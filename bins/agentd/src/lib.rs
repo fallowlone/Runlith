@@ -1,20 +1,28 @@
-//! `agentd` G1 control server: secure endpoint ownership, OS peer
+//! `agentd` G2 control server: secure endpoint ownership, OS peer
 //! authentication (ADR-0020), accept loop, handshake/ping via
-//! `ipc-control`, and graceful shutdown.
+//! `ipc-control`, version-gated business dispatch (ADR-0021), and graceful
+//! shutdown.
 //!
-//! Daemon process lifecycle + control-server integration only. No Task
-//! Engine, SQLite, providers, Runner, Memory, Context, business IPC, or
-//! Policy Engine (G6). Internal process-lifecycle state below is NOT Task
-//! lifecycle state.
+//! Daemon process lifecycle + control-server integration plus the G2
+//! composition root (database-path resolver → `storage-sqlite` open and
+//! migrations → trusted `TaskService` → bounded business dispatcher).
+//! No providers, Runner, Memory, Context, Policy Engine (G6),
+//! Execution/Attempt/Session runtimes, or AI of any kind. Internal
+//! process-lifecycle state below is NOT Task lifecycle state.
 //!
 //! Connection pipeline: transport → OS-authenticated peer → handshake →
-//! READY. Peer authentication is connection-local and never durable.
+//! READY → (v1 only) typed business dispatch. Peer authentication is
+//! connection-local and never durable. Business dispatch never bypasses
+//! the trusted application service: `agentd` owns composition, never
+//! business rules.
 
 use std::fmt;
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use app_services::TaskService;
 use bytes::BytesMut;
 #[cfg(unix)]
 use ipc_control::{ClientConfig, ClientSession};
@@ -25,6 +33,11 @@ use ipc_transport::{
     same_local_principal, FramedTransport, PeerIdentity, TransportError, MAX_CONTROL_CLIENTS,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
+
+pub mod data_dir;
+pub mod dispatch;
+
+pub use data_dir::{resolve_data_dir, resolve_database_path};
 
 #[cfg(unix)]
 use ipc_transport::platform::unix::{
@@ -55,9 +68,20 @@ pub enum DaemonError {
     /// OS peer authentication denied the connection: identity mismatch.
     /// The connection is closed with no handshake, no READY, no mutation.
     PeerDenied,
+    /// Durable storage failure: open, migration, or data-directory fault.
+    /// The daemon fails clearly rather than serving without its database
+    /// or silently creating an alternate one elsewhere.
+    Storage(storage_sqlite::StorageError),
+    /// Canonical data path unusable (missing home, unsafe directory,
+    /// relative override, non-directory object). Fail closed, no fallback
+    /// to /tmp, the working directory, or an in-memory database.
+    DataDir(String),
     /// OS/runtime I/O failure.
     Io(io::Error),
 }
+
+/// Convenience alias for daemon operations.
+pub type DaemonResult<T> = Result<T, DaemonError>;
 
 impl fmt::Display for DaemonError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -70,6 +94,8 @@ impl fmt::Display for DaemonError {
             Self::InvalidEndpoint(detail) => write!(f, "daemon invalid endpoint: {detail}"),
             Self::AlreadyRunning => write!(f, "daemon already running (endpoint owned)"),
             Self::PeerDenied => write!(f, "peer authentication denied (identity mismatch)"),
+            Self::Storage(error) => write!(f, "daemon storage failure: {error}"),
+            Self::DataDir(detail) => write!(f, "daemon data directory failure: {detail}"),
             Self::Io(error) => write!(f, "daemon I/O failure: {error}"),
         }
     }
@@ -80,9 +106,16 @@ impl std::error::Error for DaemonError {
         match self {
             Self::Transport(error) => Some(error),
             Self::Control(error) => Some(error),
+            Self::Storage(error) => Some(error),
             Self::Io(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+impl From<storage_sqlite::StorageError> for DaemonError {
+    fn from(error: storage_sqlite::StorageError) -> Self {
+        Self::Storage(error)
     }
 }
 
@@ -104,21 +137,45 @@ impl From<io::Error> for DaemonError {
     }
 }
 
-/// Daemon configuration. Protocol behavior only; no business knobs.
+/// Daemon configuration: protocol behavior plus the durable database
+/// composition. `database_path = None` is the control-only mode (G1
+/// behavior and existing tests): v1 business requests answer with a typed
+/// unavailable error and never touch storage. Production always sets a
+/// path via [`DaemonConfig::with_database`].
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
     /// Handshake negotiation parameters.
     pub server_config: ServerConfig,
+    /// Durable database file. The daemon owns the store lifecycle built
+    /// on it; `agentctl` never opens SQLite directly.
+    pub database_path: Option<PathBuf>,
 }
 
 impl DaemonConfig {
-    /// Accepted G1 daemon configuration.
+    /// Accepted G1 daemon configuration: protocol 0, no database.
     pub fn g1_default() -> Self {
         Self {
             server_config: ServerConfig::g1_default(),
+            database_path: None,
+        }
+    }
+
+    /// G2 daemon configuration (ADR-0021): protocols `[0, 1]` with the
+    /// durable database at `path`. Old `[0]` clients negotiate 0 and keep
+    /// the G1 surface; new `[0, 1]` clients negotiate 1 for business IPC.
+    pub fn with_database(path: impl Into<PathBuf>) -> Self {
+        Self {
+            server_config: ServerConfig::g2_default(),
+            database_path: Some(path.into()),
         }
     }
 }
+
+/// Shared trusted business service for the serve loop. One store, one
+/// connection, guarded by an async mutex: connections stay sequential
+/// per session (one in flight) while concurrent sessions serialize
+/// through the single SQLite connection.
+pub type BusinessHandle = Arc<tokio::sync::Mutex<TaskService>>;
 
 /// Terminal outcome of a daemon run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +198,30 @@ enum ConnectionOutcome {
     Ended,
 }
 
+/// Opens the durable business service for a database-backed daemon:
+/// validates (creating, 0700) the data directory, opens and migrates the
+/// SQLite store, and wraps it in the trusted application service. Any
+/// failure — missing home, unsafe directory, permission denied, future
+/// schema, corrupt migration state — fails the daemon startup clearly:
+/// no silent alternate database, no /tmp fallback, no in-memory
+/// substitute, no serving business IPC without durable state.
+fn open_business_service(config: &DaemonConfig) -> Result<Option<BusinessHandle>, DaemonError> {
+    let Some(path) = config.database_path.as_ref() else {
+        return Ok(None);
+    };
+    let parent = path.parent().ok_or_else(|| {
+        DaemonError::DataDir(format!(
+            "database path {} has no parent directory",
+            path.display()
+        ))
+    })?;
+    data_dir::ensure_data_dir(parent)?;
+    let store = storage_sqlite::SqliteStore::open(path)?;
+    Ok(Some(Arc::new(tokio::sync::Mutex::new(
+        TaskService::attach(store, app_services::SystemClock),
+    ))))
+}
+
 /// Local authentication policy (ADR-0020 §12, §13): the peer is allowed
 /// only when its OS identity is the same local principal as the daemon's.
 /// Shared by the Unix and Windows admission paths so exactly one policy
@@ -158,7 +239,8 @@ pub(crate) fn authorize_peer(
 
 /// Serves one authenticated stream: handshake, then the READY loop. Ping
 /// is answered inside `ipc-control`; shutdown is acknowledged and
-/// surfaced.
+/// surfaced; version-1 business requests dispatch through the shared
+/// trusted service with typed responses.
 ///
 /// `prefetched` carries a frame read before authentication (Windows
 /// first-frame staging): it is interpreted here only because the caller
@@ -166,6 +248,7 @@ pub(crate) fn authorize_peer(
 async fn serve_connection<S>(
     stream: S,
     config: &ServerConfig,
+    business: Option<BusinessHandle>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     prefetched: Option<BytesMut>,
 ) -> ConnectionOutcome
@@ -192,6 +275,18 @@ where
                 let _ = shutdown_tx.send(true);
                 return ConnectionOutcome::ShutdownInitiated;
             }
+            Ok(ReadyRequest::Business(request)) => {
+                let response = match &business {
+                    Some(handle) => {
+                        let mut service = handle.lock().await;
+                        dispatch::dispatch(&mut service, request)
+                    }
+                    None => dispatch::unavailable(),
+                };
+                if session.respond_business(response).await.is_err() {
+                    return ConnectionOutcome::Ended;
+                }
+            }
             Err(_) => return ConnectionOutcome::Ended,
         }
     }
@@ -206,6 +301,7 @@ where
 async fn serve_streams<S>(
     mut accepted: tokio::sync::mpsc::Receiver<(S, Option<BytesMut>)>,
     config: &DaemonConfig,
+    business: Option<BusinessHandle>,
 ) -> RunOutcome
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -236,9 +332,10 @@ where
                 connections_served += 1;
                 let sender = shutdown_tx.clone();
                 let server_config = config.server_config.clone();
+                let business = business.clone();
                 joins.spawn(async move {
                     let _permit = permit;
-                    serve_connection(stream, &server_config, sender, prefetched).await
+                    serve_connection(stream, &server_config, business, sender, prefetched).await
                 });
             }
         }
@@ -389,6 +486,7 @@ mod unix_daemon {
             Acquisition::Owned(listener) => listener,
             Acquisition::LiveDaemon => return Err(DaemonError::AlreadyRunning),
         };
+        let business = open_business_service(&config)?;
         // Daemon principal once, from the OS — never from configuration.
         let daemon = daemon_identity().map_err(DaemonError::from)?;
         // Snapshot the node we own so shutdown cleanup removes only it.
@@ -418,7 +516,7 @@ mod unix_daemon {
                 }
             }
         });
-        let outcome = serve_streams(accepted_rx, &config).await;
+        let outcome = serve_streams(accepted_rx, &config, business).await;
         if let Some(snapshot) = owned.as_ref() {
             let _ = remove_endpoint_if_unchanged(&endpoint.socket_path, snapshot);
         }
@@ -446,6 +544,10 @@ mod windows_daemon {
     /// Windows; a lost singleton race terminates as `AlreadyRunning`. No
     /// alternate pipe names.
     ///
+    /// The durable business service opens before binding (fail clearly on
+    /// data-directory or migration faults); v0 negotiation semantics never
+    /// depend on storage availability.
+    ///
     /// Staged admission (ADR-0020 §8): the accept pump reads exactly one
     /// bounded frame as opaque bytes, authenticates the peer SID, and only
     /// then hands the server plus the still-undecoded frame to the serve
@@ -462,6 +564,7 @@ mod windows_daemon {
             }
             Err(other) => return Err(other.into()),
         };
+        let business = super::open_business_service(&config)?;
         // Daemon principal once, from the OS — never from configuration.
         let daemon = daemon_identity().map_err(DaemonError::from)?;
         let (accepted_tx, accepted_rx) = tokio::sync::mpsc::channel::<(
@@ -497,7 +600,7 @@ mod windows_daemon {
                 }
             }
         });
-        Ok(serve_streams(accepted_rx, &config).await)
+        Ok(serve_streams(accepted_rx, &config, business).await)
     }
 }
 
@@ -896,6 +999,207 @@ mod tests {
         );
         // Production path still shuts down cleanly afterwards.
         shutdown_and_await(handle, &sandbox.endpoint).await;
+    }
+
+    fn test_db_path(root: &std::path::Path) -> PathBuf {
+        // Parent absent on purpose: the daemon admits it by creating it
+        // at 0700, exactly like the canonical application directory.
+        root.join("db").join("state.sqlite3")
+    }
+
+    fn spawn_daemon_with_db(
+        endpoint: &UnixEndpoint,
+        db: PathBuf,
+        source: impl PeerSource + 'static,
+    ) -> tokio::task::JoinHandle<Result<RunOutcome, DaemonError>> {
+        let endpoint = endpoint.clone();
+        tokio::spawn(async move {
+            run_on_endpoint_with(&endpoint, DaemonConfig::with_database(db), source).await
+        })
+    }
+
+    #[tokio::test]
+    async fn denied_peer_cannot_reach_business_dispatch_or_storage() {
+        let sandbox = Sandbox::new("denybiz");
+        let db = test_db_path(&sandbox.root);
+        let handle = spawn_daemon_with_db(
+            &sandbox.endpoint,
+            db.clone(),
+            FixedPeerSource {
+                peer: from_uid(mismatched_uid()),
+                calls: Arc::new(AtomicUsize::new(0)),
+            },
+        );
+        // Give the daemon a moment to bind (no handshake can succeed).
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // A valid-looking v1 handshake is still rejected before READY:
+        // kind and version never substitute for authentication.
+        assert!(
+            !handshake_as(&sandbox.endpoint, ipc_control::CLIENT_KIND_AGENTCTL).await,
+            "mismatched peer must never reach READY"
+        );
+        // The database the daemon composed stays empty: no project, no
+        // task, no journal record was minted for the denied peer.
+        let store = storage_sqlite::SqliteStore::open(&db).expect("open test db");
+        assert!(store.list_events_ordered().expect("journal").is_empty());
+        drop(store);
+        assert!(
+            !handle.is_finished(),
+            "denied peers must not kill the daemon"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn v1_business_round_trip_through_daemon_dispatch() {
+        use ipc_contracts::proto::{
+            control_request, control_response, task_core_request, task_core_response,
+            ControlRequest, ControlResponse, CreateProjectRequest, TaskCoreRequest,
+        };
+        use prost::Message;
+
+        let sandbox = Sandbox::new("dispatch");
+        let db = test_db_path(&sandbox.root);
+        let handle = spawn_daemon_with_db(&sandbox.endpoint, db.clone(), OsPeerSource);
+        wait_ready(&sandbox.endpoint).await;
+        // Drive one business request over a live v1 session: the daemon
+        // dispatches through the trusted service and answers typed.
+        let stream = transport_connect(&sandbox.endpoint).await.expect("connect");
+        let mut session = ClientSession::new(
+            FramedTransport::new(stream),
+            ClientConfig::business_default(ipc_control::CLIENT_KIND_AGENTCTL),
+        );
+        let accepted = session.perform_handshake().await.expect("v1 handshake");
+        assert_eq!(accepted.selected_version, 1);
+        let mut transport = session.into_inner();
+        let frame = bytes::Bytes::from(
+            ControlRequest {
+                payload: Some(control_request::Payload::TaskCore(TaskCoreRequest {
+                    payload: Some(task_core_request::Payload::CreateProject(
+                        CreateProjectRequest {
+                            id: "P-1".to_owned(),
+                            name: "Dispatched".to_owned(),
+                        },
+                    )),
+                })),
+            }
+            .encode_to_vec(),
+        );
+        transport.write_frame(frame).await.expect("write");
+        let reply = transport.read_frame().await.expect("reply");
+        let response = ControlResponse::decode(&reply[..]).expect("decode");
+        match response.payload {
+            Some(control_response::Payload::TaskCore(business)) => match business.payload {
+                Some(task_core_response::Payload::CreateProject(created)) => {
+                    assert_eq!(created.project.expect("dto").id, "P-1");
+                }
+                other => panic!("expected create_project, got {other:?}"),
+            },
+            other => panic!("expected task_core envelope, got {other:?}"),
+        }
+        // The session survives a business exchange: ping still works.
+        drop(transport);
+        admin_session(&sandbox.endpoint)
+            .await
+            .ping()
+            .await
+            .expect("ping");
+        // And the mutation is journaled exactly once.
+        let store = storage_sqlite::SqliteStore::open(&db).expect("open test db");
+        let history = store.list_events_ordered().expect("journal");
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].fact.event_type,
+            storage_sqlite::EventType::ProjectCreated
+        );
+        drop(store);
+        shutdown_and_await(handle, &sandbox.endpoint).await;
+    }
+
+    #[tokio::test]
+    async fn control_only_daemon_reports_business_unavailable() {
+        use ipc_contracts::proto::{
+            control_request, control_response, task_core_request, task_core_response,
+            ControlRequest, ControlResponse, ListProjectsRequest, TaskCoreRequest,
+        };
+        use prost::Message;
+
+        // Bespoke composition: v1 offered, no database. The version gate
+        // passes but handling answers typed-unavailable, never touching
+        // storage (which does not exist here).
+        let sandbox = Sandbox::new("nounavailable");
+        let endpoint = sandbox.endpoint.clone();
+        let handle = tokio::spawn(async move {
+            run_on_endpoint_with(
+                &endpoint,
+                DaemonConfig {
+                    server_config: ServerConfig::g2_default(),
+                    database_path: None,
+                },
+                OsPeerSource,
+            )
+            .await
+        });
+        wait_ready(&sandbox.endpoint).await;
+        let stream = transport_connect(&sandbox.endpoint).await.expect("connect");
+        let mut session = ClientSession::new(
+            FramedTransport::new(stream),
+            ClientConfig::business_default(ipc_control::CLIENT_KIND_AGENTCTL),
+        );
+        session.perform_handshake().await.expect("v1 handshake");
+        let mut transport = session.into_inner();
+        let frame = bytes::Bytes::from(
+            ControlRequest {
+                payload: Some(control_request::Payload::TaskCore(TaskCoreRequest {
+                    payload: Some(task_core_request::Payload::ListProjects(
+                        ListProjectsRequest {},
+                    )),
+                })),
+            }
+            .encode_to_vec(),
+        );
+        transport.write_frame(frame).await.expect("write");
+        let reply = transport.read_frame().await.expect("reply");
+        let response = ControlResponse::decode(&reply[..]).expect("decode");
+        match response.payload {
+            Some(control_response::Payload::TaskCore(business)) => match business.payload {
+                Some(task_core_response::Payload::Error(error)) => {
+                    assert_eq!(
+                        error.code,
+                        ipc_contracts::proto::BusinessErrorCode::Internal as i32
+                    );
+                }
+                other => panic!("expected typed unavailable error, got {other:?}"),
+            },
+            other => panic!("expected task_core envelope, got {other:?}"),
+        }
+        drop(transport);
+        shutdown_and_await(handle, &sandbox.endpoint).await;
+    }
+
+    #[tokio::test]
+    async fn database_failure_fails_startup_clearly() {
+        // A regular file where the data directory must be: fail closed,
+        // never repaired, never bypassed.
+        let sandbox = Sandbox::new("dbfail");
+        let blocker = sandbox.root.join("blocker");
+        std::fs::write(&blocker, b"not a dir").expect("setup");
+        let db = blocker.join("state.sqlite3");
+        match run_on_endpoint(&sandbox.endpoint, DaemonConfig::with_database(&db)).await {
+            Err(DaemonError::DataDir(_)) => {}
+            other => panic!("expected DataDir failure, got {other:?}"),
+        }
+        // Corrupt database content fails as storage failure, never as a
+        // silently created alternate database.
+        let dir = sandbox.root.join("data");
+        std::fs::create_dir(&dir).expect("setup");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("setup");
+        let db = dir.join("state.sqlite3");
+        std::fs::write(&db, b"definitely-not-sqlite").expect("setup");
+        match run_on_endpoint(&sandbox.endpoint, DaemonConfig::with_database(&db)).await {
+            Err(DaemonError::Storage(_)) => {}
+            other => panic!("expected Storage failure, got {other:?}"),
+        }
     }
 }
 

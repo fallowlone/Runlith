@@ -8,13 +8,17 @@ name = "agentd"
 path = "src/main.rs"
 
 [dependencies]
+app-services = { path = "../../crates/app-services" }
+bytes = "1"
 ipc-contracts = { path = "../../crates/ipc-contracts" }
 ipc-control = { path = "../../crates/ipc-control" }
 ipc-transport = { path = "../../crates/ipc-transport" }
-bytes = "1"
+storage-sqlite = { path = "../../adapters/storage-sqlite" }
+task-domain = { path = "../../crates/task" }
 tokio = { version = "~1.51", features = ["macros", "rt", "net", "sync", "time"] }
 
 [dev-dependencies]
 bytes = "1"
 prost = "0.14.4"
+storage-sqlite = { path = "../../adapters/storage-sqlite" }
 tokio = { version = "~1.51", features = ["macros", "rt", "net", "sync", "time"] }

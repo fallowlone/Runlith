@@ -65,11 +65,6 @@ pub enum ControlError {
         /// Minimum version that enables business IPC (1).
         required: u32,
     },
-    /// A business request arrived on a version-1 session, which permits
-    /// the wire shape, but this build wires no business dispatch yet
-    /// (TASK-0028 owns dispatch). Version check passed; handling is
-    /// pending — never silently executed, never downgraded to v0.
-    BusinessNotImplemented(String),
     /// The session already terminated (fatal protocol violation, rejection,
     /// or transport failure) and cannot continue.
     SessionTerminated,
@@ -103,9 +98,6 @@ impl fmt::Display for ControlError {
                 f,
                 "business IPC unsupported for negotiated protocol version {negotiated} (requires {required})"
             ),
-            Self::BusinessNotImplemented(detail) => {
-                write!(f, "business IPC not implemented: {detail}")
-            }
             Self::SessionTerminated => write!(f, "protocol session already terminated"),
         }
     }

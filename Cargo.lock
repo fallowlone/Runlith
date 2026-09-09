@@ -12,6 +12,7 @@ dependencies = [
  "ipc-control",
  "ipc-transport",
  "prost",
+ "storage-sqlite",
  "tokio",
 ]
 
@@ -19,11 +20,14 @@ dependencies = [
 name = "agentd"
 version = "0.1.0"
 dependencies = [
+ "app-services",
  "bytes",
  "ipc-contracts",
  "ipc-control",
  "ipc-transport",
  "prost",
+ "storage-sqlite",
+ "task-domain",
  "tokio",
 ]
 

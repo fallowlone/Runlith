@@ -1,21 +1,23 @@
 //! Deterministic checked-in migrations with an explicit schema version.
 //!
 //! Versioning uses SQLite `PRAGMA user_version`: 0 means a fresh database,
-//! 2 is the supported version (`0001_task_core.sql` then
-//! `0002_event_journal.sql`). Newer versions fail closed; re-opening the
-//! current version is a no-op (never destructively re-applied). Executing
-//! migrations inside one SQLite transaction is storage consistency only —
-//! not TASK-0024 event atomicity.
+//! 3 is the supported version (`0001_task_core.sql`, then
+//! `0002_event_journal.sql`, then `0003_event_scope.sql`). Newer versions
+//! fail closed; re-opening the current version is a no-op (never
+//! destructively re-applied). Executing migrations inside one SQLite
+//! transaction is storage consistency only — not TASK-0024 event
+//! atomicity.
 
 use rusqlite::Connection;
 
 use crate::error::{StorageError, StorageResult};
 
 /// Schema version this adapter understands.
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 2;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 3;
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_task_core.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_event_journal.sql");
+const MIGRATION_0003: &str = include_str!("../migrations/0003_event_scope.sql");
 
 /// Applies pending migrations to `connection`, which must already have
 /// `PRAGMA foreign_keys = ON`. Migrations run in order inside one SQLite
@@ -43,7 +45,12 @@ pub(crate) fn migrate(connection: &mut Connection) -> StorageResult<u32> {
             StorageError::Migration(format!("0002_event_journal.sql failed: {error}"))
         })?;
     }
-    transaction.execute_batch("PRAGMA user_version = 2")?;
+    if found < 3 {
+        transaction.execute_batch(MIGRATION_0003).map_err(|error| {
+            StorageError::Migration(format!("0003_event_scope.sql failed: {error}"))
+        })?;
+    }
+    transaction.execute_batch("PRAGMA user_version = 3")?;
     transaction.commit()?;
     Ok(SUPPORTED_SCHEMA_VERSION)
 }

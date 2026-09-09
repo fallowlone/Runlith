@@ -12,7 +12,7 @@
 use std::path::Path;
 
 use storage_sqlite::{EventType, JournalEvent, NewJournalEvent, SqliteStore, StorageError};
-use task_domain::{Project, Task, TaskId, TransitionCommand};
+use task_domain::{Project, ProjectId, Task, TaskId, TransitionCommand};
 
 use crate::clock::{format_rfc3339, Clock, SystemClock};
 use crate::error::{ServiceError, ServiceResult};
@@ -62,18 +62,114 @@ impl<C: Clock> TaskService<C> {
         &self.store
     }
 
-    /// Persists a new project. Creation is service-owned so durable writes
-    /// never bypass the trusted layer; it is not a lifecycle transition
-    /// and appends no journal event.
-    pub fn create_project(&mut self, project: &Project) -> ServiceResult<()> {
-        Ok(self.store.create_project(project)?)
+    /// Persists a new project together with its authoritative
+    /// `project.created` journal evidence in one commit. Creation is
+    /// service-owned so durable writes never bypass the trusted layer.
+    pub fn create_project(&mut self, project: &Project) -> ServiceResult<JournalEvent> {
+        let event = self.creation_event(
+            EventType::ProjectCreated,
+            None,
+            project.id().clone(),
+            None,
+            None,
+            None,
+            "create_project",
+        );
+        Ok(self.store.create_project_with_event(project, &event)?)
     }
 
-    /// Persists a new task in its validated initial state. Same ownership
-    /// rule as [`TaskService::create_project`]: no journal event, since no
-    /// transition committed.
-    pub fn create_task(&mut self, task: &Task) -> ServiceResult<()> {
-        Ok(self.store.create_task(task)?)
+    /// Persists a new task in its validated initial state together with
+    /// its authoritative `task.created` journal evidence in one commit.
+    pub fn create_task(&mut self, task: &Task) -> ServiceResult<JournalEvent> {
+        let state = task.state();
+        let event = self.creation_event(
+            EventType::TaskCreated,
+            Some(task.id().clone()),
+            task.project_id().clone(),
+            Some(state),
+            Some(state),
+            None,
+            "create_task",
+        );
+        Ok(self.store.create_task_with_event(task, &event)?)
+    }
+
+    /// Adds `task_id depends on depends_on_id` together with its
+    /// authoritative `task.dependency_added` journal evidence in one
+    /// commit. Domain pre-validation runs first so self-edge, duplicate,
+    /// cross-project, and cycle rejections surface as domain errors;
+    /// storage re-validates before writing.
+    pub fn add_dependency(
+        &mut self,
+        task_id: &TaskId,
+        depends_on_id: &TaskId,
+    ) -> ServiceResult<JournalEvent> {
+        let task = self
+            .store
+            .get_task(task_id)?
+            .ok_or_else(|| missing_task(task_id))?;
+        let target = self
+            .store
+            .get_task(depends_on_id)?
+            .ok_or_else(|| missing_task(depends_on_id))?;
+        let mut candidate = task.clone();
+        candidate.add_dependency(&target)?;
+        let mut graph = self.store.load_project_graph(task.project_id())?;
+        if let Some(position) = graph.iter().position(|t| t.id() == task_id) {
+            graph[position] = candidate;
+        }
+        task_domain::validate_acyclic(&graph)?;
+        let state = task.state();
+        let event = self.creation_event(
+            EventType::DependencyAdded,
+            Some(task_id.clone()),
+            task.project_id().clone(),
+            Some(state),
+            Some(state),
+            None,
+            "add_dependency",
+        );
+        Ok(self
+            .store
+            .add_dependency_with_event(task_id, depends_on_id, &event)?)
+    }
+
+    /// Reads one project by id. Read-only: emits no journal evidence.
+    pub fn get_project(&self, id: &ProjectId) -> ServiceResult<Option<Project>> {
+        Ok(self.store.get_project(id)?)
+    }
+
+    /// Lists all projects in id order. Read-only.
+    pub fn list_projects(&self) -> ServiceResult<Vec<Project>> {
+        Ok(self.store.list_projects()?)
+    }
+
+    /// Reads one task by id. Read-only.
+    pub fn get_task(&self, id: &TaskId) -> ServiceResult<Option<Task>> {
+        Ok(self.store.get_task(id)?)
+    }
+
+    /// Lists every task of one project in id order. Read-only.
+    pub fn list_tasks_for_project(&self, project_id: &ProjectId) -> ServiceResult<Vec<Task>> {
+        Ok(self.store.list_tasks_for_project(project_id)?)
+    }
+
+    /// Lists the direct dependencies of one task in id order. Read-only.
+    pub fn list_dependencies(&self, task_id: &TaskId) -> ServiceResult<Vec<TaskId>> {
+        Ok(self.store.list_dependencies(task_id)?)
+    }
+
+    /// Reads one task's journal records in commit order. Read-only.
+    pub fn list_events_for_task(&self, task_id: &TaskId) -> ServiceResult<Vec<JournalEvent>> {
+        Ok(self.store.list_events_for_task(task_id)?)
+    }
+
+    /// Reads one project's journal records in commit order. Read-only.
+    pub fn list_events_for_project(
+        &self,
+        project_id: &ProjectId,
+    ) -> ServiceResult<Vec<JournalEvent>> {
+        Ok(self.store.list_events_for_project(project_id)?)
     }
 
     /// `DRAFT → READY`.
@@ -182,10 +278,10 @@ impl<C: Clock> TaskService<C> {
         self.op_counter += 1;
         let event = NewJournalEvent {
             event_type,
-            task_id: task_id.clone(),
+            task_id: Some(task_id.clone()),
             project_id: task.project_id().clone(),
-            from_state: from,
-            to_state: to,
+            from_state: Some(from),
+            to_state: Some(to),
             reason,
             // One trusted request mints both ids: the chain it belongs to
             // (correlation) and the request itself as the direct cause
@@ -204,6 +300,44 @@ impl<C: Clock> TaskService<C> {
             event: committed,
         })
     }
+
+    /// Mints the journal evidence for one creation/dependency mutation.
+    /// Same provenance discipline as [`TaskService::mutate`]: the trusted
+    /// service owns correlation, causation, timestamp, and provenance —
+    /// never the caller, never the wire.
+    #[allow(clippy::too_many_arguments)]
+    fn creation_event(
+        &mut self,
+        event_type: EventType,
+        task_id: Option<TaskId>,
+        project_id: ProjectId,
+        from_state: Option<task_domain::TaskState>,
+        to_state: Option<task_domain::TaskState>,
+        reason: Option<String>,
+        op: &str,
+    ) -> NewJournalEvent {
+        let now = self.clock.now_millis();
+        self.op_counter += 1;
+        NewJournalEvent {
+            event_type,
+            task_id,
+            project_id,
+            from_state,
+            to_state,
+            reason,
+            correlation_id: format!("op-{now}-{}", self.op_counter),
+            causation_id: format!("req-{now}-{}", self.op_counter),
+            occurred_at: format_rfc3339(now),
+            provenance: format!("{PROVENANCE_SERVICE}/{op}"),
+        }
+    }
+}
+
+/// Storage-shaped not-found for a task id the service expected to exist.
+fn missing_task(task_id: &TaskId) -> ServiceError {
+    ServiceError::Storage(StorageError::NotFound(format!(
+        "task {task_id} does not exist"
+    )))
 }
 
 /// Maps a validated command to its canonical journal type plus the bounded

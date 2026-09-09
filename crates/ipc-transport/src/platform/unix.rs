@@ -29,6 +29,17 @@ const RUNTIME_DIR_MODE: u32 = 0o700;
 /// Required mode of the bound socket node.
 const SOCKET_MODE: u32 = 0o600;
 
+/// Environment override for the runtime parent directory (test seam).
+///
+/// When `AI_ENGINEERING_OS_RUNTIME_DIR` names an absolute path, endpoint
+/// resolution uses it instead of the canonical per-user location, so
+/// real-process tests run against a test-owned endpoint without touching
+/// the user's runtime directory. The directory itself is still admitted
+/// through [`ensure_runtime_dir`] (0700, current-user owned, no symlinks),
+/// so the override selects *which* directory, never *whether* it is
+/// secure. Production never sets this variable.
+pub const RUNTIME_DIR_OVERRIDE_ENV: &str = "AI_ENGINEERING_OS_RUNTIME_DIR";
+
 /// Resolved Unix daemon endpoint: socket node plus its runtime directory.
 #[derive(Debug, Clone)]
 pub struct UnixEndpoint {
@@ -46,10 +57,16 @@ pub struct UnixEndpoint {
 /// fallback. The path is preflighted against the UDS length constraint;
 /// over-long paths are an explicit error, never truncated.
 pub fn resolve_endpoint() -> TransportResult<UnixEndpoint> {
-    #[cfg(target_os = "macos")]
-    let runtime_dir = macos_runtime_parent();
-    #[cfg(not(target_os = "macos"))]
-    let runtime_dir = xdg_runtime_parent().unwrap_or_else(fallback_runtime_parent);
+    let runtime_dir = runtime_parent_override().unwrap_or_else(|| {
+        #[cfg(target_os = "macos")]
+        {
+            macos_runtime_parent()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            xdg_runtime_parent().unwrap_or_else(fallback_runtime_parent)
+        }
+    });
 
     let socket_path = runtime_dir.join(SOCKET_FILE_NAME);
     preflight_socket_path(&socket_path)?;
@@ -57,6 +74,21 @@ pub fn resolve_endpoint() -> TransportResult<UnixEndpoint> {
         socket_path,
         runtime_dir,
     })
+}
+
+/// Explicit absolute-parent override for tests (see
+/// [`RUNTIME_DIR_OVERRIDE_ENV`]). Relative, empty, or missing values fall
+/// back to canonical resolution.
+fn runtime_parent_override() -> Option<PathBuf> {
+    let dir = std::env::var_os(RUNTIME_DIR_OVERRIDE_ENV)?;
+    if dir.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(dir);
+    if !path.is_absolute() {
+        return None;
+    }
+    Some(path.join(APP_DIR_NAME))
 }
 
 /// Rejects socket paths that cannot be represented as a `sockaddr_un`.
@@ -580,6 +612,28 @@ mod tests {
             inspect_endpoint(&sandbox.endpoint.socket_path),
             EndpointState::UnexpectedSymlink
         );
+    }
+
+    #[test]
+    fn runtime_dir_override_selects_test_endpoint() {
+        let _guard = ENV_GUARD.lock().expect("env guard");
+        let sandbox_root = scratch_dir("override");
+        let previous = std::env::var_os(RUNTIME_DIR_OVERRIDE_ENV);
+        unsafe {
+            std::env::set_var(RUNTIME_DIR_OVERRIDE_ENV, &sandbox_root);
+        }
+        let resolved = resolve_endpoint();
+        match previous {
+            Some(value) => unsafe { std::env::set_var(RUNTIME_DIR_OVERRIDE_ENV, value) },
+            None => unsafe { std::env::remove_var(RUNTIME_DIR_OVERRIDE_ENV) },
+        }
+        let endpoint = resolved.expect("resolve");
+        assert_eq!(endpoint.runtime_dir, sandbox_root.join("ai-engineering-os"));
+        assert_eq!(
+            endpoint.socket_path.file_name().and_then(|n| n.to_str()),
+            Some(SOCKET_FILE_NAME)
+        );
+        let _ = fs::remove_dir_all(&sandbox_root);
     }
 
     #[test]

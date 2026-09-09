@@ -71,6 +71,34 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Persists a validated project together with its authoritative
+    /// `project.created` journal evidence in one transaction. The trusted
+    /// application service builds the event; this method commits it
+    /// atomically or not at all.
+    pub fn create_project_with_event(
+        &mut self,
+        project: &Project,
+        event: &NewJournalEvent,
+    ) -> StorageResult<JournalEvent> {
+        require_project_created_envelope(project, event)?;
+        if self.get_project(project.id())?.is_some() {
+            return Err(StorageError::Duplicate(format!(
+                "project {} already exists",
+                project.id()
+            )));
+        }
+        let transaction = self.connection.transaction()?;
+        transaction
+            .execute(
+                "INSERT INTO projects (id, name) VALUES (?1, ?2)",
+                params![project.id().as_str(), project.name()],
+            )
+            .map_err(|error| map_constraint(error, "create project"))?;
+        let committed = insert_journal_event(&transaction, event)?;
+        transaction.commit()?;
+        Ok(committed)
+    }
+
     /// Loads a project by id, or `None` when absent.
     pub fn get_project(&self, id: &ProjectId) -> StorageResult<Option<Project>> {
         let row: Option<(String, String)> = self
@@ -132,6 +160,33 @@ impl SqliteStore {
         insert_task_edges(&transaction, &snapshot)?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Persists a new validated task together with its authoritative
+    /// `task.created` journal evidence in one transaction: task row,
+    /// metadata, edges, and journal record commit or roll back together.
+    pub fn create_task_with_event(
+        &mut self,
+        task: &Task,
+        event: &NewJournalEvent,
+    ) -> StorageResult<JournalEvent> {
+        require_task_created_envelope(task, event)?;
+        if self.get_task(task.id())?.is_some() {
+            return Err(StorageError::Duplicate(format!(
+                "task {} already exists",
+                task.id()
+            )));
+        }
+        self.require_project(task.project_id())?;
+        self.require_dependency_targets(task)?;
+        let snapshot = task.snapshot();
+        let transaction = self.connection.transaction()?;
+        insert_task_row(&transaction, &snapshot)?;
+        insert_task_strings(&transaction, &snapshot)?;
+        insert_task_edges(&transaction, &snapshot)?;
+        let committed = insert_journal_event(&transaction, event)?;
+        transaction.commit()?;
+        Ok(committed)
     }
 
     /// Loads a task by id with metadata and edges, or `None` when absent.
@@ -202,6 +257,76 @@ impl SqliteStore {
         task_id: &TaskId,
         depends_on_id: &TaskId,
     ) -> StorageResult<()> {
+        let (task, target) = self.validated_dependency_pair(task_id, depends_on_id)?;
+        // Cycle check on the in-memory project graph before touching SQL.
+        let mut graph = self.load_project_graph(task.project_id())?;
+        let position = graph
+            .iter()
+            .position(|candidate| candidate.id() == task_id)
+            .ok_or_else(|| {
+                StorageError::Corrupt(format!("task {task_id} missing from its project graph"))
+            })?;
+        let mut candidate = graph[position].clone();
+        candidate
+            .add_dependency(&target)
+            .map_err(|error| StorageError::InvalidGraph(error.to_string()))?;
+        graph[position] = candidate;
+        validate_acyclic(&graph).map_err(|error| StorageError::InvalidGraph(error.to_string()))?;
+        self.connection
+            .execute(
+                "INSERT INTO task_dependencies (task_id, depends_on_id) VALUES (?1, ?2)",
+                params![task_id.as_str(), depends_on_id.as_str()],
+            )
+            .map_err(|error| map_constraint(error, "add dependency"))?;
+        Ok(())
+    }
+
+    /// Adds `task_id depends on depends_on_id` together with its
+    /// authoritative `task.dependency_added` journal evidence in one
+    /// transaction. Validation is identical to [`SqliteStore::add_dependency`];
+    /// the edge and the event commit or roll back together.
+    pub fn add_dependency_with_event(
+        &mut self,
+        task_id: &TaskId,
+        depends_on_id: &TaskId,
+        event: &NewJournalEvent,
+    ) -> StorageResult<JournalEvent> {
+        let (task, target) = self.validated_dependency_pair(task_id, depends_on_id)?;
+        require_dependency_envelope(&task, event)?;
+        // Cycle check on the in-memory project graph before touching SQL.
+        let mut graph = self.load_project_graph(task.project_id())?;
+        let position = graph
+            .iter()
+            .position(|candidate| candidate.id() == task_id)
+            .ok_or_else(|| {
+                StorageError::Corrupt(format!("task {task_id} missing from its project graph"))
+            })?;
+        let mut candidate = graph[position].clone();
+        candidate
+            .add_dependency(&target)
+            .map_err(|error| StorageError::InvalidGraph(error.to_string()))?;
+        graph[position] = candidate;
+        validate_acyclic(&graph).map_err(|error| StorageError::InvalidGraph(error.to_string()))?;
+        let transaction = self.connection.transaction()?;
+        transaction
+            .execute(
+                "INSERT INTO task_dependencies (task_id, depends_on_id) VALUES (?1, ?2)",
+                params![task_id.as_str(), depends_on_id.as_str()],
+            )
+            .map_err(|error| map_constraint(error, "add dependency"))?;
+        let committed = insert_journal_event(&transaction, event)?;
+        transaction.commit()?;
+        Ok(committed)
+    }
+
+    /// Shared domain validation for both dependency write paths: both
+    /// tasks must exist, share a project, and not already be linked. No
+    /// self-edge, no duplicate, no cross-project edge.
+    fn validated_dependency_pair(
+        &self,
+        task_id: &TaskId,
+        depends_on_id: &TaskId,
+    ) -> StorageResult<(Task, Task)> {
         if task_id == depends_on_id {
             return Err(StorageError::InvalidGraph(format!(
                 "task {task_id} cannot depend on itself"
@@ -225,27 +350,7 @@ impl SqliteStore {
                 "task {task_id} already depends on {depends_on_id}"
             )));
         }
-        // Cycle check on the in-memory project graph before touching SQL.
-        let mut graph = self.load_project_graph(task.project_id())?;
-        let position = graph
-            .iter()
-            .position(|candidate| candidate.id() == task_id)
-            .ok_or_else(|| {
-                StorageError::Corrupt(format!("task {task_id} missing from its project graph"))
-            })?;
-        let mut candidate = graph[position].clone();
-        candidate
-            .add_dependency(&target)
-            .map_err(|error| StorageError::InvalidGraph(error.to_string()))?;
-        graph[position] = candidate;
-        validate_acyclic(&graph).map_err(|error| StorageError::InvalidGraph(error.to_string()))?;
-        self.connection
-            .execute(
-                "INSERT INTO task_dependencies (task_id, depends_on_id) VALUES (?1, ?2)",
-                params![task_id.as_str(), depends_on_id.as_str()],
-            )
-            .map_err(|error| map_constraint(error, "add dependency"))?;
-        Ok(())
+        Ok((task, target))
     }
 
     /// Removes one edge; absent edges are a no-op (idempotent).
@@ -309,10 +414,20 @@ impl SqliteStore {
                 next.id()
             )));
         }
-        if event.task_id != *task_id || event.project_id != *next.project_id() {
+        if event.event_type.is_project_scoped() {
+            return Err(StorageError::ConstraintViolation(
+                "lifecycle transition cannot carry a project-scoped event".to_owned(),
+            ));
+        }
+        if event.task_id.as_ref() != Some(task_id) || event.project_id != *next.project_id() {
             return Err(StorageError::ConstraintViolation(
                 "lifecycle event references a different task or project than the state write"
                     .to_owned(),
+            ));
+        }
+        if event.from_state != Some(expected) || event.to_state != Some(next.state()) {
+            return Err(StorageError::ConstraintViolation(
+                "lifecycle event states do not match the guarded state write".to_owned(),
             ));
         }
         require_envelope(event)?;
@@ -338,33 +453,9 @@ impl SqliteStore {
                 },
             });
         }
-        transaction.execute(
-            "INSERT INTO event_journal
-             (event_type, event_version, task_id, project_id, from_state, to_state,
-              reason, correlation_id, causation_id, occurred_at, provenance)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                event.event_type.as_str(),
-                EVENT_SCHEMA_VERSION,
-                event.task_id.as_str(),
-                event.project_id.as_str(),
-                event.from_state.as_str(),
-                event.to_state.as_str(),
-                event.reason,
-                event.correlation_id,
-                event.causation_id,
-                event.occurred_at,
-                event.provenance,
-            ],
-        )?;
-        let seq = transaction.last_insert_rowid();
+        let committed = insert_journal_event(&transaction, event)?;
         transaction.commit()?;
-        Ok(JournalEvent {
-            id: EventId::parse(&format!("evt-{seq}"))?,
-            seq,
-            event_version: EVENT_SCHEMA_VERSION,
-            fact: event.clone(),
-        })
+        Ok(committed)
     }
 
     /// Reads one journal record by identity, or `None` when absent.
@@ -594,10 +685,10 @@ struct JournalRow {
     seq: i64,
     event_type: String,
     event_version: u32,
-    task_id: String,
+    task_id: Option<String>,
     project_id: String,
-    from_state: String,
-    to_state: String,
+    from_state: Option<String>,
+    to_state: Option<String>,
     reason: Option<String>,
     correlation_id: String,
     causation_id: String,
@@ -626,6 +717,8 @@ impl JournalRow {
 
 /// Typed decode of one journal row. Unknown types/versions are corruption;
 /// ids and states go through the same strict validation as task rows.
+/// Scope is re-checked on read: a task-scoped row with a NULL task or a
+/// project-scoped row with a task reference is corruption, never a default.
 fn decode_journal_row(row: JournalRow) -> StorageResult<JournalEvent> {
     if row.event_version != EVENT_SCHEMA_VERSION {
         return Err(StorageError::Corrupt(format!(
@@ -634,12 +727,52 @@ fn decode_journal_row(row: JournalRow) -> StorageResult<JournalEvent> {
         )));
     }
     let event_type = EventType::parse(&row.event_type)?;
-    let task_id = TaskId::new(row.task_id).map_err(|error| {
-        StorageError::DomainReconstruction(format!("journal task reference: {error}"))
-    })?;
+    let task_id = row
+        .task_id
+        .map(|id| {
+            TaskId::new(id).map_err(|error| {
+                StorageError::DomainReconstruction(format!("journal task reference: {error}"))
+            })
+        })
+        .transpose()?;
     let project_id = ProjectId::new(row.project_id).map_err(|error| {
         StorageError::DomainReconstruction(format!("journal project reference: {error}"))
     })?;
+    let from_state = row
+        .from_state
+        .map(|state| {
+            decode_state(&state).map_err(|_| {
+                StorageError::Corrupt(format!(
+                    "journal seq {} stores unknown from_state {state:?}",
+                    row.seq
+                ))
+            })
+        })
+        .transpose()?;
+    let to_state = row
+        .to_state
+        .map(|state| {
+            decode_state(&state).map_err(|_| {
+                StorageError::Corrupt(format!(
+                    "journal seq {} stores unknown to_state {state:?}",
+                    row.seq
+                ))
+            })
+        })
+        .transpose()?;
+    if event_type.is_project_scoped() {
+        if task_id.is_some() || from_state.is_some() || to_state.is_some() {
+            return Err(StorageError::Corrupt(format!(
+                "journal seq {} stores a project-scoped event with task scope",
+                row.seq
+            )));
+        }
+    } else if task_id.is_none() || from_state.is_none() || to_state.is_none() {
+        return Err(StorageError::Corrupt(format!(
+            "journal seq {} stores a task-scoped event without task scope",
+            row.seq
+        )));
+    }
     Ok(JournalEvent {
         id: EventId::parse(&format!("evt-{}", row.seq))?,
         seq: row.seq,
@@ -648,8 +781,8 @@ fn decode_journal_row(row: JournalRow) -> StorageResult<JournalEvent> {
             event_type,
             task_id,
             project_id,
-            from_state: decode_state(&row.from_state)?,
-            to_state: decode_state(&row.to_state)?,
+            from_state,
+            to_state,
             reason: row.reason,
             correlation_id: row.correlation_id,
             causation_id: row.causation_id,
@@ -678,7 +811,133 @@ fn require_envelope(event: &NewJournalEvent) -> StorageResult<()> {
             "journal event requires an occurred_at timestamp".to_owned(),
         ));
     }
+    if event.provenance.trim().is_empty() {
+        return Err(StorageError::ConstraintViolation(
+            "journal event requires provenance".to_owned(),
+        ));
+    }
+    require_scope(event)
+}
+
+/// Scope coherence between an event's type and its references, mirroring
+/// the migration-0003 CHECK: `project.created` carries no task scope at
+/// all (never a fake or sentinel id); every other type carries full task
+/// scope. Checked before touching SQL.
+fn require_scope(event: &NewJournalEvent) -> StorageResult<()> {
+    if event.event_type.is_project_scoped() {
+        if event.task_id.is_some() || event.from_state.is_some() || event.to_state.is_some() {
+            return Err(StorageError::ConstraintViolation(
+                "project-scoped journal event must not carry task scope".to_owned(),
+            ));
+        }
+    } else if event.task_id.is_none() || event.from_state.is_none() || event.to_state.is_none() {
+        return Err(StorageError::ConstraintViolation(
+            "task-scoped journal event requires task_id, from_state, and to_state".to_owned(),
+        ));
+    }
     Ok(())
+}
+
+/// Validates that `event` is the `project.created` evidence for exactly
+/// `project` before any write.
+fn require_project_created_envelope(
+    project: &Project,
+    event: &NewJournalEvent,
+) -> StorageResult<()> {
+    if event.event_type != EventType::ProjectCreated {
+        return Err(StorageError::ConstraintViolation(
+            "project creation requires a project.created event".to_owned(),
+        ));
+    }
+    if event.project_id != *project.id() {
+        return Err(StorageError::ConstraintViolation(
+            "project.created event references a different project than the state write".to_owned(),
+        ));
+    }
+    require_envelope(event)
+}
+
+/// Validates that `event` is the `task.created` evidence for exactly
+/// `task` in its current (initial) state before any write.
+fn require_task_created_envelope(task: &Task, event: &NewJournalEvent) -> StorageResult<()> {
+    if event.event_type != EventType::TaskCreated {
+        return Err(StorageError::ConstraintViolation(
+            "task creation requires a task.created event".to_owned(),
+        ));
+    }
+    if event.task_id.as_ref() != Some(task.id()) || event.project_id != *task.project_id() {
+        return Err(StorageError::ConstraintViolation(
+            "task.created event references a different task or project than the state write"
+                .to_owned(),
+        ));
+    }
+    if event.from_state != Some(task.state()) || event.to_state != Some(task.state()) {
+        return Err(StorageError::ConstraintViolation(
+            "task.created event states must be the task initial state".to_owned(),
+        ));
+    }
+    require_envelope(event)
+}
+
+/// Validates that `event` is the `task.dependency_added` evidence for an
+/// edge out of `task` before any write. Dependency edges never mutate
+/// lifecycle state, so the event records the dependent task's unchanged
+/// current state.
+fn require_dependency_envelope(task: &Task, event: &NewJournalEvent) -> StorageResult<()> {
+    if event.event_type != EventType::DependencyAdded {
+        return Err(StorageError::ConstraintViolation(
+            "dependency mutation requires a task.dependency_added event".to_owned(),
+        ));
+    }
+    if event.task_id.as_ref() != Some(task.id()) || event.project_id != *task.project_id() {
+        return Err(StorageError::ConstraintViolation(
+            "task.dependency_added event references a different task or project than the edge write"
+                .to_owned(),
+        ));
+    }
+    if event.from_state != Some(task.state()) || event.to_state != Some(task.state()) {
+        return Err(StorageError::ConstraintViolation(
+            "task.dependency_added event states must be the unchanged task state".to_owned(),
+        ));
+    }
+    require_envelope(event)
+}
+
+/// Appends one validated journal record inside the caller's transaction
+/// and returns it with its assigned identity. The caller owns the atomic
+/// boundary (state writes plus this append commit together); this helper
+/// never commits on its own.
+fn insert_journal_event(
+    connection: &Connection,
+    event: &NewJournalEvent,
+) -> StorageResult<JournalEvent> {
+    require_envelope(event)?;
+    connection.execute(
+        "INSERT INTO event_journal
+         (event_type, event_version, task_id, project_id, from_state, to_state,
+          reason, correlation_id, causation_id, occurred_at, provenance)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            event.event_type.as_str(),
+            EVENT_SCHEMA_VERSION,
+            event.task_id.as_ref().map(|id| id.as_str()),
+            event.project_id.as_str(),
+            event.from_state.map(|state| state.as_str()),
+            event.to_state.map(|state| state.as_str()),
+            event.reason,
+            event.correlation_id,
+            event.causation_id,
+            event.occurred_at,
+            event.provenance,
+        ],
+    )?;
+    let seq = connection.last_insert_rowid();
+    Ok(JournalEvent {
+        id: EventId::parse(&format!("evt-{seq}"))?,
+        seq,
+        event_version: EVENT_SCHEMA_VERSION,
+        fact: event.clone(),
+    })
 }
 
 fn insert_task_row(connection: &Connection, snapshot: &TaskSnapshot) -> StorageResult<()> {

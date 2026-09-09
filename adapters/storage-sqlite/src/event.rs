@@ -16,9 +16,12 @@ use crate::error::{StorageError, StorageResult};
 /// schema version, the application build version, and any protocol version.
 pub const EVENT_SCHEMA_VERSION: u32 = 1;
 
-/// Canonical lifecycle fact names. Provider-neutral and runtime-neutral by
-/// construction: no provider-, model-, or runner-specific type can exist
-/// here — the enum is closed.
+/// Canonical lifecycle and mutation fact names. Provider-neutral and
+/// runtime-neutral by construction: no provider-, model-, or
+/// runner-specific type can exist here — the enum is closed. The G2
+/// creation/dependency types (`project.created`, `task.created`,
+/// `task.dependency_added`) close the TASK-0027 audit gap; no generic
+/// `entity.changed`-style type exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventType {
     MarkedReady,
@@ -30,6 +33,9 @@ pub enum EventType {
     VerificationBegan,
     VerificationSucceeded,
     VerificationFailed,
+    ProjectCreated,
+    TaskCreated,
+    DependencyAdded,
 }
 
 impl EventType {
@@ -46,12 +52,15 @@ impl EventType {
             Self::VerificationBegan => "task.verification_began",
             Self::VerificationSucceeded => "task.verification_succeeded",
             Self::VerificationFailed => "task.verification_failed",
+            Self::ProjectCreated => "project.created",
+            Self::TaskCreated => "task.created",
+            Self::DependencyAdded => "task.dependency_added",
         }
     }
 
     /// Every canonical type, for exhaustive tests.
     #[must_use]
-    pub const fn all() -> [Self; 9] {
+    pub const fn all() -> [Self; 12] {
         [
             Self::MarkedReady,
             Self::Claimed,
@@ -62,7 +71,17 @@ impl EventType {
             Self::VerificationBegan,
             Self::VerificationSucceeded,
             Self::VerificationFailed,
+            Self::ProjectCreated,
+            Self::TaskCreated,
+            Self::DependencyAdded,
         ]
+    }
+
+    /// Whether this fact is project-scoped (no task subject): only
+    /// `project.created`. Every other type is task-scoped.
+    #[must_use]
+    pub const fn is_project_scoped(self) -> bool {
+        matches!(self, Self::ProjectCreated)
     }
 
     /// Strict decode: unknown names are corruption, never a default.
@@ -77,6 +96,9 @@ impl EventType {
             "task.verification_began" => Self::VerificationBegan,
             "task.verification_succeeded" => Self::VerificationSucceeded,
             "task.verification_failed" => Self::VerificationFailed,
+            "project.created" => Self::ProjectCreated,
+            "task.created" => Self::TaskCreated,
+            "task.dependency_added" => Self::DependencyAdded,
             other => {
                 return Err(StorageError::Corrupt(format!(
                     "unknown persisted event type {other:?}"
@@ -127,21 +149,31 @@ impl fmt::Display for EventId {
     }
 }
 
-/// A lifecycle fact accepted for append. Identity is assigned by the store
-/// at commit time (see [`EventId`]); everything else is fixed beforehand by
-/// the trusted application service — never by provider/model output.
+/// A lifecycle or mutation fact accepted for append. Identity is assigned
+/// by the store at commit time (see [`EventId`]); everything else is fixed
+/// beforehand by the trusted application service — never by
+/// provider/model output.
+///
+/// Scope discipline (migration 0003): `project.created` is project-scoped
+/// (`task_id`, `from_state`, `to_state` are all `None` — never a fake or
+/// sentinel task id); every other type is task-scoped (`Some` throughout).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewJournalEvent {
     /// What committed fact this is.
     pub event_type: EventType,
-    /// Task the fact is about.
-    pub task_id: TaskId,
-    /// Project the task belongs to.
+    /// Task the fact is about; `None` only for `project.created`.
+    pub task_id: Option<TaskId>,
+    /// Project the fact belongs to; always required.
     pub project_id: ProjectId,
-    /// Lifecycle state before the mutation.
-    pub from_state: TaskState,
-    /// Lifecycle state after the mutation.
-    pub to_state: TaskState,
+    /// Lifecycle state before the mutation; `None` only for
+    /// `project.created`. Creation/dependency facts record the state that
+    /// holds (initial state for `task.created`, current state for
+    /// `task.dependency_added`) — dependency edges never mutate lifecycle
+    /// state, so from and to are equal there.
+    pub from_state: Option<TaskState>,
+    /// Lifecycle state after the mutation; `None` only for
+    /// `project.created`.
+    pub to_state: Option<TaskState>,
     /// Bounded metadata: block reason, submission summary, or verdict
     /// reference. Short human/operator text only — never prompts, secrets,
     /// transcripts, or raw tool output.

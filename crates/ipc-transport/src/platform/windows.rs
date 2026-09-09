@@ -67,8 +67,19 @@ pub fn pipe_name_for_sid(sid: &str) -> String {
     format!("{PIPE_NAME_PREFIX}{sid}")
 }
 
+/// Environment override for the full pipe name (test seam).
+///
+/// When `AI_ENGINEERING_OS_PIPE_NAME` is set and non-empty, pipe
+/// resolution uses it verbatim instead of the SID-suffixed canonical
+/// name, so real-process tests run against a test-owned pipe. Production
+/// never sets this variable.
+pub const PIPE_NAME_OVERRIDE_ENV: &str = "AI_ENGINEERING_OS_PIPE_NAME";
+
 /// Resolves the canonical pipe identity for the current Windows user.
 pub fn pipe_name() -> TransportResult<String> {
+    if let Some(name) = std::env::var_os(PIPE_NAME_OVERRIDE_ENV).filter(|v| !v.is_empty()) {
+        return Ok(name.to_string_lossy().into_owned());
+    }
     Ok(pipe_name_for_sid(&current_user_sid()?))
 }
 

@@ -52,14 +52,19 @@ enum SessionState {
 
 /// Post-handshake request observed by the server side. Ping replies are
 /// already sent when [`ReadyRequest::Ping`] is returned; shutdown carries
-/// no semantics here and no reply is sent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// no semantics here and no reply is sent; business requests are decoded
+/// and surfaced without executing anything — dispatch belongs to `agentd`
+/// (TASK-0028), which enforces the same version gate before handling.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadyRequest {
     /// Liveness probe; `PingResponse` already sent.
     Ping,
     /// Shutdown asked; exposed upward with no lifecycle effect.
     /// TASK-0020 owns authorization, reply, and process behavior.
     Shutdown,
+    /// Decoded G2 business request on a version-1 session. The version
+    /// gate already passed; nothing has executed.
+    Business(ipc_contracts::proto::TaskCoreRequest),
 }
 
 /// Client-side handshake outcome.
@@ -305,6 +310,31 @@ where
         }
     }
 
+    /// Sends one business response for a previously observed
+    /// [`ReadyRequest::Business`].
+    ///
+    /// Protocol framing only: encodes the `TaskCoreResponse` inside the
+    /// `ControlResponse.task_core` envelope and writes the frame. Executes
+    /// nothing — dispatch belongs to `agentd`. Valid only after a
+    /// successful handshake; the caller guarantees the session negotiated
+    /// version 1 (only v1 sessions can observe `Business`).
+    pub async fn respond_business(
+        &mut self,
+        response: ipc_contracts::proto::TaskCoreResponse,
+    ) -> ControlResult<()> {
+        self.require_ready()?;
+        let frame = bytes::Bytes::from(
+            ControlResponse {
+                payload: Some(control_response::Payload::TaskCore(response)),
+            }
+            .encode_to_vec(),
+        );
+        match self.transport.write_frame(frame).await {
+            Ok(()) => Ok(()),
+            Err(error) => self.fail(error.into()),
+        }
+    }
+
     /// Sends the existing `ShutdownResponse` acknowledgement for a
     /// previously observed [`ReadyRequest::Shutdown`].
     ///
@@ -458,18 +488,16 @@ where
                 Ok(ReadyRequest::Ping)
             }
             Some(control_request::Payload::Shutdown(_)) => Ok(ReadyRequest::Shutdown),
-            Some(control_request::Payload::TaskCore(_)) => {
-                // Version gate, not dispatch (TASK-0028 owns dispatch):
-                // a v0 session rejects with UnsupportedProtocol and the
-                // request never executes; a v1 session passes the gate
-                // and stops here with BusinessNotImplemented.
+            Some(control_request::Payload::TaskCore(request)) => {
+                // Version gate, not dispatch: a v0 session rejects with
+                // UnsupportedProtocol and the request never executes; a v1
+                // session surfaces the decoded request for the `agentd`
+                // dispatcher, which owns handling (TASK-0028).
                 let negotiated = self
                     .negotiated_version
                     .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
                 match validate_business_allowed(negotiated) {
-                    Ok(()) => self.fail(ControlError::BusinessNotImplemented(
-                        "business dispatch lands in TASK-0028; wire shape accepted".to_owned(),
-                    )),
+                    Ok(()) => Ok(ReadyRequest::Business(request)),
                     Err(error) => self.fail(error),
                 }
             }
@@ -1096,7 +1124,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v1_session_passes_the_version_gate_without_dispatch() {
+    async fn v1_session_surfaces_business_without_executing() {
         // New client [0,1] against the G2 daemon profile negotiates 1 on
         // both sides of a live pair.
         let (pair, client_outcome, server_outcome) = run_handshake_pair(
@@ -1118,10 +1146,8 @@ mod tests {
         assert_eq!(pair.server.negotiated_version(), Some(1));
         drop(pair);
 
-        // The wire shape is structurally valid on a v1 session, but this
-        // task wires no dispatch: the gate passes and handling stops with
-        // BusinessNotImplemented — never UnsupportedProtocol, never silent
-        // execution.
+        // The wire shape is valid on a v1 session: the decoded request is
+        // surfaced for the dispatcher with nothing executed here.
         let (mut raw_client, raw_server) = raw_pair();
         let mut server = ServerSession::new(raw_server, ServerConfig::g2_default());
         raw_client
@@ -1141,8 +1167,17 @@ mod tests {
             .await
             .expect("write");
         match server.next_request().await {
-            Err(ControlError::BusinessNotImplemented(_)) => {}
-            other => panic!("expected BusinessNotImplemented on v1, got {other:?}"),
+            Ok(ReadyRequest::Business(request)) => match request.payload {
+                Some(ipc_contracts::proto::task_core_request::Payload::CreateTask(create)) => {
+                    assert_eq!(create.id, "T-1");
+                    assert_eq!(create.objective, "ship G2");
+                }
+                other => panic!("expected create_task payload, got {other:?}"),
+            },
+            other => panic!("expected Business request, got {other:?}"),
         }
+        // The session survives a business request: version-gated dispatch
+        // never terminates the connection on its own.
+        assert!(server.is_ready());
     }
 }

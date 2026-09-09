@@ -89,6 +89,7 @@ fn full_lifecycle_commits_matching_ordered_history() {
     let mut service = db.service();
     let task_id = seed_task(&mut service, "P-1", "T-1");
     let expected_types = [
+        EventType::TaskCreated,
         EventType::MarkedReady,
         EventType::Claimed,
         EventType::Started,
@@ -113,11 +114,16 @@ fn full_lifecycle_commits_matching_ordered_history() {
 
     let history = service.store().list_events_for_task(&task_id).unwrap();
     assert_eq!(history.len(), expected_types.len());
-    let mut previous_to = TaskState::Draft;
+    let mut previous_to = Some(TaskState::Draft);
+    let mut previous_seq = 0;
     for (index, event) in history.iter().enumerate() {
         // Exactly one event per mutation, in commit order, chained states.
-        assert_eq!(event.seq, (index + 1) as i64);
-        assert_eq!(event.id.to_string(), format!("evt-{}", index + 1));
+        // Seqs are the store-global commit order (creation events for
+        // other scopes interleave globally), so order — not 1-based
+        // density — is asserted here.
+        assert!(event.seq > previous_seq, "journal order must advance");
+        previous_seq = event.seq;
+        assert_eq!(event.id.to_string(), format!("evt-{}", event.seq));
         assert_eq!(event.fact.event_type, expected_types[index]);
         assert_eq!(event.fact.from_state, previous_to);
         assert_eq!(event.event_version, 1);
@@ -135,7 +141,7 @@ fn full_lifecycle_commits_matching_ordered_history() {
         );
         previous_to = event.fact.to_state;
     }
-    assert_eq!(previous_to, TaskState::Completed);
+    assert_eq!(previous_to, Some(TaskState::Completed));
     // Current state comes from the relational row, matching the trail tip.
     assert_eq!(
         service.store().get_task(&task_id).unwrap().unwrap().state(),
@@ -180,6 +186,7 @@ fn block_resume_and_retry_paths_commit_events() {
     assert_eq!(
         types,
         [
+            EventType::TaskCreated,
             EventType::MarkedReady,
             EventType::Claimed,
             EventType::Started,
@@ -208,7 +215,7 @@ fn submit_result_does_not_complete() {
     assert!(
         history
             .iter()
-            .all(|event| event.fact.to_state != TaskState::Completed),
+            .all(|event| event.fact.to_state != Some(TaskState::Completed)),
         "no event may claim completion outside verification"
     );
 }
@@ -220,6 +227,7 @@ fn invalid_transition_changes_nothing_and_appends_nothing() {
     let db = TestDb::new("invalid");
     let mut service = db.service();
     let task_id = seed_task(&mut service, "P-1", "T-1");
+    let seeded_len = journal_len(&service);
     match service.verification_succeeded(&task_id, "self-report") {
         Err(ServiceError::Domain(_)) => {}
         other => panic!("DRAFT → verification must fail domain validation, got {other:?}"),
@@ -228,18 +236,19 @@ fn invalid_transition_changes_nothing_and_appends_nothing() {
         service.store().get_task(&task_id).unwrap().unwrap().state(),
         TaskState::Draft
     );
-    assert_eq!(journal_len(&service), 0);
+    assert_eq!(journal_len(&service), seeded_len);
 }
 
 #[test]
 fn mutation_of_missing_task_appends_nothing() {
     let db = TestDb::new("missing");
     let mut service = db.service();
+    let seeded_len = journal_len(&service);
     match service.mark_ready(&TaskId::new("GHOST").unwrap()) {
         Err(ServiceError::Storage(_)) => {}
         other => panic!("expected storage NotFound, got {other:?}"),
     }
-    assert_eq!(journal_len(&service), 0);
+    assert_eq!(journal_len(&service), seeded_len);
 }
 
 // -- restart durability ---------------------------------------------------------------
@@ -266,7 +275,7 @@ fn restart_preserves_state_history_and_order() {
         TaskState::Claimed
     );
     let history = service.store().list_events_ordered().unwrap();
-    assert_eq!(history.len(), 3);
+    assert_eq!(history.len(), 6);
     assert!(
         history.windows(2).all(|pair| pair[0].seq < pair[1].seq),
         "journal order must survive restart"
@@ -275,8 +284,8 @@ fn restart_preserves_state_history_and_order() {
     let mut service = service;
     service.start(&TaskId::new("T-1").unwrap()).unwrap();
     let history = service.store().list_events_ordered().unwrap();
-    assert_eq!(history.len(), 4);
-    assert_eq!(history[3].id.to_string(), "evt-4");
+    assert_eq!(history.len(), 7);
+    assert_eq!(history[6].id.to_string(), "evt-7");
 }
 
 // -- schema compatibility ---------------------------------------------------------------
@@ -304,4 +313,168 @@ fn persisted_envelope_matches_event_schema() {
     assert!(!event.fact.causation_id.is_empty());
     assert_eq!(event.fact.occurred_at, FIXED_STAMP);
     assert_eq!(event.event_version, 1);
+}
+
+// -- G2 creation + dependency mutations -------------------------------------------
+
+#[test]
+fn project_creation_commits_project_created_event() {
+    let db = TestDb::new("projcreate");
+    let mut service = db.service();
+    let event = service
+        .create_project(&Project::new(ProjectId::new("P-1").unwrap(), "Runlith").unwrap())
+        .unwrap();
+    assert_eq!(event.fact.event_type, EventType::ProjectCreated);
+    assert_eq!(event.fact.task_id, None);
+    assert_eq!(event.fact.from_state, None);
+    assert_eq!(event.fact.to_state, None);
+    assert_eq!(event.fact.project_id.as_str(), "P-1");
+    assert_eq!(event.fact.occurred_at, FIXED_STAMP);
+    assert!(
+        event
+            .fact
+            .provenance
+            .starts_with("task-application-service/"),
+        "provenance must name the trusted service"
+    );
+    assert!(service
+        .get_project(&ProjectId::new("P-1").unwrap())
+        .unwrap()
+        .is_some());
+    // Exactly one state row plus exactly one event: no double append.
+    assert_eq!(service.list_projects().unwrap().len(), 1);
+    assert_eq!(journal_len(&service), 1);
+}
+
+#[test]
+fn duplicate_project_creation_writes_nothing() {
+    let db = TestDb::new("projdup");
+    let mut service = db.service();
+    service
+        .create_project(&Project::new(ProjectId::new("P-1").unwrap(), "One").unwrap())
+        .unwrap();
+    match service.create_project(&Project::new(ProjectId::new("P-1").unwrap(), "Two").unwrap()) {
+        Err(ServiceError::Storage(_)) => {}
+        other => panic!("expected storage Duplicate, got {other:?}"),
+    }
+    assert_eq!(journal_len(&service), 1);
+    assert_eq!(
+        service
+            .get_project(&ProjectId::new("P-1").unwrap())
+            .unwrap()
+            .unwrap()
+            .name(),
+        "One"
+    );
+}
+
+#[test]
+fn task_creation_commits_task_created_event() {
+    let db = TestDb::new("taskcreate");
+    let mut service = db.service();
+    service
+        .create_project(&Project::new(ProjectId::new("P-1").unwrap(), "P").unwrap())
+        .unwrap();
+    let task = Task::draft(
+        TaskId::new("T-1").unwrap(),
+        ProjectId::new("P-1").unwrap(),
+        "objective T-1",
+    )
+    .unwrap();
+    let event = service.create_task(&task).unwrap();
+    assert_eq!(event.fact.event_type, EventType::TaskCreated);
+    assert_eq!(event.fact.task_id.as_ref().unwrap().as_str(), "T-1");
+    assert_eq!(event.fact.from_state, Some(TaskState::Draft));
+    assert_eq!(event.fact.to_state, Some(TaskState::Draft));
+    let stored = service
+        .get_task(&TaskId::new("T-1").unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state(), TaskState::Draft);
+    assert_eq!(stored.objective(), "objective T-1");
+    assert_eq!(journal_len(&service), 2);
+}
+
+#[test]
+fn dependency_add_commits_typed_event_and_invalid_edges_write_nothing() {
+    let db = TestDb::new("depadd");
+    let mut service = db.service();
+    let a = seed_task(&mut service, "P-1", "A");
+    let b = seed_task(&mut service, "P-1", "B");
+    let before = journal_len(&service);
+    let event = service.add_dependency(&a, &b).unwrap();
+    assert_eq!(event.fact.event_type, EventType::DependencyAdded);
+    assert_eq!(event.fact.task_id.as_ref().unwrap(), &a);
+    // Edges never mutate lifecycle state: from and to are the unchanged
+    // current state.
+    assert_eq!(event.fact.from_state, Some(TaskState::Draft));
+    assert_eq!(event.fact.to_state, Some(TaskState::Draft));
+    assert_eq!(
+        service.list_dependencies(&a).unwrap().as_slice(),
+        std::slice::from_ref(&b)
+    );
+    assert_eq!(journal_len(&service), before + 1);
+    // Self-edge, duplicate, and unknown target all fail with nothing
+    // written — no edge, no event.
+    assert!(service.add_dependency(&a, &a).is_err());
+    assert!(service.add_dependency(&a, &b).is_err());
+    assert!(service
+        .add_dependency(&a, &TaskId::new("GHOST").unwrap())
+        .is_err());
+    assert_eq!(
+        service.list_dependencies(&a).unwrap().as_slice(),
+        std::slice::from_ref(&b)
+    );
+    assert_eq!(journal_len(&service), before + 1);
+}
+
+#[test]
+fn dependency_cycle_is_rejected_without_mutation() {
+    let db = TestDb::new("depcycle");
+    let mut service = db.service();
+    let a = seed_task(&mut service, "P-1", "A");
+    let b = seed_task(&mut service, "P-1", "B");
+    service.add_dependency(&a, &b).unwrap();
+    let before = journal_len(&service);
+    match service.add_dependency(&b, &a) {
+        Err(ServiceError::Domain(_)) => {}
+        other => panic!("expected domain DependencyCycle, got {other:?}"),
+    }
+    assert!(service.list_dependencies(&b).unwrap().is_empty());
+    assert_eq!(journal_len(&service), before);
+}
+
+#[test]
+fn cross_project_dependency_is_rejected_without_mutation() {
+    let db = TestDb::new("depxproj");
+    let mut service = db.service();
+    let a = seed_task(&mut service, "P-1", "A");
+    let f = seed_task(&mut service, "P-2", "F");
+    let before = journal_len(&service);
+    assert!(service.add_dependency(&a, &f).is_err());
+    assert!(service.list_dependencies(&a).unwrap().is_empty());
+    assert_eq!(journal_len(&service), before);
+}
+
+#[test]
+fn read_only_operations_emit_no_events() {
+    let db = TestDb::new("readonly");
+    let mut service = db.service();
+    let task_id = seed_task(&mut service, "P-1", "T-1");
+    let project_id = ProjectId::new("P-1").unwrap();
+    let before = journal_len(&service);
+    assert!(service.get_project(&project_id).unwrap().is_some());
+    assert_eq!(service.list_projects().unwrap().len(), 1);
+    assert!(service.get_task(&task_id).unwrap().is_some());
+    assert_eq!(
+        service.list_tasks_for_project(&project_id).unwrap().len(),
+        1
+    );
+    assert!(service.list_dependencies(&task_id).unwrap().is_empty());
+    assert_eq!(service.list_events_for_task(&task_id).unwrap().len(), 1);
+    assert!(!service
+        .list_events_for_project(&project_id)
+        .unwrap()
+        .is_empty());
+    assert_eq!(journal_len(&service), before);
 }

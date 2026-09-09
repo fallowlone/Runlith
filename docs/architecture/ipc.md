@@ -383,12 +383,16 @@ unchanged: it does not contradict this message-shape contract, and G1 may
 replace it. Any genuine future contradiction must escalate as
 `ARCHITECTURE_BLOCKER`, never as opportunistic G1 implementation.
 
-## 15. G2 protocol v1: versioned business IPC (contract only)
+## 15. G2 protocol v1: versioned business IPC (implemented)
 
 Accepted in
 [`adr/ADR-0021-g2-business-ipc-and-local-data-composition.md`](./adr/ADR-0021-g2-business-ipc-and-local-data-composition.md);
-contract definition only — no business dispatch, no database opening,
-and no `agentctl` Project/Task commands are implemented here.
+implemented in TASK-0028 (see
+[`../development/G2_BUSINESS_IPC_IMPLEMENTATION.md`](../development/G2_BUSINESS_IPC_IMPLEMENTATION.md)):
+`agentd` dispatches the `task_core` envelope through the trusted
+application service against the daemon-owned database, and `agentctl`
+exposes the Project/Task commands. What follows is the accepted
+contract in its implemented form.
 
 Protocol `0` (handshake, ping, shutdown) stays supported; protocol `1`
 adds the bounded `task_core` envelope
@@ -424,7 +428,8 @@ Composition stays
 database is owned by the `agentd` composition root at the canonical
 `ai-engineering-os/state.sqlite3` application-data location (per-OS
 paths in ADR-0021 §15; the IPC runtime directory is explicitly
-rejected), and `agentctl` never opens SQLite. TASK-0028 implements
+rejected), and `agentctl` never opens SQLite. TASK-0028 implemented
 this contract atomically — including the three new journal types
 (`project.created`, `task.created`, `task.dependency_added`) — before
-any CLI command ships, and preserves old-G1-client compatibility.
+any CLI command shipped, and old-G1-client compatibility is preserved
+and tested.

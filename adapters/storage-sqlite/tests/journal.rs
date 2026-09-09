@@ -72,10 +72,10 @@ fn new_event(
 ) -> NewJournalEvent {
     NewJournalEvent {
         event_type,
-        task_id: task.id().clone(),
+        task_id: Some(task.id().clone()),
         project_id: task.project_id().clone(),
-        from_state: from,
-        to_state: to,
+        from_state: Some(from),
+        to_state: Some(to),
         reason: None,
         correlation_id: "op-test-1".into(),
         causation_id: "req-test-1".into(),
@@ -99,11 +99,11 @@ fn journal_len(store: &SqliteStore) -> usize {
 // -- migration ------------------------------------------------------------
 
 #[test]
-fn fresh_database_reaches_v2() {
-    let db = TestDb::new("fresh-v2");
+fn fresh_database_reaches_v3() {
+    let db = TestDb::new("fresh-v3");
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 2);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 2);
+    assert_eq!(store.schema_version().unwrap(), 3);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 3);
     assert!(store.list_events_ordered().unwrap().is_empty());
 }
 
@@ -137,7 +137,7 @@ fn v1_database_with_data_migrates_preserving_state() {
             .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 2);
+    assert_eq!(store.schema_version().unwrap(), 3);
     let task = store
         .get_task(&TaskId::new("T-1").unwrap())
         .unwrap()
@@ -148,14 +148,14 @@ fn v1_database_with_data_migrates_preserving_state() {
 }
 
 #[test]
-fn v2_reopen_is_a_noop() {
-    let db = TestDb::new("v2-noop");
+fn v3_reopen_is_a_noop() {
+    let db = TestDb::new("v3-noop");
     {
         let mut store = db.open();
         ready_task_via_store(&mut store);
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 2);
+    assert_eq!(store.schema_version().unwrap(), 3);
     assert!(store
         .get_task(&TaskId::new("T-1").unwrap())
         .unwrap()
@@ -163,18 +163,284 @@ fn v2_reopen_is_a_noop() {
 }
 
 #[test]
-fn future_version_rejected_after_v2() {
-    let db = TestDb::new("future-v2");
+fn future_version_rejected_after_v3() {
+    let db = TestDb::new("future-v3");
     {
         let _store = db.open();
     }
     db.raw().execute_batch("PRAGMA user_version = 99").unwrap();
     match SqliteStore::open(&db.path) {
         Err(StorageError::UnsupportedSchemaVersion { found, supported }) => {
-            assert_eq!((found, supported), (99, 2));
+            assert_eq!((found, supported), (99, 3));
         }
         _ => panic!("expected UnsupportedSchemaVersion, open must fail closed"),
     }
+}
+
+#[test]
+fn v2_journal_rows_survive_migration_to_v3() {
+    let db = TestDb::new("v2-preserve");
+    {
+        // Hand-built v2 layout: 0001 + 0002 tables, version stamp 2, real
+        // lifecycle journal rows committed under the old NOT NULL shape.
+        let connection = db.raw();
+        connection
+            .execute_batch(
+                "CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+                 CREATE TABLE tasks (
+                     id TEXT PRIMARY KEY,
+                     project_id TEXT NOT NULL REFERENCES projects (id),
+                     objective TEXT NOT NULL, parent_id TEXT NULL REFERENCES tasks (id),
+                     state TEXT NOT NULL, kind TEXT NULL, risk TEXT NULL);
+                 CREATE TABLE task_dependencies (
+                     task_id TEXT NOT NULL REFERENCES tasks (id),
+                     depends_on_id TEXT NOT NULL REFERENCES tasks (id),
+                     PRIMARY KEY (task_id, depends_on_id));
+                 CREATE TABLE task_strings (
+                     task_id TEXT NOT NULL REFERENCES tasks (id),
+                     slot TEXT NOT NULL, position INTEGER NOT NULL, value TEXT NOT NULL,
+                     PRIMARY KEY (task_id, slot, position));
+                 CREATE TABLE event_journal (
+                     seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                     event_type TEXT NOT NULL, event_version INTEGER NOT NULL,
+                     task_id TEXT NOT NULL REFERENCES tasks (id),
+                     project_id TEXT NOT NULL REFERENCES projects (id),
+                     from_state TEXT NOT NULL, to_state TEXT NOT NULL,
+                     reason TEXT NULL, correlation_id TEXT NOT NULL,
+                     causation_id TEXT NOT NULL, occurred_at TEXT NOT NULL,
+                     provenance TEXT NOT NULL);
+                 CREATE INDEX event_journal_task_seq ON event_journal (task_id, seq);
+                 CREATE INDEX event_journal_project_seq ON event_journal (project_id, seq);
+                 PRAGMA user_version = 2;
+                 INSERT INTO projects (id, name) VALUES ('P-1', 'legacy');
+                 INSERT INTO tasks (id, project_id, objective, state)
+                     VALUES ('T-1', 'P-1', 'legacy objective', 'CLAIMED');
+                 INSERT INTO event_journal
+                   (event_type, event_version, task_id, project_id, from_state,
+                    to_state, reason, correlation_id, causation_id, occurred_at,
+                    provenance)
+                 VALUES
+                   ('task.marked_ready', 1, 'T-1', 'P-1', 'DRAFT', 'READY',
+                    NULL, 'op-1', 'req-1', '2024-01-01T00:00:00Z',
+                    'task-application-service/mark_ready'),
+                   ('task.claimed', 1, 'T-1', 'P-1', 'READY', 'CLAIMED',
+                    NULL, 'op-2', 'req-2', '2024-01-01T00:00:01Z',
+                    'task-application-service/claim');",
+            )
+            .unwrap();
+    }
+    let mut store = db.open();
+    assert_eq!(store.schema_version().unwrap(), 3);
+    // Every existing row survives verbatim: seq, identity, type, refs,
+    // states, payload, and provenance.
+    let history = store.list_events_ordered().unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].seq, 1);
+    assert_eq!(history[0].id.to_string(), "evt-1");
+    assert_eq!(history[0].fact.event_type, EventType::MarkedReady);
+    assert_eq!(history[0].fact.task_id.as_ref().unwrap().as_str(), "T-1");
+    assert_eq!(history[0].fact.project_id.as_str(), "P-1");
+    assert_eq!(history[0].fact.from_state, Some(TaskState::Draft));
+    assert_eq!(history[0].fact.to_state, Some(TaskState::Ready));
+    assert_eq!(
+        history[0].fact.provenance,
+        "task-application-service/mark_ready"
+    );
+    assert_eq!(history[1].seq, 2);
+    assert_eq!(history[1].id.to_string(), "evt-2");
+    assert_eq!(history[1].fact.event_type, EventType::Claimed);
+    assert_eq!(history[1].fact.occurred_at, "2024-01-01T00:00:01Z");
+    // The sequence continues without reuse: the next identity is evt-3.
+    let mut task = store
+        .get_task(&TaskId::new("T-1").unwrap())
+        .unwrap()
+        .unwrap();
+    task.start().unwrap();
+    let event = store
+        .apply_lifecycle_transition(
+            task.id(),
+            TaskState::Claimed,
+            &task,
+            &new_event(
+                &task,
+                TaskState::Claimed,
+                TaskState::Running,
+                EventType::Started,
+            ),
+        )
+        .unwrap();
+    assert_eq!(event.seq, 3);
+    assert_eq!(event.id.to_string(), "evt-3");
+    // A project-scoped event appends with a NULL task reference — no fake
+    // task id is used to satisfy the column.
+    let created = store
+        .create_project_with_event(
+            &project("P-2"),
+            &NewJournalEvent {
+                event_type: EventType::ProjectCreated,
+                task_id: None,
+                project_id: ProjectId::new("P-2").unwrap(),
+                from_state: None,
+                to_state: None,
+                reason: None,
+                correlation_id: "op-3".into(),
+                causation_id: "req-3".into(),
+                occurred_at: "2024-01-01T00:00:02Z".into(),
+                provenance: "task-application-service/create_project".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(created.seq, 4);
+    assert_eq!(created.fact.task_id, None);
+    assert_eq!(store.list_events_ordered().unwrap().len(), 4);
+}
+
+#[test]
+fn scope_check_rejects_mis_scoped_rows() {
+    let db = TestDb::new("scope-check");
+    let mut store = db.open();
+    ready_task_via_store(&mut store);
+    // project.created with a task reference violates the scope CHECK.
+    let scoped = db.raw().execute(
+        "INSERT INTO event_journal
+               (event_type, event_version, task_id, project_id, from_state,
+                to_state, correlation_id, causation_id, occurred_at, provenance)
+             VALUES ('project.created', 1, 'T-1', 'P-1', NULL, NULL,
+                     'op-1', 'req-1', '2024-01-01T00:00:00Z', 'test')",
+        [],
+    );
+    assert!(scoped.is_err(), "project.created must not carry task_id");
+    // Task-scoped types without a task reference violate the scope CHECK.
+    let unscoped = db.raw().execute(
+        "INSERT INTO event_journal
+               (event_type, event_version, task_id, project_id, from_state,
+                to_state, correlation_id, causation_id, occurred_at, provenance)
+             VALUES ('task.created', 1, NULL, 'P-1', 'DRAFT', 'DRAFT',
+                     'op-1', 'req-1', '2024-01-01T00:00:00Z', 'test')",
+        [],
+    );
+    assert!(unscoped.is_err(), "task.created requires task scope");
+    assert_eq!(journal_len(&store), 0);
+}
+
+#[test]
+fn creation_mutations_are_atomic_with_their_events() {
+    let db = TestDb::new("atomic-create");
+    let mut store = db.open();
+    let created_project = store
+        .create_project_with_event(
+            &project("P-1"),
+            &NewJournalEvent {
+                event_type: EventType::ProjectCreated,
+                task_id: None,
+                project_id: ProjectId::new("P-1").unwrap(),
+                from_state: None,
+                to_state: None,
+                reason: None,
+                correlation_id: "op-1".into(),
+                causation_id: "req-1".into(),
+                occurred_at: "2024-01-01T00:00:00Z".into(),
+                provenance: "task-application-service/create_project".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(created_project.fact.event_type, EventType::ProjectCreated);
+    let task = draft_task("P-1", "T-1");
+    let created_task = store
+        .create_task_with_event(
+            &task,
+            &NewJournalEvent {
+                event_type: EventType::TaskCreated,
+                task_id: Some(TaskId::new("T-1").unwrap()),
+                project_id: ProjectId::new("P-1").unwrap(),
+                from_state: Some(TaskState::Draft),
+                to_state: Some(TaskState::Draft),
+                reason: None,
+                correlation_id: "op-2".into(),
+                causation_id: "req-2".into(),
+                occurred_at: "2024-01-01T00:00:01Z".into(),
+                provenance: "task-application-service/create_task".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(created_task.seq, 2);
+    assert_eq!(created_task.fact.event_type, EventType::TaskCreated);
+    // A mismatched creation event commits nothing: no row, no journal.
+    let other = draft_task("P-1", "T-9");
+    let bad = NewJournalEvent {
+        event_type: EventType::TaskCreated,
+        task_id: Some(TaskId::new("T-OTHER").unwrap()),
+        project_id: ProjectId::new("P-1").unwrap(),
+        from_state: Some(TaskState::Draft),
+        to_state: Some(TaskState::Draft),
+        reason: None,
+        correlation_id: "op-3".into(),
+        causation_id: "req-3".into(),
+        occurred_at: "2024-01-01T00:00:02Z".into(),
+        provenance: "task-application-service/create_task".into(),
+    };
+    assert!(store.create_task_with_event(&other, &bad).is_err());
+    assert!(store
+        .get_task(&TaskId::new("T-9").unwrap())
+        .unwrap()
+        .is_none());
+    assert_eq!(journal_len(&store), 2);
+}
+
+#[test]
+fn dependency_mutation_is_atomic_with_its_event() {
+    let db = TestDb::new("atomic-dep");
+    let mut store = db.open();
+    ready_task_via_store(&mut store);
+    let other = draft_task("P-1", "T-2");
+    store.create_task(&other).unwrap();
+    let committed = store
+        .add_dependency_with_event(
+            &TaskId::new("T-1").unwrap(),
+            &TaskId::new("T-2").unwrap(),
+            &NewJournalEvent {
+                event_type: EventType::DependencyAdded,
+                task_id: Some(TaskId::new("T-1").unwrap()),
+                project_id: ProjectId::new("P-1").unwrap(),
+                from_state: Some(TaskState::Ready),
+                to_state: Some(TaskState::Ready),
+                reason: None,
+                correlation_id: "op-1".into(),
+                causation_id: "req-1".into(),
+                occurred_at: "2024-01-01T00:00:00Z".into(),
+                provenance: "task-application-service/add_dependency".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(committed.fact.event_type, EventType::DependencyAdded);
+    assert_eq!(
+        store
+            .list_dependencies(&TaskId::new("T-1").unwrap())
+            .unwrap(),
+        [TaskId::new("T-2").unwrap()]
+    );
+    // A duplicate edge commits neither a second edge nor a second event.
+    let before = journal_len(&store);
+    let dup = NewJournalEvent {
+        event_type: EventType::DependencyAdded,
+        task_id: Some(TaskId::new("T-1").unwrap()),
+        project_id: ProjectId::new("P-1").unwrap(),
+        from_state: Some(TaskState::Ready),
+        to_state: Some(TaskState::Ready),
+        reason: None,
+        correlation_id: "op-2".into(),
+        causation_id: "req-2".into(),
+        occurred_at: "2024-01-01T00:00:01Z".into(),
+        provenance: "task-application-service/add_dependency".into(),
+    };
+    assert!(store
+        .add_dependency_with_event(
+            &TaskId::new("T-1").unwrap(),
+            &TaskId::new("T-2").unwrap(),
+            &dup
+        )
+        .is_err());
+    assert_eq!(journal_len(&store), before);
 }
 
 // -- typed append + reads ---------------------------------------------------
@@ -202,8 +468,8 @@ fn lifecycle_commit_appends_exactly_one_typed_event() {
     assert_eq!(event.id, EventId::parse("evt-1").unwrap());
     assert_eq!(event.event_version, EVENT_SCHEMA_VERSION);
     assert_eq!(event.fact.event_type, EventType::Claimed);
-    assert_eq!(event.fact.from_state, TaskState::Ready);
-    assert_eq!(event.fact.to_state, TaskState::Claimed);
+    assert_eq!(event.fact.from_state, Some(TaskState::Ready));
+    assert_eq!(event.fact.to_state, Some(TaskState::Claimed));
     assert_eq!(journal_len(&store), 1);
 
     assert_eq!(store.get_event(&event.id).unwrap(), Some(event.clone()));
@@ -415,7 +681,7 @@ fn mismatched_event_references_write_nothing() {
         TaskState::Claimed,
         EventType::Claimed,
     );
-    event.task_id = TaskId::new("SOMEONE-ELSE").unwrap();
+    event.task_id = Some(TaskId::new("SOMEONE-ELSE").unwrap());
     match store.apply_lifecycle_transition(task.id(), TaskState::Ready, &task, &event) {
         Err(StorageError::ConstraintViolation(_)) => {}
         other => panic!("expected ConstraintViolation, got {other:?}"),
@@ -607,10 +873,10 @@ fn journal_event_facts_have_no_secret_fields() {
         event_version: EVENT_SCHEMA_VERSION,
         fact: NewJournalEvent {
             event_type: EventType::Submitted,
-            task_id: TaskId::new("T-1").unwrap(),
+            task_id: Some(TaskId::new("T-1").unwrap()),
             project_id: ProjectId::new("P-1").unwrap(),
-            from_state: TaskState::Running,
-            to_state: TaskState::Submitted,
+            from_state: Some(TaskState::Running),
+            to_state: Some(TaskState::Submitted),
             reason: Some("diff + tests".into()),
             correlation_id: "op-1".into(),
             causation_id: "req-1".into(),

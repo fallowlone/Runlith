@@ -1,11 +1,12 @@
-//! `agentctl` G1 client lifecycle: connect-first launcher behavior,
-//! daemon spawning, bounded startup/reconnect retry, ping, and graceful
-//! shutdown against an existing daemon only.
+//! `agentctl` G2 client: connect-first launcher behavior, daemon
+//! spawning, bounded startup/reconnect retry, ping, graceful shutdown
+//! against an existing daemon only, plus version-1 business requests
+//! (`project ...`, `task ...`) through the trusted daemon dispatcher.
 //!
-//! Launcher/client integration only. No Task APIs, no business IPC, no
-//! reconnect state reuse (every reconnect is a new transport plus a new
-//! handshake), and never a blind replay of `ShutdownRequest` after an
-//! ambiguous failure.
+//! Launcher/client integration only. No Task APIs of its own, no SQLite,
+//! no storage access, no reconnect state reuse (every reconnect is a new
+//! transport plus a new handshake), and never a blind replay of a
+//! business mutation after an ambiguous failure.
 
 use std::fmt;
 use std::future::Future;
@@ -17,6 +18,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use ipc_contracts::proto::{
     control_request, control_response, ControlRequest, ControlResponse, ShutdownRequest,
+    TaskCoreRequest, TaskCoreResponse,
 };
 use ipc_control::{ClientConfig, ClientSession, ControlError, CLIENT_KIND_AGENTCTL};
 use ipc_transport::{FramedTransport, TransportError};
@@ -42,6 +44,9 @@ pub const SHUTDOWN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Deadline for daemon endpoint/process disappearance after acknowledgement.
 pub const DISAPPEAR_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Deadline for a business response after the request is written.
+pub const BUSINESS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Poll interval while waiting for endpoint disappearance.
 const ABSENCE_POLL: Duration = Duration::from_millis(50);
@@ -99,6 +104,12 @@ pub enum ClientError {
     /// re-probe daemon state instead. Anticipates the broader
     /// no-blind-side-effect-replay invariant.
     ShutdownAmbiguous(String),
+    /// A business mutation was sent (or may have been sent) but its
+    /// outcome is unconfirmed: lost reply, undecodable reply, wrong
+    /// variant, or timeout after the write. The mutation is NOT replayed:
+    /// callers must re-probe with a read (get/list/events) instead.
+    /// G2 provides no generic automatic mutation retry.
+    BusinessAmbiguous(String),
     /// OS/runtime I/O failure.
     Io(io::Error),
 }
@@ -118,6 +129,9 @@ impl fmt::Display for ClientError {
             }
             Self::ShutdownAmbiguous(detail) => {
                 write!(f, "ambiguous shutdown (not replayed): {detail}")
+            }
+            Self::BusinessAmbiguous(detail) => {
+                write!(f, "ambiguous business result (not replayed): {detail}")
             }
             Self::Io(error) => write!(f, "client I/O failure: {error}"),
         }
@@ -250,6 +264,151 @@ pub async fn connect_and_handshake(
         other => classify_transport(other),
     })?;
     handshake_stream(stream).await
+}
+
+/// Performs a version-1 handshake over a connected stream with a fresh
+/// session. Reconnects always build a new session: no socket-local state
+/// is reused, and v1/auth state is never inherited from a dead session.
+async fn handshake_stream_v1<S>(stream: S) -> Result<ClientSession<S>, ClientError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut session = ClientSession::new(
+        FramedTransport::new(stream),
+        ClientConfig::business_default(CLIENT_KIND_AGENTCTL),
+    );
+    session
+        .perform_handshake()
+        .await
+        .map_err(classify_control)?;
+    if !session.business_allowed() {
+        return Err(ClientError::Control(ControlError::UnsupportedProtocol {
+            negotiated: session.negotiated_version().unwrap_or(0),
+            required: 1,
+        }));
+    }
+    Ok(session)
+}
+
+/// Connects to an existing daemon and handshakes at protocol v1. No
+/// spawning, no retries.
+#[cfg(unix)]
+pub async fn connect_and_handshake_v1(
+    endpoint: &UnixEndpoint,
+) -> Result<ClientSession<UnixStream>, ClientError> {
+    let stream = transport_connect(endpoint)
+        .await
+        .map_err(|error| match error {
+            TransportError::EndpointUnavailable { endpoint } => {
+                ClientError::DaemonUnavailable(endpoint)
+            }
+            other => classify_transport(other),
+        })?;
+    handshake_stream_v1(stream).await
+}
+
+/// Connects to an existing daemon and handshakes at protocol v1. No
+/// spawning, no retries.
+#[cfg(windows)]
+pub async fn connect_and_handshake_v1(
+    pipe_name: &str,
+) -> Result<ClientSession<NamedPipeClient>, ClientError> {
+    let stream = connect_client(pipe_name).map_err(|error| match error {
+        TransportError::EndpointUnavailable { endpoint } => {
+            ClientError::DaemonUnavailable(endpoint)
+        }
+        other => classify_transport(other),
+    })?;
+    handshake_stream_v1(stream).await
+}
+
+fn business_request_frame(request: TaskCoreRequest) -> Bytes {
+    Bytes::from(
+        ControlRequest {
+            payload: Some(control_request::Payload::TaskCore(request)),
+        }
+        .encode_to_vec(),
+    )
+}
+
+/// Sends one business request and validates the business reply. Shared
+/// across platforms over any connected v1 session.
+///
+/// Connect/handshake failures happen before any business byte is written
+/// and stay retryable under the existing policy. After the request is
+/// written, any failure (lost response, undecodable reply, wrong
+/// variant, timeout) is [`ClientError::BusinessAmbiguous`] and the
+/// mutation is never replayed — callers re-probe with a read instead.
+/// A well-formed reply — including a typed business-error payload — is a
+/// successful exchange, not an ambiguity.
+async fn business_session<S>(
+    session: ClientSession<S>,
+    request: TaskCoreRequest,
+    absence: &str,
+) -> Result<TaskCoreResponse, ClientError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut transport = session.into_inner();
+    transport
+        .write_frame(business_request_frame(request))
+        .await
+        .map_err(|error| {
+            ClientError::BusinessAmbiguous(format!(
+                "TaskCoreRequest send failed ({error}); endpoint {absence}; not replaying"
+            ))
+        })?;
+    let frame = tokio::time::timeout(BUSINESS_RESPONSE_TIMEOUT, transport.read_frame())
+        .await
+        .map_err(|_| {
+            ClientError::BusinessAmbiguous(format!(
+                "business response timeout; endpoint {absence}; not replaying"
+            ))
+        })?;
+    let frame = match frame {
+        Ok(frame) => frame,
+        Err(error) => {
+            return Err(ClientError::BusinessAmbiguous(format!(
+                "business response lost ({error}); endpoint {absence}; not replaying"
+            )));
+        }
+    };
+    let response = ControlResponse::decode(&frame[..]).map_err(|error| {
+        ClientError::BusinessAmbiguous(format!(
+            "business response undecodable ({error}); endpoint {absence}; not replaying"
+        ))
+    })?;
+    match response.payload {
+        Some(control_response::Payload::TaskCore(business)) => Ok(business),
+        other => Err(ClientError::BusinessAmbiguous(format!(
+            "unexpected business reply ({other:?}); endpoint {absence}; not replaying"
+        ))),
+    }
+}
+
+/// Runs one business request against the daemon, starting it first when
+/// genuinely missing (connect-first plus bounded retry, exactly like the
+/// G1 lifecycle). The request executes at most once per call.
+#[cfg(unix)]
+pub async fn business_request(
+    endpoint: &UnixEndpoint,
+    spawn: impl FnOnce() -> io::Result<Child>,
+    request: TaskCoreRequest,
+) -> Result<TaskCoreResponse, ClientError> {
+    let session = connect_or_start_with(spawn, || connect_and_handshake_v1(endpoint)).await?;
+    business_session(session, request, absence_note(endpoint)).await
+}
+
+/// Runs one business request against the daemon, starting it first when
+/// genuinely missing.
+#[cfg(windows)]
+pub async fn business_request(
+    pipe_name: &str,
+    spawn: impl FnOnce() -> io::Result<Child>,
+    request: TaskCoreRequest,
+) -> Result<TaskCoreResponse, ClientError> {
+    let session = connect_or_start_with(spawn, || connect_and_handshake_v1(pipe_name)).await?;
+    business_session(session, request, absence_note(pipe_name)).await
 }
 
 /// Shared connect-first + spawn-once + bounded-retry lifecycle.
@@ -697,6 +856,12 @@ mod tests {
         assert!(!is_retryable(&ClientError::StartupTimeout));
         assert!(!is_retryable(&ClientError::NotRunning));
         assert!(!is_retryable(&ClientError::SpawnFailed("x".to_owned())));
+        // A possibly-committed business mutation is never retried: the
+        // caller re-probes with a read instead. G2 has no generic
+        // automatic mutation retry.
+        assert!(!is_retryable(&ClientError::BusinessAmbiguous(
+            "x".to_owned()
+        )));
     }
 
     #[test]
