@@ -1,0 +1,304 @@
+# Canonical near-term execution queue (governance state, not runtime state).
+# planning/tasks/queue.yaml != runtime Task database. Once the durable Task
+# Engine becomes authoritative, this file may become a generated/import
+# artifact; that migration is not solved here.
+# Authority: Architecture / ADRs / invariants > roadmap > task queue.
+# The queue sequences work; it cannot weaken architecture, security,
+# privacy, acceptance, or gate criteria.
+# G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
+
+schema_version: 1
+completed_through: TASK-0027
+current_gate: G2
+
+items:
+  - id: TASK-0012
+    gate: G0
+    title: Machine-readable Task and Event schemas
+    objective: Materialize the already-defined Task and Event contracts into
+      canonical machine-readable schemas without implementing persistence.
+    scope: Task schema; persistent-event envelope schema.
+    exit_criteria_summary: Canonical Task schema and Event schema exist and
+      are referenced from architecture navigation.
+    depends_on: []
+    blocked_by: []
+    references:
+      - docs/development/G0_AUDIT.md
+      - docs/architecture/task-engine.md
+      - docs/architecture/events.md
+
+  - id: TASK-0013
+    gate: G0
+    title: Context Engine and Context Continuity contracts
+    objective: Create repository-local formal contracts for the Context
+      Engine and provider-independent Context Continuity.
+    scope: context-engine.md; continuity.md.
+    exit_criteria_summary: Both contracts exist and are referenced from
+      architecture navigation.
+    depends_on: []
+    blocked_by: []
+    references:
+      - docs/development/G0_AUDIT.md
+      - docs/architecture/adr/ADR-0010-context-derived-state.md
+      - docs/architecture/adr/ADR-0011-provider-independent-context-continuity.md
+
+  - id: TASK-0014
+    gate: G0
+    title: G1 IPC readiness decisions
+    objective: Resolve only the design decisions required before G1
+      implementation (framing, code-generation strategy and toolchain
+      pinning, endpoint paths, message limits and timeouts, stale-endpoint
+      and instance handling, shutdown authorization); lesser open items may
+      be classified rather than resolved.
+    scope: IPC design decisions only; no transport code.
+    exit_criteria_summary: All audited G1 technical blockers are decided and
+      recorded in ipc.md (ADR-0003 only if a decision changes).
+    depends_on:
+      - TASK-0011
+    blocked_by: []
+    references:
+      - docs/development/G0_AUDIT.md
+      - docs/architecture/ipc.md
+      - docs/architecture/adr/ADR-0003-local-ipc.md
+
+  - id: TASK-0015
+    gate: G0
+    title: ADR coverage closure, gate-relevant wave
+    objective: Review the audit's unmaterialized ADR candidates, formalize
+      the decisions required before the next affected gate (at minimum the
+      PRE-G3 Planning/Orchestration and Evaluation/Verification decisions),
+      and settle how deferred accepted architecture is represented without
+      paperwork for its own sake.
+    scope: Gate-relevant ADRs only; deferred targets stay deferred.
+    exit_criteria_summary: PRE-G3 decisions have accepted ADRs or an explicit
+      recorded deferral rationale.
+    depends_on: []
+    blocked_by: []
+    references:
+      - docs/development/G0_AUDIT.md
+
+  - id: TASK-0016
+    gate: G0
+    title: Final G0 closure audit
+    objective: Re-run the G0 checklist after TASK-0012 through TASK-0015 and
+      report G0_COMPLETE, G0_INCOMPLETE, or G0_BLOCKED.
+    scope: Audit only; no repairs, no implementation.
+    exit_criteria_summary: A new closure audit report exists with an explicit
+      overall status.
+    depends_on:
+      - TASK-0012
+      - TASK-0013
+      - TASK-0014
+      - TASK-0015
+    blocked_by: []
+    references:
+      - docs/development/G0_AUDIT.md
+
+  - id: TASK-0017
+    gate: G1
+    title: Protobuf integration inside ipc-contracts
+    objective: Implement the accepted code-generation and toolchain decision
+      inside ipc-contracts (build plumbing, generated control DTO
+      integration, contract tests). No transport yet.
+    scope: Codegen plumbing and DTO integration only.
+    exit_criteria_summary: Control DTOs are generated and contract-tested
+      from the canonical proto.
+    depends_on:
+      - TASK-0014
+    blocked_by: []
+    references:
+      - docs/architecture/ipc.md
+      - crates/ipc-contracts/proto/agentd_control.proto
+
+  - id: TASK-0018
+    gate: G1
+    title: IPC framing and transport foundation
+    objective: Implement the accepted message framing and the local
+      transport abstraction (UDS on macOS/Linux, Named Pipe boundary on
+      Windows, endpoint lifecycle primitives). No business IPC.
+    scope: Framing and transport abstraction only.
+    exit_criteria_summary: Framed control messages round-trip over the local
+      transport abstraction in tests.
+    depends_on:
+      - TASK-0017
+    blocked_by: []
+    references:
+      - docs/architecture/ipc.md
+
+  - id: TASK-0019
+    gate: G1
+    title: Handshake, ping, and version negotiation
+    objective: Implement the existing handshake, ping, and version
+      negotiation control contract. Control plane only.
+    scope: Handshake, ping, version negotiation; no Task/Project/provider APIs.
+    exit_criteria_summary: Negotiated control sessions establish and answer
+      liveness probes in tests.
+    depends_on:
+      - TASK-0018
+    blocked_by: []
+    references:
+      - docs/architecture/ipc.md
+
+  - id: TASK-0020
+    gate: G1
+    title: Daemon lifecycle, reconnect, and shutdown
+    objective: Implement daemon start/connect lifecycle, reconnect, stale
+      endpoint handling, single-instance and race handling, and shutdown per
+      TASK-0014 decisions. No Tauri UI business logic.
+    scope: Lifecycle, reconnect, and shutdown mechanics only.
+    exit_criteria_summary: Lifecycle and reconnect behavior is exercised in
+      tests per the accepted decisions.
+    depends_on:
+      - TASK-0019
+    blocked_by: []
+    references:
+      - docs/architecture/ipc.md
+
+  - id: TASK-0021
+    gate: G1
+    title: G1 failure matrix and gate verification
+    objective: Verify the complete accepted G1 failure matrix (daemon
+      missing, wrong protocol version, daemon crash, stale socket,
+      permission error, reconnect) plus deterministic control-contract tests.
+    scope: Failure-matrix verification only.
+    exit_criteria_summary: The full G1 failure matrix passes, making G1
+      eligible for independent gate verification.
+    depends_on:
+      - TASK-0020
+    blocked_by: []
+    references:
+      - docs/architecture/ipc.md
+
+  - id: TASK-0022
+    gate: G2
+    title: Task Domain Core
+    objective: Implement the pure Task-domain model and lifecycle state
+      machine (Project, Task, Dependency, transition validation). No
+      persistence, no execution model, no AI.
+    scope: Pure domain crate only; no SQLite, Event Journal, or agentctl
+      changes.
+    exit_criteria_summary: Canonical states/transitions implemented once
+      with exhaustive tests; agent completion authority absent; G1 suite
+      still green.
+    depends_on:
+      - TASK-0021
+    blocked_by: []
+    references:
+      - docs/architecture/task-engine.md
+      - contracts/json-schema/task.schema.json
+
+  - id: TASK-0023
+    gate: G2
+    title: SQLite Persistence
+    objective: Durable relational storage for the Task domain core.
+    scope: Persistence layer only.
+    exit_criteria_summary: Task/Project/dependency state survives restarts
+      per the accepted contract.
+    depends_on:
+      - TASK-0022
+    blocked_by: []
+    references:
+      - docs/architecture/task-engine.md
+
+  - id: TASK-0024
+    gate: G2
+    title: Transactional Mutations + Event Journal
+    objective: Atomic state-plus-journal commits for every Task mutation.
+    scope: Transactional application services and journal records only.
+    exit_criteria_summary: Every Task state change commits with its journal
+      record atomically.
+    depends_on:
+      - TASK-0023
+    blocked_by: []
+    references:
+      - docs/architecture/events.md
+
+  - id: TASK-0025
+    gate: G2
+    title: Local IPC Peer Authentication Decision
+    objective: Materialize the deferred local IPC peer-authentication
+      decision as an accepted ADR before mutable business IPC is exposed.
+      Architecture/contracts/planning only; no implementation, no Rust
+      production code.
+    scope: ADR-0020 plus minimal ipc/security doc and queue updates.
+    exit_criteria_summary: ADR-0020 Accepted (OS-user principal,
+      per-OS mechanism, staging, fail-closed behavior); indexes updated;
+      remaining G2 queue revised to TASK-0026/0027/0028.
+    depends_on:
+      - TASK-0024
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0020-local-ipc-peer-authentication.md
+      - docs/architecture/ipc.md
+
+  - id: TASK-0026
+    gate: G2
+    title: Local IPC Peer Authentication Implementation
+    objective: Implement ADR-0020 OS-user peer authentication in the local
+      IPC path (Unix peer credentials, Windows token SID, first-frame
+      staging, fail-closed behavior) with the specified test matrix.
+    scope: IPC peer-auth implementation and tests only.
+    exit_criteria_summary: Same-user peers accepted, cross-user peers
+      rejected fail-closed; unauthenticated peers never reach handshake.
+    depends_on:
+      - TASK-0025
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0020-local-ipc-peer-authentication.md
+
+  - id: TASK-0027
+    gate: G2
+    title: Business IPC Contract + Local Data Composition
+    objective: Materialize the exact G2 business IPC contract (protocol v1,
+      Project/Task/Dependency DTOs, semantic lifecycle commands, typed
+      business errors) and the agentd-owned local data composition before
+      implementation. Contract/docs/planning only; no business dispatch, no
+      SQLite wiring, no agentctl commands.
+    scope: task_core.proto plus control-envelope field, version/contract
+      support in ipc-contracts/ipc-control with contract tests, ADR-0021,
+      event-taxonomy gap closure in docs and envelope schema, queue revision.
+    exit_criteria_summary: ADR-0021 Accepted with v0 preserved and v1
+      defined; v0 bootstrap-only enforced in tests; DTO/lifecycle/error
+      surface explicit; canonical data paths and audit coverage resolved;
+      no business handler exists yet.
+    depends_on:
+      - TASK-0026
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0021-g2-business-ipc-and-local-data-composition.md
+      - docs/architecture/ipc.md
+      - docs/architecture/events.md
+      - contracts/json-schema/event.schema.json
+
+  - id: TASK-0028
+    gate: G2
+    title: agentctl Project/Task Implementation
+    objective: Implement the accepted ADR-0021 contract atomically (agentd
+      business dispatch behind authenticated v1 sessions, journaled
+      creation/dependency mutations, agentd-owned SQLite composition,
+      agentctl Project/Task commands) before any CLI command ships.
+    scope: agentd dispatch, TaskService/storage journaled mutations,
+      database composition, agentctl commands; G1 backward compatibility
+      preserved.
+    exit_criteria_summary: Project/Task commands work against durable
+      state in tests over authenticated IPC; every persistent G2 mutation
+      commits with journal evidence; old G1 clients still pass.
+    depends_on:
+      - TASK-0027
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0021-g2-business-ipc-and-local-data-composition.md
+      - docs/architecture/task-engine.md
+
+  - id: TASK-0029
+    gate: G2
+    title: G2 Closure Audit
+    objective: Independent gate verification for G2 (Durable Task Core).
+    scope: Audit only; no repairs, no implementation.
+    exit_criteria_summary: A closure audit report exists with an explicit
+      overall status.
+    depends_on:
+      - TASK-0028
+    blocked_by: []
+    references:
+      - docs/architecture/task-engine.md

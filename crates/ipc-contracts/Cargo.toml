@@ -1,0 +1,15 @@
+[package]
+name = "ipc-contracts"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ipc_contracts"
+path = "src/lib.rs"
+
+[dependencies]
+prost = "0.14.4"
+
+[build-dependencies]
+prost-build = "0.14.4"
+protoc-bin-vendored = "3.2.0"

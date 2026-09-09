@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "bins/agentd",
+    "bins/agentctl",
+    "crates/ipc-contracts",
+    "crates/ipc-control",
+    "crates/ipc-transport",
+    "crates/task",
+    "crates/app-services",
+    "adapters/storage-sqlite",
+]
+resolver = "2"

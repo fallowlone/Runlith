@@ -1,0 +1,12 @@
+[package]
+name = "app-services"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "app_services"
+path = "src/lib.rs"
+
+[dependencies]
+task-domain = { path = "../task" }
+storage-sqlite = { path = "../../adapters/storage-sqlite" }

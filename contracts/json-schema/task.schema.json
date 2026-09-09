@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Task durable business contract projection",
+  "description": "Machine-readable validation projection of the accepted Task domain contract (docs/architecture/task-engine.md). Validates representation shape only: status value, baseline fields, provider neutrality. It does not validate lifecycle transitions, READY preconditions, DAG acyclicity, scope authorization, or completion authority.",
+  "$comment": "Contract projection / validation representation only. Task JSON Schema != Task persistence format (SQLite) and != IPC encoding (Protobuf). Required fields are minimal identity/core (id, objective, status) because DRAFT completeness and READY preconditions remain open design items; schema required rules must not invent them. additionalProperties is intentionally permissive so the schema stays evolution-friendly; unknown fields are neither authorized nor forbidden by this projection — trusted application/domain validation decides. Schema-valid JSON != authorized Task state and != Policy approval. See docs/architecture/task-engine.md for semantics.",
+  "type": "object",
+  "required": ["id", "objective", "status"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Task identity as non-empty string. Universal ID format (UUID, ULID, integer, pattern) remains open and is not constrained here."
+    },
+    "objective": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Intended work. Representation only; the schema does not judge whether the objective is good enough."
+    },
+    "parent": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional parent/epic reference. Absence means no parent reference is supplied in this representation."
+    },
+    "depends_on": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true,
+      "description": "Dependency references. DAG acyclicity and dependency existence are application/domain validation, not schema concerns."
+    },
+    "acceptance": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Acceptance criteria as durable Task intent. Tests are evidence for criteria, never the criteria themselves."
+    },
+    "scope": {
+      "type": "object",
+      "properties": {
+        "allowed_paths": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "forbidden_paths": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": true,
+      "description": "Explicit execution-scope contract. Syntax validity never authorizes a path; Policy approval and Runner enforcement remain with trusted runtime layers. The object stays open to future scope dimensions."
+    },
+    "verification": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Required verification references owned by the Task. No verification taxonomy is established; Evaluation owns execution and interpretation."
+    },
+    "required_review": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Required review references owned by the Task. No closed review taxonomy is established."
+    },
+    "risk": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Optional risk metadata. No universal risk taxonomy (levels, dimensions) is established; architecture-defined metadata is allowed without prescribing it."
+    },
+    "artifacts": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Artifact references. Task references artifacts; it is never the artifact blob store. Reference ID format remains open."
+    },
+    "kind": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional extensible routing/planning metadata. kind != provider: provider-specific kinds are forbidden and no closed kind enum exists."
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "DRAFT",
+        "READY",
+        "CLAIMED",
+        "RUNNING",
+        "BLOCKED",
+        "SUBMITTED",
+        "AWAITING_REVIEW",
+        "VERIFYING",
+        "RETRY_READY",
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED"
+      ],
+      "description": "Canonical lifecycle value exactly as accepted. The schema validates the value only; legal transitions belong to the Task domain/application service."
+    }
+  },
+  "additionalProperties": true
+}

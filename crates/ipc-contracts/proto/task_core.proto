@@ -1,0 +1,204 @@
+syntax = "proto3";
+
+package ai_engineering_os.ipc;
+
+// G2 business IPC contract (protocol version 1 only).
+//
+// Imported by `agentd_control.proto`, which carries it as
+// `ControlRequest.task_core = 4` / `ControlResponse.task_core = 4`.
+// This file stays a bounded business schema: Project/Task reads and
+// writes, dependency edges, and the semantic lifecycle operations that
+// map 1:1 onto the trusted TaskService methods. It never grows
+// Execution, Attempt, AgentSession, Scheduler, Provider, Worktree,
+// runner, memory, context, policy, or cloud concepts — those belong to
+// later protocol versions with their own contract files.
+//
+// Authority rules (ADR-0021):
+// - A business request on a version-0 negotiated session is rejected as
+//   unsupported for the negotiated protocol; it never executes.
+// - The client never mints authoritative event provenance: no event_id,
+//   event_type, timestamp, correlation/causation id, provenance identity,
+//   or from/to state travels on the wire. The server owns those.
+// - There is no generic set-state and no complete-task request.
+//   `submit_result != verification_succeeded` is preserved on the wire.
+// - `reason` is bounded human/request text only (block reason,
+//   submission summary, verdict note). Server validates non-blank where
+//   the operation requires it and ignores it otherwise.
+
+// Minimal G2 Project view: identity plus name only. No organization,
+// team, cloud account, billing, or owner concepts.
+message ProjectDto {
+  string id = 1;
+  string name = 2;
+}
+
+// Minimal G2 Task view over the TASK-0022 domain fields required by the
+// contract: identity, owning project, durable objective, and canonical
+// lifecycle state name (DRAFT, READY, ... exactly as accepted).
+// Extended domain metadata (parent, acceptance, scope paths,
+// verification/review refs, risk, artifacts, kind) is NOT on this DTO;
+// neither is any provider/model/session/runtime state.
+message TaskDto {
+  string id = 1;
+  string project_id = 2;
+  string objective = 3;
+  string state = 4;
+}
+
+// Semantic lifecycle operations. Each maps 1:1 onto a trusted
+// TaskService method; START additionally covers the two accepted resume
+// edges (BLOCKED -> RUNNING, RETRY_READY -> RUNNING). No CANCEL / FAIL:
+// those edges are unresolved and stay rejected server-side.
+enum TaskLifecycleOp {
+  TASK_LIFECYCLE_OP_UNSPECIFIED = 0;
+  MARK_READY = 1;
+  CLAIM = 2;
+  START = 3;
+  BLOCK = 4;
+  SUBMIT_RESULT = 5;
+  ROUTE_TO_REVIEW = 6;
+  BEGIN_VERIFICATION = 7;
+  VERIFICATION_FAILED = 8;
+  VERIFICATION_SUCCEEDED = 9;
+}
+
+// Small typed business-error taxonomy. Human-readable `message` is
+// bounded and sanitized server-side: never raw SQLite errors,
+// filesystem paths, SQL strings, Rust debug dumps, or backtraces.
+enum BusinessErrorCode {
+  BUSINESS_ERROR_CODE_UNSPECIFIED = 0;
+  INVALID_ARGUMENT = 1;
+  NOT_FOUND = 2;
+  ALREADY_EXISTS = 3;
+  INVALID_TRANSITION = 4;
+  CONFLICT = 5;
+  STALE_STATE = 6;
+  CORRUPT_STATE = 7;
+  UNSUPPORTED_PROTOCOL = 8;
+  INTERNAL = 9;
+}
+
+// Typed business failure. Returned as the `error` variant of
+// TaskCoreResponse, never as a thrown transport error.
+message BusinessError {
+  BusinessErrorCode code = 1;
+  string message = 2;
+}
+
+message CreateProjectRequest {
+  string id = 1;
+  string name = 2;
+}
+
+message GetProjectRequest {
+  string id = 1;
+}
+
+message ListProjectsRequest {}
+
+message CreateTaskRequest {
+  string id = 1;
+  string project_id = 2;
+  string objective = 3;
+}
+
+message GetTaskRequest {
+  string id = 1;
+}
+
+message ListTasksForProjectRequest {
+  string project_id = 1;
+}
+
+// Dependency edges carry Task IDs only. The server owns all edge
+// validation (self-edge, duplicate, cross-project, cycle): the client
+// can never assert an edge is valid.
+message AddDependencyRequest {
+  string task_id = 1;
+  string depends_on_id = 2;
+}
+
+message ListDependenciesRequest {
+  string task_id = 1;
+}
+
+// One semantic lifecycle step. `reason` carries the bounded human note
+// the operation requires (block reason, submission summary, verdict);
+// it must be non-blank for BLOCK, SUBMIT_RESULT, VERIFICATION_FAILED,
+// and VERIFICATION_SUCCEEDED, and is ignored by the other operations.
+message LifecycleRequest {
+  string task_id = 1;
+  TaskLifecycleOp op = 2;
+  string reason = 3;
+}
+
+// One inbound G2 business request (protocol v1 only).
+message TaskCoreRequest {
+  oneof payload {
+    CreateProjectRequest create_project = 1;
+    GetProjectRequest get_project = 2;
+    ListProjectsRequest list_projects = 3;
+    CreateTaskRequest create_task = 4;
+    GetTaskRequest get_task = 5;
+    ListTasksForProjectRequest list_tasks_for_project = 6;
+    AddDependencyRequest add_dependency = 7;
+    ListDependenciesRequest list_dependencies = 8;
+    LifecycleRequest lifecycle = 9;
+  }
+}
+
+message CreateProjectResponse {
+  ProjectDto project = 1;
+}
+
+message GetProjectResponse {
+  ProjectDto project = 1;
+}
+
+message ListProjectsResponse {
+  repeated ProjectDto projects = 1;
+}
+
+message CreateTaskResponse {
+  TaskDto task = 1;
+}
+
+message GetTaskResponse {
+  TaskDto task = 1;
+}
+
+message ListTasksResponse {
+  repeated TaskDto tasks = 1;
+}
+
+message AddDependencyResponse {}
+
+message ListDependenciesResponse {
+  repeated string depends_on_ids = 1;
+}
+
+// Committed lifecycle outcome: the resulting Task view plus the
+// transition that was applied. Event identity/provenance stay
+// server-owned and are not echoed here.
+message LifecycleResponse {
+  TaskDto task = 1;
+  string from_state = 2;
+  string to_state = 3;
+}
+
+// One outbound G2 business response: exactly one success variant or the
+// typed `error` variant (field 10, kept clear of the success range).
+message TaskCoreResponse {
+  oneof payload {
+    CreateProjectResponse create_project = 1;
+    GetProjectResponse get_project = 2;
+    ListProjectsResponse list_projects = 3;
+    CreateTaskResponse create_task = 4;
+    GetTaskResponse get_task = 5;
+    ListTasksResponse list_tasks = 6;
+    AddDependencyResponse add_dependency = 7;
+    ListDependenciesResponse list_dependencies = 8;
+    LifecycleResponse lifecycle = 9;
+    BusinessError error = 10;
+  }
+}

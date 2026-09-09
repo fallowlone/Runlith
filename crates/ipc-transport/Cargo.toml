@@ -1,0 +1,30 @@
+[package]
+name = "ipc-transport"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ipc_transport"
+path = "src/lib.rs"
+
+[dependencies]
+bytes = "1"
+futures-core = "0.3"
+futures-sink = "0.3"
+tokio = { version = "~1.51", features = ["rt", "net", "io-util", "time"] }
+tokio-util = { version = "0.7.19", features = ["codec"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tokio = { version = "~1.51", features = ["rt", "net", "io-util", "time", "macros"] }

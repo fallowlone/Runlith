@@ -1,0 +1,12 @@
+[package]
+name = "storage-sqlite"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "storage_sqlite"
+path = "src/lib.rs"
+
+[dependencies]
+task-domain = { path = "../../crates/task" }
+rusqlite = { version = "0.40.2", features = ["bundled"] }

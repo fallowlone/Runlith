@@ -1,0 +1,2307 @@
+# External Repository Research — Adoption Decisions for AI Engineering OS
+
+> **Snapshot:** 2026-09-09  
+> **Purpose:** evaluate external repositories/papers supplied during the project and decide what should influence AI Engineering OS.  
+> **Rule:** ideas may be adopted; code is copied or linked only after license/security review. Popularity is not an architecture argument.
+
+## Executive decision
+
+The list is genuinely useful, but not all projects are equally relevant.
+
+### Adopt into the architecture now
+
+1. **OpenViking** — hierarchical L0/L1/L2 context resources, observable retrieval trajectories, asynchronous session-to-memory consolidation.
+2. **Superpowers** — atomic implementation plans, test-first behavior where meaningful, spec-compliance review before code-quality review, worktree discipline, lazy skills.
+3. **Context Hub** — versioned curated docs, incremental fetch, local annotations treated as untrusted by default.
+4. **DeepAgents** — isolated subagent contexts, large tool-output offload, pluggable backends, skills loaded on demand, human approval at tool boundary.
+5. **Impeccable** — separate durable product truth from visual design truth and use deterministic UI/design quality detectors.
+6. **Agency Agents / Agency Agents App** — explicit role contracts, measurable deliverables/success metrics, deterministic provider-specific rendering, local install ledger/drift detection.
+7. **Page Agent** — separate browser/controller operations from LLM reasoning; prefer compact DOM/text representation and indexed deterministic actions when visual reasoning is unnecessary.
+8. **WriteHERE** — bounded just-in-time recursive decomposition, versioned adaptive plan revisions, heterogeneous task classes, graph-scoped context and explicit anti-recursion/liveness guardrails.
+
+### Defer, but design an extension point now
+
+9. **Lightpanda** — future browser backend via CDP/BiDi adapter; excellent performance characteristics, but compatibility gaps and AGPL considerations mean it should not become a hard core dependency.
+10. **BitNet** — future local utility-model backend for privacy/cheap classification, reranking, summarization or embeddings; not a primary coding agent for v1.
+
+### Research only / do not integrate into v1
+
+11. **MiroFish** — useful inspiration for simulation, population-level testing and temporal/collective memory, but its prediction-swarm architecture is not the product's execution model. AGPL and heavy simulation dependencies are additional reasons not to integrate it.
+
+---
+
+# 1. Validating the supplied “trending” text
+
+The supplied weekly-growth numbers cannot be verified from a repository README alone. GitHub exposes current totals, while a claim such as `+23.2K this week` needs a historical star series from a third-party tracker or captured snapshots.
+
+For architecture decisions, this research therefore uses:
+
+- current repository state;
+- documented architecture/features;
+- licenses;
+- security/privacy posture;
+- direct relevance to our product.
+
+Approximate GitHub totals visible during this review:
+
+| Repository | Approx. stars | License | Relevance |
+|---|---:|---|---|
+| `obra/superpowers` | 283k | MIT | Very high |
+| `msitarzewski/agency-agents` | 151k | MIT | High |
+| `666ghj/MiroFish` | 72k | AGPL-3.0 | Medium/Research |
+| `pbakaus/impeccable` | 66k | Apache-2.0 | Very high for UI workflow |
+| `microsoft/BitNet` | 39k | MIT | Future/local inference |
+| `volcengine/OpenViking` | 36k | Mixed; main AGPL-3.0 | Very high conceptually |
+| `lightpanda-io/browser` | 35k | AGPL-3.0 | High future browser backend |
+| `langchain-ai/deepagents` | 29k | MIT | Very high conceptually |
+| `alibaba/page-agent` | 28k | MIT | High future browser/UI agent |
+| `andrewyng/context-hub` | 14k | MIT | Very high context/docs |
+
+Star counts are a snapshot and will change.
+
+---
+
+# 2. `msitarzewski/agency-agents`
+
+Repository: https://github.com/msitarzewski/agency-agents  
+Related native app: https://github.com/msitarzewski/agency-agents-app  
+License: MIT.
+
+## What is valuable
+
+The core repo is not really an orchestration engine. Its main strength is **role specification**: specialized agents are described with a mission, workflow, concrete deliverables, success metrics, memory/learning expectations and communication conventions.
+
+The companion Tauri app is more architecturally relevant to us. It uses deterministic per-tool renderers, tracks what it wrote in a local install ledger, detects drift when files are modified outside the app, stores tokens in the platform keychain, avoids arbitrary frontend shell execution, and keeps a tool registry as a single source of truth.
+
+## Adopt
+
+### A. Agent Definition Contract
+
+Our future agent profiles should not be loose persona prompts. Use a typed definition such as:
+
+```text
+AgentDefinition
+├── id / version
+├── role
+├── mission
+├── required_capabilities
+├── allowed_tool_profile
+├── input_contract
+├── output_contract
+├── workflow_refs
+├── success_metrics
+├── escalation_rules
+├── review_requirements
+├── memory_policy
+└── presentation metadata (optional voice/name/icon)
+```
+
+The important transfer from Agency Agents is **measurable work contracts**, not fictional personality.
+
+Personality may affect UX/tone, but must never influence security, policy, architecture authority or Definition of Done.
+
+### B. Deterministic provider rendering
+
+If our product later installs skills/agent definitions into Claude/Codex/OpenCode-native locations, create:
+
+```text
+Canonical Agent/Skill Definition
+        ↓
+ProviderRendererPort
+        ├── ClaudeRenderer
+        ├── CodexRenderer
+        └── OpenCodeRenderer
+```
+
+Renderers must be deterministic and contract-tested.
+
+### C. Install ledger + drift reconciliation
+
+If we write provider-native files outside our own state directory, keep a ledger:
+
+```text
+managed artifact
+├── destination
+├── content hash
+├── renderer version
+├── source definition version
+└── last reconciliation
+```
+
+Never overwrite a user-modified file blindly.
+
+## Do not adopt
+
+- Huge persona prose in every execution context.
+- “Personality” as a substitute for permissions/capabilities.
+- 200+ agents preloaded into context.
+
+## Priority
+
+**P1 for Agent Profile schema. P2 for provider-native install/rendering.**
+
+---
+
+# 3. `obra/superpowers`
+
+Repository: https://github.com/obra/superpowers  
+License: MIT.
+
+## What is valuable
+
+Superpowers formalizes a repeatable software-development workflow for coding agents: small plans with exact file paths and verification steps, worktrees, subagent-driven development, test-driven implementation, systematic debugging, review between tasks, and verification before completion.
+
+Its strongest principle for us is **evidence over claims**.
+
+## Adopt
+
+### A. Skills as lazy reusable workflows
+
+Add a future `SkillRegistry`/`SkillResolver` behind ports. Base context contains only skill metadata/descriptions. Full skill content is loaded only when matched to the task.
+
+A skill is subordinate to:
+
+```text
+Task Scope
+Architecture Invariants
+Policy Engine
+Accepted ADRs
+```
+
+### B. Two-stage review
+
+Every meaningful implementation should support two independent review stages:
+
+1. **Spec compliance** — did the change implement exactly the task and acceptance criteria without scope expansion?
+2. **Code quality/security** — is the implementation maintainable, safe and idiomatic?
+
+This is better than one broad “review this PR” prompt.
+
+### C. Atomic plans
+
+Our task generator should prefer small tasks with:
+
+- exact allowed paths;
+- explicit forbidden paths;
+- prerequisites;
+- acceptance criteria;
+- exact verification;
+- output contract.
+
+### D. TDD — with one modification
+
+Use RED → GREEN → REFACTOR by default for behavior and bugs.
+
+Do **not** make TDD dogmatic for pure scaffolding/configuration where a fabricated test adds no evidence. There, deterministic build/contract verification is better.
+
+## Do not adopt
+
+- Any skill being able to override system policy.
+- Blindly spawning fresh subagents for every trivial operation.
+- Methodology as runtime business logic; it should remain composable workflow policy.
+
+## Priority
+
+**P0 — use these rules during development immediately.**
+
+---
+
+# 4. `666ghj/MiroFish`
+
+Repository: https://github.com/666ghj/MiroFish  
+License: AGPL-3.0.
+
+## What is valuable
+
+MiroFish builds a graph from seed information, generates large populations of agents/personas, injects individual/collective memory, runs simulations with temporal memory updates, then produces reports from the simulated environment.
+
+This is a different problem from our execution engine, but two ideas are useful.
+
+## Adapt later
+
+### A. Orchestration Simulation Lab
+
+Instead of testing only three real LLM agents, create a future synthetic simulation harness using `FakeAgent` populations:
+
+```text
+1,000 synthetic agents
+    ↓
+controlled latency/failure/quota patterns
+    ↓
+Scheduler/Reconciler
+    ↓
+metrics: deadlocks, retries, fairness, recovery, queue pressure
+```
+
+This gives us swarm-scale testing without spending LLM tokens.
+
+### B. Temporal/collective state experiments
+
+For future team memory research, distinguish:
+
+- individual agent experience;
+- task/team shared knowledge;
+- project-wide durable decisions.
+
+This maps better to our existing memory channels than a single global memory store.
+
+## Do not adopt
+
+- MiroFish as an internal dependency.
+- GraphRAG as default memory architecture.
+- Thousands of LLM agents as a product primitive.
+- Prediction/simulation ontology in our Task domain.
+
+## Licensing
+
+Because the main project is AGPL, do not copy/link its implementation into a closed commercial core without an explicit licensing strategy. Concepts can be independently implemented.
+
+## Priority
+
+**P3 research / test-lab inspiration only.**
+
+---
+
+# 5. `volcengine/OpenViking`
+
+Repository: https://github.com/volcengine/OpenViking  
+License: main project AGPL-3.0; selected CLI/examples components use Apache-2.0.
+
+## Why this is the most important repo in the list for our Context Engine
+
+OpenViking treats memory/resources/skills like a browsable context filesystem and preprocesses entries into three levels:
+
+- **L0** — tiny abstract for relevance decisions;
+- **L1** — overview for planning;
+- **L2** — full source/details loaded only when needed.
+
+It also records the retrieval trajectory and turns committed sessions into long-term memory asynchronously.
+
+This strongly validates our existing progressive-disclosure design.
+
+## Adopt now
+
+### A. `ContextResource` with layered representations
+
+Add a model like:
+
+```text
+ContextResource
+├── stable resource URI
+├── kind
+├── provenance
+├── content hash/version
+├── L0 abstract
+├── L1 overview
+└── L2 source reference/full content
+```
+
+L0/L1 are derived and rebuildable. L2/source remains authoritative.
+
+### B. Stable internal context URIs
+
+Use a provider-neutral internal namespace, e.g.:
+
+```text
+ctx://project/{project_id}/resources/...
+ctx://project/{project_id}/memory/...
+ctx://project/{project_id}/skills/...
+ctx://task/{task_id}/artifacts/...
+```
+
+This is a reference scheme, not necessarily a mounted OS filesystem.
+
+### C. Observable retrieval trajectory
+
+Every Context Plan should record:
+
+```text
+query
+→ candidate directories/resources
+→ ranking signals
+→ L0 inspected
+→ L1 inspected
+→ L2 selected
+→ final context item
+```
+
+This enables debugging, privacy inspection and later policy learning.
+
+### D. Async memory consolidation
+
+After a task/session is durably committed:
+
+```text
+raw events/evidence
+   ↓
+MemoryConsolidator
+   ↓
+proposed memory
+   ↓
+validation/dedup/provenance
+   ↓
+durable memory
+```
+
+Never let session summarization mutate authoritative task state.
+
+## Do not adopt blindly
+
+- Do not make a vector database the truth layer.
+- Do not depend on OpenViking main AGPL code in core.
+- Do not expose its exact `viking://` namespace; use our own neutral scheme.
+
+## Priority
+
+**P0/P1 — incorporate into Context Engine specification before implementation.**
+
+---
+
+# 6. `lightpanda-io/browser`
+
+Repository: https://github.com/lightpanda-io/browser  
+License: AGPL-3.0.
+
+## What is valuable
+
+Lightpanda is a browser built for machine/headless use rather than a Chromium fork. It exposes CDP/BiDi compatibility, can dump pages to Markdown, and its published benchmark shows substantially lower memory and faster execution than headless Chrome. Its native agent can also produce deterministic replayable JavaScript automation scripts.
+
+## Adopt architecturally
+
+### A. Browser backend as a replaceable port
+
+Future design:
+
+```text
+BrowserAutomationPort
+├── Chromium/Playwright adapter
+├── Lightpanda adapter
+└── future native/browser adapters
+```
+
+No browser engine becomes domain logic.
+
+### B. Prefer semantic/text extraction when possible
+
+For many web tasks:
+
+```text
+DOM / accessibility state
+    ↓
+compact text/markdown representation
+    ↓
+LLM
+```
+
+is cheaper and more deterministic than screenshots.
+
+Use screenshots/vision only when visual layout actually matters.
+
+### C. Compile successful AI browsing into deterministic replay
+
+Future strategic feature:
+
+```text
+LLM explores once
+   ↓
+validated browser action script
+   ↓
+replay without LLM tokens
+```
+
+This is a powerful general pattern, not limited to Lightpanda.
+
+## Risks / why not core-v1
+
+- Web API/CDP coverage remains incomplete compared with Chromium.
+- Native Windows support is not equivalent to Chrome today.
+- AGPL requires a deliberate distribution/integration strategy.
+
+Do not bundle it by default until license and compatibility policy are settled. A user-installed sidecar adapter is the safer initial path.
+
+## Priority
+
+**P2 future Browser Tool.**
+
+---
+
+# 7. `pbakaus/impeccable`
+
+Repository: https://github.com/pbakaus/impeccable  
+License: Apache-2.0.
+
+## What is valuable
+
+Impeccable separates durable product truth (`PRODUCT.md`) from visual design truth (`DESIGN.md`), provides an explicit design workflow, and includes deterministic detectors for common AI-generated UI problems in addition to subjective LLM critique.
+
+This directly supports our belief that design is part of product/marketing quality.
+
+## Adopt now
+
+### A. Add `PRODUCT.md`
+
+Contains durable product facts:
+
+- audience;
+- core job-to-be-done;
+- trust/privacy positioning;
+- user skill level;
+- main workflows;
+- non-goals;
+- product language/voice constraints.
+
+Do not put pixel-level visual decisions here.
+
+### B. Add `DESIGN.md`
+
+Contains:
+
+- visual principles;
+- density/hierarchy;
+- typography;
+- spacing;
+- motion;
+- color semantics;
+- component patterns;
+- interaction rules;
+- accessibility baseline;
+- screenshot/marketing quality requirements.
+
+### C. Deterministic design gate
+
+Add a replaceable design-quality check to frontend CI/development:
+
+```text
+rendered UI
+  ↓
+static/a11y/design detectors
+  ↓
+visual regression
+  ↓
+optional LLM critique
+```
+
+We may use Impeccable directly as a development tool initially, but our product architecture must not depend on it.
+
+## Priority
+
+**P0 for project development workflow.**
+
+---
+
+# 8. `alibaba/page-agent`
+
+Repository: https://github.com/alibaba/page-agent  
+License: MIT.
+
+## What is valuable
+
+Its internal separation is especially relevant:
+
+```text
+LLM/Core Agent
+      ↓
+Page Controller interface
+      ↓
+DOM extraction / indexed actions
+```
+
+The controller does not depend on the LLM, while the LLM reasons over a simplified representation and invokes deterministic page actions.
+
+The repo also explicitly favors traceability/predictability and keeps client-side BYOK privacy clear.
+
+## Adopt for future browser/UI automation
+
+### A. `BrowserController` independent of LLM
+
+The model should never directly manipulate a webview object.
+
+```text
+Agent Runtime
+   ↓ typed tool request
+Browser Tool Service
+   ↓
+BrowserControllerPort
+   ↓
+Browser backend
+```
+
+### B. Indexed/symbolic actions
+
+Use stable element/action references within one page snapshot rather than asking the model to repeatedly reconstruct selectors.
+
+### C. Compact DOM representation
+
+Introduce browser-specific Context Renderer capable of:
+
+- accessibility tree / semantic DOM;
+- interactive elements;
+- current URL/title/state;
+- bounded text content;
+- explicit page version/snapshot ID.
+
+### D. Permission token for browser control
+
+Remote/extension control must have its own scoped authorization; never equate “can talk to the app” with “can control all browser tabs”.
+
+## Do not adopt
+
+- Client-side API keys embedded into production web scripts.
+- Browser controller state inside the general Task domain.
+
+## Priority
+
+**P2 future browser subsystem.**
+
+---
+
+# 9. `andrewyng/context-hub`
+
+Repository: https://github.com/andrewyng/context-hub  
+License: MIT.
+
+## Why it matters
+
+Context Hub solves a common coding-agent failure: using stale or hallucinated API knowledge. It provides curated, versioned, language-specific Markdown docs, incremental fetch, and persistent local annotations.
+
+Crucially, annotations are treated as **untrusted input and excluded by default**. This is an excellent security pattern for agent memory.
+
+## Adopt now
+
+### A. `DocumentationSourcePort`
+
+Context Engine should be able to ask a source for documentation matching:
+
+```text
+package/framework
+version
+language
+requested topic/file
+```
+
+Possible adapters later:
+
+- repository local docs;
+- Context Hub CLI/API;
+- provider official docs;
+- cached verified docs.
+
+### B. Dependency-aware documentation resolution
+
+When researching an API, derive the desired version from lockfiles/config where possible rather than retrieving generic latest docs.
+
+### C. Incremental documentation fetch
+
+Fetch index/overview first; specific reference files next; full documentation only as a last resort.
+
+### D. Untrusted annotations
+
+Any agent/user annotations to external docs must carry:
+
+```text
+trust = untrusted
+source
+created_by
+created_at
+validation status
+```
+
+They are never silently injected into high-priority instructions.
+
+### E. Feedback loop
+
+Track whether a context resource helped or hurt successful execution. This can later train our Context Policy without retraining the model.
+
+## Priority
+
+**P0/P1 for Context Engine and memory trust model.**
+
+---
+
+# 10. `langchain-ai/deepagents`
+
+Repository: https://github.com/langchain-ai/deepagents  
+License: MIT.
+
+## What is valuable
+
+DeepAgents combines long-horizon planning, isolated subagents, pluggable filesystems/backends, persistent memory, context summarization, disk offload of large tool results, human approval, and lazily loaded skills. It explicitly recommends enforcing security at tool/sandbox boundaries rather than trusting the model.
+
+That is very close to our target principles.
+
+## Adopt now
+
+### A. Large tool-result offload
+
+Do not keep massive command/browser/test output in conversation history.
+
+Introduce a generic result form:
+
+```text
+ToolResult
+├── short inline summary
+├── artifact_ref
+├── content_hash
+├── byte_size
+├── token_estimate
+├── mime/type
+└── provenance
+```
+
+Full data goes to Artifact Store; context gets only the summary + handle until exact data is requested.
+
+### B. Isolated subagent context
+
+Each delegated task gets a new Context Plan derived from its own scope. Do not clone the supervisor's full conversation into every worker.
+
+### C. Pluggable execution/file backends
+
+This validates our Runner/Workspace ports. Keep local/container/remote storage and execution replaceable.
+
+### D. Human-in-the-loop belongs at action boundary
+
+Approvals apply to concrete actions/capabilities, not vague “are you sure?” prompts.
+
+## Do not adopt
+
+- LangGraph as our core runtime; we intentionally use Rust and our own domain model.
+- Python/JS framework objects in domain contracts.
+
+## Priority
+
+**P0/P1 concepts.**
+
+---
+
+# 11. `microsoft/BitNet`
+
+Repository: https://github.com/microsoft/BitNet  
+License: MIT.
+
+## What is valuable
+
+`bitnet.cpp` is an efficient inference runtime for ternary/1-bit models. Microsoft currently ships an official 2.4B model and has also released small BitNet embedding models. This makes the project relevant to local-first, privacy-sensitive helper workloads.
+
+## Future use in AI Engineering OS
+
+Do not make BitNet a first-class requirement. Instead keep a generic:
+
+```text
+LocalInferencePort
+```
+
+Potential low-risk utility tasks:
+
+- context relevance classification;
+- cheap summarization/abstraction generation (L0/L1) after evaluation;
+- log/event categorization;
+- offline metadata extraction;
+- embeddings/reranking where platform support is adequate;
+- privacy mode for non-critical helpers.
+
+Never give a small local utility model independent authority over:
+
+- security approvals;
+- destructive commands;
+- architecture changes;
+- final Definition of Done;
+- critical code review.
+
+## Current limitation for our Mac-first product
+
+The BitNet ecosystem is promising, but model/platform coverage is still less mature than mainstream llama.cpp/Ollama ecosystems. It should be one optional adapter, not “the local AI architecture”.
+
+## Priority
+
+**P3; revisit after Context/Memory Engine exists.**
+
+---
+
+# 12. Architecture changes that should be made to our Source of Truth
+
+## 12.1 New/strengthened concepts
+
+### `ContextResource`
+
+```text
+id
+uri
+kind
+source_ref
+version/content_hash
+trust
+sensitivity
+L0 abstract
+L1 overview
+L2 source/detail ref
+provenance
+```
+
+### `RetrievalTrace`
+
+Records why each resource was traversed/selected/rejected.
+
+### `DocumentationSourcePort`
+
+Provider-neutral access to versioned external technical docs.
+
+### `ArtifactStorePort`
+
+Stores large tool results once and returns stable content-addressed references.
+
+### `SkillRegistryPort`
+
+Provides on-demand reusable workflows; only metadata is visible until a skill is loaded.
+
+### `AgentDefinition`
+
+Typed role/deliverable/success/escalation contract rather than a giant persona prompt.
+
+### `BrowserAutomationPort` — future
+
+Provider-neutral browser automation. Chromium is compatibility baseline; Lightpanda/Page-Agent-like adapters are optional.
+
+### `LocalInferencePort` — future
+
+Optional local models for utility workloads.
+
+---
+
+# 13. New architecture invariants recommended
+
+```text
+INV-028 Skills are lazy-loaded; full skill bodies are not baseline context.
+
+INV-029 Agent-generated annotations and learned notes are untrusted until
+        provenance/validation policy promotes them.
+
+INV-030 Context summaries/abstracts are derived representations; original
+        source/evidence remains authoritative.
+
+INV-031 Context retrieval must preserve an observable selection trajectory.
+
+INV-032 Large tool outputs are content-addressed artifacts, not repeatedly
+        embedded in model conversation history.
+
+INV-033 Browser automation logic is isolated behind a controller/port and is
+        not coupled to a specific LLM or browser engine.
+
+INV-034 Durable product truth and visual design truth are separate documents
+        (`PRODUCT.md` and `DESIGN.md`).
+
+INV-035 Agent role/personality metadata never grants capabilities, permissions,
+        architecture authority, or completion authority.
+
+INV-036 AGPL/copyleft external implementations are not copied, linked or bundled
+        into proprietary core without an explicit license architecture review.
+```
+
+---
+
+# 14. Repository additions recommended
+
+```text
+/
+├── PRODUCT.md
+├── DESIGN.md
+├── AGENT.md
+├── docs/
+│   └── research/
+│       └── external-projects-adoption.md
+├── skills/                       # later; lazy-loadable workflows
+│   └── INDEX.md
+└── crates/
+    ├── context/                  # ContextResource + planning ports
+    ├── tools/                    # Tool registry/result contracts
+    └── ...
+```
+
+Do not create all future modules before a task actually needs them.
+
+---
+
+# 15. What should affect the first implementation tasks
+
+Immediately:
+
+1. Use the `AGENT.md` development protocol.
+2. Keep tasks atomic and exact-path scoped.
+3. Require evidence/verification rather than self-reported completion.
+4. Plan for `ContextResource` L0/L1/L2 before implementing Context Engine.
+5. Plan Artifact Store handles before allowing huge tool outputs into history.
+6. Treat all stored annotations/memory as data with explicit trust/provenance.
+7. Create `PRODUCT.md` and `DESIGN.md` before substantial UI work.
+
+Do **not** delay G1 for browser automation, swarm simulation, BitNet, marketplace or remote agents.
+
+---
+
+# 16. Source index
+
+Primary sources reviewed:
+
+- Agency Agents: https://github.com/msitarzewski/agency-agents
+- Agency Agents App: https://github.com/msitarzewski/agency-agents-app
+- Superpowers: https://github.com/obra/superpowers
+- MiroFish: https://github.com/666ghj/MiroFish
+- OpenViking: https://github.com/volcengine/OpenViking
+- Lightpanda: https://github.com/lightpanda-io/browser
+- Impeccable: https://github.com/pbakaus/impeccable
+- Page Agent: https://github.com/alibaba/page-agent
+- Context Hub: https://github.com/andrewyng/context-hub
+- DeepAgents: https://github.com/langchain-ai/deepagents
+- BitNet: https://github.com/microsoft/BitNet
+
+License-specific note: this document is an architectural research summary, not legal advice. Before bundling or linking third-party code into a commercial distribution, verify the exact component/version license and distribution model again.
+
+---
+
+# 17. reader3 (karpathy/reader3)
+
+Decision: **ADAPT — high conceptual value, low direct-code value.**
+
+`reader3` is useful as a compact demonstration of AI-friendly resource handling rather than as a production architecture to reuse. The project separates an EPUB's logical reading structure from its physical files/spine, exposes content one meaningful unit at a time, and derives both display-oriented and plain-text representations from the same source. Those ideas reinforce the project's Context/Resource architecture.
+
+## 17.1 Adopt / adapt
+
+### Semantic Resource Segmentation
+
+Do not make fixed token chunks the primary knowledge unit. Parse the strongest available semantic structure first and fall back only when necessary.
+
+Examples:
+
+```text
+Code       Repository → Package → File → Type → Function/Method
+Markdown   Document → Heading → Section
+EPUB       Book → TOC/Spine → Chapter → Section
+PDF        Document → Chapter/Section → Page/Table/Figure fallback
+```
+
+A chunk is a derived transport/retrieval representation, not authoritative structure.
+
+### Logical structure != physical storage
+
+Resources may have both physical and logical graphs. Parsers must preserve the distinction rather than flattening everything into file order.
+
+### Multiple representations per resource
+
+A resource may expose several derived representations:
+
+```text
+Resource
+├── Original
+├── Display
+├── PlainText
+├── Markdown
+├── ModelOptimized
+├── SummaryL0
+└── SummaryL1
+```
+
+The original/source representation remains authoritative. Derived representations carry source references, parser/renderer version and content hash.
+
+### Preprocess once, retrieve many
+
+Parsing, normalization, structural extraction and derived-representation generation happen during ingestion or invalidation, not repeatedly for every model request.
+
+### Progressive structural disclosure
+
+Retrieve the smallest meaningful semantic unit first; expand only when the task requires more context.
+
+### Parser fallback with confidence
+
+Parsers may fall back from authoritative structure to inferred/heuristic structure, but the system must expose the confidence/source of that structure.
+
+Target concept:
+
+```rust
+enum StructuralConfidence {
+    Authoritative,
+    Parsed,
+    Inferred,
+    Fallback,
+}
+```
+
+### Imported content is untrusted
+
+EPUB, Markdown, PDF, HTML, repository text and any other user/external resource are data, not instructions. They may contain prompt-injection strings and must never gain authority merely because they entered model context.
+
+### Separate UI and model sanitization pipelines
+
+Display HTML and model-readable text are different representations and require independent processing. A UI sanitizer must use an allowlist, remove executable/event-handler content and validate URL schemes. Model normalization must preserve evidence/provenance without converting resource text into system instructions.
+
+## 17.2 New bounded context: Resource Engine
+
+Resource ingestion/normalization should be separated from Context selection.
+
+```text
+Input Sources
+    ↓
+Resource Engine
+    ├── ingest
+    ├── parse
+    ├── normalize
+    ├── semantic segmentation
+    ├── representation generation
+    ├── provenance
+    └── indexing metadata
+    ↓
+Resource Store
+    ↓
+Context Engine
+    ├── search/retrieve
+    ├── rank
+    ├── budget
+    ├── select
+    └── provider render
+    ↓
+Agent
+```
+
+The Context Engine must not own EPUB/PDF/code parsing. Parsers are adapters behind a resource-parser contract so they can be replaced independently.
+
+Candidate future port:
+
+```text
+ResourceParserPort
+```
+
+Potential adapters later include code/AST, Markdown, HTML, PDF, EPUB and DOCX parsers. Do not create empty implementations before a real task requires them.
+
+## 17.3 Resource Registry instead of folder-as-database
+
+Do not use filesystem presence as authoritative application state. A resource registry tracks at least:
+
+```text
+resource_id
+source_ref / source_uri
+content_hash
+parser_id + parser_version
+processing_status
+trust_level
+representations
+structural_confidence
+index/version metadata
+```
+
+A missing source becomes an explicit state such as `SourceMissing`; it does not silently erase historical knowledge or references.
+
+## 17.4 Explicit rejects
+
+Do not carry over:
+
+- Python server architecture;
+- unsafe general object deserialization such as `pickle` for user-controlled/persistent resources;
+- folder presence as the authoritative database;
+- simplistic HTML sanitization based only on deleting a handful of tags;
+- manual copy/paste as the long-term AI integration model;
+- direct dependency on reader3 itself.
+
+## 17.5 Additional invariants
+
+```text
+INV-037 Fixed-size token chunks are derived retrieval units, not authoritative semantic structure.
+INV-038 Imported/user/external resource content is untrusted data and never gains instruction authority automatically.
+INV-039 Original/source evidence remains authoritative over display/model/summary representations.
+INV-040 Resource parsing/normalization is isolated from Context selection behind replaceable contracts.
+INV-041 Persistent user-controlled resources must not use deserialization mechanisms capable of arbitrary code execution.
+INV-042 UI/display sanitization and model-context normalization are separate pipelines.
+```
+
+Primary source reviewed: https://github.com/karpathy/reader3
+
+
+# 18. `principia-ai/WriteHERE`
+
+Repository: https://github.com/principia-ai/WriteHERE  
+Paper: https://aclanthology.org/2025.emnlp-main.1254/  
+Paper: **Beyond Outlining: Heterogeneous Recursive Planning for Adaptive Long-form Writing with Language Models**, EMNLP 2025.  
+License: repository README declares MIT.  
+Snapshot during review: roughly 970+ stars; no formal GitHub releases were published.
+
+## Verdict
+
+**ADAPT — high architectural value for Planner/Reconciler/Task Graph, low value as a direct runtime dependency.**
+
+WriteHERE is not primarily interesting because it writes long documents. Its useful idea for us is that planning and execution do not need to be two rigid phases. The system recursively decomposes only when needed, executes primitive leaves immediately, then changes the work graph as new results become available.
+
+The published paper models the process as a DAG and uses a state-based hierarchical task scheduler. Tasks are heterogeneous (`retrieval`, `reasoning`, `composition`), and planning is interleaved with execution instead of generating one immutable outline upfront. The paper reports improvements on long-form writing benchmarks and ablations show degradation when recursive planning is removed. This is useful evidence for the planning pattern, but **it is not a software-engineering benchmark**, so we must validate the strategy ourselves before making it the default coding planner.
+
+## What to adopt
+
+### A. Interleave decomposition and execution
+
+Do not require the Planner to predict the entire project perfectly before any work starts.
+
+Target concept:
+
+```text
+coarse goal / current plan
+        ↓
+select actionable node
+        ↓
+atomic enough?
+   ├─ yes → execute → evidence → reconcile
+   └─ no  → propose bounded children/dependencies
+                    ↓
+              validate + persist
+```
+
+Only the affected branch of the DAG should need replanning when new evidence invalidates an assumption.
+
+### B. `PlannerPort` returns `PlanChangeSet`, never direct mutation
+
+The LLM/planner is not authoritative application state. It proposes a typed, versioned graph delta containing:
+
+```text
+base revision
+reason
+source evidence
+nodes/edges to add/update/remove
+risk delta
+budget delta
+scope delta
+```
+
+The Task/Plan application layer validates DAG integrity, policies, scope, acceptance preservation and budgets before persisting the next plan revision.
+
+### C. First-class plan revisions
+
+Every dynamic structural change should be explainable later:
+
+```text
+revision 17
+reason: test exposed a missing migration prerequisite
+caused_by: TEST-8831
+added: TASK-214
+changed dependency path: 210 → 214 → 211
+```
+
+This supports audit, replay, debugging and a strong Mission-Control UX.
+
+### D. Heterogeneous task classes
+
+Adopt the principle that different work needs different decomposition/execution policies, but do not hardcode WriteHERE's writing-specific three classes.
+
+Candidate extensible classes for our system:
+
+```text
+Research
+Design
+Implementation
+Verification
+Integration
+Operations
+```
+
+A task kind may influence planner strategy, capability routing, context construction and evaluator choice. It must remain provider-neutral metadata rather than domain branching on Claude/Codex/etc.
+
+### E. Graph-scoped context
+
+The paper's memory is task graph + workspace, while only task-relevant knowledge is loaded into the actual execution context. This aligns strongly with our Context Engine.
+
+Prefer context from:
+
+```text
+current task
++ relevant ancestors/goal constraints
++ completed prerequisite outputs
++ selected sibling/dependent evidence
++ needed workspace resources
+```
+
+Do not inject the entire task DAG/history into every agent.
+
+### F. Planning observability
+
+Expose durable operational facts in the UI:
+
+- current DAG;
+- task types;
+- dependencies/readiness;
+- plan revision history;
+- why a task appeared or was replanned;
+- which evidence triggered a change;
+- budget/guardrail interventions.
+
+Do **not** market or expose private chain-of-thought. The useful transparency is structured state and provenance.
+
+## Critical lessons from repository failure modes
+
+The repository's open issues are as valuable as the paper. Current reports include:
+
+- infinite loop in summarization;
+- Python maximum recursion-depth failure;
+- a decomposition failure where a writing task becomes only thinking-type subtasks and stops making writing progress;
+- key-handling/security concerns;
+- historical bugs around task dependency data.
+
+These show why adaptive recursive planning must never be an unconstrained `while LLM says decompose` loop.
+
+### Required anti-recursion/liveness controls
+
+```text
+max_decomposition_depth
+max_children_per_decomposition
+max_total_plan_nodes
+max_plan_mutations_per_reconcile_cycle
+planning time/token budget
+no-progress timeout
+cycle detection
+duplicate/self-similar decomposition fingerprint detection
+scope/risk escalation gates
+```
+
+A decomposition must move toward executable work. If it cannot produce a valid smaller plan inside limits, the system explicitly blocks/escalates instead of planning forever.
+
+## What not to copy
+
+- the Python/Flask/React implementation architecture;
+- direct API-key file handling as our credential model;
+- `ACTIVE/SUSPENDED/SILENT` as our complete persistent Task lifecycle;
+- fixed `retrieval/reasoning/composition` task ontology;
+- unbounded recursive LLM decomposition;
+- the repository itself as a runtime dependency.
+
+WriteHERE's simple scheduling states are useful conceptually, but our richer lifecycle remains authoritative. `RUNNABLE/WAITING/...` should be a **derived scheduling readiness**, distinct from persistent business status.
+
+## Architecture decisions accepted
+
+The Source of Truth has been updated with:
+
+- bounded adaptive hierarchical planning;
+- `PlannerPort` and declarative `PlanChangeSet`;
+- versioned plan revisions with provenance;
+- separation of persistent lifecycle vs derived scheduling readiness;
+- extensible task kinds;
+- graph-scoped context retrieval;
+- hard decomposition/liveness budgets;
+- requirement to benchmark adaptive planning against static planning on coding tasks before default enablement;
+- invariants `INV-043` through `INV-050`.
+
+## Priority
+
+**P1 architecture / G7 runtime feature.**  
+Do not implement adaptive recursive planning before durable Task Core, FakeAgent, Git/worktree isolation, Policy Engine and basic multi-agent DAG are stable.
+
+
+# Davia — davialabs/davia
+
+**Decision: ADAPT (high product/UX value, medium architecture value, low value as a runtime dependency).**
+
+Repository: `davialabs/davia`  
+License: MIT.  
+Status at review time: **archived/read-only since 2026-08-10**. GitHub showed roughly **1.7k stars**, so the social post's ~693-star figure is stale.
+
+## What the project actually does
+
+Davia is an interactive internal-documentation environment aimed at coding agents. Its CLI initializes a `.davia` workspace and agent-specific instructions. Documentation is generated locally, then viewed through a rich web workspace. The project also offered an opt-in push flow to a hosted collaborative workspace.
+
+The repository is a TypeScript pnpm/Turborepo monorepo with:
+
+- CLI application;
+- web documentation workspace;
+- a separate AI-agent package;
+- rich editor/visualization dependencies including Tiptap, React Flow, Excalidraw, Mermaid-to-Excalidraw and CodeMirror.
+
+The agent implementation uses LangChain/LangGraph and direct Anthropic/OpenAI/Google API integrations.
+
+## Strong ideas to adopt/adapt
+
+### 1. Documentation as a first-class AI/human artifact
+
+The strongest idea is product-level: documentation should not only be static Markdown generated once. It can be an interactive project knowledge surface shared by humans and agents.
+
+For our product this becomes a **Documentation Engine + Architecture Explorer**, not a clone of Davia.
+
+### 2. Editable visual documentation
+
+Interactive graphs and diagrams make repository/business logic much easier to inspect. We adopt visual architecture/documentation projections, but keep a structured evidence-grounded graph or declarative model underneath so that a renderer can be replaced.
+
+### 3. Local-first generation with optional collaboration
+
+Davia generates files locally and only uploads through an explicit push flow. This supports our local-first principle. We go further: cloud sync remains fully optional, and the user must be able to inspect what data will leave the device.
+
+### 4. Separate generated and curated knowledge
+
+Davia's editable documentation highlights an important problem: if both the agent and the human edit the same generated page, regeneration can destroy human intent. Our design therefore explicitly separates generated/rebuildable projections from human-curated overlays and composes them deterministically.
+
+### 5. Visual project map as agent-debugging UI
+
+We extend the concept beyond docs. The Architecture Explorer should expose module/symbol/task/ADR/security relationships with provenance and actions such as attaching a node to task context or opening source evidence.
+
+## Important weaknesses / anti-patterns
+
+### 1. Whole-repository context injection
+
+Davia's initialization middleware reads repository files, formats them as Markdown and injects the result into a `SystemMessage`. Config limits this to 1,000 files and approximately 130k tokens, where token count is estimated using a rough 4-characters-per-token rule.
+
+This is incompatible with our architecture for two reasons:
+
+1. it treats context capacity as a bulk-loading problem rather than semantic just-in-time retrieval;
+2. more seriously, repository content is untrusted data and must not be elevated into system-instruction authority.
+
+Our Documentation Engine must retrieve repository evidence through Resource Engine + Context Engine and keep resource data in a lower-authority context channel.
+
+### 2. Coarse token/file budgeting
+
+`MAX_FILES = 1000`, `MAX_TOKENS = 130000` and a universal 4 chars/token heuristic are acceptable prototype safety caps but not a context strategy. We retain hard budgets but use model/provider-aware token estimation and semantic retrieval.
+
+### 3. Very high LangGraph recursion limit
+
+The agent raises graph recursion to 1000. This is another reminder that planning/agent loops need explicit liveness and no-progress controls. Our existing bounded-planning invariants remain stronger.
+
+### 4. Excluding broad resource classes
+
+The repository excludes JSON, XML, CSV, PDFs, office documents, databases and many other extensions from the bulk reader. For repository understanding this can discard important configuration/schema/data evidence. Our Resource Engine handles file/resource types by parser capability and trust policy rather than a single broad exclusion list.
+
+### 5. Credentials handling
+
+The CLI searches `.davia/.env` and project `.env`, copies the selected provider key into process environment, and the sync code stores an access token in a local JSON config. This is not acceptable for our security model. We keep provider credentials behind OS credential stores/Secret Broker and prefer native CLI authentication where possible.
+
+### 6. Diagram conversion coupled to Puppeteer
+
+Davia converts Mermaid to Excalidraw through a Puppeteer-based helper. Useful as a prototype, but a headless browser must not become a core diagram/domain dependency. Our `DiagramRendererPort` makes Mermaid/React Flow/Excalidraw/headless conversion replaceable adapters.
+
+### 7. Hosted workspace maturity
+
+The archived README says a push creates/uploads a workspace but updating an already-pushed workspace was not supported at that point. This reinforces keeping synchronization as a separate later subsystem rather than making cloud state authoritative.
+
+## Adopt
+
+- interactive documentation as a first-class product surface;
+- local generation + optional collaboration concept;
+- architecture/project visual explorer;
+- rich text + code + diagram presentation primitives;
+- agent-facing documentation generation workflow.
+
+## Adapt
+
+- generated docs -> provenance-backed derived projections;
+- editable docs -> Generated + Curated layers with merge/diff semantics;
+- diagrams -> canonical structured graph/declarative source + replaceable renderer;
+- full regeneration -> dependency-driven stale detection and incremental rebuild;
+- local files -> Documentation Engine backed by Resource/Event/Task evidence;
+- AI documentation context -> normal Context Engine retrieval, not whole-repo injection.
+
+## Reject
+
+- whole-repository source concatenated into system messages;
+- a universal 4 chars/token estimate as the budgeting mechanism;
+- generated documentation as authoritative truth;
+- broad file-extension exclusion as repository understanding strategy;
+- plaintext/local JSON credential storage;
+- direct provider SDKs/API-key handling leaking into documentation domain;
+- Puppeteer/Excalidraw as canonical diagram architecture;
+- archived Davia codebase as a runtime dependency.
+
+## Resulting architecture updates
+
+The Source of Truth now defines:
+
+- `DocumentationEnginePort` / `DocumentationRendererPort` / `DiagramRendererPort`;
+- evidence/generated/curated documentation layers;
+- provenance and freshness requirements;
+- incremental staleness-aware regeneration;
+- Architecture Explorer / Project Map;
+- anti-feedback-loop rules for generated docs used as context;
+- strict repository-content authority boundaries;
+- new invariants `INV-051` through `INV-058`.
+
+## Priority
+
+**P2.** Build after durable project state, Resource Engine, Context Engine and repository/code graph foundations. A read-only Architecture Explorer may precede the full editor.
+
+---
+
+# SmarterRouter — Intelligent LLM Routing / VRAM-Aware Local Gateway
+
+Repository: `peva3/SmarterRouter`
+
+Decision: **ADAPT — HIGH VALUE for Model Routing, Local Inference Scheduling, Profiling and Failover architecture. Do not embed the Python project as a runtime dependency.**
+
+License: MIT.
+
+## What the project actually does
+
+SmarterRouter is an OpenAI-compatible routing gateway over local and external model backends. Its architecture separates backend adapters from routing logic, profiles models on the user's actual hardware, combines local measurements with external benchmark data, tracks GPU/VRAM pressure, supports model discovery and hot-swap, and can fall back to alternative models when a preferred route fails.
+
+Important observed mechanisms:
+
+- backend abstraction for Ollama, llama.cpp and OpenAI-compatible services;
+- model capability probing for features such as vision and tool use;
+- standardized local profiling prompts;
+- optional LLM-as-judge evaluation;
+- external benchmark database aggregated from many public sources;
+- hardware-specific latency/VRAM measurements;
+- LRU / largest-first model eviction under VRAM pressure;
+- exact and semantic routing-decision cache;
+- response cache;
+- local SQLite persistence for profiles, benchmarks and feedback;
+- hot discovery/reprofiling of newly available models;
+- cascading fallback when a selected model fails.
+
+## Adopt
+
+### 1. Hardware-specific model profiling
+
+A model's usefulness is not an abstract global property. Runtime performance depends on the user's hardware, quantization, backend, context size and concurrency.
+
+Our system should maintain a versioned `ModelRuntimeProfile` containing measured properties such as:
+
+- cold-start latency;
+- warm latency;
+- tokens/sec;
+- peak memory / estimated resident memory;
+- context-window capability;
+- tool-call capability;
+- structured-output capability;
+- vision/audio capability where relevant;
+- reliability/error rate;
+- measured-at timestamp;
+- hardware/backend fingerprint.
+
+External benchmark data may supplement missing information, but local measured data outranks generic estimates for local execution characteristics.
+
+### 2. Separate model capability, quality and resource profiles
+
+Do not collapse all model information into one scalar score.
+
+Conceptually separate:
+
+- `ModelCapabilities` — what the model/runtime can do;
+- `ModelQualityProfile` — how well it performs for task classes;
+- `ModelRuntimeProfile` — performance on this device/backend;
+- `ProviderCapacityProfile` — quota, concurrency, rate-limit and availability state;
+- `PrivacyProfile` — where inference runs and what data may leave the device.
+
+Routing combines these dimensions at decision time.
+
+### 3. Local resource-aware scheduling
+
+Adopt a dedicated `DeviceResourceManagerPort` / `ModelResidencyManagerPort` rather than placing VRAM logic in the Model Router.
+
+Responsibilities include:
+
+- observing CPU/GPU/unified memory pressure;
+- model residency tracking;
+- estimated load/unload cost;
+- pinned models;
+- model load/unload requests;
+- device-specific capacity;
+- resource-pressure events.
+
+The Router asks whether a candidate is feasible; it does not directly call `nvidia-smi`, ROCm, sysfs or OS APIs.
+
+### 4. Model residency as a scheduling cost
+
+Routing should consider not only quality and nominal speed but also whether a model is already resident.
+
+A slightly weaker warm local model may be preferable to loading a much larger cold model for a low-risk task. Conversely, security-sensitive or architecture-critical tasks may explicitly override residency/cost preferences.
+
+### 5. Dynamic model discovery
+
+Backends are dynamic resources. The system should be able to discover models without restart and retain historical profile data when a model temporarily disappears.
+
+Use states such as:
+
+- Available;
+- Unavailable;
+- Degraded;
+- Profiling;
+- Unsupported;
+- Disabled.
+
+A missing model should not erase its historical performance profile.
+
+### 6. Observed performance feedback loop
+
+Our Adaptive Model Router should learn from completed project executions, not only synthetic benchmarks.
+
+Useful dimensions include:
+
+- task kind;
+- repository;
+- language/framework;
+- first-pass verification rate;
+- reviewer rejection rate;
+- regression rate;
+- execution duration;
+- token/monetary cost;
+- context size;
+- number of retries;
+- human override/approval outcome.
+
+This repository-specific empirical profile is a stronger long-term moat than generic benchmark tables.
+
+### 7. Multi-candidate failover
+
+The router should produce a ranked route plan rather than a single irreversible choice:
+
+`primary -> fallback candidates -> escalation policy`.
+
+However failover semantics must depend on execution purity. Read-only inference may transparently retry. Stateful coding-agent executions create a new durable attempt and may not blindly replay side effects.
+
+## Adapt
+
+### SmarterRouter prompt classification -> structured task metadata first
+
+SmarterRouter infers categories/difficulty from prompt content and heuristics. Our system usually has richer authoritative metadata already:
+
+- TaskKind;
+- risk;
+- required capabilities;
+- acceptance criteria;
+- repository/language;
+- tool requirements;
+- context budget;
+- privacy policy.
+
+Therefore classification from raw prompt is only a fallback for ad-hoc/unstructured interactions, never the primary source when structured task metadata exists.
+
+### Static benchmark database -> provenance-aware benchmark evidence
+
+External benchmark data can be useful, but every score must retain:
+
+- benchmark/source name;
+- version/date;
+- measured vs estimated status;
+- evaluator methodology;
+- model/runtime variant;
+- confidence;
+- applicability tags.
+
+Estimated benchmark values must never silently masquerade as measurements.
+
+### LLM-as-judge -> secondary evaluator signal
+
+Use deterministic task-specific evaluation whenever possible. LLM judging is useful for qualitative tasks but is not authoritative by itself.
+
+Avoid:
+
+- model judging itself;
+- one judge deciding all quality;
+- routing loops where benchmark scores are generated by the candidate models themselves without independent evidence.
+
+### GPU/VRAM support -> generic device-resource model
+
+Do not encode NVIDIA/AMD/Intel/Apple assumptions in business logic. Platform-specific measurement lives in replaceable adapters.
+
+Apple unified memory, container memory, CPU-only inference and future accelerators should fit the same resource model.
+
+Measurements may have confidence/error bounds; heuristic values must be marked as estimates.
+
+### OpenAI-compatible gateway -> optional compatibility adapter
+
+An OpenAI-compatible local endpoint can be useful for integrations, but it is an adapter around our routing service, not the internal domain API.
+
+Internal orchestration must retain richer semantics than `/v1/chat/completions`, including task identity, capability requirements, policy, attempt provenance and routing explanation.
+
+## Reject / Do not copy blindly
+
+### 1. Single weighted routing formula
+
+A fixed scalar formula is too weak for our product. Routing is constrained optimization with hard eligibility gates first, then preference scoring.
+
+Examples of hard gates:
+
+- required tools unsupported;
+- context window too small;
+- provider forbidden by privacy policy;
+- model unavailable/quota exhausted;
+- resource budget impossible;
+- task risk requires a trusted verifier/provider.
+
+Only eligible candidates are scored afterward.
+
+### 2. Model-name heuristics as authority
+
+Names such as `*coder` may be weak hints but are not reliable capability evidence.
+
+### 3. Semantic response cache keyed mainly by prompt similarity
+
+This is unsafe for coding and stateful agents.
+
+Two semantically similar prompts may correspond to different:
+
+- commits;
+- worktrees;
+- task revisions;
+- permissions;
+- tool states;
+- project constitutions;
+- provider/system instructions.
+
+Response reuse is allowed only when the operation is explicitly cacheable and the key contains a complete immutable state/context fingerprint. Otherwise cache routing metadata/embeddings/artifacts, not generated answers.
+
+### 4. Transparent fallback after side effects
+
+Never silently rerun a stateful agent on another model after files/commands/tools may already have changed the world. Create a new `ExecutionAttempt`, recover from durable task/worktree state and apply idempotency/policy rules.
+
+### 5. Raw environment variables as our primary secret UX
+
+Our product keeps credentials behind the Secret Broker / OS credential stores. Provider-native subscription authentication should remain provider-owned whenever possible.
+
+## Resulting architecture updates
+
+The Source of Truth now adds a provider-neutral **Adaptive Model Routing & Local Resource Scheduling** subsystem with explicit ports for:
+
+- `ModelRouterPort`;
+- `ModelCatalogPort`;
+- `ModelProfilerPort`;
+- `BenchmarkEvidencePort`;
+- `DeviceResourceManagerPort`;
+- `ModelResidencyManagerPort`;
+- `ProviderCapacityPort`;
+- `RoutingFeedbackPort`.
+
+Routing sequence:
+
+1. derive authoritative task requirements;
+2. discover eligible provider/model/runtime candidates;
+3. apply hard capability/security/privacy/resource gates;
+4. score remaining candidates using repository-specific historical quality, global benchmark evidence, runtime performance, cost/quota, latency, context compatibility and residency cost;
+5. return a ranked, explainable `RoutePlan` with fallback semantics;
+6. record actual outcome and update empirical profiles after independent verification.
+
+## Priority
+
+**P1/P2 boundary.** The abstract routing contracts should exist early so provider selection never leaks into domain logic. Advanced learning/profiling/VRAM optimization can be implemented after the basic provider/runtime pipeline works reliably.
+\n\n---\n\n## ZeroClaw (`zeroclaw-labs/zeroclaw`)\n\n**Reviewed:** 2026-09-09  \n**Verdict:** **ADAPT / STUDY DEEPLY**  \n**Direct runtime dependency:** **No**  \n**License:** dual MIT OR Apache-2.0 in the current upstream repository.\n\n### Current project reality\n\nThe social post understates the current popularity: public GitHub analytics in September 2026 report roughly **32.6–32.7k stars** and ~4.9k forks. The current upstream is no longer a tiny weekend codebase: GitHub shows thousands of commits and a large Rust workspace with many crates.\n\nThe famous footprint/startup comparison is useful as a direction but should not be treated as independent scientific evidence. The published benchmark is project-reported, some comparison values are normalized for edge hardware, and current builds/feature sets may differ. Reproduce measurements locally before using them for architectural or marketing decisions.\n\n### What is genuinely valuable for our project\n\n#### 1. Trait-driven extension points\n\nZeroClaw keeps providers, channels, tools, memory and runtime-adjacent capabilities behind public Rust traits. This strongly validates our Ports & Adapters decision.\n\n**Adopt principle:** keep a small provider-neutral contracts/API crate and wire concrete implementations through factories/registries outside the domain.\n\n#### 2. Compact AGENTS bootstrap + architecture routing map\n\nZeroClaw's root `AGENTS.md` deliberately stays compact and points agents to an architecture map for task-specific reading.\n\n**Adopt:** our `AGENT.md` remains the always-loaded contract; add `docs/architecture/MAP.md` for progressive disclosure.\n\n#### 3. Explicit Single Source of Truth rule\n\nTheir contributor guidance requires naming the canonical source before adding state/caches/config duplication.\n\n**Adopt strongly:** every persistent fact in our architecture must have one bounded-context owner. Other forms are derived views/snapshots/caches with invalidation/provenance.\n\n#### 4. History trimming keeps tool protocol valid\n\nZeroClaw explicitly documents that trimming is lossy but must preserve tool-call/tool-result pairing and payload provenance.\n\n**Adopt:** our Context Engine cannot prune individual sides of a correlated tool exchange. Large results become bounded summaries + artifact references, not dangling protocol objects.\n\n#### 5. Tool execution receipts\n\nZeroClaw implements HMAC-SHA256 receipts for successful tool results so the model cannot forge a new valid claim that a tool executed. This addresses an important distinction between model narration and runtime evidence.\n\n**Adopt and extend:**\n\n- live per-session authenticated receipt for provider-visible tool results;\n- durable audit evidence in our Event Journal/Security Audit for security-relevant actions;\n- never treat a receipt as authorization, correctness or completion evidence by itself.\n\nThe current ZeroClaw history also shows why implementation truth must outrank documentation: an upstream issue documented a period where receipt docs described wiring as shipped while production call sites still passed `None`. Our Architecture/Documentation Engine must therefore tie generated claims to executable/testable evidence where possible.\n\n#### 6. Risk profiles and sandbox backend separation\n\nZeroClaw separates agent risk profiles from OS sandbox implementations and documents backend-specific capability differences (filesystem vs network, etc.).\n\n**Adopt:** policy/risk semantics are domain-level; Landlock/Seatbelt/container/VM details live behind sandbox adapters. Required isolation fails closed.\n\n#### 7. Deterministic SOP engine\n\nZeroClaw has deterministic Standard Operating Procedures with triggers, approval gates, durable run state and resumability.\n\n**Adopt concept:** our adaptive Planner is not the answer for every workflow. Introduce a future deterministic `ProcedureEngine` for known repeatable sequences.\n\n#### 8. Separation of history, memory, files, logs and usage\n\nZeroClaw's documentation is unusually explicit that file content is not automatically memory, logs are diagnostics rather than source-of-truth memory, and tool results require intentional promotion if they should persist.\n\n**Adopt strongly:** preserve separate ownership/lifecycles for session history, long-term memory, artifacts/files, Event Journal, Security Audit, operational logs and usage ledgers.\n\n#### 9. Incremental daemon persistence\n\nThe daemon writes conversation/memory state incrementally rather than relying on a shutdown flush.\n\n**Adopt:** hard-kill recovery is a first-class test case for `agentd`.\n\n### Important warning: runtime efficiency != maintainable architecture\n\nA closed RFC in the ZeroClaw repository criticized the project's growth to a very large Rust codebase, citing roughly 1,076 Rust files / ~776k lines at that point and several extremely large modules. The maintainers did not rewrite it in Python, but the criticism is architecturally useful.\n\n**Our response:**\n\n- CI dependency-boundary tests;\n- narrow crates;\n- generated code separated from hand-written domain code;\n- soft/hard module size review budgets;\n- no speculative abstractions or giant central configuration modules;\n- every cross-context integration through an explicit contract.\n\n### Reject / do not copy blindly\n\n1. **Self-reported marketing benchmark as fact.** Reproduce performance on our own build/hardware.\n2. **Silent sandbox fallback to `none`.** For our required security profiles, missing isolation must block execution instead of weakening it.\n3. **Putting all personal-assistant/channel/hardware capabilities into the coding-core.** Our product remains focused; channels/peripherals are optional integrations, not core domain.\n4. **A giant Rust workspace as an acceptable cost of extensibility.** Replaceability is useful only if the implementation remains navigable.\n5. **In-band receipts as the whole audit system.** We additionally need durable Event Journal/Security Audit evidence.\n\n### Architectural changes accepted\n\n- add Tool Execution Receipt design;\n- add future deterministic Procedure Engine;\n- add `docs/architecture/MAP.md`;\n- strengthen canonical state ownership;\n- strengthen tool-call/tool-result pruning rules;\n- require fail-closed isolation;\n- add Rust architecture fitness and resource benchmarks;\n- add invariants INV-069 through INV-082.\n\n### Priority\n\n**High.** ZeroClaw is one of the most relevant repositories reviewed so far because its implementation domain overlaps directly with our Rust local agent runtime. We should study specific subsystems during implementation, but reproduce the ideas behind our own contracts rather than importing the runtime wholesale.\n
+---
+
+## Claude Octopus (`nyldn/claude-octopus`)
+
+**Reviewed:** 2026-09-09  
+**Verdict:** **ADAPT / HIGH VALUE for workflow orchestration, provider diversity and quality gates**  
+**Direct runtime dependency:** **No**  
+**License:** MIT.
+
+### Current project reality
+
+The social post is already behind the upstream project. The current repository exposes a much broader surface than the quoted 29 roles / 43 skills: the README currently advertises roughly **31 specialist personas, 53 commands and 63 skills**, with support for a dozen external provider integrations alongside the Claude host. The repository has also evolved far beyond a small shell plugin into a large workflow/orchestration project with MCP integration, worktree-based parallelism, provider health checks, reaction handling, routines, cost accounting and council workflows.
+
+The project remains **Claude-centric by product design**: Claude Code is the host/orchestrator and external models are additional seats or escalation paths. That is useful as an implementation study, but it is explicitly not the architecture we want for our provider-neutral Agent OS.
+
+### What is genuinely valuable for our project
+
+#### 1. Workflow templates with explicit phase gates
+
+Claude Octopus uses a Double Diamond-inspired lifecycle:
+
+```text
+Discover -> Define -> Develop -> Deliver
+```
+
+Each phase has a distinct purpose and can have its own providers, tools and quality gates.
+
+**Adopt as a workflow-template concept, not as the universal Task state machine.**
+
+Our Task lifecycle remains provider/workflow neutral. A higher-level `WorkflowTemplate` / future `ProcedureEngine` can encode macro flows such as:
+
+```text
+Research -> Scope -> Implement -> Verify -> Deliver
+```
+
+or:
+
+```text
+Threat Model -> Implement -> Security Verify -> Human Gate
+```
+
+The workflow template may create/coordinate durable Tasks but must never replace the Task state machine or authoritative acceptance criteria.
+
+#### 2. Provider capability discovery and graceful degradation
+
+Octopus detects whether providers are available and can continue a workflow with the remaining seats when an optional provider is missing or times out.
+
+**Adopt strongly:** provider availability/capability is runtime state, not compile-time configuration.
+
+The Model/Provider layer should expose states such as:
+
+```text
+available
+missing
+degraded
+quota_exhausted
+policy_blocked
+incompatible
+```
+
+A workflow declares minimum required capabilities/quorum separately from preferred provider roster.
+
+Graceful degradation is allowed only when the workflow contract permits it. Security- or verification-critical seats may fail closed.
+
+#### 3. Provider-aware preflight before expensive dispatch
+
+Octopus performs prompt-size/provider checks and exposes projected run cost before large workflows. It also records per-provider/per-skill usage.
+
+**Adopt and generalize:** before dispatch, our system should calculate a `DispatchPreflight` containing:
+
+- eligible providers/models;
+- estimated context size;
+- provider context limits;
+- expected token/cost range where observable;
+- subscription/quota status where observable;
+- expected number of seats/attempts;
+- required tool/sandbox capabilities;
+- data/privacy destinations;
+- risk of degraded/fallback execution.
+
+Preflight estimates are evidence/estimates, never guarantees.
+
+#### 4. Multi-model council as a bounded decision primitive
+
+Octopus supports structured councils with multiple seats, styles such as adversarial/red-team, quorum, critical-veto gates, budget caps and optional implementation handoff.
+
+**Adopt as a bounded high-risk decision mechanism.**
+
+Our future `CouncilEngine` should be separate from ordinary agent chat and support:
+
+```text
+CouncilRequest
+- goal: advice | decision | plan | review | risk_assessment
+- seat requirements
+- diversity requirements
+- evidence set
+- budget
+- quorum policy
+- veto policy
+- synthesis policy
+```
+
+Councils are appropriate for architecture decisions, security review, ambiguous trade-offs and high-risk verification. They are not the default for every implementation task.
+
+#### 5. Minority-opinion preservation
+
+A valuable Octopus behavior is surfacing dissent rather than only returning a flattened majority synthesis.
+
+**Adopt strongly:** a council/synthesis result must preserve unresolved material disagreement.
+
+The result should contain:
+
+```text
+consensus findings
+minority findings
+critical objections
+uncertain claims
+evidence references
+```
+
+A synthesizer may summarize disagreement but may not silently erase it.
+
+#### 6. Critical veto beats naive majority voting
+
+Octopus has moved beyond only a scalar quality threshold by adding quorum and critical-veto concepts to council workflows.
+
+**Adopt, but make risk-driven.**
+
+Example:
+
+```text
+5 seats agree implementation is fine
+SecurityVerifier reports confirmed auth bypass
+=> FAIL / BLOCK
+```
+
+A safety/security/data-loss invariant can veto a majority when the veto is backed by the required evidence class.
+
+#### 7. Provider/vendor diversity is a first-class signal
+
+Octopus explicitly distinguishes model diversity from vendor diversity; two models from the same provider are not equivalent to independent cross-provider review.
+
+**Adopt:** `DiversityPolicy` should be able to require:
+
+- different provider families;
+- different model families;
+- different role prompts;
+- independent context construction where appropriate;
+- blinded review for selected evaluations.
+
+This prevents false confidence from several highly correlated seats.
+
+#### 8. Provider attribution in every aggregate result
+
+Octopus exposes which providers actually contributed and records provider-aware usage/cost.
+
+**Adopt strongly:** every synthesized/council/review artifact must retain seat attribution and provenance.
+
+Never present a result as “multi-model verified” if only one provider successfully contributed.
+
+#### 9. Worktree isolation for parallel implementation
+
+Octopus runs independent work packages in isolated git worktrees and gates handoff/merge.
+
+This confirms our existing worktree-per-execution direction. We keep Git/Workspace isolation in our own `WorkspaceEngine`, not inside workflow/persona code.
+
+#### 10. Reaction engine for external lifecycle events
+
+Octopus models reactions to CI failures, requested changes, stuck agents and PR lifecycle state with retry/escalation limits.
+
+**Adapt into our Event -> Procedure/Reconciler model.**
+
+Examples:
+
+```text
+CI Failed
+  -> attach evidence to Task
+  -> reopen/retry according to policy
+  -> escalate after bounded attempts
+
+Review Changes Requested
+  -> create revision attempt
+  -> preserve original review evidence
+
+No Progress Timeout
+  -> mark attempt stalled
+  -> checkpoint
+  -> reroute/escalate
+```
+
+Retries are bounded and visible. External event handling never creates an unbounded autonomous loop.
+
+#### 11. Explicit activation instead of keyword-triggered hidden delegation
+
+Current Octopus personas are selected by explicit workflows rather than automatically activating solely because a prompt contains a keyword.
+
+**Adopt principle:** important role/workflow activation must be explainable and policy-driven. Keyword matching can be a suggestion signal, not hidden authority to launch expensive or privileged agents.
+
+#### 12. MCP/IDE seam is thin
+
+Octopus' IDE integration uses an MCP server over stdio and calls the existing orchestration core using argument-safe process execution rather than duplicating workflow behavior in the IDE adapter.
+
+**Adopt the seam principle:** UI/IDE/MCP adapters are control surfaces. They do not own orchestration semantics.
+
+### Important weaknesses / things we should not copy
+
+#### 1. Claude as the architectural center
+
+The host Claude is ultimately the coordinator/synthesizer in the primary product model.
+
+**Reject for our core.** Our durable Task/Planner/Reconciler/Context state is authoritative; Claude, Codex, Muse, OpenCode, Gemini or future agents are replaceable execution seats.
+
+#### 2. Fixed 75% consensus / quality threshold as a universal rule
+
+A scalar threshold is easy to understand but too crude for security, architecture and deterministic software verification.
+
+**Reject as a universal completion rule.**
+
+Use typed gates:
+
+- deterministic tests;
+- required verifier classes;
+- quorum where appropriate;
+- evidence-backed critical veto;
+- risk policy;
+- human approval where required.
+
+#### 3. Large persona/skill catalog as core complexity
+
+31+ personas and 60+ skills are useful UX/workflow assets but can become prompt/configuration sprawl.
+
+**Do not hard-code dozens of personas into the domain.**
+
+Our role model stays data-driven and versioned:
+
+```text
+RoleProfile
+- capabilities
+- responsibilities
+- deliverables
+- success metrics
+- allowed tools
+- risk constraints
+- handoff/escalation rules
+```
+
+Role packs/skills belong above the core contracts and can be installed/versioned independently.
+
+#### 4. Shell-heavy orchestration as our runtime architecture
+
+Octopus retains a Bash orchestration core with TypeScript/MCP wrappers. It uses safer process invocation patterns in the IDE seam, but this is not suitable as our long-lived system architecture.
+
+**Reject implementation approach:** our orchestration/runtime stays Rust with typed contracts, durable state, Policy Engine and explicit process adapters.
+
+#### 5. External CLI responses classified as low-risk by default
+
+The published Octopus threat model labels external CLI responses as relatively low risk. For our product, any provider output, repository content, web result or tool-produced content is untrusted data until validated for its use.
+
+**Reject the low-trust assumption.** Provider output can contain prompt injection, unsafe commands, hallucinated claims or malicious content derived from repository/web inputs.
+
+#### 6. Gate delivery must be verifiably installed/enforced
+
+A historical Octopus issue showed Marketplace packaging could strip a hooks manifest and silently disable many quality gates. This is a critical architectural lesson.
+
+**Adopt the lesson:** security/quality controls must expose runtime attestation/health, not exist only as configuration files.
+
+The system should be able to answer:
+
+```text
+Is policy gate X installed?
+Was it executed for Attempt Y?
+Which version ran?
+What evidence/result did it produce?
+```
+
+A configured-but-not-executed gate is not evidence.
+
+### Resulting architecture updates
+
+Add or formalize these provider-neutral concepts:
+
+- `WorkflowTemplatePort` / future `ProcedureEngine` macro workflows;
+- `DispatchPreflight`;
+- `CouncilEnginePort`;
+- `CouncilPolicy` with quorum/diversity/critical-veto rules;
+- `DiversityPolicy`;
+- `ProviderContribution` / seat attribution;
+- `GateAttestation` / enforcement health;
+- bounded `ReactionPolicy` integrated through Event Journal/Reconciler;
+- data-driven `RoleProfile` and independently versioned skill/workflow packs.
+
+### Priority
+
+- **P0/P1:** provider capability state, preflight, contribution provenance, gate attestation, worktree/reaction semantics.
+- **P1/P2:** workflow templates, role profiles, council/quorum/diversity infrastructure.
+- **P2:** marketplace-grade role/skill packs and sophisticated multi-model deliberation UX.
+
+---
+
+## vakra-dev/reader — web acquisition and browser infrastructure for LLMs
+
+**Repository:** https://github.com/vakra-dev/reader  
+**Reviewed:** 2026-09-09  
+**Language:** TypeScript; includes a Rust-based HTML-to-Markdown dependency (`@vakra-dev/supermarkdown`)  
+**License:** Apache-2.0  
+**Decision:** **ADAPT / HIGH VALUE for web acquisition architecture; do not use as a core dependency.**
+
+### What the current repository actually is
+
+The current Reader release (`0.3.x` at review time) is a Playwright-based web acquisition stack exposing three main primitives:
+
+1. scrape known URLs into Markdown/HTML;
+2. crawl/discover pages with bounded depth/page count;
+3. create browser sessions reachable through CDP for Playwright/Puppeteer control.
+
+Its current `package.json` depends on `playwright-core`, `fingerprint-generator`, `fingerprint-injector`, `proxy-chain`, `undici` and `@vakra-dev/supermarkdown`. It does **not** depend on Ulixee Hero. The social post saying Reader "is part of Ulixee Hero" is therefore not accurate for the current repository; it may reflect an earlier implementation or confusion with related anti-detection projects.
+
+Reader's own README describes browser pooling, anti-detection/fingerprint behavior, main-content cleaning, proxy tiers, retries/timeouts, crawl limits and daemon mode. The repository currently exposes typed errors, `robots.txt` checks, proxy health/gating and browser health/recycling.
+
+### ADOPT / ADAPT
+
+#### A. Separate acquisition from interpretation
+
+Strongly adopt the architectural separation:
+
+```text
+web acquisition -> immutable raw artifact -> Resource Engine -> Context Engine
+```
+
+The browser/fetcher must never become the Context Engine.
+
+#### B. Three different capabilities, not one giant browser API
+
+Adapt Reader's product primitives into provider-neutral ports:
+
+- `WebFetchPort` — fetch a known resource;
+- `CrawlPort` — bounded discovery;
+- `BrowserAutomationPort` — stateful rendered interaction.
+
+This makes simple HTTP fetching possible without booting a browser and keeps interactive browser semantics out of resource/context code.
+
+#### C. Warm browser runtime with health and recycling
+
+Reader's browser pool tracks active/pending tabs, browser health, page counts and idle time, then proactively recycles unhealthy/old processes. This is useful for a future local/remote browser worker.
+
+Adopt the lifecycle concept, not the TypeScript implementation.
+
+#### D. Explicit extraction representations and graceful fallback
+
+Reader keeps raw HTML and produces cleaned HTML/Markdown; its Markdown converter has a fallback to plain text when conversion fails. Adopt resilience but record the representation quality (`Structured`, `Degraded`, etc.). A fallback is not equivalent to a successful structural extraction.
+
+#### E. Typed retryability and health-aware execution
+
+Reader classifies errors and treats some as non-retryable; it also separates proxy selection/health from the scrape operation. Generalize this into a typed retry policy governed by Policy/Procedure/Reconciler rather than burying retries inside browser adapters.
+
+#### F. Provenance-rich web snapshots
+
+Store exact fetched snapshots/resources with URL/final URL/timestamp/content hash/backend/profile/freshness. This supports context replay and prevents "the web changed" from making historical agent runs irreproducible.
+
+### SECURITY / ARCHITECTURE IMPROVEMENTS OVER READER
+
+#### 1. Central SSRF/network policy must be stronger than URL validation
+
+Reader validates URL syntax and checks `robots.txt`, but our future product may run inside user networks, cloud workers and authenticated sessions. We therefore require policy checks on DNS resolution and every redirect hop, including private/loopback/link-local ranges and organization allow/deny rules.
+
+#### 2. Clean Markdown is still prompt-injection-capable
+
+Reader's "LLM-ready Markdown" is an output format, not a trust boundary. Our Resource/Context engines retain `UNTRUSTED` provenance for HTML, Markdown, DOM, accessibility trees and page text.
+
+#### 3. Browser needs stronger isolation than ordinary resource parsing
+
+A browser session can execute hostile JavaScript, persist cookies and reach networks. It should run in a scoped browser worker/container/VM where policy requires, without host credentials or unrelated filesystem access.
+
+#### 4. Stealth/anti-detection is optional
+
+Do not make bypass/stealth a product invariant. Model it as an optional adapter capability controlled by user/org policy. Retrying through alternate fingerprint/proxy profiles must remain bounded and cannot override explicit policy/access restrictions.
+
+#### 5. Credentials never live in task/config text
+
+Proxy passwords, browser cookies and authenticated-site credentials are `secret_ref`s resolved by Secret Broker. Logs/audit use redacted identifiers.
+
+### REJECT
+
+- hard dependency on Playwright/Chromium in core `agentd` domain crates;
+- exposing CDP/Playwright objects through domain interfaces;
+- treating cleaned Markdown as trusted/model instructions;
+- silent extraction fallback with no quality signal;
+- blind retry/proxy escalation after policy or explicit access denial;
+- putting proxy/site credentials in normal task/config/event payloads;
+- making anti-bot bypass a core product promise.
+
+### License / dependency decision
+
+Reader itself is Apache-2.0, which is permissive for commercial use with its conditions. We still do not need to copy the implementation: the important value is its runtime patterns. Any future browser/formatter dependency must receive its own license/security/supply-chain review.
+
+### Priority
+
+- **P0:** network/SSRF policy and untrusted-web-content architecture.
+- **P1:** acquisition ports + web snapshot/result contracts + Resource Engine integration.
+- **P2:** browser pool/worker, crawl capability, remote browser, proxy/stealth adapters.
+
+
+---
+
+## automata/aicodeguide — AI Code Guide
+
+**Verdict:** ADAPT / HIGH METHODOLOGY VALUE; no runtime dependency.
+
+**Repository type:** documentation/roadmap rather than an agent runtime. MIT licensed. At review time GitHub showed ~2.7k stars.
+
+### What is genuinely useful
+
+1. **Plan/spec before implementation.** The guide recommends turning a product idea into a PRD/specification, then a dependency-aware task plan, and only then coding. This strongly matches our durable Task/Planner architecture.
+2. **Task-level rather than project-level execution.** The recommendation to give an AI a bounded feature/ticket instead of "build the whole app" directly supports our atomic execution model.
+3. **AGENTS.md as agent bootstrap.** This matches our compact agent instructions + progressive architecture map approach.
+4. **Engine/mechanism vs policy separation.** The guide explicitly recommends keeping engine code apart from policy code. This is highly aligned with our Ports & Adapters and replaceability goal.
+5. **Testing/TDD/property-based testing.** Particularly useful for state machines, policies, parsers, context/resource handling and other edge-case-heavy subsystems.
+6. **Multi-model validation.** Already present in our Council/Adaptive Router design; the guide reinforces it as a practical development workflow.
+7. **Design-intent history.** Keeping a record of why decisions were made is useful, but we adapt this into structured Decisions/ADRs/Event Journal rather than raw Git-tracked transcripts.
+
+### ADOPT
+
+- specification before implementation;
+- small dependency-aware tasks;
+- explicit project-wide agent rules/bootstrap docs;
+- engine/mechanism vs policy separation;
+- independent verification for AI-generated code;
+- property-based tests as a first-class option;
+- feature/task-level context rather than project-level free-form prompts;
+- multi-model review when it improves evidence diversity.
+
+### ADAPT
+
+#### PRD → layered specifications
+
+Do not use one monolithic PRD as product requirements + architecture + implementation status. Split product intent, requirements, architecture constraints/ADRs, versioned ChangeSpecs, Task DAG and verification evidence.
+
+#### Prompt log → structured design-intent journal
+
+Raw conversations are useful debugging/history but unsafe and noisy as authoritative version-controlled artifacts. Persist material outcomes as Decisions/ADRs/spec revisions with provenance. Keep raw transcript retention local/configurable.
+
+#### TDD → risk-based verification
+
+Use TDD where interfaces/behavior are clear, but do not force every work type into test-first ceremony. Always require verification appropriate to task risk. Add property/model-based/fuzz/contract/security testing where stronger.
+
+#### Project rules → canonical policy + provider renderers
+
+`AGENTS.md`, `CLAUDE.md`, Cursor rules, etc. should be generated/rendered compatibility surfaces from canonical rules, with hashes/drift detection, rather than multiple independently maintained authorities.
+
+### REJECT / DO NOT GENERALIZE
+
+- blindly pack an entire large repository into context via repomix/files-to-prompt as the default; use our Resource/Context Engine JIT retrieval instead;
+- put raw complete LLM/prompt histories in Git by default;
+- treat a generated PRD or TODO Markdown checklist as durable execution state;
+- allow implementation agents to modify tests/acceptance criteria until their code "passes" without independent test-integrity review;
+- provider-specific rules as independent sources of truth;
+- YOLO/dangerously-skip-permissions workflows as a product default;
+- assume "more prompt detail" can replace runtime policy, sandboxing, verification or typed contracts.
+
+### Architectural additions derived from this review
+
+- versioned `ChangeSpec` between requirements and tasks;
+- requirement → task → acceptance → evaluation/evidence traceability;
+- structured Design Intent / Decision Journal;
+- explicit Test Mutation Policy + Test Integrity checks;
+- stronger mechanism/policy separation contracts;
+- canonical project-rule source rendered to provider-specific agent files;
+- full-repository packing demoted to explicit bounded fallback.
+
+### License / dependency decision
+
+MIT is permissive, but there is little reason to copy code: the value is methodological. Cite/inspire from the workflow ideas, implement our own contracts and execution semantics.
+
+### Priority
+
+- **P0:** spec/task/evidence traceability + Test Integrity + mechanism/policy boundaries.
+- **P1:** ChangeSpec and structured design-intent/decision trail + provider rule renderers.
+- **P2:** development-process analytics comparing planning/verification strategies across agents/models.
+
+---
+
+## getomni-ai/zerox — multimodal OCR and document extraction
+
+**Verdict:** ADAPT / HIGH VALUE for Document Ingestion and Resource Engine; do not use as a privileged in-process dependency.
+
+**Repository status at review:** ~12.3k GitHub stars, ~450 commits, MIT license. Node and Python implementations exist, but feature parity differs.
+
+### What the project actually does
+
+Zerox converts documents/pages to images, sends page images to a vision model, asks for Markdown, then aggregates page results. It supports multiple document families through PDF/image conversion and supports structured extraction using JSON Schema in the Node implementation. It exposes concurrency, page selection, retries, orientation/edge processing and an optional `maintainFormat` mode that serializes page processing by passing previous-page output into the next page context.
+
+### ADOPT
+
+- page/unit-level document processing rather than a single monolithic prompt;
+- multiple provider/model capability for vision extraction;
+- per-page metadata and aggregation;
+- separate structured extraction contract using JSON Schema;
+- ability to use a different model for OCR vs structured extraction;
+- page selection and bounded concurrency;
+- explicit failure accounting instead of pretending all pages succeeded;
+- cross-page continuity as a real concern for tables/layout;
+- benchmark-driven comparison of OCR/extraction strategies.
+
+### ADAPT
+
+#### Vision-first OCR → strategy-based document ingestion
+
+Do not rasterize everything. Prefer native structural extraction for born-digital Office/HTML/XML/spreadsheet sources when it preserves more semantics. Use PDF text/layout extraction where reliable, targeted visual extraction for figures/tables, and vision OCR for scanned/visual/degraded cases.
+
+#### `maintainFormat` → bounded carry-state
+
+Zerox passes the previous page Markdown into the next request to improve continuity. Our version creates a small explicit `CarryState` for open tables/sections/continuations so context size does not grow and continuity can be inspected/rebuilt.
+
+#### structured extraction → evidence-bearing extraction
+
+JSON Schema is retained at the model/tool boundary, but extracted fields carry page/region/source provenance and confidence. High-risk fields can require independent validation/review.
+
+#### temp files → owned job workspaces
+
+Zerox exposes configurable temporary directories and documents behavior that can clear existing contents. Our implementation only deletes unique application-owned job directories under a controlled runtime root.
+
+#### long documents → durable jobs
+
+An open issue reports timeouts while processing a 500+ page PDF. Our document pipeline persists page/unit results and resumes incomplete work instead of repeating an entire document after a late failure.
+
+### Security finding that materially affects our design
+
+A 2026 open issue reports OS command injection through a document URL-derived file extension reaching Poppler shell execution; CVE-2026-85672 describes affected Zerox 1.1.20 and rates it critical. Whether/when upstream remediation lands does not change our architectural lesson:
+
+- converters must run in an isolated worker;
+- URL acquisition happens through centralized SSRF/network policy;
+- filenames/extensions/MIME claims are untrusted metadata;
+- never construct shell strings from resource metadata;
+- use fixed executable + argument arrays;
+- sandbox and resource-limit native document parsers/renderers.
+
+The repository issue list also includes a SheetJS dependency vulnerability report, reinforcing that document-format dependencies require normal supply-chain/security scanning.
+
+### REJECT
+
+- vision rasterization as the universal canonical parser;
+- embedding LibreOffice/Poppler/Ghostscript invocation directly into Resource/Context business logic;
+- arbitrary remote URL fetching from a document parser;
+- shell-based converter commands containing user-controlled path/extension data;
+- deleting arbitrary caller-provided temp-directory contents;
+- treating Markdown returned by a vision model as ground truth;
+- accepting schema-valid extraction as factual verification;
+- all-or-nothing processing for large documents;
+- silently dropping failed pages under best-effort mode;
+- hard-coding current provider/model lists into document domain types.
+
+### Product opportunity
+
+A future Document Inspector can make processing observable:
+
+```text
+contract.pdf
+├── Native structure      available
+├── Page images           12
+├── Markdown              VisionExtracted / 94% quality
+├── Tables                3 extracted
+├── Structured fields     18/20 verified
+├── External transfer     Gemini: pages 3,7,8
+└── Provenance            inspectable per field/page
+```
+
+This aligns strongly with our privacy/trust positioning: users can see not just the answer, but **how a document became model context and what left the device**.
+
+### Priority
+
+- **P0:** sandboxed document worker + command/path/temp/SSRF safety.
+- **P1:** native-first ingestion strategy, page-level durable jobs, representation/provenance contracts, schema extraction.
+- **P2:** adaptive strategy benchmarks, local VLM route, region/table/figure-specific extraction and high-quality document inspector UI.
+
+
+## Shannon — KeygraphHQ/shannon
+
+**Repository:** `KeygraphHQ/shannon`  
+**Verdict:** **ADAPT / VERY HIGH VALUE for Security Verification, evidence-backed gates and durable security workflows**  
+**Direct dependency:** **REJECT for core**  
+**License note:** current open-source repository is **AGPL-3.0**; do not copy/link its implementation into our proprietary core without deliberate license review/commercial terms.
+
+### Current reality vs the shared post
+
+The post is materially outdated in a few places:
+
+- Shannon 3.0 launched on 2026-09-02 and the project reports more than ~47K GitHub stars, not 15.7K.
+- The current implementation is provider-agnostic across Anthropic/OpenAI/xAI/AWS Bedrock plus compatible gateways/local endpoints; it is no longer fundamentally Claude-only.
+- Current latest Shannon supports ChatGPT Plus/Pro via Codex subscription integration; current latest does **not** support Claude Code subscription, while v1.9.0 was the final Claude Agent SDK-based release that did.
+- Shannon 3.0 adds a multi-stage code-analysis pipeline, resumable workspaces, CI/CD integrations, SARIF, reconciliation/deduplication and stronger reporting/reliability.
+
+### Architecture worth studying
+
+Current Shannon runs a source-aware security pipeline roughly as:
+
+```text
+Source code ──► Recon + vulnerability analysis ─┐
+                                                ├─► Reconcile/deduplicate ─► Exploit queue
+Source code ──► Security code analysis ─────────┘
+Running app ───────────────────────────────────────────────► Exploitation
+                                                             │
+                                                exploit proven?
+                                                    │ yes         │ no
+                                                    ▼             ▼
+                                                report/evidence  discard as pentest finding
+```
+
+Its implementation also demonstrates several good production patterns:
+
+- ephemeral Docker worker per scan;
+- repository mounted read-only;
+- per-run workspace/state/logs/artifacts;
+- resumability/checkpointing;
+- URL/target binding on resume to prevent cross-target contamination;
+- Temporal orchestration with thin activities and Temporal-agnostic business services;
+- parallel category-specific analysis/exploitation with bounded concurrency;
+- configuration validated by schema;
+- rules of engagement / scope controls;
+- evidence-backed findings and reproducible PoCs;
+- final reconciliation/deduplication;
+- SARIF/JSON/PDF/Markdown outputs;
+- CI gates that distinguish exploit-confirmed findings from analysis hypotheses.
+
+### ADOPT
+
+#### 1. Proof/evidence-backed security findings
+
+A security conclusion should carry runtime/source evidence, not only LLM prose. Proven dynamic vulnerabilities link to exact target/build/repository state, request/response/browser/tool receipts and reproduction artifacts.
+
+#### 2. Separate analysis from exploitation
+
+Use static/structural analysis and runtime recon to generate/prioritize hypotheses, then use a distinct exploit-verification stage where policy permits.
+
+#### 3. Reconciliation/deduplication before expensive exploitation
+
+Merge candidates from independent analysis paths, preserve provenance/conflicts, and avoid duplicate destructive testing.
+
+#### 4. Durable, resumable security workflow
+
+Security scans are long-running. Checkpoint stage/agent progress and resume only when target/input fingerprints still match.
+
+#### 5. Read-only repository + ephemeral security worker
+
+A pentest worker should not need to mutate the scanned repository. Dynamic security activity belongs in an isolated worker against an authorized disposable/local/staging target.
+
+#### 6. Target binding on resume
+
+The workspace/checkpoint is bound to normalized target identity and relevant repository/build revision. Target mismatch fails closed rather than reusing stale attack state.
+
+#### 7. Typed scope / Rules of Engagement
+
+Shannon supports configuration such as focus/avoid rules, login flow and request limits. Our version promotes enforceable parts into typed Policy Engine rules instead of leaving them only in free-form prompt text.
+
+#### 8. Standardized downstream security outputs
+
+Support SARIF as an adapter so evidence-backed findings integrate with GitHub/GitLab/security tooling without making SARIF our domain model.
+
+#### 9. Orchestration/business-logic boundary
+
+Shannon's Temporal activities delegate to Temporal-agnostic services. We adopt this boundary so our security procedures can later run on our Rust procedure engine, Temporal/cloud or another durable workflow engine without rewriting security business logic.
+
+### ADAPT
+
+#### “No exploit, no report” → two-channel finding model
+
+For pentest reports Shannon discards candidates it cannot exploit. That is excellent for reducing speculative noise but too lossy as our universal security model.
+
+Our design keeps:
+
+- `AnalyticalRisk` / unproven static finding;
+- `ProvenExploit` / live validated finding.
+
+Default CI gates can treat them differently. This preserves potentially serious but environment-dependent/static risks while maintaining a high-confidence exploit channel.
+
+#### Free-form Rules of Engagement → executable policy
+
+Human prose remains useful for intent, but rate limits, origins, paths, forbidden destructive operations, credentials and external callbacks become machine-enforceable policy.
+
+#### One model per run → Adaptive Model Router
+
+Shannon 2.x/3.x uses a unified selected model setting through a scan. Our architecture keeps security roles/model needs independent so different providers/models can be chosen per stage or for independent review.
+
+#### Temporal → replaceable workflow adapter
+
+Temporal is a proven option for durable security workflows, but our local v1 does not need to adopt it. The domain depends on workflow ports/contracts only.
+
+#### Parallel vuln/exploit agents → interference-aware scheduling
+
+Parallelism is allowed only when sessions/data/rate limits/destructive actions cannot interfere with each other.
+
+### REJECT
+
+- copying AGPL Shannon implementation into proprietary core without an explicit licensing decision;
+- treating inability to exploit as proof of absence of risk;
+- allowing exploit mode against production by default;
+- storing Rules of Engagement only as free-form prompt text when constraints must be enforced;
+- binding Security Verification domain semantics to Temporal, Docker, Playwright, Pi harness, Claude or any current provider;
+- treating an LLM-generated report as sufficient evidence;
+- resuming a security workflow against a different target/environment without explicit re-binding/new run;
+- conflating `scan incomplete`, `scan clean`, `risk found`, and `exploit proven` into one success/failure bit;
+- automatically running destructive security actions simply because an AI categorized a hypothesis as high severity.
+
+### Product opportunity
+
+This repository strengthens a potentially major differentiator for our product: **Verified Delivery can include exploit-backed security verification before merge/release**.
+
+Possible UI:
+
+```text
+SECURITY GATE — release/1.8
+
+Target            staging-42
+Repository        commit a73f...
+Status            COMPLETE
+
+Proven exploits   0
+Analytical risks  3
+Blocked checks    0
+
+Injection         PASS — exploit attempted
+XSS               PASS — exploit attempted
+Authorization     2 analytical risks, not reproduced
+SSRF              PASS — constrained probe
+
+Evidence          27 artifacts / receipts
+SARIF             available
+Human review      required for 1 high analytical risk
+```
+
+This fits our broader product thesis: agents do not decide that work is “done”; independent deterministic/agentic evaluators produce inspectable evidence.
+
+### Priority
+
+- **P0:** finding/evidence lifecycle, security runner authorization/isolation, typed Rules of Engagement, target fingerprint binding.
+- **P1:** reconciliation, resumable exploit procedures, SARIF, CI/release gate integration, evidence browser.
+- **P2:** source-informed attack graph, continuous security routines, automated fix→retest loop, enterprise governance/integrations.

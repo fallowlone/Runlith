@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package ai_engineering_os.ipc;
+
+// Bootstrap control-plane contract between local clients (Tauri host,
+// agentctl) and agentd. G1: handshake, ping, shutdown only (protocol 0).
+// G2 (ADR-0021): the v1 business envelope `task_core = 4` carries the
+// bounded `task_core.proto` contract; it is valid only on sessions that
+// negotiated protocol version 1. Field numbers 1-3 are frozen G1 history
+// and are never renumbered.
+import "task_core.proto";
+
+// A single inbound control message from a local client to agentd.
+message ControlRequest {
+  oneof payload {
+    HandshakeRequest handshake = 1;
+    PingRequest ping = 2;
+    ShutdownRequest shutdown = 3;
+    // G2 business request. Valid only on protocol-v1 sessions; a v0
+    // session rejects it as unsupported for the negotiated protocol.
+    TaskCoreRequest task_core = 4;
+  }
+}
+
+// A single outbound control message from agentd to a local client.
+message ControlResponse {
+  oneof payload {
+    HandshakeResponse handshake = 1;
+    PingResponse ping = 2;
+    ShutdownResponse shutdown = 3;
+    // G2 business response. Valid only on protocol-v1 sessions.
+    TaskCoreResponse task_core = 4;
+  }
+}
+
+// First application-level exchange on a new IPC connection.
+// client_kind is descriptive metadata only, never authentication.
+message HandshakeRequest {
+  // Protocol versions the client can speak, for negotiation.
+  repeated uint32 supported_protocol_versions = 1;
+  // Descriptive client identity, e.g. "tauri-host" or "agentctl".
+  string client_kind = 2;
+  // Client application build version (diagnostic metadata, not protocol).
+  string client_build_version = 3;
+  // Optional control-protocol features under negotiation (open vocabulary).
+  repeated string requested_capabilities = 4;
+}
+
+// Explicit accept/reject outcome for a handshake attempt.
+message HandshakeResponse {
+  oneof outcome {
+    HandshakeAccepted accepted = 1;
+    HandshakeRejected rejected = 2;
+  }
+}
+
+// Successful negotiation: the version to use plus daemon metadata.
+message HandshakeAccepted {
+  // The single protocol version both sides will use.
+  uint32 selected_protocol_version = 1;
+  // Daemon application build version (diagnostic, not compatibility).
+  string daemon_build_version = 2;
+  // Negotiated subset of the requested capabilities.
+  repeated string accepted_capabilities = 3;
+}
+
+// Failed negotiation: diagnostic reason plus versions the daemon speaks,
+// so a wrong-version peer can report and adapt observably.
+message HandshakeRejected {
+  // Human- and log-readable diagnostic; not domain authority.
+  string reason = 1;
+  repeated uint32 daemon_supported_protocol_versions = 2;
+}
+
+// Minimal liveness probe. Proves control-channel responsiveness only.
+message PingRequest {}
+
+// Minimal liveness reply. Carries no state, metrics, or timestamps.
+message PingResponse {}
+
+// Request daemon shutdown. No options: authorization and lifecycle
+// behavior belong to later implementation/security design.
+message ShutdownRequest {}
+
+// Acknowledgement of a shutdown request. Not a guarantee about
+// shutdown timing or process teardown semantics.
+message ShutdownResponse {}

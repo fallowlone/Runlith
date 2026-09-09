@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Domain Event envelope",
+  "description": "Machine-readable Domain Event envelope contract: stable metadata shared by persistent domain-event records (docs/architecture/events.md). Envelope baseline only: no enforced event taxonomy, no payload taxonomy, no persistence encoding, no ordering or provenance envelope. The canonical G2 mutation taxonomy (ADR-0021, events.md section 4.1) is listed as event_type examples: nine lifecycle types plus project.created, task.created, task.dependency_added.",
+  "$comment": "Persisted-fact envelope, not RPC: the schema describes committed facts and contains no execution-request fields. Schema-valid JSON != authoritative event: a model/provider cannot mint domain history by matching this shape; only trusted validated application services commit Event Journal facts. SECRET values must not enter journal payloads (INV-008); JSON Schema cannot prove data classification from arbitrary strings, so no fake regex security is attempted here — enforcement is Policy/application responsibility. additionalProperties is intentionally permissive so future domain-specific event data can extend this baseline once taxonomy is decided. event_type stays an open string (no enum) so the envelope never becomes a closed registry; the examples array records the canonical G2 names without enforcing them. This schema selects no Event Journal serialization encoding and introduces no Event Sourcing. See docs/architecture/events.md for semantics.",
+  "type": "object",
+  "required": ["event_type", "schema_version", "occurred_at", "correlation_id", "causation_id"],
+  "properties": {
+    "event_type": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Typed event identity as non-empty string. Open vocabulary (no enum): exact naming convention for future types remains open, but the canonical G2 mutation names in examples are stable. Typed Agent Bus names and provider-specific types must not be read in here.",
+      "examples": [
+        "task.marked_ready",
+        "task.claimed",
+        "task.started",
+        "task.blocked",
+        "task.submitted",
+        "task.routed_to_review",
+        "task.verification_began",
+        "task.verification_succeeded",
+        "task.verification_failed",
+        "project.created",
+        "task.created",
+        "task.dependency_added"
+      ]
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Event-record schema version. Distinct from application build version, IPC protocol version, and provider version. No upcasting or deprecation policy is defined here."
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Serialized timestamp representation only. Clock source, precision, monotonic ordering, and generation origin remain open implementation items."
+    },
+    "correlation_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Identifier of the larger operation/workflow/execution chain this fact belongs to. Format remains open; correlation != causation."
+    },
+    "causation_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Identifier of the prior action/event/request that directly caused this fact. Format remains open; causation != correlation."
+    }
+  },
+  "additionalProperties": true
+}

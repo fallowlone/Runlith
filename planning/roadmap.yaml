@@ -1,0 +1,108 @@
+# Canonical development roadmap: gate sequence / macro plan.
+# Authority: Architecture / ADRs / invariants > roadmap > task queue.
+# The roadmap never overrides architecture; on disagreement, architecture wins.
+# Gate progression follows exit criteria, never calendar dates.
+# NOTE: status values below (in_progress / blocked / planned) are
+# planning-document metadata only. They are NOT Task.status lifecycle
+# states (see docs/architecture/task-engine.md) and change nothing there.
+# Near-term work lives in planning/tasks/queue.yaml, not here.
+
+schema_version: 1
+current_gate: G2
+task_queue: planning/tasks/queue.yaml
+
+gates:
+  - id: G0
+    name: Architecture Freeze
+    status: completed
+    objective: Freeze architecture before production implementation.
+    exit_criteria_ref: docs/development/G0_AUDIT.md
+    scope_ref: AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
+
+  - id: G1
+    name: Tauri <-> agentd
+    status: completed
+    objective: Local control channel only (start, handshake, ping, version
+      negotiation, reconnect, shutdown) plus the six failure-matrix tests.
+    scope_ref: docs/architecture/ipc.md
+
+  - id: G2
+    name: Task Core
+    status: in_progress
+    objective: Project, Task, Dependency, state machine, SQLite, Event
+      Journal, agentctl. No AI.
+    scope_ref:
+      - docs/architecture/task-engine.md
+      - docs/architecture/events.md
+
+  - id: G3
+    name: FakeAgent Runtime
+    status: planned
+    objective: Full Task -> Scheduler -> FakeAgent -> Submit -> Verify flow.
+    scope_ref: docs/architecture/fake-agent.md
+
+  - id: G4
+    name: Workspace/Git
+    status: planned
+    objective: Worktrees, branches, diff, cleanup, failure modes.
+    scope_ref: docs/architecture/adr/ADR-0008-worktree-isolation.md
+
+  - id: G5
+    name: First real provider
+    status: planned
+    objective: One provider passes the AgentProvider contract; the second
+      must add cleanly without core changes.
+    scope_ref: docs/architecture/providers.md
+
+  - id: G6
+    name: Security
+    status: planned
+    objective: Policy Engine, approvals, Secret Broker, audit, runner
+      security levels.
+    scope_ref: docs/architecture/adr/ADR-0013-policy-engine-os-isolation.md
+
+  - id: G7
+    name: Multi-agent DAG + bounded adaptive planning
+    status: planned
+    objective: Planner/Worker/Reviewer with typed messages, versioned plan
+      revisions, PlannerPort, atomicity proposals, recursion guardrails.
+    scope_ref: AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
+
+  - id: G8
+    name: Verification
+    status: planned
+    objective: Tests/review/security/acceptance pipeline.
+    scope_ref: AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
+
+  - id: G9
+    name: Context Engine + Continuity
+    status: planned
+    objective: Retrieval, token budget, context plans, epochs, checkpoints,
+      history search.
+    scope_ref:
+      - docs/architecture/adr/ADR-0010-context-derived-state.md
+      - docs/architecture/adr/ADR-0011-provider-independent-context-continuity.md
+
+  - id: G10
+    name: Memory Engine
+    status: planned
+    objective: Structured memory with provenance and lifecycle.
+    scope_ref: docs/architecture/adr/ADR-0012-structured-memory-provenance.md
+
+  - id: G11
+    name: Background daemon
+    status: planned
+    objective: Authorized work continues with UI closed.
+    scope_ref: AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
+
+  - id: G12
+    name: Remote Worker
+    status: planned
+    objective: Device identity, outbound worker connection, remote execution.
+    scope_ref: AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
+
+  - id: G13
+    name: Cloud/Team
+    status: planned
+    objective: Account, billing, encrypted sync, teams, org policies.
+    scope_ref: AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md

@@ -1,0 +1,20 @@
+[package]
+name = "agentctl"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "agentctl"
+path = "src/main.rs"
+
+[dependencies]
+bytes = "1"
+ipc-contracts = { path = "../../crates/ipc-contracts" }
+ipc-control = { path = "../../crates/ipc-control" }
+ipc-transport = { path = "../../crates/ipc-transport" }
+prost = "0.14.4"
+tokio = { version = "~1.51", features = ["macros", "rt", "net", "time"] }
+
+[dev-dependencies]
+agentd = { path = "../agentd" }
+tokio = { version = "~1.51", features = ["macros", "rt", "net", "time"] }
