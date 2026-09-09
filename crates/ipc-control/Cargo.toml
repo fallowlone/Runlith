@@ -11,6 +11,7 @@ path = "src/lib.rs"
 bytes = "1"
 ipc-contracts = { path = "../ipc-contracts" }
 ipc-transport = { path = "../ipc-transport" }
+product-version = { path = "../product-version" }
 prost = "0.14.4"
 tokio = { version = "~1.51", features = ["time"] }
 

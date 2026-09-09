@@ -8,5 +8,6 @@ members = [
     "crates/task",
     "crates/app-services",
     "adapters/storage-sqlite",
+    "crates/product-version",
 ]
 resolver = "2"

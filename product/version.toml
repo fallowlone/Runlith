@@ -1,0 +1,10 @@
+# Canonical product-version identity (TASK-0029).
+# Authority: docs/development/VERSIONING.md.
+# semver: public release line (explicit release decisions only).
+# development: per-task identity, advanced by every completed task.
+# task: canonical task responsible for the current repository state.
+# gate: current development gate.
+semver = "0.1.0"
+development = "0.1.0-dev.task0029"
+task = "TASK-0029"
+gate = "G2"

@@ -437,3 +437,12 @@ When a task touches pentesting, SAST/AppSec, exploit validation, security scanni
 - do not use the system to scan or exploit targets that are outside the explicitly authorized project/test scope.
 
 If a change alters target authorization, exploit permissions, Rules of Engagement semantics, security finding states, proof/evidence requirements, release-gate policy or destructive security-runner capabilities, treat it as security-critical: require an ADR/policy review, adversarial tests and explicit approval before implementation.
+
+## 26. Product version
+
+`product/version.toml` is the single source of product-version
+identity (policy: `docs/development/VERSIONING.md`). Every completed
+task updates it (`development = "<semver>-dev.taskNNNN"`,
+`task = "TASK-NNNN"`, current `gate`); public SemVer moves only on an
+explicit release decision. Do not independently bump public SemVer,
+protocol versions, or Cargo package versions.

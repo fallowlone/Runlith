@@ -176,18 +176,21 @@ impl ServerConfig {
     }
 }
 
-/// Default daemon build version from package metadata. Preferred wiring is
-/// `agentd`'s own version via [`ServerConfig`]; this helper covers tests and
-/// early integration.
+/// Default daemon build version: the canonical product development
+/// identity (`product/version.toml`), e.g. `0.1.0-dev.task0029`.
+/// Diagnostic metadata only — never protocol compatibility. Preferred
+/// wiring is `agentd`'s own version via [`ServerConfig`]; this helper
+/// covers tests and early integration.
 #[must_use]
 pub fn default_daemon_build_version() -> String {
-    env!("CARGO_PKG_VERSION").to_owned()
+    product_version::development_version().to_owned()
 }
 
-/// Default client build version from package metadata.
+/// Default client build version: the canonical product development
+/// identity, same rule as the daemon side.
 #[must_use]
 pub fn default_client_build_version() -> String {
-    env!("CARGO_PKG_VERSION").to_owned()
+    product_version::development_version().to_owned()
 }
 
 #[cfg(test)]
@@ -285,6 +288,18 @@ mod tests {
         assert!(!is_business_allowed(0));
         assert!(is_business_allowed(1));
         assert!(!is_business_allowed(99));
+    }
+
+    #[test]
+    fn build_versions_report_canonical_development_identity() {
+        // Both sides report the single canonical product identity from
+        // product/version.toml — never diverging package versions.
+        assert_eq!(default_daemon_build_version(), "0.1.0-dev.task0029");
+        assert_eq!(default_client_build_version(), "0.1.0-dev.task0029");
+        assert_eq!(
+            default_client_build_version(),
+            product_version::development_version()
+        );
     }
 
     #[test]
