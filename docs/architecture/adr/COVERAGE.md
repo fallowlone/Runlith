@@ -12,6 +12,7 @@
 |---|---|---|---|---|
 | Local IPC peer authentication | ACTIVE DECISION | G2 | ADR-0020 | none — covered; implementation in TASK-0026 before mutable business IPC |
 | G2 business IPC + local data composition | ACTIVE DECISION | G2 | ADR-0021 | none — covered; implementation in TASK-0028 before CLI commands |
+| G3 runtime Event Journal scope (execution/attempt aggregate references, initial runtime vocabulary, outcome/version/provenance semantics) | ACTIVE DECISION | G3 | ADR-0022 | none — covered; implementation in TASK-0035 (migration 0004 + RuntimeService) before FakeAgent |
 | Planning / Orchestration | ACTIVE DECISION | PRE-G3 | ADR-0017 | none — covered |
 | Evaluation / Verification | ACTIVE DECISION | PRE-G3 | ADR-0018 | none — covered |
 | Policy Engine | Covered by existing ADR (detail PRE-G6) | G6 | ADR-0013 (baseline: engine + isolation layers) | dedicated G6 design ADR before G6 implementation |

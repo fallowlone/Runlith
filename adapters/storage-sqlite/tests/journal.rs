@@ -81,6 +81,9 @@ fn new_event(
         causation_id: "req-test-1".into(),
         occurred_at: "2024-01-01T00:00:00Z".into(),
         provenance: "task-application-service/test".into(),
+        execution_id: None,
+        attempt_id: None,
+        attempt_outcome: None,
     }
 }
 
@@ -99,11 +102,11 @@ fn journal_len(store: &SqliteStore) -> usize {
 // -- migration ------------------------------------------------------------
 
 #[test]
-fn fresh_database_reaches_v3() {
-    let db = TestDb::new("fresh-v3");
+fn fresh_database_reaches_v4() {
+    let db = TestDb::new("fresh-v4");
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 3);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 3);
+    assert_eq!(store.schema_version().unwrap(), 4);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 4);
     assert!(store.list_events_ordered().unwrap().is_empty());
 }
 
@@ -137,7 +140,7 @@ fn v1_database_with_data_migrates_preserving_state() {
             .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 3);
+    assert_eq!(store.schema_version().unwrap(), 4);
     let task = store
         .get_task(&TaskId::new("T-1").unwrap())
         .unwrap()
@@ -148,14 +151,14 @@ fn v1_database_with_data_migrates_preserving_state() {
 }
 
 #[test]
-fn v3_reopen_is_a_noop() {
-    let db = TestDb::new("v3-noop");
+fn v4_reopen_is_a_no_op() {
+    let db = TestDb::new("v4-noop");
     {
         let mut store = db.open();
         ready_task_via_store(&mut store);
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 3);
+    assert_eq!(store.schema_version().unwrap(), 4);
     assert!(store
         .get_task(&TaskId::new("T-1").unwrap())
         .unwrap()
@@ -163,22 +166,22 @@ fn v3_reopen_is_a_noop() {
 }
 
 #[test]
-fn future_version_rejected_after_v3() {
-    let db = TestDb::new("future-v3");
+fn future_version_rejected_after_v4() {
+    let db = TestDb::new("future-v4");
     {
         let _store = db.open();
     }
     db.raw().execute_batch("PRAGMA user_version = 99").unwrap();
     match SqliteStore::open(&db.path) {
         Err(StorageError::UnsupportedSchemaVersion { found, supported }) => {
-            assert_eq!((found, supported), (99, 3));
+            assert_eq!((found, supported), (99, 4));
         }
         _ => panic!("expected UnsupportedSchemaVersion, open must fail closed"),
     }
 }
 
 #[test]
-fn v2_journal_rows_survive_migration_to_v3() {
+fn v2_journal_rows_survive_migration_to_v4() {
     let db = TestDb::new("v2-preserve");
     {
         // Hand-built v2 layout: 0001 + 0002 tables, version stamp 2, real
@@ -230,7 +233,7 @@ fn v2_journal_rows_survive_migration_to_v3() {
             .unwrap();
     }
     let mut store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 3);
+    assert_eq!(store.schema_version().unwrap(), 4);
     // Every existing row survives verbatim: seq, identity, type, refs,
     // states, payload, and provenance.
     let history = store.list_events_ordered().unwrap();
@@ -287,6 +290,9 @@ fn v2_journal_rows_survive_migration_to_v3() {
                 causation_id: "req-3".into(),
                 occurred_at: "2024-01-01T00:00:02Z".into(),
                 provenance: "task-application-service/create_project".into(),
+                execution_id: None,
+                attempt_id: None,
+                attempt_outcome: None,
             },
         )
         .unwrap();
@@ -341,6 +347,9 @@ fn creation_mutations_are_atomic_with_their_events() {
                 causation_id: "req-1".into(),
                 occurred_at: "2024-01-01T00:00:00Z".into(),
                 provenance: "task-application-service/create_project".into(),
+                execution_id: None,
+                attempt_id: None,
+                attempt_outcome: None,
             },
         )
         .unwrap();
@@ -360,6 +369,9 @@ fn creation_mutations_are_atomic_with_their_events() {
                 causation_id: "req-2".into(),
                 occurred_at: "2024-01-01T00:00:01Z".into(),
                 provenance: "task-application-service/create_task".into(),
+                execution_id: None,
+                attempt_id: None,
+                attempt_outcome: None,
             },
         )
         .unwrap();
@@ -378,6 +390,9 @@ fn creation_mutations_are_atomic_with_their_events() {
         causation_id: "req-3".into(),
         occurred_at: "2024-01-01T00:00:02Z".into(),
         provenance: "task-application-service/create_task".into(),
+        execution_id: None,
+        attempt_id: None,
+        attempt_outcome: None,
     };
     assert!(store.create_task_with_event(&other, &bad).is_err());
     assert!(store
@@ -409,6 +424,9 @@ fn dependency_mutation_is_atomic_with_its_event() {
                 causation_id: "req-1".into(),
                 occurred_at: "2024-01-01T00:00:00Z".into(),
                 provenance: "task-application-service/add_dependency".into(),
+                execution_id: None,
+                attempt_id: None,
+                attempt_outcome: None,
             },
         )
         .unwrap();
@@ -432,6 +450,9 @@ fn dependency_mutation_is_atomic_with_its_event() {
         causation_id: "req-2".into(),
         occurred_at: "2024-01-01T00:00:01Z".into(),
         provenance: "task-application-service/add_dependency".into(),
+        execution_id: None,
+        attempt_id: None,
+        attempt_outcome: None,
     };
     assert!(store
         .add_dependency_with_event(
@@ -845,6 +866,9 @@ fn table_layout_matches_the_accepted_contract() {
             "causation_id",
             "occurred_at",
             "provenance",
+            "execution_id",
+            "attempt_id",
+            "attempt_outcome",
         ]
     );
     assert_eq!(
@@ -882,6 +906,9 @@ fn journal_event_facts_have_no_secret_fields() {
             causation_id: "req-1".into(),
             occurred_at: "2024-01-01T00:00:00Z".into(),
             provenance: "task-application-service/submit_result".into(),
+            execution_id: None,
+            attempt_id: None,
+            attempt_outcome: None,
         },
     };
     let debug = format!("{event:?}");

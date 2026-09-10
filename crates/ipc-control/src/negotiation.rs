@@ -293,9 +293,13 @@ mod tests {
     #[test]
     fn build_versions_report_canonical_development_identity() {
         // Both sides report the single canonical product identity from
-        // product/version.toml — never diverging package versions.
-        assert_eq!(default_daemon_build_version(), "0.1.0-dev.task0029");
-        assert_eq!(default_client_build_version(), "0.1.0-dev.task0029");
+        // product/version.toml — never diverging package versions and
+        // never a hardcoded historical task literal. Rolling the version
+        // to the next task must not require editing this test.
+        assert_eq!(
+            default_daemon_build_version(),
+            product_version::development_version()
+        );
         assert_eq!(
             default_client_build_version(),
             product_version::development_version()

@@ -8,8 +8,8 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0029
-current_gate: G2
+completed_through: TASK-0039
+current_gate: G4
 
 items:
   - id: TASK-0012
@@ -322,3 +322,154 @@ items:
     blocked_by: []
     references:
       - docs/architecture/task-engine.md
+
+  - id: TASK-0031
+    gate: G2
+    title: Version Pin Rollover Remediation
+    objective: Remove test coupling to one historical development-task
+      number so the canonical version tests validate the current
+      repository version dynamically and survive future bumps without
+      per-task literal edits. Test-only remediation; no product behavior
+      changes.
+    scope: Test-only sections of crates/product-version/src/lib.rs and
+      crates/ipc-control/src/negotiation.rs, plus product/version.toml,
+      remediation report, and queue update.
+    exit_criteria_summary: Canonical version tests assert dynamic
+      self-consistency and derivation instead of TASK-0029 literals;
+      workspace checks green at 0.1.0-dev.task0031.
+    depends_on:
+      - TASK-0030
+    blocked_by: []
+    references:
+      - docs/development/G2_CLOSURE_AUDIT.md
+      - docs/development/G2_VERSION_PIN_REMEDIATION.md
+
+  - id: TASK-0032
+    gate: G2
+    title: G2 Closure Re-Audit
+    objective: Re-run the G2 closure verification after the TASK-0031
+      version-pin remediation and report G2_COMPLETE, G2_INCOMPLETE, or
+      G2_BLOCKED.
+    scope: Audit only; no repairs, no implementation.
+    exit_criteria_summary: A closure audit report exists with an explicit
+      overall status.
+    depends_on:
+      - TASK-0031
+    blocked_by: []
+    references:
+      - docs/architecture/task-engine.md
+
+  - id: TASK-0033
+    gate: G3
+    title: Execution/Attempt Domain Foundation
+    objective: Implement the provider-neutral durable runtime domain
+      foundation (Task/Execution/Attempt separation, strong IDs,
+      append-only attempt history, completion-authority split). No
+      FakeAgent, Scheduler, persistence, IPC, or AI.
+    scope: New crates/agent-runtime pure-domain crate only.
+    exit_criteria_summary: Execution/Attempt model implemented with
+      exhaustive tests; agent-runtime depends on task-domain only;
+      workspace green.
+    depends_on:
+      - TASK-0032
+    blocked_by: []
+    references:
+      - docs/architecture/task-engine.md
+      - docs/architecture/providers.md
+      - docs/architecture/fake-agent.md
+
+  - id: TASK-0034
+    gate: G3
+    title: Runtime Event Journal Contract
+    objective: Materialize the missing authoritative contract for durable
+      runtime events (typed Execution/Attempt journal scope, initial
+      runtime vocabulary, outcome/version/provenance semantics) left open
+      by the first TASK-0034 preflight. Contract/docs/schema only; no
+      persistence, no service, no FakeAgent.
+    scope: ADR-0022 plus events.md runtime sections, envelope schema
+      runtime conditionals, evidence doc, and queue revision only.
+    exit_criteria_summary: ADR-0022 Accepted with execution.created,
+      attempt.created, attempt.concluded plus typed scope/outcome/version
+      rules; schema rejects invalid scope combinations; workspace green.
+    depends_on:
+      - TASK-0033
+    blocked_by: []
+    references:
+      - docs/architecture/events.md
+      - docs/architecture/adr/ADR-0022-runtime-event-journal-scope.md
+      - contracts/json-schema/event.schema.json
+
+  - id: TASK-0035
+    gate: G3
+    title: Execution/Attempt Persistence + Runtime Events
+    objective: Durable SQLite persistence for the runtime domain plus
+      typed runtime Event Journal evidence, atomically coupled like the
+      Task core, implementing exactly the ADR-0022 contract.
+    scope: Storage adapter extension (migration 0004) and runtime events
+      only; no FakeAgent, no Scheduler.
+    exit_criteria_summary: Executions/attempts survive restarts with
+      atomic event evidence; workspace green.
+    depends_on:
+      - TASK-0034
+    blocked_by: []
+    references:
+      - docs/architecture/events.md
+      - docs/architecture/adr/ADR-0022-runtime-event-journal-scope.md
+
+  - id: TASK-0036
+    gate: G3
+    title: Deterministic FakeAgent
+    objective: Implement the deterministic FakeAgent test double against
+      the runtime boundary, covering the canonical scenario set without
+      real intelligence.
+    scope: FakeAgent adapter/test layer only; no real providers.
+    exit_criteria_summary: All canonical FakeAgent scenarios exercise
+      the runtime boundary deterministically; workspace green.
+    depends_on:
+      - TASK-0035
+    blocked_by: []
+    references:
+      - docs/architecture/fake-agent.md
+
+  - id: TASK-0037
+    gate: G3
+    title: Minimal Scheduler + Evaluation Flow
+    objective: Minimal assignment/orchestration plus the trusted
+      evaluation flow from runtime evidence through submit_result to
+      verification, preserving completion authority.
+    scope: Scheduler and evaluation wiring only.
+    exit_criteria_summary: Task -> execution -> attempt -> submit ->
+      verify flow works end to end; workspace green.
+    depends_on:
+      - TASK-0036
+    blocked_by: []
+    references:
+      - docs/architecture/task-engine.md
+
+  - id: TASK-0038
+    gate: G3
+    title: G3 End-to-End Failure Matrix
+    objective: Verify the full G3 failure matrix (crash, hang, timeout,
+      malformed result, policy rejection, quota, network, partial
+      result, review rejection) through deterministic scenarios.
+    scope: Failure-matrix verification only.
+    exit_criteria_summary: Every canonical failure scenario behaves per
+      contract with durable evidence; workspace green.
+    depends_on:
+      - TASK-0037
+    blocked_by: []
+    references:
+      - docs/architecture/fake-agent.md
+
+  - id: TASK-0039
+    gate: G3
+    title: G3 Closure Audit
+    objective: Independent gate verification for G3 (FakeAgent Runtime).
+    scope: Audit only; no repairs, no implementation.
+    exit_criteria_summary: A closure audit report exists with an explicit
+      overall status.
+    depends_on:
+      - TASK-0038
+    blocked_by: []
+    references:
+      - docs/architecture/fake-agent.md

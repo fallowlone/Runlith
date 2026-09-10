@@ -65,7 +65,9 @@ A domain event represents a durable fact that the trusted application layer
 accepted and committed. Conceptually, facts such as "Task status changed",
 "Plan revision accepted", "Execution attempt started", or "Verification
 outcome recorded" may later yield domain events. No exhaustive canonical
-event taxonomy is created here.
+event taxonomy exists for the entire future product — but the G3
+Execution/Attempt minimum IS canonical (§4.2, ADR-0022) and must not be
+treated as open.
 
 ### 4.1 G2 canonical mutation events (ADR-0021)
 
@@ -94,6 +96,114 @@ not a G2 wire operation, so no `task.dependency_removed` exists yet; a
 future removal API must define it first. `task_strings` list metadata
 stays bounded persistence machinery (§9 evidence-reference discipline),
 never a business IPC surface.
+
+### 4.2 G3 canonical runtime events (ADR-0022)
+
+The initial runtime vocabulary is exactly three provider-neutral types.
+No other runtime event name is canonical; in particular there are no
+`execution.started / succeeded / failed / completed` events (TASK-0033
+defines no terminal Execution lifecycle), no `attempt.started` split
+(the domain exposes a single Attempt birth fact), no Session events,
+and no per-FakeAgent-scenario types.
+
+```text
+execution.created  — a durable Execution aggregate was created for a Task
+attempt.created    — a new durable open Attempt was allocated inside an
+                     Execution (allocation only: NOT a claim that a
+                     provider process spawned, a session exists, a
+                     runner started, or tool execution began)
+attempt.concluded  — an open Attempt transitioned exactly once to its
+                     canonical terminal outcome (the only terminal
+                     runtime event; failure scenarios are never
+                     separate types)
+```
+
+#### Runtime aggregate scope
+
+The envelope carries first-class nullable aggregate references
+(snake_case, like the rest of the envelope):
+
+```text
+execution_id     — ExecutionId reference; required on all runtime types
+attempt_id       — AttemptId reference; required on attempt.created and
+                   attempt.concluded; null on execution.created
+attempt_outcome  — canonical terminal outcome; required only on
+                   attempt.concluded; null everywhere else
+```
+
+Project remains the root scope: every runtime event carries required
+`project_id` and required `task_id` (`Project → Task → Execution →
+Attempt`), derived and validated from authoritative Task ownership —
+never caller-supplied against that chain. Runtime identities are never
+encoded into `reason`, `provenance`, `correlation_id`,
+`causation_id`, or free-form payloads, and no generic authoritative
+JSON payload bucket exists.
+
+#### Attempt outcome semantics
+
+`attempt.concluded` carries exactly one outcome, serialized lowercase
+snake to stay visually distinct from SCREAMING Task states:
+
+| Domain (`agent-runtime`) | Journal (`attempt_outcome`) |
+|---|---|
+| `Succeeded` | `succeeded` |
+| `Failed` | `failed` |
+| `TimedOut` | `timed_out` |
+| `Cancelled` | `cancelled` |
+
+`Succeeded` means evidence was produced for the pipeline — never Task
+completion. FakeAgent scenario names (`crash`, `quota_reached`, …) are
+adapter/test behavior that later tasks map onto these four outcomes;
+they are not durable vocabulary. Attempt `detail` (the opaque
+adapter-minted note) is not journal state: it may live in relational
+Attempt state or later structured evidence, never as unbounded
+provider output, transcript, prompt, or secret in the journal.
+
+#### Task lifecycle columns stay Task-only
+
+`from_state`/`to_state` remain semantically `TaskState?` and are null
+on all runtime types. Attempt outcomes are never written there, so a
+reading such as `to_state = FAILED` can only ever mean Task FAILED,
+never Attempt Failed.
+
+#### Scope matrix
+
+| Event family | project_id | task_id | execution_id | attempt_id | attempt_outcome | Task from/to |
+|---|---|---|---|---|---|---|
+| `project.created` | required | null | null | null | null | null |
+| `task.created`, `task.dependency_added` | required | required | null | null | null | initial / unchanged state per §4.1 |
+| Task lifecycle events | required | required | null | null | null | canonical Task states |
+| `execution.created` | required | required | required | null | null | null |
+| `attempt.created` | required | required | required | required | null | null |
+| `attempt.concluded` | required | required | required | required | required | null |
+
+#### Version semantics
+
+All three runtime types start at `event_version = 1`; no G2 version
+moves. SQLite schema version, event version, IPC protocol version, and
+product version are distinct concepts; one runtime type may later
+increment its event version independently. Typed reads fail closed on
+unknown event types (no `Other` escape) and on known types with
+unsupported versions (no silent v1 reading of v2 semantics).
+
+#### Provenance authority
+
+Providers, FakeAgent, Runners, and clients mint no authoritative event
+field — not `event_id`, `event_type`, `event_version`, timestamps,
+correlation/causation, provenance, aggregate references, or
+`attempt_outcome`. The trusted application service constructs them all;
+FakeAgent reports results through that boundary and never appends
+`attempt.concluded` directly.
+
+#### Task completion separation
+
+```text
+attempt.concluded(succeeded) != Task COMPLETED
+```
+
+Runtime events never grant completion. The required path stays Attempt
+Succeeded → evidence → `submit_result` → independent verification →
+`verification_succeeded` → COMPLETED (ADR-0018).
 
 ## 5. Event is not command
 
@@ -199,7 +309,9 @@ serialization and field names are pending schema design. Requirements:
   application command, Task, Execution, Attempt, PlanRevision, Policy
   decision, Evaluation result) without trusting model narrative. No
   mandatory provenance fields are invented; the final envelope structure is
-  pending schema design.
+  pending schema design. For G3 runtime facts the aggregate references
+  and provenance authority are already decided (§4.2, ADR-0022); the
+  general provenance representation stays open.
 
 ## 9. Secrets, sensitivity, and evidence references
 
@@ -390,12 +502,16 @@ authoritative current-state model.
 ## 18. Open Event Design Items
 
 Unresolved by accepted architecture; listed, not decided. Each item below
-is included only because no accepted source resolves it:
+is included only because no accepted source resolves it. G3 runtime
+scope is NOT in this list anymore: runtime event naming,
+runtime aggregate/entity reference envelope, runtime event scope, and
+runtime unknown-version behavior were resolved by ADR-0022 (§4.2) and
+are removed below. Everything remaining is genuinely future work:
 
 - event record ID format;
 - canonical persistent serialization format;
-- event naming convention;
-- aggregate/entity reference envelope;
+- event naming convention for future (non-G3-runtime) domains;
+- aggregate/entity reference envelope for future (non-G3-runtime) aggregates;
 - global vs per-project vs per-entity ordering model;
 - sequence number semantics;
 - clock/timestamp generation and precision;
@@ -404,7 +520,8 @@ is included only because no accepted source resolves it:
 - actor/origin provenance representation;
 - command/request ID linkage;
 - schema compatibility/upcasting strategy;
-- unknown/newer event-version behavior;
+- unknown/newer event-version behavior for future (non-G3-runtime) types
+  (G3 runtime behavior is fail-closed per §4.2);
 - projection checkpoint semantics;
 - projection rebuild API;
 - cross-context event subscription semantics;

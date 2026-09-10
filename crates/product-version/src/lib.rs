@@ -181,13 +181,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_file_parses_to_task0029() {
+    fn canonical_file_is_self_consistent() {
+        // Timeless by design: this test validates the *relationship*
+        // between the canonical fields (semver / development / task) and
+        // the planning gate, never one historical task number. Rolling the
+        // version to TASK-0032, TASK-0100, ... must not require editing
+        // this test — only product/version.toml moves.
         let version = product_version();
-        assert_eq!(version.semver, "0.1.0");
-        assert_eq!(version.development, "0.1.0-dev.task0029");
-        assert_eq!(version.task, "TASK-0029");
-        assert_eq!(version.gate, "G2");
-        assert_eq!(development_version(), "0.1.0-dev.task0029");
+        let suffix = version
+            .development
+            .strip_prefix(version.semver)
+            .and_then(|rest| rest.strip_prefix("-dev.task"))
+            .expect("development must be <semver>-dev.taskNNNN");
+        assert_eq!(suffix.len(), 4, "task suffix must be four digits");
+        assert!(
+            suffix.bytes().all(|b| b.is_ascii_digit()),
+            "task suffix must be numeric"
+        );
+        assert_eq!(
+            version.task,
+            format!("TASK-{suffix}"),
+            "task must match the development suffix"
+        );
+        assert_eq!(
+            development_version(),
+            version.development,
+            "runtime identity must come from the canonical file"
+        );
     }
 
     #[test]

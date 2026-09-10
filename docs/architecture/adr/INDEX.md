@@ -26,5 +26,6 @@
 | [ADR-0019](./ADR-0019-gate-scoped-adr-activation.md) | ADR materialization is gate-scoped | Accepted | adr governance, activation policy, coverage |
 | [ADR-0020](./ADR-0020-local-ipc-peer-authentication.md) | Local IPC uses OS-authenticated user identity | Accepted | ipc, peer authentication, trust boundary TB2, agentctl sequencing |
 | [ADR-0021](./ADR-0021-g2-business-ipc-and-local-data-composition.md) | G2 business IPC is versioned and composed in agentd | Accepted | ipc protocol v1, task business contract, local data composition, event taxonomy, g2 sequencing |
+| [ADR-0022](./ADR-0022-runtime-event-journal-scope.md) | Runtime events use typed Execution/Attempt journal scope | Accepted | events, runtime event taxonomy, execution/attempt scope, g3 sequencing |
 
 Coverage register (not an ADR): [COVERAGE.md](./COVERAGE.md).

@@ -1,0 +1,11 @@
+[package]
+name = "fake-evaluator"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "fake_evaluator"
+path = "src/lib.rs"
+
+[dependencies]
+evaluation = { path = "../../crates/evaluation" }

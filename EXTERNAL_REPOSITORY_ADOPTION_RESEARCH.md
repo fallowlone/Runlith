@@ -2305,3 +2305,499 @@ This fits our broader product thesis: agents do not decide that work is “done�
 - **P0:** finding/evidence lifecycle, security runner authorization/isolation, typed Rules of Engagement, target fingerprint binding.
 - **P1:** reconciliation, resumable exploit procedures, SARIF, CI/release gate integration, evidence browser.
 - **P2:** source-informed attack graph, continuous security routines, automated fix→retest loop, enterprise governance/integrations.
+
+---
+
+## microsoft/tgrep — trigram-indexed repository search
+
+**Reviewed:** 2026-09-10  
+**Repository:** `microsoft/tgrep`  
+**Version reviewed:** `1.0.5`  
+**License:** MIT  
+**Decision:** **ADAPT — HIGH VALUE for future repository lexical retrieval, freshness/reconciliation, and bounded indexing architecture. DEFER direct runtime dependency until G9 benchmark/security review. REJECT its standalone TCP server as part of our production control plane.**
+
+### What the project actually does
+
+`tgrep` is a Rust implementation of grep-style repository search accelerated by a pre-built trigram index. Its important architectural idea is not merely “grep faster”; it separates **candidate discovery** from **exact verification**:
+
+```text
+regex / literal query
+        ↓
+query decomposition
+        ↓
+trigram posting-list lookup
+        ↓
+small candidate file set
+        ↓
+full regex/literal verification
+        ↓
+exact matches
+```
+
+If a query cannot be safely reduced to useful literal/trigram constraints, correctness must win over index use and the system can fall back to a direct file scan.
+
+The current project is split into a reusable `tgrep-core` library and a `tgrep-cli`. The server mode uses a `HybridIndex` consisting of a memory-mapped immutable on-disk snapshot plus an in-memory live overlay for changed files. Microsoft states that `tgrep` is integrated into GitHub Copilot CLI for fast searches across large repositories.
+
+### Why this matters for AI Engineering OS
+
+Our Context Engine already rejects “embed everything, retrieve top-k, ask an LLM” as the universal repository retrieval strategy. Exact symbol names, error strings, function names, config keys and regex searches are often better served by deterministic lexical retrieval.
+
+`tgrep` reinforces a multi-strategy model:
+
+```text
+Repository query
+       ↓
+RepositoryTextSearchPort / retrieval planner
+       ├── exact/direct scan
+       ├── indexed lexical/trigram search
+       ├── FTS5 / BM25
+       ├── AST / symbol graph
+       ├── Git/history
+       └── optional embeddings
+       ↓
+verified candidate evidence
+       ↓
+Context Planner
+```
+
+The trigram index is therefore a **replaceable retrieval strategy**, not the Context Engine itself and not authoritative repository state.
+
+### ADOPT
+
+#### 1. Candidate-index first, exact verification second
+
+Use indexes to reduce the search space, but verify results against the actual source content before treating them as evidence.
+
+This yields a useful general rule:
+
+```text
+index hit != source evidence
+index hit → candidate → exact source verification
+```
+
+For correctness-critical agent work, an index should never become a substitute for the source file it indexes.
+
+#### 2. Immutable base snapshot + live overlay
+
+`tgrep serve` maintains:
+
+```text
+HybridIndex
+├── IndexReader     # mmap'd published snapshot
+└── LiveIndex       # changed/new/deleted-file overlay
+```
+
+The live layer takes precedence over the base snapshot. This is a strong model for our future repository indexes because rebuilding a whole large repository index after every edit is wasteful.
+
+Adapt into:
+
+```text
+RepositoryIndex
+├── PublishedSnapshot(revision=N)
+└── LiveDelta
+      ├── changed
+      ├── created
+      └── deleted
+```
+
+Published indexes remain immutable/rebuildable; mutable recent changes are isolated in a bounded overlay.
+
+#### 3. Watcher events are hints, not authority
+
+`tgrep` explicitly handles the fact that file-system notifications can be missed because of queue overflow, filesystem behavior, branch/tree replacement or watch-capacity limits. Its server therefore combines watcher-driven incremental updates with periodic full reconciliation and can fall back to polling when native watch capacity is exhausted.
+
+Adopt the principle broadly:
+
+```text
+filesystem watcher
+      ↓
+low-latency change hint
+
+periodic reconciler
+      ↓
+compare index/resource state with filesystem truth
+      ↓
+repair missed / stale / deleted entries
+```
+
+A file watcher must never be the sole correctness mechanism for repository state.
+
+#### 4. Explicit retrieval freshness / consistency
+
+`tgrep` documents that an on-disk index can be stale and that even a running server may temporarily lag recent edits or still be building/reconciling. It provides a direct-scan path (`--no-index`) when current filesystem contents are required.
+
+Our architecture should expose this intentionally rather than hide it:
+
+```text
+SearchConsistency
+
+FAST
+  derived index may be used within accepted freshness bounds
+
+FRESH
+  live overlay/reconciliation state must cover known recent mutations
+
+AUTHORITATIVE
+  exact source is read/verified directly before result is trusted
+```
+
+Names are provisional until the G9 contract task, but the semantic distinction should remain.
+
+A retrieval result should be able to report, where useful:
+
+```text
+strategy
+index_revision
+freshness / consistency level
+candidate_count
+verified_source_count
+fallback_reason
+```
+
+This integrates naturally with observable/reproducible `ContextPlan` reasoning.
+
+#### 5. Correct fallback when an index cannot safely narrow a query
+
+The lexical query planner must never produce false negatives merely to use the index.
+
+Required principle:
+
+```text
+safe candidate reduction available
+→ index
+
+safe reduction unavailable / index unavailable / index suspect
+→ exact scan or another correct strategy
+```
+
+Optimization failure must degrade performance, not correctness.
+
+#### 6. Derived index corruption must not become project corruption
+
+`tgrep` has had real bugs around malformed/corrupt on-disk index input, including an August 2026 issue where untrusted `lookup.bin` offset/length values could cause panic or excessive work. The project subsequently bounded posting decoding and also has recovery behavior for corrupt indexes.
+
+For AI Engineering OS:
+
+```text
+corrupt repository index
+!=
+corrupt project
+```
+
+Expected behavior:
+
+```text
+index validation failure
+→ mark derived index DEGRADED/INVALID
+→ direct-scan fallback where feasible
+→ rebuild derived index
+```
+
+Do not silently return incomplete search results from a known-corrupt index.
+
+#### 7. Byte-bounded caches, not only entry-count bounds
+
+`tgrep` documents a concrete failure mode where entry-count-only caching allowed a huge file to retain enormous memory. Its current server bounds cache size by:
+
+```text
+max entries
+max total bytes
+max single-entry bytes
+```
+
+Adopt the generic resource-budget pattern for `agentd` caches:
+
+```text
+CacheBudget
+├── max_entries
+├── max_total_bytes
+└── max_single_entry_bytes
+```
+
+This should later apply to repository text, parsed resources, AST/index data and other large derived artifacts where appropriate.
+
+#### 8. Memory-bounded index construction
+
+`tgrep` moved its default full index build to an external merge-sort design: bounded arenas spill sorted segments to disk and k-way merge them into the final index rather than retaining the whole inverted index in memory.
+
+This is highly relevant to a long-running multi-agent daemon. Index construction must coexist with provider processes, context compilation, SQLite and multiple executions without causing avoidable memory spikes.
+
+Future index builders should have explicit resource budgets such as:
+
+```text
+IndexBuildBudget
+├── max_memory_bytes
+├── concurrency
+├── io_priority/budget
+└── background_priority
+```
+
+The exact implementation remains an adapter concern.
+
+#### 9. Progressive-disclosure search for coding agents
+
+`tgrep`'s agent guide recommends broad searches returning filenames first, then narrowing to specific files and using only small context windows. This strongly aligns with our L0→L4 context model.
+
+Adopt the interaction pattern:
+
+```text
+query
+  ↓
+matching-file/symbol census
+  ↓
+selected locations
+  ↓
+bounded snippets
+  ↓
+exact source read only where needed
+```
+
+This reduces tool-output volume and model attention cost without reducing source availability.
+
+### ADAPT
+
+#### `tgrep-core` → future `RepositoryTextSearchPort` adapter
+
+`tgrep-core` is already separated as a library crate and contains the reusable pieces we care about: trigram extraction, repository walking, binary index building/reading, regex query decomposition, live index and hybrid index.
+
+However, it should not become a domain dependency.
+
+Target boundary:
+
+```text
+Context / Resource application layer
+          ↓
+RepositoryTextSearchPort
+          ↓
+TgrepLexicalIndexAdapter       # optional future adapter
+          ↓
+tgrep-core or independently implemented equivalent
+```
+
+`RepositoryTextSearchPort` is the stable architecture concept. `tgrep-core` is only one possible implementation.
+
+Before adopting the crate directly, re-review its exact release, dependency tree, binary/index format behavior, ignore/file-size semantics, corruption handling and supply-chain/security profile.
+
+Current `tgrep-core` dependencies include `serde`, `serde_json`, `anyhow`, `blake3`, `memmap2`, `memchr`, `regex`, `regex-syntax`, `rayon`, `ignore`, `globset` and `encoding_rs`. This is acceptable for an infrastructure adapter in principle, but far too concrete to leak into Context or Resource domain contracts.
+
+#### Indexed lexical search + Code Intelligence are complementary
+
+Do not confuse text search with semantic code intelligence.
+
+```text
+RepositoryTextSearchPort
+→ bytes/text/regex/literals/files
+
+CodeIntelligencePort
+→ symbols/references/definitions/types/semantic relationships
+```
+
+The retrieval planner may combine both. Neither should absorb the other merely because both can answer some symbol queries.
+
+#### Ignore/filter semantics must be observable
+
+`tgrep` deliberately applies ignore rules, binary filtering and default file-size limits. Indexed and direct-scan modes can also differ for some options.
+
+Our search contract must make material exclusions visible enough that an agent can distinguish:
+
+```text
+no match found
+```
+
+from:
+
+```text
+source not searched because of scope / ignore / size / capability policy
+```
+
+This is especially important when retrieval evidence feeds verification.
+
+### DEFER
+
+#### 1. Direct `tgrep-core` dependency until G9
+
+Do not add it during G3/G4/G5 merely because it is useful.
+
+Before adoption, run our own representative benchmark against at least:
+
+```text
+ripgrep/direct scan
+trigram/indexed lexical candidate search
+FTS5/BM25 where applicable
+AST/symbol lookup
+```
+
+across:
+
+```text
+small repository
+medium repository
+large monorepo
+cold index
+warm index
+recently edited files
+branch/tree replacement
+literal symbol
+regex with strong literal
+broad regex
+high-result-count query
+```
+
+Measure:
+
+```text
+query latency
+index-build latency
+peak/steady RSS
+index disk size
+freshness lag
+candidate reduction
+fallback frequency
+correctness parity
+context/tool-output volume
+```
+
+`tgrep` publishes strong project-reported benchmarks and wins most of its current measured repo/platform cells, but performance varies materially by repository/platform/query. Its own current results include a near-tie/loss against ripgrep for Kubernetes on Linux, so “indexed is always faster” must not become an architecture assumption.
+
+#### 2. Persistent index format
+
+Do not adopt `.tgrep/` as a canonical product format.
+
+Any repository-search index in AI Engineering OS is:
+
+```text
+derived
+versioned
+rebuildable
+discardable
+```
+
+The source repository remains authority.
+
+### REJECT
+
+#### Standalone `tgrep serve` TCP daemon in the production architecture
+
+`tgrep serve` uses a localhost TCP JSON-RPC server with a discovered PID/port file. That architecture is reasonable for its CLI use case, but does not fit our local control-plane trust model.
+
+We already deliberately use:
+
+```text
+agentd
++
+OS-authenticated UDS / Named Pipe
++
+versioned Protobuf
+```
+
+Do not introduce:
+
+```text
+agentd
+  ↓
+localhost TCP / JSON-RPC
+  ↓
+tgrep serve
+```
+
+as a required internal service.
+
+If tgrep technology is adopted, prefer an in-process infrastructure adapter around `tgrep-core`, or an independently implemented equivalent behind our own port and security boundary.
+
+Also reject:
+
+- treating the search index as authoritative repository state;
+- assuming watcher notifications provide complete change history;
+- returning stale/partial indexed results without freshness/status signals when correctness matters;
+- making embeddings the fallback for every lexical query;
+- loading unrestricted search output directly into model context;
+- copying tgrep's CLI/server topology into the product simply because the search algorithm is useful.
+
+### Benchmark interpretation
+
+The repository reports large improvements over ripgrep on many large repositories/platforms and explicitly notes that the margin depends on repository size, platform, query selectivity and output volume. Benchmarks measure search with an index already built, and the project separately measures index-build behavior.
+
+Treat these results as **useful engineering evidence, not universal product truth**. Our own benchmark must include the indexing/freshness/resource costs relevant to a continuously running `agentd`.
+
+### Security / reliability notes
+
+Positive signals:
+
+- MIT license;
+- dedicated `tgrep-core` boundary rather than CLI-only code;
+- CI, fuzzing and compatibility testing exist in the repository;
+- recent releases addressed corrupted-index bounds handling, watcher/reconciliation behavior, memory bounding and polling fallback;
+- project documentation explicitly explains stale/partial-index behavior to coding agents.
+
+Risks/constraints to retain in our review:
+
+- on-disk indexes are untrusted/derived input and require strict bounds/version validation;
+- mmap/binary-index parsing must fail cleanly on corruption;
+- watcher/index freshness is eventually reconciled rather than magically instantaneous;
+- filesystem ignore/max-size rules can affect completeness;
+- memory budgets need both total and single-object bounds;
+- a local TCP server is not compatible with our accepted IPC security boundary as a core internal control service.
+
+### Gate placement
+
+**Do not modify the current G3 sequence.**
+
+Primary placement:
+
+```text
+G9 — Context Engine + Continuity
+```
+
+Candidate G9 work:
+
+```text
+RepositoryTextSearchPort contract
+→ direct-scan reference adapter
+→ benchmark harness
+→ optional trigram indexed adapter
+→ freshness/reconciliation model
+→ ContextPlan observability integration
+```
+
+`CodeIntelligencePort` integration may follow when structural/symbol intelligence is activated.
+
+### Decision summary
+
+```text
+ADOPT
+- indexed lexical candidate reduction + exact verification
+- immutable snapshot + live overlay
+- watcher as low-latency hint, reconciliation as correctness backstop
+- explicit retrieval freshness/consistency
+- correctness-preserving direct-scan fallback
+- byte-bounded caches
+- memory-bounded external index builds
+- progressive-disclosure search
+- corrupt derived index → degrade/rebuild, never corrupt project truth
+
+ADAPT
+- tgrep-core ideas behind RepositoryTextSearchPort
+- combine lexical retrieval with BM25/AST/Git/embeddings through a planner
+- expose search scope/freshness/fallback provenance
+
+DEFER
+- direct tgrep-core dependency until G9 benchmark/security review
+- persistent index-format choice until retrieval contracts stabilize
+
+REJECT
+- standalone tgrep serve TCP/JSON-RPC daemon inside our production control plane
+- .tgrep as canonical product data
+- watcher/index as repository authority
+```
+
+### Primary sources reviewed
+
+- Repository / README: https://github.com/microsoft/tgrep
+- Agent usage/freshness guidance: https://github.com/microsoft/tgrep/blob/main/AGENTS.md
+- Benchmarks: https://github.com/microsoft/tgrep/blob/main/BENCHMARKS.md
+- Core dependency manifest: https://github.com/microsoft/tgrep/blob/main/tgrep-core/Cargo.toml
+- Server/watch/reconciliation/cache implementation: https://github.com/microsoft/tgrep/blob/main/tgrep-cli/src/serve.rs
+- Releases: https://github.com/microsoft/tgrep/releases
+- Corrupt index issue #98: https://github.com/microsoft/tgrep/issues/98
+- MIT license: https://github.com/microsoft/tgrep/blob/main/LICENSE
+

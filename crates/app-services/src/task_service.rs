@@ -290,7 +290,11 @@ impl<C: Clock> TaskService<C> {
             correlation_id: format!("op-{now}-{}", self.op_counter),
             causation_id: format!("req-{now}-{}", self.op_counter),
             occurred_at: format_rfc3339(now),
-            provenance: format!("{PROVENANCE_SERVICE}/{}", op_name(&command)),
+            provenance: format!("{PROVENANCE_SERVICE}/{op}", op = op_name(&command)),
+            // Task lifecycle facts never carry runtime scope.
+            execution_id: None,
+            attempt_id: None,
+            attempt_outcome: None,
         };
         let committed = self
             .store
@@ -329,6 +333,10 @@ impl<C: Clock> TaskService<C> {
             causation_id: format!("req-{now}-{}", self.op_counter),
             occurred_at: format_rfc3339(now),
             provenance: format!("{PROVENANCE_SERVICE}/{op}"),
+            // Creation/dependency facts never carry runtime scope.
+            execution_id: None,
+            attempt_id: None,
+            attempt_outcome: None,
         }
     }
 }

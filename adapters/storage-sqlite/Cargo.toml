@@ -9,4 +9,5 @@ path = "src/lib.rs"
 
 [dependencies]
 task-domain = { path = "../../crates/task" }
+agent-runtime = { path = "../../crates/agent-runtime" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }

@@ -6,8 +6,13 @@ members = [
     "crates/ipc-control",
     "crates/ipc-transport",
     "crates/task",
+    "crates/agent-runtime",
+    "crates/scheduler",
+    "crates/evaluation",
     "crates/app-services",
     "adapters/storage-sqlite",
+    "adapters/fake-agent",
+    "adapters/fake-evaluator",
     "crates/product-version",
 ]
 resolver = "2"

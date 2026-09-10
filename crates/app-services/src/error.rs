@@ -3,6 +3,7 @@
 
 use std::fmt;
 
+use agent_runtime::RuntimeError;
 use storage_sqlite::StorageError;
 use task_domain::DomainError;
 
@@ -43,6 +44,18 @@ impl From<DomainError> for ServiceError {
 impl From<StorageError> for ServiceError {
     fn from(error: StorageError) -> Self {
         Self::Storage(error)
+    }
+}
+
+impl From<RuntimeError> for ServiceError {
+    fn from(error: RuntimeError) -> Self {
+        // Deliberately no new variant: bins/agentd matches ServiceError
+        // exhaustively under the frozen G2 wire taxonomy, so runtime
+        // discipline rejections (open sibling, duplicate identity,
+        // unknown or already-concluded attempt) surface as explicit
+        // constraint violations carrying the verbatim domain reason.
+        // Nothing is persisted and no event is appended either way.
+        Self::Storage(StorageError::ConstraintViolation(error.to_string()))
     }
 }
 

@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "agent-runtime"
+version = "0.1.0"
+dependencies = [
+ "task-domain",
+]
+
+[[package]]
 name = "agentctl"
 version = "0.1.0"
 dependencies = [
@@ -50,6 +57,11 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "app-services"
 version = "0.1.0"
 dependencies = [
+ "agent-runtime",
+ "evaluation",
+ "fake-agent",
+ "fake-evaluator",
+ "scheduler",
  "storage-sqlite",
  "task-domain",
 ]
@@ -108,6 +120,29 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys",
+]
+
+[[package]]
+name = "evaluation"
+version = "0.1.0"
+dependencies = [
+ "agent-runtime",
+ "task-domain",
+]
+
+[[package]]
+name = "fake-agent"
+version = "0.1.0"
+dependencies = [
+ "agent-runtime",
+ "task-domain",
+]
+
+[[package]]
+name = "fake-evaluator"
+version = "0.1.0"
+dependencies = [
+ "evaluation",
 ]
 
 [[package]]
@@ -571,6 +606,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "scheduler"
+version = "0.1.0"
+dependencies = [
+ "agent-runtime",
+ "task-domain",
+]
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -608,6 +651,7 @@ dependencies = [
 name = "storage-sqlite"
 version = "0.1.0"
 dependencies = [
+ "agent-runtime",
  "rusqlite",
  "task-domain",
 ]

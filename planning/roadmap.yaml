@@ -8,7 +8,7 @@
 # Near-term work lives in planning/tasks/queue.yaml, not here.
 
 schema_version: 1
-current_gate: G2
+current_gate: G4
 task_queue: planning/tasks/queue.yaml
 
 gates:
@@ -28,7 +28,7 @@ gates:
 
   - id: G2
     name: Task Core
-    status: in_progress
+    status: completed
     objective: Project, Task, Dependency, state machine, SQLite, Event
       Journal, agentctl. No AI.
     scope_ref:
@@ -37,13 +37,13 @@ gates:
 
   - id: G3
     name: FakeAgent Runtime
-    status: planned
+    status: completed
     objective: Full Task -> Scheduler -> FakeAgent -> Submit -> Verify flow.
     scope_ref: docs/architecture/fake-agent.md
 
   - id: G4
     name: Workspace/Git
-    status: planned
+    status: in_progress
     objective: Worktrees, branches, diff, cleanup, failure modes.
     scope_ref: docs/architecture/adr/ADR-0008-worktree-isolation.md
 

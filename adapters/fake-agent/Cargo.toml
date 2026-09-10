@@ -1,0 +1,12 @@
+[package]
+name = "fake-agent"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "fake_agent"
+path = "src/lib.rs"
+
+[dependencies]
+agent-runtime = { path = "../../crates/agent-runtime" }
+task-domain = { path = "../../crates/task" }
