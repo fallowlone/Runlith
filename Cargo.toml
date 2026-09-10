@@ -9,10 +9,13 @@ members = [
     "crates/agent-runtime",
     "crates/scheduler",
     "crates/evaluation",
+    "crates/workspace",
     "crates/app-services",
     "adapters/storage-sqlite",
     "adapters/fake-agent",
+    "adapters/provider-claude",
     "adapters/fake-evaluator",
+    "adapters/git-cli",
     "crates/product-version",
 ]
 resolver = "2"

@@ -43,13 +43,13 @@ gates:
 
   - id: G4
     name: Workspace/Git
-    status: in_progress
+    status: completed
     objective: Worktrees, branches, diff, cleanup, failure modes.
     scope_ref: docs/architecture/adr/ADR-0008-worktree-isolation.md
 
   - id: G5
     name: First real provider
-    status: planned
+    status: in_progress
     objective: One provider passes the AgentProvider contract; the second
       must add cleanly without core changes.
     scope_ref: docs/architecture/providers.md

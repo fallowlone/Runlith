@@ -1,0 +1,12 @@
+[package]
+name = "workspace"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "workspace"
+path = "src/lib.rs"
+
+[dependencies]
+task-domain = { path = "../task" }
+agent-runtime = { path = "../agent-runtime" }

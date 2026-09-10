@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 task-domain = { path = "../task" }
 agent-runtime = { path = "../agent-runtime" }
+workspace = { path = "../workspace" }
 storage-sqlite = { path = "../../adapters/storage-sqlite" }
 scheduler = { path = "../scheduler" }
 evaluation = { path = "../evaluation" }
@@ -17,3 +18,5 @@ evaluation = { path = "../evaluation" }
 [dev-dependencies]
 fake-agent = { path = "../../adapters/fake-agent" }
 fake-evaluator = { path = "../../adapters/fake-evaluator" }
+git-cli = { path = "../../adapters/git-cli" }
+provider-claude = { path = "../../adapters/provider-claude" }

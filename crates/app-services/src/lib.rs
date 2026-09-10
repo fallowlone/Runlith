@@ -14,12 +14,17 @@ mod error;
 mod orchestration_service;
 mod runtime_service;
 mod task_service;
+mod workspace_service;
 
 pub use clock::{format_rfc3339, Clock, FixedClock, SystemClock};
 pub use error::{ServiceError, ServiceResult};
-pub use orchestration_service::{OrchestrationIds, OrchestrationService};
+pub use orchestration_service::{ExecutionEntry, OrchestrationIds, OrchestrationService};
 pub use runtime_service::{AppliedExecution, RuntimeService};
 pub use task_service::{AppliedTransition, TaskService};
+pub use workspace_service::{
+    CleanedWorkspace, CleanupOutcome, EnsureOutcome, EnsuredWorkspace, ManagedWorkspaceRoot,
+    WorkspaceRequest, WorkspaceService,
+};
 
 // Orchestration contract re-exports: these types are the public vocabulary
 // of `OrchestrationService::schedule` (injected executor/evaluator ports,

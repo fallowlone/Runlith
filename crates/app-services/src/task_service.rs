@@ -295,6 +295,10 @@ impl<C: Clock> TaskService<C> {
             execution_id: None,
             attempt_id: None,
             attempt_outcome: None,
+            // Task lifecycle facts never carry workspace scope.
+            workspace_id: None,
+            from_workspace_state: None,
+            to_workspace_state: None,
         };
         let committed = self
             .store
@@ -337,6 +341,10 @@ impl<C: Clock> TaskService<C> {
             execution_id: None,
             attempt_id: None,
             attempt_outcome: None,
+            // Creation/dependency facts never carry workspace scope.
+            workspace_id: None,
+            from_workspace_state: None,
+            to_workspace_state: None,
         }
     }
 }

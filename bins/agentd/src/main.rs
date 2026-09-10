@@ -32,7 +32,7 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match agentd::run(DaemonConfig::with_database(database_path)).await {
+    match agentd::run(DaemonConfig::with_execution(database_path)).await {
         Ok(RunOutcome::ShutdownCompleted { connections_served }) => {
             println!("agentd: shutdown complete (connections served: {connections_served})");
             ExitCode::SUCCESS

@@ -1,8 +1,8 @@
 # External Repository Research — Adoption Decisions for AI Engineering OS
 
-> **Snapshot:** 2026-09-09  
+> **Snapshot:** 2026-09-10  
 > **Purpose:** evaluate external repositories/papers supplied during the project and decide what should influence AI Engineering OS.  
-> **Rule:** ideas may be adopted; code is copied or linked only after license/security review. Popularity is not an architecture argument.
+> **Rule:** default mode is independent adoption/transformation of ideas and failure lessons, not copying code or adding dependencies. License/privacy details are secondary unless a concrete implementation, dependency, protocol/format copy, or redistribution decision makes them material. Popularity is not an architecture argument.
 
 ## Executive decision
 
@@ -27,6 +27,15 @@ The list is genuinely useful, but not all projects are equally relevant.
 ### Research only / do not integrate into v1
 
 11. **MiroFish** — useful inspiration for simulation, population-level testing and temporal/collective memory, but its prediction-swarm architecture is not the product's execution model. AGPL and heavy simulation dependencies are additional reasons not to integrate it.
+
+### Later high-value reviews incorporated into the architecture
+
+- **microsoft/tgrep** — indexed lexical retrieval patterns, snapshot + live overlay, reconciliation and bounded indexes; primary placement G9.
+- **Graphify-Labs/graphify** — revision-bound structural graph retrieval, provenance, blast-radius analysis and incremental-index integrity; primary placement G9.
+- **juliusbrussee/caveman** — recoverable shape-aware context/tool-output compression, cache-aware optimization and measurement provenance; primary placement G9/Usage Ledger.
+- **dietrichgebert/ponytail** — work avoidance, reuse-first solution minimality, complexity review and deliberate simplification with upgrade triggers; placement across Planner/ChangeSpec/Review Packet and later efficiency learning.
+
+These reviews reinforce one combined production principle: optimize **verified delivery efficiency**, not a single token/LOC metric.
 
 ---
 
@@ -2800,4 +2809,1409 @@ REJECT
 - Releases: https://github.com/microsoft/tgrep/releases
 - Corrupt index issue #98: https://github.com/microsoft/tgrep/issues/98
 - MIT license: https://github.com/microsoft/tgrep/blob/main/LICENSE
+
+---
+
+## Graphify-Labs/graphify — deterministic code/document knowledge graph and graph-assisted retrieval
+
+**Reviewed:** 2026-09-10  
+**Reference:** `Graphify-Labs/graphify` (`v8` development branch)  
+**Observed package version:** `graphifyy 0.9.57` in current `pyproject.toml`  
+**Current declared license:** Apache-2.0; `NOTICE` states portions contributed before relicensing remain available under MIT and `LICENSE-MIT` is retained.  
+**Decision:** **ADAPT — HIGH VALUE for G9 Code Intelligence / Context, later Review Packet and architecture explorer; do not adopt Graphify as a core runtime dependency.**
+
+### Why it matters to AI Engineering OS
+
+Graphify attacks a problem that is directly relevant to this project: an agent should not repeatedly rediscover repository structure by reading arbitrary files or stuffing a whole repository into context. It builds a deterministic AST-derived code graph, augments it with document/rationale relations, and exposes graph queries such as node explanation, neighborhood traversal, shortest paths and affected/blast-radius traversal.
+
+The useful architectural idea is **not** “replace search/RAG with one graph.” The useful idea is a separate structural evidence layer that can cooperate with exact lexical search, symbol lookup, Git evidence, requirements/ADRs and optional semantic retrieval.
+
+Target adaptation:
+
+```text
+Repository sources / docs / ADRs / requirements
+          │
+          ├── exact lexical retrieval
+          ├── AST / symbol extraction
+          ├── Git revision + diff evidence
+          └── typed resource/document extraction
+                    │
+                    ▼
+          Project Structural Evidence Graph
+                    │
+          ┌─────────┼─────────────┐
+          ▼         ▼             ▼
+     neighborhood  path       impact/blast radius
+          │         │             │
+          └─────────┼─────────────┘
+                    ▼
+             Retrieval Planner
+                    ▼
+          exact source verification
+                    ▼
+               ContextPlan
+```
+
+The graph remains derived/rebuildable evidence. It does **not** become canonical Task, Git, requirement, architecture or source-code truth.
+
+### What Graphify currently demonstrates
+
+The current README describes local tree-sitter AST extraction for code, cross-file `calls` / `imports` / `inherits` and related edges, community detection, `query`, `path`, `explain`, `affected`, document/rationale nodes, global/cross-project graph composition, PR/worktree impact views, and optional MCP exposure. Code parsing is local/no-LLM; semantic extraction for docs/media may use an agent/provider. The architecture document separates detection, extraction, build, clustering, analysis, report/export, cache, security, validation, serving and watch stages.
+
+The current package manifest is Python 3.10+ and depends directly on NetworkX, NumPy, RapidFuzz and a broad set of tree-sitter language packages. Optional extras add MCP/Starlette, Neo4j, FalkorDB, document/media tooling and several model/provider SDKs. This is useful as a reference implementation, but a poor fit as a foundational dependency for our Rust `agentd` and strict replaceable-port architecture.
+
+### ADOPT — architectural ideas
+
+#### 1. Structural graph is a first-class retrieval strategy
+
+Add structural graph traversal as a peer of lexical/BM25/embedding retrieval rather than burying it inside RAG.
+
+Relevant operations:
+
+```text
+get_node / resolve_symbol
+neighbors
+shortest_path
+incoming/outgoing relationships
+import/call cycles
+affected / reverse-dependency traversal
+subsystem/community candidates
+```
+
+This fits our existing `CodeIntelligencePort`; it does not replace `RepositoryTextSearchPort`.
+
+#### 2. Evidence class and confidence are separate
+
+Graphify distinguishes `EXTRACTED`, `INFERRED`, and `AMBIGUOUS` edges and stores an explicit confidence score. We adopt the separation between **evidence origin** and **confidence**, but strengthen it:
+
+```text
+StructuralRelationEvidence
+- relation
+- source_ref
+- source_location
+- source_revision
+- extraction_method / extractor_version
+- evidence_class: EXACT | DERIVED | SEMANTIC_INFERENCE | AMBIGUOUS
+- confidence (optional calibrated estimate)
+- provenance
+```
+
+A high confidence value never creates authority. Exact source remains verifiable and wins when graph evidence conflicts with source.
+
+#### 3. Code → rationale / ADR / requirement traceability
+
+Graphify promotes `NOTE` / `WHY` / ADR/RFC references into nodes connected to code. This is especially valuable for our existing `ChangeSpec` and requirement-traceability architecture.
+
+Future graph view should support paths such as:
+
+```text
+Requirement
+→ ChangeSpec revision
+→ Task
+→ changed symbol/file
+→ verification evidence
+→ ADR / rationale
+```
+
+This is more valuable to our product than generic “knowledge graph” visualization because it can answer *why does this code exist, what requirement owns it, and what evidence would be affected by changing it?*
+
+#### 4. Blast-radius / affected traversal
+
+Graphify's `affected` traversal follows selected directed relations such as calls/imports/references/inheritance. Adapt this into a future `ImpactAnalysis` capability.
+
+Candidate uses:
+
+- context planning before an execution;
+- test-selection candidates;
+- review packet construction;
+- identifying dependent symbols/modules;
+- security change scope;
+- Delivery Reconciler / merge-risk hints.
+
+Impact output must retain the path/relation/location that caused each hit. A raw “affected=true” label without evidence is insufficient.
+
+#### 5. Progressive graph disclosure
+
+Prefer:
+
+```text
+resolve seed
+→ bounded neighborhood/path/impact summary
+→ selected symbols/files
+→ exact source reads
+```
+
+rather than dumping an entire graph/report into model context.
+
+Graphify's own code benchmark is a useful signal that graph tooling can improve repository QA, but its reported code suite currently uses only six graded questions and around 140K tokens/query. That is nowhere near enough evidence to make graph-first retrieval mandatory for our product. Our G9 benchmark must measure answer quality **and** token/latency cost.
+
+#### 6. Revision-bound structural indexes
+
+A graph must carry the repository/source revision it represents. Queries need freshness evidence just like the tgrep-derived lexical index design.
+
+Conceptually:
+
+```text
+StructuralGraphSnapshot
+- repository_ref
+- revision / source manifest hash
+- extractor version
+- corpus definition
+- build completeness
+- created_at
+```
+
+A stale graph can still be useful candidate evidence, but must never masquerade as current source truth.
+
+#### 7. Incremental rebuild must preserve corpus integrity
+
+Graphify's issue history is particularly useful here. It has encountered manifest shrinkage, differing corpora between rebuild paths, absolute/relative path drift, document-only deletion gaps and graph overwrite/shrink failures. These are exactly the failure modes a durable background indexer will meet.
+
+Adopt stronger invariants:
+
+```text
+incremental update
+!= changed-files-only new corpus
+
+unchanged source entries remain represented unless source deletion is proven
+
+failed / hollow / incomplete extraction
+!= successful complete rebuild
+
+partial derived graph
+must not replace a known-good graph without explicit degraded state
+```
+
+Each build/reconcile path must use one canonical corpus-definition function. Hook/CLI/background-worker implementations may not independently decide which files belong to the graph.
+
+#### 8. Build completeness is explicit
+
+Introduce a future derived-index health record:
+
+```text
+IndexBuildEvidence
+- expected source count/hash
+- processed source count/hash
+- failed sources
+- omitted sources
+- extractor failures
+- partial flag
+- prior graph revision
+- produced graph revision
+```
+
+The publish step should refuse an unexpectedly catastrophic shrink or incomplete corpus unless policy explicitly authorizes replacement.
+
+This is stronger than a node-count-only shrink guard: semantic changes can legitimately alter node count, while source coverage is a more direct integrity signal.
+
+#### 9. Graph artifacts are untrusted and rebuildable
+
+Graph JSON/index data can be malformed, stale or produced by an older extractor. Treat it the same way as the tgrep-derived index principle:
+
+```text
+corrupt graph
+→ INVALID / DEGRADED
+→ rebuild / fallback
+!= corrupt canonical project state
+```
+
+Readers must perform schema/version/bounds validation before traversal.
+
+#### 10. Community detection is a heuristic view, not architecture truth
+
+Leiden/community clustering and “god nodes” are useful for:
+
+- architecture explorer UI;
+- context candidate grouping;
+- repo onboarding;
+- merge/review-risk hints.
+
+But detected communities must never silently become bounded-context ownership, module policy or Task authority. They are derived hypotheses and should expose algorithm/revision/settings provenance.
+
+#### 11. Cross-project graph as a namespaced overlay
+
+Graphify prefixes project node IDs and can merge project graphs into a global graph. Adapt the idea for future multi-repository/team views, but not as one mutable `global-graph.json` authority.
+
+Prefer:
+
+```text
+ProjectGraph A ─┐
+ProjectGraph B ─┼─→ CrossProjectGraphView / federation
+ProjectGraph C ─┘
+```
+
+Project identity stays explicit. Cross-project dedup/edges are derived and reversible. An external-library node matched by label alone is not enough evidence for canonical identity.
+
+#### 12. Temporal graph / graph diff
+
+Graphify's benchmark harness includes hundreds of historical ERPNext AST checkpoints. The lesson is useful: code intelligence should eventually support revision-to-revision structural comparison.
+
+Potential product uses:
+
+```text
+architecture drift
+new/removed dependency edges
+blast-radius change
+review packet before/after graph
+risk hot-spots
+```
+
+Do not persist full snapshots forever by default. A content-addressed/rebuildable representation or checkpoint+delta strategy should be benchmarked.
+
+#### 13. PR/worktree impact views
+
+Graphify exposes PR dashboard ideas and “PRs sharing graph communities” as merge-risk hints. Adapt this later into our existing Review Packet + Delivery Reconciler architecture:
+
+```text
+Worktree diff
+→ changed symbols
+→ graph impact paths
+→ overlapping impacted regions across executions/PRs
+→ merge/review risk evidence
+```
+
+Community overlap alone must not determine merge order or block delivery. It is a candidate risk signal.
+
+#### 14. Query observability — opt-in and bounded
+
+Graphify includes local query logging controls. We already require telemetry off by default. If our Context/Code Intelligence layer logs retrieval decisions, retain only bounded metadata/provenance by default and keep full retrieved payload logging separately opt-in/sensitive.
+
+Useful fields:
+
+```text
+query kind
+repository revision
+tool/strategy
+candidate/returned counts
+latency
+context budget
+freshness/fallback
+```
+
+Do not turn source snippets or private repository content into routine diagnostic logs.
+
+#### 15. Architecture documentation parity tests
+
+Graphify's architecture document has tests that import symbols named in its module-responsibility table so docs cannot drift silently. Adapt the principle for generated/checkable architecture facts:
+
+- crate dependency maps;
+- contract/ADR references;
+- supported event/schema versions;
+- registered provider/tool capabilities.
+
+Do **not** make free-form prose mechanically generated just to satisfy tests; validate factual architecture claims that can actually be derived from code.
+
+### ADAPT — security/privacy lessons
+
+Positive patterns worth retaining:
+
+- AST parsing instead of executing repository source;
+- no `shell=True` for subprocesses;
+- explicit URL SSRF checks and redirect revalidation for ingestion;
+- output/download size caps;
+- path-containment validation;
+- HTML/text sanitization for graph labels;
+- source content treated as untrusted when passed to an LLM;
+- code-only mode can stay entirely local;
+- credentials are not stored in graph artifacts.
+
+For our system, prompt-injection delimiters/sentinel neutralization are only defense-in-depth. They are **not** a security boundary. Resource/semantic extraction still passes through Policy/Runner/provider isolation and provenance rules.
+
+### DEFER
+
+- a concrete graph storage engine decision (SQLite tables vs embedded graph index vs another representation) until G9 benchmarks;
+- embeddings/semantic graph edges as an optional augmentation, not base truth;
+- community detection engine choice;
+- cross-project federation;
+- temporal graph storage;
+- PR/worktree graph-impact UI;
+- optional Graphify import/interoperability adapter;
+- hyperedges/n-ary relation storage until a real use case beats explicit typed relations;
+- direct dependency on Graphify itself.
+
+### REJECT
+
+#### Graphify as a core runtime dependency
+
+Do not embed the Python package into `agentd` as a foundational service. Reasons:
+
+- Python runtime/lifecycle would become part of core availability;
+- broad NetworkX + many tree-sitter dependencies conflict with our intentionally small Rust runtime boundary;
+- optional integrations add substantial provider/MCP/database/media surface;
+- its graph schema and lifecycle are Graphify product choices rather than our canonical contracts;
+- our `CodeIntelligencePort` must remain replaceable.
+
+A future benchmark may still compare Graphify as an external reference implementation.
+
+#### MCP/HTTP as internal authority
+
+Graphify can expose stdio MCP and optional HTTP. Do not make its MCP/HTTP server an internal control plane or authoritative code-intelligence service inside `agentd`.
+
+If MCP integration is later useful, it should be an external/plugin adapter behind our own capability/security boundary. Existing OS-authenticated local IPC remains the product control plane.
+
+#### “Graph first” as a mandatory retrieval rule
+
+Do not copy Graphify's strict-hook approach that redirects raw source reads to the graph as a universal policy. Our Retrieval Planner chooses between exact lexical, structural graph, symbols, Git, documents and optional semantic retrieval according to query/risk/freshness. For correctness-sensitive evidence, exact source verification is still required.
+
+#### Graph community as domain truth
+
+Do not let clustering determine architectural boundaries, ownership, task decomposition, security policy or merge authority.
+
+#### One giant JSON graph as canonical storage
+
+Do not use `graph.json`/`global-graph.json` as canonical project state. Large monolithic JSON is acceptable as an export/interchange artifact, not as durable authority for a long-running multi-agent control plane.
+
+### Reliability / maintenance findings from current repository
+
+The project is active and fast-moving. The current `v8` branch reports package version `0.9.57`, while the GitHub Releases page indexed by search lagged behind at `0.9.47`; source manifest is the better current-version signal here.
+
+Current/recent issue history reveals several lessons relevant to our design:
+
+- an open issue reports divergent corpora between hook rebuild and `/graphify` skill paths when Markdown extractors are included by one path but not the other; this shows why corpus membership must have one canonical owner;
+- a recent issue documented a graph being silently replaced by a drastically smaller graph after hollow/invalid LLM extraction responses were not classified as incomplete; even though fixes evolve, the broader lesson is to gate publication on explicit source-coverage/completeness evidence;
+- historical incremental-manifest bugs caused unchanged files to be rediscovered as new after the manifest was rewritten from only the changed subset;
+- path-root/absolute-vs-relative bugs have appeared in incremental/update paths, reinforcing that source addressing must be revision/root aware and portable;
+- the security document currently lists “0.3.x” as supported even though the package manifest is at 0.9.x; it also says graph analysis makes no network calls except explicit ingest, while the current README documents provider-backed semantic extraction for docs/media. These are concrete examples of security/prose drift despite otherwise good architecture-doc parity practices;
+- the code-intelligence benchmark is promising but currently only `n=6`, so it is far too small to justify adopting Graphify's retrieval policy wholesale.
+
+These are not arguments that Graphify is poor quality; they are valuable evidence of the edge cases that emerge once a derived structural index becomes continuously updated and agent-facing.
+
+### Benchmark interpretation
+
+Project-reported results include:
+
+- LOCOMO recall@10 `0.497` for graph expansion;
+- LOCOMO QA `45.3%`;
+- LongMemEval-S QA `76%`, tied with dense RAG in its harness;
+- ERPNext code QA key-fact coverage `70.8% → 82.0%` when a graphify tool is added to a fixed agent, but only `n=6` questions and about `140K` tokens per query.
+
+The memory harness has useful fairness controls (same model/budgets and published judge-validation details), but it remains a project-owned harness. The code result is especially underpowered statistically. Treat all numbers as **candidate evidence**, not product truth.
+
+Our G9 benchmark should compare at least:
+
+```text
+exact lexical only
+indexed lexical/trigram
+symbol/AST lookup
+structural graph
+lexical + graph
+BM25/FTS
+optional embeddings/hybrid
+```
+
+Measure:
+
+```text
+repository QA correctness
+symbol/path accuracy
+impact-analysis precision/recall
+freshness after edit/delete/branch switch
+tokens delivered to model
+first-use/cold latency
+warm latency
+index build/update latency
+RSS/disk size
+false positive structural edges
+failure/corruption recovery
+```
+
+### License / dependency decision
+
+The current project declares Apache-2.0 and retains an MIT license for portions predating relicensing. Apache-2.0 is commercially usable, but direct copying/redistribution carries notice/license obligations and would unnecessarily entangle our proprietary product with attribution tracking.
+
+Preferred policy for this review:
+
+```text
+study architecture / behavior / tests
+→ reimplement independently behind our own Rust ports
+→ do not copy source code
+```
+
+If we ever import or vendor Graphify code, perform a file-level provenance/license review and preserve required Apache NOTICE/license terms.
+
+### Gate placement
+
+Do not change current G4 implementation sequence.
+
+Primary placement:
+
+```text
+G9 — Context Engine + Continuity
+```
+
+Secondary later consumers:
+
+```text
+G8  Verification        → impacted-test/review evidence candidates
+G11 Background          → incremental graph maintenance
+later Delivery          → PR/worktree conflict/impact hints
+UI Architecture Explorer → structural visualization
+```
+
+Do not implement this during current G4 Workspace/Git work.
+
+### Decision summary
+
+```text
+ADOPT
+- structural graph as a first-class retrieval/evidence strategy
+- provenance/evidence class on every relation
+- code ↔ ADR/rationale/requirement traceability
+- affected/blast-radius traversal with causal paths
+- revision-bound graph snapshots
+- explicit build completeness and source coverage
+- canonical corpus membership shared by every rebuild path
+- incomplete derived graph cannot silently replace known-good evidence
+- graph corruption degrades/rebuilds; source truth remains intact
+- architecture-doc factual parity checks
+
+ADAPT
+- Graphify graph operations behind CodeIntelligencePort
+- graph + lexical/symbol/Git/document retrieval through Retrieval Planner
+- community/god-node analysis as heuristic UI/context signals
+- cross-project graph as namespaced federation, not global authority
+- temporal graph diff for architecture drift/review evidence
+- PR/worktree graph overlap for Review Packet / Delivery Reconciler hints
+- bounded opt-in retrieval observability
+
+DEFER
+- graph storage engine
+- community algorithm
+- semantic/LLM edges
+- embeddings
+- temporal persistence strategy
+- cross-project federation
+- hyperedges
+- Graphify interoperability adapter
+- direct Graphify dependency
+
+REJECT
+- Graphify Python package as core agentd dependency
+- MCP/HTTP Graphify server as internal product control plane
+- mandatory graph-first/raw-source-blocking retrieval policy
+- graph communities as architecture/task/security authority
+- one monolithic graph JSON as canonical product state
+- inferred relation/confidence as authorization or completion evidence
+```
+
+### Primary sources reviewed
+
+- Repository / README: https://github.com/Graphify-Labs/graphify
+- Architecture: https://github.com/Graphify-Labs/graphify/blob/v8/ARCHITECTURE.md
+- Benchmarks: https://github.com/Graphify-Labs/graphify/blob/v8/BENCHMARKS.md
+- Package/dependencies: https://github.com/Graphify-Labs/graphify/blob/v8/pyproject.toml
+- Security model: https://github.com/Graphify-Labs/graphify/blob/v8/SECURITY.md
+- License / notice: https://github.com/Graphify-Labs/graphify/blob/v8/LICENSE ; https://github.com/Graphify-Labs/graphify/blob/v8/NOTICE
+- Affected/blast-radius implementation: https://github.com/Graphify-Labs/graphify/blob/v8/graphify/affected.py
+- Global graph implementation: https://github.com/Graphify-Labs/graphify/blob/v8/graphify/global_graph.py
+- Corpus divergence issue #2089: https://github.com/Graphify-Labs/graphify/issues/2089
+- Incomplete extraction / graph shrink issue #3105: https://github.com/Graphify-Labs/graphify/issues/3105
+- Incremental manifest issue #837: https://github.com/Graphify-Labs/graphify/issues/837
+- Update path portability issue #433: https://github.com/Graphify-Labs/graphify/issues/433
+- Skill/provider mismatch issue #2513: https://github.com/Graphify-Labs/graphify/issues/2513
+
+
+---
+
+## `juliusbrussee/caveman` — recoverable context compression and token-efficiency measurement
+
+**Reviewed:** 2026-09-10  
+**Decision:** **ADAPT — VERY HIGH VALUE for future production Context Engine / token efficiency.**  
+**Integration policy:** study and independently reimplement ideas behind our own ports; do not make Caveman Engine a core dependency.
+
+Repository: https://github.com/juliusbrussee/caveman
+
+### Why this matters to AI Engineering OS
+
+Caveman began as a terse-output skill but the current repository also contains a much more relevant architecture for agent systems: local, type-aware compression of large upstream context/tool payloads, exact recovery handles, cache-aware transformation, token accounting and benchmark methodology.
+
+The useful lesson is not “make the model speak like a caveman.” The useful lesson is:
+
+```text
+retain exact evidence
+→ expose a smaller derived representation
+→ recover exact source on demand
+→ pass through unchanged when the optimization is unsafe or not beneficial
+```
+
+This aligns strongly with our existing rule that Context is a disposable/materialized view and source evidence remains authoritative.
+
+### Two different Caveman mechanisms must not be confused
+
+The repository documents two materially different layers:
+
+1. **Caveman skill / terse output** — primarily changes model output style. The project's `HONEST-NUMBERS.md` explicitly says this layer does not compress input/context/reasoning and adds roughly 1–1.5k input tokens per turn through the skill instructions.
+2. **Caveman Engine/Proxy family** — compresses upstream payloads/tool outputs locally and supports recovery of exact originals.
+
+For AI Engineering OS, the second category is much more important.
+
+### Benchmark evidence and limits
+
+The project's `WRAP-BENCHMARK.md` reports a controlled tool-heavy benchmark:
+
+```text
+Direct Claude Code input:     885,793 provider-reported tokens
+Caveman wrap + skill:          591,673
+Reduction:                     33.2%
+Exact-answer checks:           18/18
+Case-clustered 95% interval:   14.6%–48.5%
+```
+
+This is useful controlled evidence, but it is explicitly `benchmark_counterfactual`, not production billing/customer savings.
+
+The per-shape results make the workload dependence concrete:
+
+```text
+log needle          -50.2% input
+deployment JSON     -26.4%
+CSV outlier         -55.1%
+test output         -27.8%
+YAML/config         -46.2%
+HTML dashboard       +9.9%  (regression)
+```
+
+The HTML workload used 140,687 direct input tokens versus 154,641 through Caveman because no useful transform applied while the wrapper/skill overhead was still paid. This is a critical negative result: an optimizer must be allowed to decide **not to optimize**.
+
+The project's own documentation also reports workloads where optimization can lose. This is a feature, not an embarrassment, for our research: it proves the correct architecture must be **adaptive and measurable**, not always-on.
+
+The terse-output skill separately reports large output-token reductions, but its own honesty note warns that input/reasoning are unchanged and per-turn instruction overhead can make already-terse workloads net-negative.
+
+### Current Engine mechanics worth retaining as evidence
+
+The current Engine documentation exposes a registry of **15 specialized compressors** covering JSON, logs, code, diffs, search results, text, HTML, tables, config, tool schemas, tool-schema annotations, TOON, accessibility trees, repetition and terminal output. We should not copy this taxonomy blindly, but it is strong evidence that payload-shape specialization is a practical architecture rather than a theoretical idea.
+
+Caveman's native Context Content Recovery storage is bounded to **512 MiB by default**. When capacity is exhausted, new lossy transforms fail closed to original-byte pass-through rather than evicting existing recovery handles. This specific size is not our target; the **bounded recovery + preserve existing recoverability + pass-through on exhaustion** behavior is the valuable pattern.
+
+The repository's memory-file compressor reports five real fixtures averaging roughly **46% reduction** for repeatedly loaded project instruction/memory files. We do not copy the mechanism as canonical-file rewriting; we adapt the underlying idea to derived, revisioned AgentPolicyView / Execution Envelope rendering.
+
+Caveman Browse demonstrates the same “optimize representation only when it wins” lesson. In its large 200-row operations-table fixture, Playwright ARIA was 15,704 inferred tokens while a focused Caveman query was about **121 tokens (~129.8× smaller)**. On a small checkout form, Playwright ARIA was 67 tokens while the focused Caveman result was **111 tokens (1.66× larger)** because action IDs/recovery/accounting overhead dominated. The useful product rule is progressive disclosure and workload-aware representation, not “our representation is always smaller.”
+
+### ADOPT / ADAPT
+
+#### 1. Recoverable lossy compression — P0
+
+Target:
+
+```text
+Exact Resource / Tool Evidence
+        ↓ retain exact source
+Compressed Context View
+        ↓
+RecoveryRef
+        ↓ on demand
+Exact original / exact bounded range
+```
+
+The compressed representation is derived evidence only.
+
+Required semantics:
+
+```text
+COMPRESSED != AUTHORITATIVE
+COMPRESSED != VERIFIED
+COMPRESSED != permission
+```
+
+If the exact original cannot be safely recovered, do not apply lossy compression.
+
+Permanent candidate rule:
+
+```text
+NO RECOVERY → NO LOSSY COMPRESSION
+```
+
+#### 2. Compression artifact provenance
+
+Our implementation should go beyond a bare recovery handle:
+
+```text
+CompressionArtifact
+- source_ref
+- source_hash
+- source_revision
+- compressor
+- compressor_version
+- original bytes/tokens
+- compressed bytes/tokens
+- lossiness class
+- sensitivity
+- recovery_ref
+- provenance
+```
+
+This supports invalidation, audit, cache decisions and exact re-read.
+
+#### 3. Shape-aware compression
+
+Caveman's strongest architectural idea is that JSON/logs/diffs/code/search/HTML/tables/tool schemas/terminal output should not all be summarized with one generic algorithm.
+
+Future product boundary:
+
+```text
+ContextCompressorPort
+├── TestOutputCompressor
+├── LogCompressor
+├── JsonCompressor
+├── DiffCompressor
+├── SearchResultCompressor
+├── CodeStructureCompressor
+├── TerminalOutputCompressor
+└── DocumentCompressor
+```
+
+Examples:
+
+- tests: failures/panics/exact failed names preserved; repetitive passes collapsed;
+- logs: errors/stack traces/diagnostic boundaries retained;
+- JSON: structure and relevant subtrees retained;
+- diff: file/hunk/change structure retained with exact source recoverability;
+- search results: diagnostic/security/high-value hits retained with exact references;
+- code: signatures/symbols/structure before full bodies when appropriate.
+
+#### 4. Fail-through instead of corrupting context
+
+If parsing/compression fails, recovery storage is unavailable, or compressed output is not meaningfully smaller/safer, return the original/bounded exact representation.
+
+Optimization failure may reduce efficiency; it must not silently reduce correctness.
+
+#### 5. Tool-output compression as a high-value sink
+
+Coding agents repeatedly feed terminal/test/search output back into later turns. The same noisy output can therefore consume context multiple times.
+
+We should retain the trusted exact tool artifact while sending the model a compact, structured view. Recovery remains exact and tool-call/tool-result correlation remains valid.
+
+#### 6. Observe → Shadow → Active rollout
+
+Adopt a staged rollout model:
+
+```text
+OFF → OBSERVE → SHADOW → ACTIVE
+```
+
+`OBSERVE`: identify token sinks without changing context.
+
+`SHADOW`: generate optimized context but keep baseline model-visible context; compare measurements/counterfactual where possible.
+
+`ACTIVE`: enable optimization only after quality/security/robustness gates pass.
+
+#### 7. Cache-aware optimization
+
+A smaller prompt is not automatically cheaper/faster if it destroys provider prompt-cache reuse.
+
+Conceptual comparison:
+
+```text
+40k input, 35k cached, 5k uncached
+vs
+25k input, 0 cached, 25k uncached
+```
+
+Raw tokens favor the second; effective cost/latency may favor the first.
+
+Our Context Planner should therefore account for stable prefixes, cache epochs/invalidation and transformation stability.
+
+#### 8. `EffectiveContextCost`
+
+Do not optimize only `raw_token_count`. Evaluate something closer to:
+
+```text
+uncached input cost
++ cached input cost
++ transformation overhead
++ latency
++ expected context reuse
++ recovery/retry risk
+```
+
+The final production metric should be tied to verified delivery rather than prompt size alone.
+
+#### 9. Provider-reported measurement provenance
+
+Caveman's distinction between estimated, counterfactual and provider-reported numbers is worth adopting.
+
+Future usage evidence:
+
+```text
+TokenMeasurement
+- provider/model
+- value/unit
+- evidence source:
+    ESTIMATED
+    PROVIDER_REPORTED
+    BENCHMARK_COUNTERFACTUAL
+    MEASURED_LOCAL
+- cache class
+- execution_id
+- timestamp
+```
+
+Savings claims should be similarly classified as inferred/measured/controlled-A-B/verified.
+
+Never present tokenizer estimates as invoice-level savings.
+
+#### 10. Context budget packing signals
+
+Caveman experiments with relevance/recency/error-aware packing. Our richer ContextPlan should consider the same useful signal: error/diagnostic evidence often deserves priority over long successful output.
+
+The concept adapts to our existing scoring model:
+
+```text
+relevance
+freshness
+trust
+required
+sensitivity
+error/diagnostic signal
+task phase
+structural relation
+token cost
+attention cost
+```
+
+#### 11. Derived compact agent-policy views
+
+Compression of project memory/instruction files is conceptually useful only if the canonical source stays untouched.
+
+For us:
+
+```text
+canonical ADR/rules/ChangeSpec
+→ validated renderer
+→ compact Execution Envelope / provider-specific AgentPolicyView
+```
+
+The compact view is derived, versioned and recoverable/rebuildable. Do not let a summarizer overwrite authoritative architecture.
+
+#### 12. Context Efficiency Observatory + automatic promotion/rollback
+
+Long term, optimization needs real execution evidence:
+
+```text
+provider tokens
+cached/uncached tokens
+cost
+latency
+compression ratio
+recovery calls
+tool calls
+retry count
+verification result
+human intervention
+task type/risk
+```
+
+A candidate compressor/policy should be promoted only when A/B evidence shows efficiency gain without quality regression; otherwise reject/rollback it.
+
+### REJECT / DEFER
+
+#### Global terse-output skill as the core mechanism — REJECT
+
+A large repeated “be terse” instruction can itself consume context every turn and does not reduce input/reasoning tokens. Our agents already use structured result contracts; concise output should come from bounded schemas and role-specific instructions, not a large always-on persona prompt.
+
+#### Fixed line caps as correctness strategy — REJECT
+
+Rules such as “keep first N lines” may be useful emergency bounds but are too crude as an authority. A critical compiler/test/security error can appear after the cutoff. Prefer semantic extraction + budget + exact recovery.
+
+#### Tool-schema stripping — DEFER
+
+Tool descriptions affect action selection and argument correctness. Compression of schemas is high risk and should remain experimental until controlled benchmarks prove tool-selection, argument, security and cache non-regression.
+
+#### Text-as-image / pixel context — REJECT for core
+
+Potential token-accounting gains are provider/model dependent and introduce worse exact retrieval, accessibility, provenance and visual/OCR failure modes. At most this belongs in an isolated future experiment/plugin.
+
+#### Caveman Engine dependency — REJECT
+
+Our goal is idea adoption and independent reimplementation inside Rust/local-first boundaries. The runtime dependency would also bring a foreign architecture and split-license considerations with no need when we are reimplementing the ideas.
+
+### Implementation-policy note (not an adoption blocker)
+
+Because our default research mode is independent reimplementation of ideas, Caveman's own privacy/license choices do not determine our architecture. They are useful only as failure/operations evidence. One surfaced current security page describes content-free anonymous CLI telemetry enabled after disclosure with opt-out controls, while another crawled `SECURITY.md` snapshot still states “no telemetry,” illustrating documentation drift. Our canonical product rule remains telemetry off by default / explicit opt-in.
+
+### Recovery-store security lesson
+
+Exact recovery can accidentally become a durable secret sink because terminal/log/tool payloads may contain credentials or sensitive data.
+
+Future recovery retention must pass through sensitivity/Secret policy and have explicit local ownership, encryption/TTL/deletion semantics where required.
+
+Do not durably retain a secret merely because compression wants reversibility.
+
+### Browser / DOM representation lesson
+
+Caveman's browser work illustrates a broader principle: focused structural extraction can make huge DOM/accessibility representations dramatically smaller, but on small pages UID/recovery metadata can make the optimized representation larger.
+
+Conclusion:
+
+```text
+progressive disclosure + workload-aware selection
+> universal compressed representation
+```
+
+### Gate placement
+
+Primary:
+
+```text
+G9 — Context Engine + Continuity
+```
+
+Later:
+
+```text
+Usage Ledger / Model Router → cache/token/cost evidence
+G11 Background → observe/shadow benchmarking and optimization learning
+Review/Verification → quality non-regression gate
+```
+
+Do not interrupt current G4 Workspace/Git work.
+
+### Caveman decision summary
+
+```text
+ADOPT / ADAPT
+- exact recovery for lossy derived context (P0)
+- no-recovery/no-lossy-compression rule (P0)
+- shape-aware tool/context compression
+- pass-through when unsafe/unprofitable
+- tool-output semantic compression
+- observe/shadow/active rollout
+- provider/cache-aware context optimization
+- explicit token-measurement provenance
+- error/diagnostic signal in context packing
+- compact derived policy/context views, never compressed authority
+- execution-level efficiency observatory
+- controlled A/B promotion and rollback
+
+DEFER
+- tool-schema compression
+- exact compressor algorithms and storage backend
+- provider-specific cache tuning until provider integrations exist
+
+REJECT
+- global terse persona/skill as core token strategy
+- fixed line truncation as correctness authority
+- text-as-image/pixel compression as core
+- Caveman Engine as a core dependency
+```
+
+### Primary sources reviewed
+
+- Repository / README: https://github.com/juliusbrussee/caveman
+- Honest numbers: https://github.com/JuliusBrussee/caveman/blob/main/docs/HONEST-NUMBERS.md
+- Wrap benchmark: https://github.com/JuliusBrussee/caveman/blob/main/docs/WRAP-BENCHMARK.md
+- Licensing overview: https://github.com/JuliusBrussee/caveman/blob/main/LICENSING.md
+- Engine BSL text: https://github.com/JuliusBrussee/caveman/blob/main/LICENSE.BSL
+
+---
+
+## `dietrichgebert/ponytail` — solution minimality, reuse-first engineering and complexity control
+
+**Reviewed:** 2026-09-10  
+**Decision:** **ADAPT — VERY HIGH VALUE for planning/review efficiency.**  
+**Integration policy:** transform the engineering ideas into typed planning/review mechanisms; do not copy an always-on prompt/skill architecture.
+
+Repository: https://github.com/dietrichgebert/ponytail
+
+### Why this matters to AI Engineering OS
+
+Ponytail attacks an earlier layer of cost than context compression. Its central idea is that avoiding unnecessary code/abstractions/dependencies reduces not only LOC today but every future cost of indexing, reading, reviewing, testing, maintaining and re-sending that complexity to agents.
+
+Conceptual distinction:
+
+```text
+Ponytail → Structural / Work Efficiency
+Caveman  → Context Efficiency
+```
+
+The strongest combined principle is:
+
+```text
+Do less work.
+Retrieve less.
+Send less.
+Reuse more.
+Verify everything.
+```
+
+This should become architecture, not a slogan injected into every prompt.
+
+### Core ladder worth adapting
+
+The repository's current ladder is essentially:
+
+```text
+1. Does this need to exist? → YAGNI
+2. Already in this codebase? → reuse it
+3. Standard library?
+4. Native platform feature?
+5. Already-installed dependency?
+6. Can the solution be much smaller?
+7. Only then create the minimum new implementation that works.
+```
+
+The ladder is explicitly supposed to run after understanding the real code path/root cause. This distinction is important: minimal solution does not mean shallow diagnosis.
+
+### Strongest idea: reuse before write
+
+AI coding agents frequently create new helpers/managers/factories/wrappers that duplicate an existing capability elsewhere in the repository.
+
+We can make reuse evidence-backed through existing/future AI Engineering OS capabilities:
+
+```text
+Task needs capability
+      ↓
+RepositoryTextSearchPort + CodeIntelligencePort + Graph
+      ↓
+existing symbols/services/ports/patterns/dependencies
+      ↓
+ReuseCandidateSet
+      ↓
+Planner / Execution Envelope
+```
+
+For example, the Execution Envelope may explicitly surface existing `WorkspaceService`, `GitPort` or `RuntimeService` rather than relying on a generic instruction to “search first.”
+
+### Official agentic benchmark evidence
+
+The repository's 2026-06-18 real Claude Code benchmark reports, for its feature-task aggregate, approximately:
+
+```text
+Ponytail vs baseline:
+LOC     -54%
+tokens  -22%
+cost    -20%
+time    -27%
+```
+
+The reduction varies dramatically by task: large on features with an over-build trap and close to zero on already-minimal CRUD-style work. The published examples include a date-picker task shrinking from roughly **404 added lines to 23** and a color-picker task from roughly **287 to 23** when native/platform capabilities replaced custom implementation. This is exactly the class of waste our reuse/native-capability preflight should detect.
+
+The benchmark also reports that a simple YAGNI one-liner prompt reduced code but once dropped a path-traversal guard in the safety tasks; Ponytail's fuller rules retained the tested safety behavior. This is useful evidence that “be shorter” is weaker than a policy that explicitly preserves safety boundaries.
+
+These are project-reported measurements and should be treated as directional evidence, not guaranteed savings for our workloads.
+
+### Independent 480-build benchmark: the critical robustness warning
+
+An independent repository (`Deepusleepy/ponytail-benchmark`) ran:
+
+```text
+24 tasks
+× 4 modes (baseline/lite/full/ultra)
+× 5 repetitions
+= 480 builds
+Claude Opus 4.8
+```
+
+Reported result at Full was roughly 44% less code / 53% fewer logical statements, while correctness remained about 99% and the tested security attacks did not regress.
+
+However, on **5 of 24 tasks** where edge-case robustness was not explicitly specified, aggressive minimality removed defensive bad-input behavior and robustness dropped sharply. Stronger minimality levels made this effect worse.
+
+This is the most important negative finding for us:
+
+```text
+MINIMUM CODE
+!=
+MINIMUM VALID ROBUST SOLUTION
+```
+
+Therefore robustness/security/data-safety floors must survive even when the task specification omits an obvious malformed-input case.
+
+### Independent process-cost warning
+
+A separate Cursor SDK A/B report in Ponytail issue #121 found that leaner output can increase tool calls/tokens/cost on large completion-forced tasks. Representative estimated-cost deltas in that small matrix were approximately **+55% Composer 2.5 Fast, +6% Gemini 3.5 Flash, +5% Claude Sonnet 4.6, -2% Claude Opus 4.8, and -13% GPT-5.5 High**. The benchmark authors explicitly label those costs as SDK usage × public list pricing, not invoice truth.
+
+The pattern is important: for several models Ponytail caused more exploration/tool calls and more tokens while producing a leaner final artifact. That is consistent with a mechanism that spends more agent effort reading/tracing/reusing before writing less code. Model/task interaction matters; there is no universal “minimality saves tokens” rule.
+
+Conclusion:
+
+```text
+LOC reduction != token optimization
+```
+
+Sometimes spending many additional tool reads to remove a small amount of code is not a good total efficiency trade.
+
+This reinforces our need for a multi-objective Verified Delivery Cost rather than a one-dimensional LOC/token target.
+
+### ADOPT / ADAPT
+
+#### 1. Solution Minimality / Work Avoidance
+
+Introduce a planning/review capability that asks whether new work is necessary before creating it.
+
+It is not a new heavyweight Engine; it is a policy/evaluation concern spanning Planner, Execution Envelope and Review Packet.
+
+#### 2. Reuse Candidate Set backed by retrieval
+
+Turn “already exists in this codebase?” into structured evidence from lexical/symbol/graph retrieval.
+
+Potential Execution Envelope fields later:
+
+```text
+existing_capabilities:
+  - WorkspaceService
+  - GitPort
+  - RuntimeService
+
+reuse_required:
+  - GitPort for Git operations
+
+forbidden_duplicate_mechanisms:
+  - second Git service
+  - raw shell abstraction
+```
+
+Exact schema is deferred.
+
+#### 3. Complexity Delta in Review Packet
+
+Future reviewer can explicitly identify:
+
+```text
+new dependency
+new service/abstraction
+new persistent state
+new public API
+new configuration
+new background process
+duplicated capability
+stdlib/native capability ignored
+unnecessary wrapper/factory/interface
+```
+
+The signal helps reviewers find overengineering; it does not substitute for correctness/security review.
+
+#### 4. Optional Complexity Budget in ChangeSpec
+
+Example:
+
+```text
+complexity_budget:
+  new_dependencies: 0
+  new_services: 0
+  new_persistence: false
+  new_public_api: minimal
+```
+
+Crossing the budget requires explicit rationale rather than silent scope expansion.
+
+#### 5. Typed deliberate simplification + upgrade trigger
+
+Ponytail's debt comments contain a useful idea: every deliberate shortcut should name its ceiling and trigger for replacement.
+
+Use a typed project decision instead of a magic source comment:
+
+```text
+SimplificationDecision
+- scope
+- chosen_solution
+- alternatives rejected
+- rationale
+- known ceiling
+- upgrade trigger
+- evidence
+- ChangeSpec revision
+- provenance
+```
+
+This can later feed Reconciler / Learning Pipeline so a deliberate simplification is revisited when its measured trigger becomes true.
+
+#### 6. Minimality review as a separate Review Packet dimension
+
+Ponytail's `review` and repository-wide `audit` modes are useful conceptually:
+
+```text
+Verification / Review Packet
+├── acceptance correctness
+├── architecture
+├── security
+├── test integrity
+└── complexity/minimality review
+```
+
+Do not mix “can be simplified” with security/correctness severity; each finding retains its category.
+
+#### 7. Root-cause before minimal patch
+
+A tiny symptom patch can be worse than one slightly larger shared fix. The system should trace callers/ownership enough to identify the real shared root cause before applying minimality.
+
+The objective is **smallest correct root-cause fix**, not smallest visible diff at any cost.
+
+#### 8. Task-/role-/risk-aware policy selection
+
+Different roles need different complexity pressure:
+
+- bounded coding worker → strong reuse/minimal-change signal;
+- architecture agent → prefer simplest architecture satisfying all invariants, but do not collapse necessary boundaries;
+- security reviewer → security evidence dominates minimality;
+- research agent → minimal-code rules mostly irrelevant.
+
+Select policy from `RoleProfile + TaskKind + ExecutionPhase + RiskClass`, not a global always-loaded rule.
+
+### Always-on prompt overhead: REJECT as our implementation
+
+Ponytail itself has issues discussing context overhead from many always-loaded skill descriptions (#219). Another issue (#664) showed a version where `lite/full/ultra` rendered instructions were 96/99 lines identical and roughly 5.2k characters each, meaning mode switching changed stance much more than context footprint.
+
+Our architecture should not repeatedly inject a large policy document on every agent turn. The context-overhead issue #219 explicitly proposes a conductor/lazy-loading pattern because every top-level skill description consumes session context. This reinforces our existing progressive-disclosure rule for skills/policies.
+
+Issue #664 measured one release where the rendered `lite`, `full` and `ultra` instructions were about **5.2k characters each and 96 of 99 lines identical**. The product lesson is not that these exact modes are bad; it is that a mode selector is meaningless for efficiency if all modes carry almost the same context payload.
+
+Instead:
+
+```text
+canonical structured rules/policy
+        ↓
+task classification
+        ↓
+only relevant derived constraints
+        ↓
+small Execution Envelope / RoleProfile view
+```
+
+If modes exist, differences must be semantically real/machine-observable rather than mostly labels/examples over the same prompt body.
+
+### Do not copy `lite/full/ultra` directly
+
+If we expose policy levels at all, they should preserve invariant floors and differ in allowed optimization pressure. A conceptual version might be:
+
+```text
+Conservative
+Balanced
+Aggressive
+```
+
+but automatic risk/task selection is preferred over a user-facing mode knob for core orchestration.
+
+Regardless of level, never relax:
+
+```text
+security floor
+data-loss floor
+correctness floor
+architecture-invariant floor
+explicit acceptance floor
+```
+
+### Engineering Efficiency / Verified Delivery Cost
+
+The combined Caveman/Ponytail evidence shows why AI Engineering OS must measure more than tokens or LOC:
+
+```text
+EngineeringEfficiency
+- verified success
+- robustness
+- security
+- wall-clock
+- provider cost
+- input/output/reasoning tokens
+- cache efficiency
+- tool calls
+- retries
+- human attention
+- changed LOC
+- dependency/abstraction growth
+- future maintenance surface
+```
+
+A useful top-level business/engineering KPI later is conceptually:
+
+```text
+Verified Delivery Cost
+=
+total provider/runtime cost
++ retries/recovery
++ verification cost
++ human intervention
+per independently verified task/change
+```
+
+Example intuition:
+
+```text
+Strategy A: 300k tokens, 90% first-pass verified
+Strategy B: 180k tokens, 50% first-pass verified
+```
+
+B looks better on a token dashboard and may be substantially worse as a production system.
+
+### P0 promotion rule
+
+No minimality/reuse/compression/model/reasoning optimization becomes default merely because it lowers tokens/LOC/latency.
+
+Required:
+
+```text
+controlled/project-local evidence
+→ correctness/verification non-regression
+→ security/robustness non-regression
+→ measured total efficiency benefit
+→ promotion
+```
+
+Otherwise keep experimental/reject.
+
+### Relationship with Graphify/tgrep
+
+Ponytail's strongest “reuse before write” idea becomes much more reliable when combined with our previously adopted retrieval architecture:
+
+```text
+Ponytail philosophy
+        +
+Graphify-style structural retrieval
+        +
+tgrep/indexed lexical exact discovery
+        +
+exact source verification
+        ↓
+evidence-backed reuse decision
+```
+
+This is an important synthesis: minimality policy should be powered by repository evidence rather than prompt persuasion.
+
+### Relationship with Caveman
+
+The two repositories operate at different points:
+
+```text
+Ponytail
+→ prevent unnecessary work/code/complexity from being created
+
+Caveman
+→ reduce the context cost of the work/evidence that legitimately exists
+```
+
+Work avoidance precedes context compression in the architecture.
+
+### Gate placement
+
+Primary future placement:
+
+```text
+Planner / ChangeSpec / Execution Envelope → reuse/minimality constraints
+Review Packet                         → ComplexityDelta / overengineering review
+G9 Context Engine                     → context efficiency and reuse evidence
+Learning/Promotion Pipeline           → measure outcomes and promote policies
+Model Router                          → model/reasoning efficiency
+```
+
+No change to current G4 Workspace/Git sequence.
+
+### Ponytail decision summary
+
+```text
+ADOPT / ADAPT
+- work avoidance / solution minimality as a structured concern
+- reuse-before-write backed by repository evidence
+- stdlib/native/existing-dependency preference where appropriate
+- smallest correct root-cause fix
+- ComplexityDelta in Review Packet
+- optional ComplexityBudget in ChangeSpec
+- typed SimplificationDecision with known ceiling + upgrade trigger
+- task/role/risk-aware minimality policy
+- project-local efficiency benchmarking
+- quality/robustness/security non-regression before promotion
+
+DEFER
+- exact minimality scoring formula
+- user-visible policy levels
+- automated repository-wide deletion suggestions until verification/ownership is mature
+
+REJECT
+- global large always-on Ponytail prompt
+- minimum LOC as an optimization target
+- aggressive YAGNI that strips unstated robustness/security behavior
+- treating fewer lines as proof of better engineering
+- copying lite/full/ultra prompt modes as product architecture
+```
+
+### Primary sources reviewed
+
+- Repository / current ladder: https://github.com/DietrichGebert/ponytail
+- Agentic benchmark: https://github.com/DietrichGebert/ponytail/blob/main/benchmarks/results/2026-06-18-agentic.md
+- Benchmark overview / independent reports: https://github.com/DietrichGebert/ponytail/blob/main/benchmarks/README.md
+- Independent 480-build benchmark: https://github.com/Deepusleepy/ponytail-benchmark
+- Context-overhead issue #219: https://github.com/DietrichGebert/ponytail/issues/219
+- Process-cost A/B issue #121: https://github.com/DietrichGebert/ponytail/issues/121
+- Mode-context similarity issue #664: https://github.com/DietrichGebert/ponytail/issues/664
+- Minimality review skill: https://github.com/DietrichGebert/ponytail/blob/main/skills/ponytail-review/SKILL.md
+- Debt / ceiling + upgrade-trigger convention: https://github.com/DietrichGebert/ponytail/blob/main/skills/ponytail-debt/SKILL.md
+
+---
+
+## Caveman + Ponytail synthesis — Production Efficiency Architecture
+
+The two repositories should not become two plugins/subsystems in AI Engineering OS. Their strongest ideas combine into one coherent optimization architecture.
+
+### Ordered efficiency pipeline
+
+```text
+Task Intent
+   ↓
+1. Work Avoidance / Reuse
+   ↓
+2. Exact Retrieval / Progressive Disclosure
+   ↓
+3. Recoverable Context Compression
+   ↓
+4. Provider Cache Optimization
+   ↓
+5. Model + Reasoning Routing
+   ↓
+6. Execution
+   ↓
+7. Independent Verification
+   ↓
+8. Efficiency Observatory
+   ↓
+9. Learning / Promotion / Rollback
+```
+
+This ordering prevents a common mistake: spending sophisticated compression/model-routing effort on complexity that should never have been built or retrieved.
+
+### Combined decision table
+
+| Idea | Caveman | Ponytail | AI Engineering OS decision |
+|---|:---:|:---:|---|
+| Avoid unnecessary work | — | yes | **ADOPT** |
+| Reuse before new implementation | — | yes | **ADOPT + CodeIntelligence** |
+| Stdlib/native before new dependency | — | yes | **ADAPT** |
+| Complexity/overengineering review | — | yes | **ADOPT in Review Packet** |
+| Deliberate simplification + upgrade trigger | — | yes | **ADOPT as typed decision** |
+| Shape-aware tool-output compression | yes | — | **ADOPT/ADAPT** |
+| Lossy compression + exact recovery | yes | — | **ADOPT P0** |
+| Context-budget packing | yes | — | **ADAPT** |
+| Cache-aware optimization | yes | — | **ADOPT P0** |
+| Observe/shadow/A-B rollout | yes | benchmark culture | **ADOPT P0** |
+| Large always-on prompt | costly in terse-skill form | yes | **REJECT** |
+| Shorter at any cost | unsafe/unprofitable cases exist | robustness trade-off exists | **REJECT** |
+| Fixed intensity for every task | — | lite/full/ultra | **ADAPT to risk/task routing** |
+| Measurement only by tokens/LOC | insufficient | insufficient | **REJECT** |
+
+### Product differentiator
+
+The potential differentiator is not “token compression.” It is a control plane that can answer, per verified engineering outcome:
+
+```text
+What work was avoided through reuse?
+What evidence was retrieved and why?
+What was compressed and recoverable?
+What did caching save?
+Why was this model/reasoning level selected?
+How many retries/human interventions occurred?
+Did the optimization preserve correctness/security/robustness?
+What policy should be promoted for similar future tasks?
+```
+
+This is materially stronger than reporting a compression percentage.
+
+### Final synthesis rule
+
+```text
+Do less work.
+Retrieve less.
+Send less.
+Reuse more.
+Verify everything.
+Measure the verified outcome, not the vanity metric.
+```
+
+The words are explanatory; production behavior must be represented by typed contracts, evidence, routing and measurement rather than one giant system prompt.
 

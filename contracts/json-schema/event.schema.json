@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Domain Event envelope",
-  "description": "Machine-readable Domain Event envelope contract: stable metadata shared by persistent domain-event records (docs/architecture/events.md). Envelope baseline plus the G3 runtime scope contract (ADR-0022): optional execution_id, attempt_id, attempt_outcome with conditional per-family validation. The canonical G2 mutation taxonomy (ADR-0021, events.md section 4.1) plus the three runtime types (ADR-0022, events.md section 4.2) are listed as event_type examples: nine lifecycle types plus project.created, task.created, task.dependency_added, execution.created, attempt.created, attempt.concluded. No payload taxonomy, no persistence encoding, no ordering or general provenance envelope beyond the runtime scope decided here.",
-  "$comment": "Persisted-fact envelope, not RPC: the schema describes committed facts and contains no execution-request fields. Schema-valid JSON != authoritative event: a model/provider cannot mint domain history by matching this shape; only trusted validated application services commit Event Journal facts. SECRET values must not enter journal payloads (INV-008); JSON Schema cannot prove data classification from arbitrary strings, so no fake regex security is attempted here — enforcement is Policy/application responsibility. additionalProperties is intentionally permissive so future domain-specific event data can extend this baseline once taxonomy is decided. event_type stays an open string (no enum) so the envelope never becomes a closed registry; the examples array records the canonical G2 + G3-runtime names without enforcing them. Runtime scope convention: a scope field that must be absent on an event family is constrained to null (absent and explicit-null are equivalent); from_state/to_state remain TaskState semantics and are null on all runtime events; attempt_outcome serializes the agent-runtime AttemptOutcome as succeeded/failed/timed_out/cancelled (lowercase, distinct from SCREAMING Task states). This schema selects no Event Journal serialization encoding and introduces no Event Sourcing. See docs/architecture/events.md for semantics.",
+  "description": "Machine-readable Domain Event envelope contract: stable metadata shared by persistent domain-event records (docs/architecture/events.md). Envelope baseline plus the G3 runtime scope contract (ADR-0022): optional execution_id, attempt_id, attempt_outcome with conditional per-family validation; plus the G4 workspace scope contract (ADR-0023 section 9): optional workspace_id with conditional per-family validation, where workspace.created and workspace.removed carry the lease lifecycle in from_state/to_state (ALLOCATED->READY and CLEANUP_PENDING->REMOVED respectively). The canonical G2 mutation taxonomy (ADR-0021, events.md section 4.1) plus the three runtime types (ADR-0022, events.md section 4.2) plus the two workspace types (ADR-0023, docs/architecture/workspace.md) are listed as event_type examples: nine lifecycle types plus project.created, task.created, task.dependency_added, execution.created, attempt.created, attempt.concluded, workspace.created, workspace.removed. No payload taxonomy, no persistence encoding, no ordering or general provenance envelope beyond the runtime and workspace scope decided here.",
+  "$comment": "Persisted-fact envelope, not RPC: the schema describes committed facts and contains no execution-request fields. Schema-valid JSON != authoritative event: a model/provider cannot mint domain history by matching this shape; only trusted validated application services commit Event Journal facts. SECRET values must not enter journal payloads (INV-008); JSON Schema cannot prove data classification from arbitrary strings, so no fake regex security is attempted here — enforcement is Policy/application responsibility. additionalProperties is intentionally permissive so future domain-specific event data can extend this baseline once taxonomy is decided. event_type stays an open string (no enum) so the envelope never becomes a closed registry; the examples array records the canonical G2 + G3-runtime + G4-workspace names without enforcing them. Runtime scope convention: a scope field that must be absent on an event family is constrained to null (absent and explicit-null are equivalent); from_state/to_state remain TaskState semantics and are null on all runtime events; attempt_outcome serializes the agent-runtime AttemptOutcome as succeeded/failed/timed_out/cancelled (lowercase, distinct from SCREAMING Task states). Workspace scope convention: workspace_id is null on every G2/G3 family and a non-blank string on the two workspace facts; workspace from_state/to_state carry the lease lifecycle (ALLOCATED/READY/CLEANUP_PENDING/REMOVED, SCREAMING lease markers owned by the Workspace context, never Task states). This schema selects no Event Journal serialization encoding and introduces no Event Sourcing. See docs/architecture/events.md for semantics.",
   "type": "object",
   "required": ["event_type", "schema_version", "occurred_at", "correlation_id", "causation_id"],
   "properties": {
@@ -25,7 +25,9 @@
         "task.dependency_added",
         "execution.created",
         "attempt.created",
-        "attempt.concluded"
+        "attempt.concluded",
+        "workspace.created",
+        "workspace.removed"
       ]
     },
     "schema_version": {
@@ -75,7 +77,11 @@
     "attempt_outcome": {
       "type": ["string", "null"],
       "enum": ["succeeded", "failed", "timed_out", "cancelled", null],
-      "description": "Canonical terminal Attempt outcome (ADR-0022): the agent-runtime AttemptOutcome serialized lowercase (Succeeded->succeeded, Failed->failed, TimedOut->timed_out, Cancelled->cancelled). Required only on attempt.concluded; null everywhere else, including all G2 events."
+      "description": "Canonical terminal Attempt outcome (ADR-0022): the agent-runtime AttemptOutcome serialized lowercase (Succeeded->succeeded, Failed->failed, TimedOut->timed_out, Cancelled->cancelled). Required only on attempt.concluded; null everywhere else, including all G2 and workspace events."
+    },
+    "workspace_id": {
+      "type": ["string", "null"],
+      "description": "Workspace aggregate reference (ADR-0023 section 9). Null on every G2/G3 family; non-blank string on workspace.created and workspace.removed. Never a filesystem path used as identity (the persisted worktree reference is separate lease state, not scope)."
     }
   },
   "additionalProperties": true,
@@ -91,6 +97,7 @@
           "execution_id": {"type": "string", "minLength": 1},
           "attempt_id": {"type": "null"},
           "attempt_outcome": {"type": "null"},
+          "workspace_id": {"type": "null"},
           "from_state": {"type": "null"},
           "to_state": {"type": "null"}
         }
@@ -107,6 +114,7 @@
           "execution_id": {"type": "string", "minLength": 1},
           "attempt_id": {"type": "string", "minLength": 1},
           "attempt_outcome": {"type": "null"},
+          "workspace_id": {"type": "null"},
           "from_state": {"type": "null"},
           "to_state": {"type": "null"}
         }
@@ -123,6 +131,7 @@
           "execution_id": {"type": "string", "minLength": 1},
           "attempt_id": {"type": "string", "minLength": 1},
           "attempt_outcome": {"enum": ["succeeded", "failed", "timed_out", "cancelled"]},
+          "workspace_id": {"type": "null"},
           "from_state": {"type": "null"},
           "to_state": {"type": "null"}
         }
@@ -154,7 +163,42 @@
         "properties": {
           "execution_id": {"type": "null"},
           "attempt_id": {"type": "null"},
-          "attempt_outcome": {"type": "null"}
+          "attempt_outcome": {"type": "null"},
+          "workspace_id": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["event_type"],
+        "properties": {"event_type": {"const": "workspace.created"}}
+      },
+      "then": {
+        "required": ["execution_id", "workspace_id"],
+        "properties": {
+          "execution_id": {"type": "string", "minLength": 1},
+          "workspace_id": {"type": "string", "minLength": 1},
+          "attempt_id": {"type": "null"},
+          "attempt_outcome": {"type": "null"},
+          "from_state": {"const": "ALLOCATED"},
+          "to_state": {"const": "READY"}
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["event_type"],
+        "properties": {"event_type": {"const": "workspace.removed"}}
+      },
+      "then": {
+        "required": ["execution_id", "workspace_id"],
+        "properties": {
+          "execution_id": {"type": "string", "minLength": 1},
+          "workspace_id": {"type": "string", "minLength": 1},
+          "attempt_id": {"type": "null"},
+          "attempt_outcome": {"type": "null"},
+          "from_state": {"const": "CLEANUP_PENDING"},
+          "to_state": {"const": "REMOVED"}
         }
       }
     }

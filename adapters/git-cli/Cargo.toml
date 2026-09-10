@@ -1,0 +1,11 @@
+[package]
+name = "git-cli"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "git_cli"
+path = "src/lib.rs"
+
+[dependencies]
+workspace = { path = "../../crates/workspace" }
