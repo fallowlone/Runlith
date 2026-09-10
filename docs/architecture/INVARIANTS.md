@@ -24,6 +24,7 @@
 - **INV-050** — Planning loops must terminate in executable work, an explicit blocker, or escalation; silent infinite replanning is a correctness failure.
 - **INV-078** — Long-running agentd state is persisted incrementally; graceful shutdown is never the sole durability mechanism.
 - **INV-140** — Security workflow state is durable and resumable at stage/attempt granularity; provider/process failure may not require repeating already verified stages when fingerprints still match.
+- **INV-145** — Git/filesystem mutation and SQLite state are separate failure domains and require reconciliation; they are never represented as one ACID transaction.
 
 ## Provider neutrality and model routing
 

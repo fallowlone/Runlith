@@ -65,6 +65,10 @@ enum TaskLifecycleOp {
 // Small typed business-error taxonomy. Human-readable `message` is
 // bounded and sanitized server-side: never raw SQLite errors,
 // filesystem paths, SQL strings, Rust debug dumps, or backtraces.
+// PROVIDER_UNAVAILABLE is a G5 addition for the execution surface only
+// (task_core dispatch never emits it): the configured real provider
+// cannot be reached (missing executable, incompatible version,
+// unavailable authentication where detected before execution).
 enum BusinessErrorCode {
   BUSINESS_ERROR_CODE_UNSPECIFIED = 0;
   INVALID_ARGUMENT = 1;
@@ -76,6 +80,7 @@ enum BusinessErrorCode {
   CORRUPT_STATE = 7;
   UNSUPPORTED_PROTOCOL = 8;
   INTERNAL = 9;
+  PROVIDER_UNAVAILABLE = 10;
 }
 
 // Typed business failure. Returned as the `error` variant of

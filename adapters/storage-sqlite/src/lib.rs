@@ -17,6 +17,7 @@ mod event;
 mod migration;
 mod runtime_store;
 mod task_store;
+mod workspace_store;
 
 pub use error::{StorageError, StorageResult};
 pub use event::{

@@ -10,6 +10,7 @@ use std::fmt;
 
 use agent_runtime::{AttemptId, ExecutionId};
 use task_domain::{ProjectId, TaskId, TaskState};
+use workspace::{LeaseLifecycle, WorkspaceId};
 
 use crate::error::{StorageError, StorageResult};
 
@@ -17,16 +18,18 @@ use crate::error::{StorageError, StorageResult};
 /// schema version, the application build version, and any protocol version.
 pub const EVENT_SCHEMA_VERSION: u32 = 1;
 
-/// Canonical lifecycle, mutation, and runtime fact names.
+/// Canonical lifecycle, mutation, runtime, and workspace fact names.
 /// Provider-neutral and runtime-neutral by construction: no provider-,
 /// model-, or runner-specific type can exist here — the enum is closed.
 /// The G2 creation/dependency types (`project.created`, `task.created`,
 /// `task.dependency_added`) close the TASK-0027 audit gap; the G3
 /// runtime types (`execution.created`, `attempt.created`,
-/// `attempt.concluded`) materialize ADR-0022. No generic
-/// `entity.changed`-style type exists, and there is deliberately no
-/// event type per Attempt outcome, per FakeAgent scenario, per Session,
-/// or per Execution terminal state.
+/// `attempt.concluded`) materialize ADR-0022; the G4 workspace types
+/// (`workspace.created`, `workspace.removed`) freeze the ADR-0023 §9
+/// taxonomy (TASK-0042). No generic `entity.changed`-style type exists,
+/// and there is deliberately no event type per Attempt outcome, per
+/// FakeAgent scenario, per Session, per Execution terminal state, or per
+/// lease lifecycle marker beyond the two frozen workspace facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventType {
     MarkedReady,
@@ -44,6 +47,8 @@ pub enum EventType {
     ExecutionCreated,
     AttemptCreated,
     AttemptConcluded,
+    WorkspaceCreated,
+    WorkspaceRemoved,
 }
 
 impl EventType {
@@ -66,12 +71,14 @@ impl EventType {
             Self::ExecutionCreated => "execution.created",
             Self::AttemptCreated => "attempt.created",
             Self::AttemptConcluded => "attempt.concluded",
+            Self::WorkspaceCreated => "workspace.created",
+            Self::WorkspaceRemoved => "workspace.removed",
         }
     }
 
     /// Every canonical type, for exhaustive tests.
     #[must_use]
-    pub const fn all() -> [Self; 15] {
+    pub const fn all() -> [Self; 17] {
         [
             Self::MarkedReady,
             Self::Claimed,
@@ -88,6 +95,8 @@ impl EventType {
             Self::ExecutionCreated,
             Self::AttemptCreated,
             Self::AttemptConcluded,
+            Self::WorkspaceCreated,
+            Self::WorkspaceRemoved,
         ]
     }
 
@@ -110,6 +119,16 @@ impl EventType {
         )
     }
 
+    /// Whether this fact is workspace-scoped (carries the lease's
+    /// Execution + Workspace references under ADR-0023 §9): exactly the
+    /// two G4 workspace types. Workspace facts never travel through the
+    /// Task lifecycle or runtime commit paths; lifecycle and runtime
+    /// facts never carry workspace scope.
+    #[must_use]
+    pub const fn is_workspace_scoped(self) -> bool {
+        matches!(self, Self::WorkspaceCreated | Self::WorkspaceRemoved)
+    }
+
     /// Strict decode: unknown names are corruption, never a default.
     pub fn parse(raw: &str) -> StorageResult<Self> {
         Ok(match raw {
@@ -128,6 +147,8 @@ impl EventType {
             "execution.created" => Self::ExecutionCreated,
             "attempt.created" => Self::AttemptCreated,
             "attempt.concluded" => Self::AttemptConcluded,
+            "workspace.created" => Self::WorkspaceCreated,
+            "workspace.removed" => Self::WorkspaceRemoved,
             other => {
                 return Err(StorageError::Corrupt(format!(
                     "unknown persisted event type {other:?}"
@@ -267,15 +288,19 @@ impl fmt::Display for EventId {
 /// else is fixed beforehand by the trusted application service — never
 /// by provider/model output.
 ///
-/// Scope discipline (migrations 0003/0004): `project.created` is
+/// Scope discipline (migrations 0003/0004/0005): `project.created` is
 /// project-scoped (`task_id`, `from_state`, `to_state` are all `None` —
 /// never a fake or sentinel task id); G2 task/dependency/lifecycle
-/// facts are task-scoped (`Some` throughout, no runtime scope);
-/// runtime facts follow the ADR-0022 matrix (`execution.created`:
+/// facts are task-scoped (`Some` throughout, no runtime or workspace
+/// scope); runtime facts follow the ADR-0022 matrix (`execution.created`:
 /// execution scope, no attempt, no outcome, no Task states;
 /// `attempt.created`: execution + attempt scope, no outcome, no Task
 /// states; `attempt.concluded`: execution + attempt scope plus the
-/// canonical outcome, no Task states).
+/// canonical outcome, no Task states); workspace facts follow the ADR-0023
+/// §9 matrix (project + task + execution + workspace scope, attempt
+/// columns `None`, Task lifecycle columns `None`, lease lifecycle carried
+/// in the workspace-state fields and persisted through the same
+/// from_state/to_state columns).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewJournalEvent {
     /// What committed fact this is.
@@ -314,6 +339,18 @@ pub struct NewJournalEvent {
     /// Canonical terminal outcome; `Some` only for `attempt.concluded`.
     /// The authoritative outcome — `reason` never carries it.
     pub attempt_outcome: Option<AttemptOutcome>,
+    /// Lease this fact is about; `Some` only for the two workspace types.
+    /// First-class structured reference, never an encoding. G2/G3 rows
+    /// always store NULL here (migration 0005 CHECK-enforced).
+    pub workspace_id: Option<WorkspaceId>,
+    /// Lease lifecycle before the mutation; `Some` only for workspace
+    /// facts. Shares the persisted from_state column with Task states —
+    /// the two vocabularies never mix on one row (workspace rows carry
+    /// lease names, every other row carries Task names or NULL).
+    pub from_workspace_state: Option<LeaseLifecycle>,
+    /// Lease lifecycle after the mutation; `Some` only for workspace
+    /// facts. Shares the persisted to_state column the same way.
+    pub to_workspace_state: Option<LeaseLifecycle>,
 }
 
 /// A committed journal record: the accepted fact plus its stable identity.

@@ -36,6 +36,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 pub mod data_dir;
 pub mod dispatch;
+pub mod execution;
 
 pub use data_dir::{resolve_data_dir, resolve_database_path};
 
@@ -139,9 +140,9 @@ impl From<io::Error> for DaemonError {
 
 /// Daemon configuration: protocol behavior plus the durable database
 /// composition. `database_path = None` is the control-only mode (G1
-/// behavior and existing tests): v1 business requests answer with a typed
-/// unavailable error and never touch storage. Production always sets a
-/// path via [`DaemonConfig::with_database`].
+/// behavior and existing tests): v1 business and v2 execution requests
+/// answer with a typed unavailable error and never touch storage.
+/// Production always sets a path via [`DaemonConfig::with_database`].
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
     /// Handshake negotiation parameters.
@@ -149,6 +150,10 @@ pub struct DaemonConfig {
     /// Durable database file. The daemon owns the store lifecycle built
     /// on it; `agentctl` never opens SQLite directly.
     pub database_path: Option<PathBuf>,
+    /// Composition-owned provider executable override. `None` resolves
+    /// `claude` via `PATH` at `run` time; `Some` pins an explicit binary
+    /// (tests inject fixture doubles). Never client-supplied.
+    pub provider_executable: Option<PathBuf>,
 }
 
 impl DaemonConfig {
@@ -157,6 +162,7 @@ impl DaemonConfig {
         Self {
             server_config: ServerConfig::g1_default(),
             database_path: None,
+            provider_executable: None,
         }
     }
 
@@ -167,7 +173,28 @@ impl DaemonConfig {
         Self {
             server_config: ServerConfig::g2_default(),
             database_path: Some(path.into()),
+            provider_executable: None,
         }
+    }
+
+    /// G5 daemon configuration (TASK-0047): protocols `[0, 1, 2]` with
+    /// the durable database at `path`, enabling the execution surface
+    /// (`run`/`status`/`cancel`) through the real-provider composition.
+    /// Production default from TASK-0047 on.
+    pub fn with_execution(path: impl Into<PathBuf>) -> Self {
+        Self {
+            server_config: ServerConfig::g5_default(),
+            database_path: Some(path.into()),
+            provider_executable: None,
+        }
+    }
+
+    /// Pins the provider executable for this daemon (test seam for
+    /// fixture doubles; production leaves `None` for `PATH` resolution).
+    #[must_use]
+    pub fn with_provider_executable(mut self, executable: impl Into<PathBuf>) -> Self {
+        self.provider_executable = Some(executable.into());
+        self
     }
 }
 
@@ -222,6 +249,22 @@ fn open_business_service(config: &DaemonConfig) -> Result<Option<BusinessHandle>
     ))))
 }
 
+/// Opens the execution composition for a database-backed daemon: shares
+/// the database path (services open their own short-lived connections
+/// per operation) plus a fresh cancel registry, process tracker, and the
+/// configured provider executable override. No I/O: the managed workspace
+/// root is ensured per `run`. Control-only daemons (`None` database)
+/// get no execution composition — execution requests answer typed
+/// unavailable, exactly like business requests.
+fn open_execution(config: &DaemonConfig) -> Option<execution::ExecutionHandle> {
+    config.database_path.as_ref().map(|db| {
+        Arc::new(execution::ExecutionComposition::new(
+            db.clone(),
+            config.provider_executable.clone(),
+        ))
+    })
+}
+
 /// Local authentication policy (ADR-0020 §12, §13): the peer is allowed
 /// only when its OS identity is the same local principal as the daemon's.
 /// Shared by the Unix and Windows admission paths so exactly one policy
@@ -240,7 +283,10 @@ pub(crate) fn authorize_peer(
 /// Serves one authenticated stream: handshake, then the READY loop. Ping
 /// is answered inside `ipc-control`; shutdown is acknowledged and
 /// surfaced; version-1 business requests dispatch through the shared
-/// trusted service with typed responses.
+/// trusted service with typed responses; version-2 execution requests
+/// dispatch through the shared execution composition (`run` commits its
+/// durable entry synchronously and continues in a detached background
+/// thread — the connection never carries the provider session).
 ///
 /// `prefetched` carries a frame read before authentication (Windows
 /// first-frame staging): it is interpreted here only because the caller
@@ -249,6 +295,7 @@ async fn serve_connection<S>(
     stream: S,
     config: &ServerConfig,
     business: Option<BusinessHandle>,
+    execution: Option<execution::ExecutionHandle>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     prefetched: Option<BytesMut>,
 ) -> ConnectionOutcome
@@ -287,6 +334,39 @@ where
                     return ConnectionOutcome::Ended;
                 }
             }
+            Ok(ReadyRequest::Execution(request)) => {
+                let (response, job) = match &execution {
+                    Some(composition) => execution::dispatch_execution(composition, request),
+                    None => (execution::execution_unavailable(), None),
+                };
+                // Detached by design (see `execution::run_background`):
+                // shutdown/restart orphans the provider child and strands
+                // the attempt as reconcilable open state — never silent
+                // success. The handle is dropped immediately so the serve
+                // loop never blocks on provider time. A spawn failure is
+                // reported honestly with the committed execution named.
+                let response = match job {
+                    Some(job) => {
+                        let id = job.work_execution_id();
+                        match std::thread::Builder::new()
+                            .name(format!("exec-background-{id}"))
+                            .spawn(move || execution::run_background(job))
+                        {
+                            Ok(_) => response,
+                            Err(_) => match &execution {
+                                // A job exists only when composition is
+                                // present; the fallback keeps totality.
+                                Some(composition) => execution::abort_start(composition, &id),
+                                None => response,
+                            },
+                        }
+                    }
+                    None => response,
+                };
+                if session.respond_execution(response).await.is_err() {
+                    return ConnectionOutcome::Ended;
+                }
+            }
             Err(_) => return ConnectionOutcome::Ended,
         }
     }
@@ -298,10 +378,16 @@ where
 /// Admission is bounded: past [`MAX_CONTROL_CLIENTS`] the extra
 /// connection is closed, never a daemon failure. Only peer-authenticated
 /// streams ever arrive here — the pumps authenticate before sending.
+///
+/// Background provider runs are detached threads, not tracked tasks:
+/// wind-down aborts connection tasks promptly while in-flight provider
+/// children are orphaned with their attempts left open (documented G5
+/// posture; recovery is G11 work).
 async fn serve_streams<S>(
     mut accepted: tokio::sync::mpsc::Receiver<(S, Option<BytesMut>)>,
     config: &DaemonConfig,
     business: Option<BusinessHandle>,
+    execution: Option<execution::ExecutionHandle>,
 ) -> RunOutcome
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -333,9 +419,18 @@ where
                 let sender = shutdown_tx.clone();
                 let server_config = config.server_config.clone();
                 let business = business.clone();
+                let execution = execution.clone();
                 joins.spawn(async move {
                     let _permit = permit;
-                    serve_connection(stream, &server_config, business, sender, prefetched).await
+                    serve_connection(
+                        stream,
+                        &server_config,
+                        business,
+                        execution,
+                        sender,
+                        prefetched,
+                    )
+                    .await
                 });
             }
         }
@@ -516,7 +611,7 @@ mod unix_daemon {
                 }
             }
         });
-        let outcome = serve_streams(accepted_rx, &config, business).await;
+        let outcome = serve_streams(accepted_rx, &config, business, open_execution(&config)).await;
         if let Some(snapshot) = owned.as_ref() {
             let _ = remove_endpoint_if_unchanged(&endpoint.socket_path, snapshot);
         }
@@ -600,7 +695,7 @@ mod windows_daemon {
                 }
             }
         });
-        Ok(serve_streams(accepted_rx, &config, business).await)
+        Ok(serve_streams(accepted_rx, &config, business, open_execution(&config)).await)
     }
 }
 
@@ -1135,6 +1230,7 @@ mod tests {
                 DaemonConfig {
                     server_config: ServerConfig::g2_default(),
                     database_path: None,
+                    provider_executable: None,
                 },
                 OsPeerSource,
             )

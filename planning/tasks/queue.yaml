@@ -8,8 +8,8 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0039
-current_gate: G4
+completed_through: TASK-0047
+current_gate: G5
 
 items:
   - id: TASK-0012
@@ -473,3 +473,149 @@ items:
     blocked_by: []
     references:
       - docs/architecture/fake-agent.md
+
+  - id: TASK-0040
+    gate: G4
+    title: Workspace/Git Contract
+    objective: Establish the authoritative Workspace/Git contract (ownership,
+      identities, lifecycle, cleanup safety, reconciliation, failure
+      taxonomy) before real Git mutations.
+    scope: ADR-0023, workspace.md, pure crates/workspace domain contract,
+      G4 contract evidence doc, queue sequence.
+    exit_criteria_summary: Ownership ambiguity resolved, all 18 validation
+      questions answered, adapter strategy recommended, workspace green.
+    depends_on:
+      - TASK-0039
+    blocked_by: []
+    references:
+      - docs/architecture/workspace.md
+      - docs/architecture/adr/ADR-0023-workspace-ownership-and-git-worktree-lifecycle.md
+
+  - id: TASK-0041
+    gate: G4
+    title: Git Repository Inspection + Worktree Creation
+    objective: Implement the ADR-0023 GitPort inspection/creation surface
+      over the recommended git CLI adapter (argv-only, no shell) without
+      durability or reconciliation.
+    scope: Concrete git CLI adapter plus creation-path wiring only; no
+      SQLite tables, no journal implementation, no cleanup/diff.
+    exit_criteria_summary: Inspection and verified worktree creation work
+      against fixtures with typed failures; workspace green.
+    depends_on:
+      - TASK-0040
+    blocked_by: []
+    references:
+      - docs/architecture/workspace.md
+
+  - id: TASK-0042
+    gate: G4
+    title: Durable Workspace Ownership + Reconciliation
+    objective: Persist workspace leases and reconcile Git/filesystem/branch
+      state after creation and crash, implementing the ADR-0023
+      workspace.created/workspace.removed journal contract.
+    scope: Lease persistence plus reconciliation semantics only; no
+      diff/cleanup engines.
+    exit_criteria_summary: Ownership survives restarts, partial creation
+      reconciles, journal evidence commits atomically; workspace green.
+    depends_on:
+      - TASK-0041
+    blocked_by: []
+    references:
+      - docs/architecture/workspace.md
+
+  - id: TASK-0043
+    gate: G4
+    title: Diff + Safe Cleanup
+    objective: Base-revision diff evidence plus conservative idempotent
+      cleanup honoring dirtiness, live ownership, and external-branch
+      safety.
+    scope: Diff computation and safe cleanup paths only; no merge queue.
+    exit_criteria_summary: Diffs baseline at base_revision, dirty work is
+      never silently destroyed, cleanup is idempotent; workspace green.
+    depends_on:
+      - TASK-0042
+    blocked_by: []
+    references:
+      - docs/architecture/workspace.md
+
+  - id: TASK-0044
+    gate: G4
+    title: G4 Git Failure Matrix
+    objective: Exercise the full G4 failure taxonomy (collisions, dirty
+      states, crashes, stale workspaces, user edits, failed checkouts)
+      deterministically against fixtures.
+    scope: Failure-matrix verification only.
+    exit_criteria_summary: Every taxonomy class behaves per contract with
+      durable evidence; workspace green.
+    depends_on:
+      - TASK-0043
+    blocked_by: []
+    references:
+      - docs/architecture/workspace.md
+
+  - id: TASK-0045
+    gate: G4
+    title: G4 Closure Audit
+    objective: Independent gate verification for G4 (Workspace/Git).
+    scope: Audit only; no repairs, no implementation.
+    exit_criteria_summary: A closure audit report exists with an explicit
+      overall status.
+    depends_on:
+      - TASK-0044
+    blocked_by: []
+    references:
+      - docs/architecture/workspace.md
+
+  - id: TASK-0046
+    gate: G5
+    title: First Real Provider
+    objective: One provider passes the AgentProvider contract against the
+      durable Execution/Attempt core; detailed breakdown deferred to G5
+      planning (bind workspace cleanup to lease-derived repository
+      resolution per G4 closure audit F1 when orchestration wires it).
+    scope: Per planning/roadmap.yaml G5 objective and
+      docs/architecture/providers.md; no G6 policy/sandbox scope.
+    exit_criteria_summary: G5 scope broken into executable tasks with
+      acceptance criteria; or first provider slice implemented per the
+      agreed breakdown.
+    depends_on:
+      - TASK-0045
+    blocked_by: []
+    references:
+      - docs/architecture/providers.md
+      - docs/development/G4_CLOSURE_AUDIT.md
+
+  - id: TASK-0047
+    gate: G5
+    title: Claude Composition Root + agentctl Execution Surface
+    objective: Wire the real Claude provider into the production agentd
+      composition root and expose the smallest provider-neutral agentctl
+      execution surface (run/status/cancel over versioned v2 IPC).
+    scope: execution_core.proto + protocol v2, agentd execution
+      composition (entry/background, tracker, cancel registry, deferred
+      verification), agentctl execution commands, deterministic
+      composition tests, real production-path smoke.
+    exit_criteria_summary: G5_COMPOSITION_READY — Claude runs through the
+      production control plane with workspace isolation, liveness,
+      cancellation, typed failures, and completion-authority preserved;
+      gate closure deferred to TASK-0048.
+    depends_on:
+      - TASK-0046
+    blocked_by: []
+    references:
+      - docs/architecture/providers.md
+      - docs/development/G5_CLAUDE_COMPOSITION.md
+
+  - id: TASK-0048
+    gate: G5
+    title: G5 Closure Audit
+    objective: Independent gate verification for G5 (first real provider
+      through the production composition).
+    scope: Audit only; no repairs, no implementation.
+    exit_criteria_summary: A closure audit report exists with an explicit
+      overall status.
+    depends_on:
+      - TASK-0047
+    blocked_by: []
+    references:
+      - docs/architecture/providers.md

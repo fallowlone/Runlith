@@ -22,15 +22,24 @@ pub const IPC_PROTOCOL_VERSION_V0: u32 = 0;
 /// (`TaskCoreRequest` / `TaskCoreResponse`) to the G1 surface (ADR-0021).
 pub const IPC_PROTOCOL_VERSION_V1: u32 = 1;
 
+/// G5 execution protocol version: adds the bounded `execution_core`
+/// envelope (`ExecutionCoreRequest` / `ExecutionCoreResponse`) to the
+/// G2 surface (TASK-0047). A v2 session carries both business and
+/// execution authority.
+pub const IPC_PROTOCOL_VERSION_V2: u32 = 2;
+
 /// Current IPC protocol version: the highest version this build speaks.
-pub const IPC_PROTOCOL_VERSION: u32 = IPC_PROTOCOL_VERSION_V1;
+pub const IPC_PROTOCOL_VERSION: u32 = IPC_PROTOCOL_VERSION_V2;
 
 /// Alias making "current" explicit at call sites.
-pub const IPC_PROTOCOL_VERSION_CURRENT: u32 = IPC_PROTOCOL_VERSION_V1;
+pub const IPC_PROTOCOL_VERSION_CURRENT: u32 = IPC_PROTOCOL_VERSION_V2;
 
 /// Every protocol version this build negotiates, oldest first.
-pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 2] =
-    [IPC_PROTOCOL_VERSION_V0, IPC_PROTOCOL_VERSION_V1];
+pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 3] = [
+    IPC_PROTOCOL_VERSION_V0,
+    IPC_PROTOCOL_VERSION_V1,
+    IPC_PROTOCOL_VERSION_V2,
+];
 
 /// Maximum length of a client-supplied human/request `reason` (block
 /// reason, submission summary, verdict note) in bytes. The trusted
@@ -65,11 +74,20 @@ pub fn is_supported_version(version: u32) -> bool {
 }
 
 /// Reports whether a negotiated session version carries business
-/// authority: only version 1 enables `TaskCoreRequest`. A version-0
+/// authority: versions 1 and 2 enable `TaskCoreRequest`. A version-0
 /// session stays bootstrap-only (handshake, ping, shutdown).
 #[must_use]
 pub fn supports_business_ipc(negotiated_version: u32) -> bool {
-    negotiated_version == IPC_PROTOCOL_VERSION_V1
+    negotiated_version == IPC_PROTOCOL_VERSION_V1 || negotiated_version == IPC_PROTOCOL_VERSION_V2
+}
+
+/// Reports whether a negotiated session version carries execution (G5
+/// `execution_core`) authority: only version 2 does. A v0/v1 session
+/// rejects execution requests as unsupported for the negotiated
+/// protocol — decoding is never authority.
+#[must_use]
+pub fn supports_execution_ipc(negotiated_version: u32) -> bool {
+    negotiated_version == IPC_PROTOCOL_VERSION_V2
 }
 
 #[cfg(test)]
@@ -93,24 +111,32 @@ mod tests {
     }
 
     #[test]
-    fn protocol_v0_remains_supported_and_v1_is_current() {
+    fn protocol_v0_remains_supported_and_v2_is_current() {
         assert_eq!(IPC_PROTOCOL_VERSION_V0, 0);
         assert_eq!(IPC_PROTOCOL_VERSION_V1, 1);
-        assert_eq!(IPC_PROTOCOL_VERSION, 1);
-        assert_eq!(IPC_PROTOCOL_VERSION_CURRENT, 1);
-        assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, [0, 1]);
+        assert_eq!(IPC_PROTOCOL_VERSION_V2, 2);
+        assert_eq!(IPC_PROTOCOL_VERSION, 2);
+        assert_eq!(IPC_PROTOCOL_VERSION_CURRENT, 2);
+        assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, [0, 1, 2]);
         assert!(is_supported_version(0));
         assert!(is_supported_version(1));
-        assert!(!is_supported_version(2));
+        assert!(is_supported_version(2));
+        assert!(!is_supported_version(3));
         assert!(is_compatible(0));
         assert!(is_compatible(1));
+        assert!(is_compatible(2));
     }
 
     #[test]
-    fn only_v1_carries_business_authority() {
+    fn v1_and_v2_carry_business_authority_v2_adds_execution() {
         assert!(!supports_business_ipc(IPC_PROTOCOL_VERSION_V0));
         assert!(supports_business_ipc(IPC_PROTOCOL_VERSION_V1));
+        assert!(supports_business_ipc(IPC_PROTOCOL_VERSION_V2));
         assert!(!supports_business_ipc(99));
+        assert!(!supports_execution_ipc(IPC_PROTOCOL_VERSION_V0));
+        assert!(!supports_execution_ipc(IPC_PROTOCOL_VERSION_V1));
+        assert!(supports_execution_ipc(IPC_PROTOCOL_VERSION_V2));
+        assert!(!supports_execution_ipc(99));
     }
 
     #[test]
@@ -357,6 +383,117 @@ mod contract_tests {
             BusinessErrorCode::Internal,
         ] {
             assert_ne!(code as i32, 0, "{code:?} must not be the unspecified value");
+        }
+    }
+
+    #[test]
+    fn execution_core_envelope_uses_field_five_and_round_trips() {
+        use crate::proto::{
+            execution_core_request, CancelExecutionRequest, ExecutionCoreRequest,
+            GetExecutionRequest, RunExecutionRequest,
+        };
+        let business = ControlRequest {
+            payload: Some(control_request::Payload::ExecutionCore(
+                ExecutionCoreRequest {
+                    payload: Some(execution_core_request::Payload::Run(RunExecutionRequest {
+                        task_id: "T-1".to_owned(),
+                        execution_id: "E-1".to_owned(),
+                        attempt_id: "A-1".to_owned(),
+                        repository_ref: "repo-local:demo".to_owned(),
+                        repository_path: "/srv/demo".to_owned(),
+                        base_revision: "HEAD".to_owned(),
+                    })),
+                },
+            )),
+        };
+        let bytes = business.encode_to_vec();
+        // Field 5, wire type LEN: (5 << 3) | 2 = 0x2A.
+        assert_eq!(bytes[0], 0x2A);
+        let decoded = ControlRequest::decode(bytes.as_slice()).expect("must decode");
+        match decoded.payload {
+            Some(control_request::Payload::ExecutionCore(request)) => match request.payload {
+                Some(execution_core_request::Payload::Run(run)) => {
+                    assert_eq!(run.task_id, "T-1");
+                    assert_eq!(run.execution_id, "E-1");
+                    assert_eq!(run.attempt_id, "A-1");
+                    assert_eq!(run.repository_path, "/srv/demo");
+                    assert_eq!(run.base_revision, "HEAD");
+                }
+                other => panic!("expected run, got {other:?}"),
+            },
+            other => panic!("expected execution_core envelope, got {other:?}"),
+        }
+        // Get and cancel variants decode on the same envelope.
+        for request in [
+            ExecutionCoreRequest {
+                payload: Some(execution_core_request::Payload::Get(GetExecutionRequest {
+                    execution_id: "E-1".to_owned(),
+                })),
+            },
+            ExecutionCoreRequest {
+                payload: Some(execution_core_request::Payload::Cancel(
+                    CancelExecutionRequest {
+                        execution_id: "E-1".to_owned(),
+                    },
+                )),
+            },
+        ] {
+            let bytes = request.encode_to_vec();
+            let decoded = ExecutionCoreRequest::decode(bytes.as_slice()).expect("must decode");
+            assert!(decoded.payload.is_some());
+        }
+    }
+
+    #[test]
+    fn execution_status_and_error_round_trip() {
+        use crate::proto::{
+            execution_core_response, AttemptView, BusinessError, BusinessErrorCode,
+            ExecutionCoreResponse, GetExecutionResponse,
+        };
+        let status = ExecutionCoreResponse {
+            payload: Some(execution_core_response::Payload::Get(
+                GetExecutionResponse {
+                    task_id: "T-1".to_owned(),
+                    execution_id: "E-1".to_owned(),
+                    task_state: "RUNNING".to_owned(),
+                    attempts: vec![AttemptView {
+                        attempt_id: "A-1".to_owned(),
+                        outcome: "OPEN".to_owned(),
+                        provider_ref: "claude-code".to_owned(),
+                        detail: String::new(),
+                    }],
+                    provider_ref: "claude-code".to_owned(),
+                    workspace_path: "/tmp/ws".to_owned(),
+                    execution_live: true,
+                },
+            )),
+        };
+        let bytes = status.encode_to_vec();
+        let decoded = ExecutionCoreResponse::decode(bytes.as_slice()).expect("must decode");
+        match decoded.payload {
+            Some(execution_core_response::Payload::Get(get)) => {
+                assert_eq!(get.attempts.len(), 1);
+                assert_eq!(get.attempts[0].outcome, "OPEN");
+                assert!(get.execution_live);
+            }
+            other => panic!("expected get, got {other:?}"),
+        }
+        // The execution surface reuses the business error taxonomy plus
+        // the G5 provider-unavailable code.
+        let error = ExecutionCoreResponse {
+            payload: Some(execution_core_response::Payload::Error(BusinessError {
+                code: BusinessErrorCode::ProviderUnavailable as i32,
+                message: "provider unavailable".to_owned(),
+            })),
+        };
+        let bytes = error.encode_to_vec();
+        let decoded = ExecutionCoreResponse::decode(bytes.as_slice()).expect("must decode");
+        match decoded.payload {
+            Some(execution_core_response::Payload::Error(error)) => {
+                assert_eq!(error.code, BusinessErrorCode::ProviderUnavailable as i32);
+                assert_ne!(error.code, BusinessErrorCode::Internal as i32);
+            }
+            other => panic!("expected error, got {other:?}"),
         }
     }
 

@@ -48,7 +48,7 @@ pub fn negotiate_capabilities(requested: &[String], supported: &[String]) -> Vec
 }
 
 /// Reports whether a negotiated session version carries business (G2
-/// `task_core`) authority: only version 1 does. A version-0 session stays
+/// `task_core`) authority: versions 1 and 2 do. A version-0 session stays
 /// bootstrap-only (handshake, ping, shutdown) even though the Protobuf
 /// decoder could structurally parse a business frame — decoding is never
 /// authority.
@@ -57,7 +57,14 @@ pub fn is_business_allowed(negotiated_version: u32) -> bool {
     ipc_contracts::supports_business_ipc(negotiated_version)
 }
 
-/// Enforces the version gate for one business request: `Ok` on v1,
+/// Reports whether a negotiated session version carries execution (G5
+/// `execution_core`) authority: only version 2 does.
+#[must_use]
+pub fn is_execution_allowed(negotiated_version: u32) -> bool {
+    ipc_contracts::supports_execution_ipc(negotiated_version)
+}
+
+/// Enforces the version gate for one business request: `Ok` on v1+,
 /// [`ControlError::UnsupportedProtocol`] otherwise.
 pub fn validate_business_allowed(negotiated_version: u32) -> ControlResult<()> {
     if is_business_allowed(negotiated_version) {
@@ -66,6 +73,20 @@ pub fn validate_business_allowed(negotiated_version: u32) -> ControlResult<()> {
         Err(ControlError::UnsupportedProtocol {
             negotiated: negotiated_version,
             required: IPC_PROTOCOL_VERSION_V1,
+        })
+    }
+}
+
+/// Enforces the version gate for one execution request: `Ok` on v2,
+/// [`ControlError::UnsupportedProtocol`] otherwise. A v0/v1 session
+/// rejects without executing.
+pub fn validate_execution_allowed(negotiated_version: u32) -> ControlResult<()> {
+    if is_execution_allowed(negotiated_version) {
+        Ok(())
+    } else {
+        Err(ControlError::UnsupportedProtocol {
+            negotiated: negotiated_version,
+            required: ipc_contracts::IPC_PROTOCOL_VERSION_V2,
         })
     }
 }
@@ -174,6 +195,22 @@ impl ServerConfig {
             supported_capabilities: Vec::new(),
         }
     }
+
+    /// G5 daemon configuration (TASK-0047): protocols 0, 1, and 2. A v2
+    /// session carries both business (`task_core`) and execution
+    /// (`execution_core`) authority; older sessions keep their exact
+    /// prior authority. Production default from TASK-0047 on.
+    pub fn g5_default() -> Self {
+        Self {
+            supported_versions: vec![
+                IPC_PROTOCOL_VERSION_V0,
+                IPC_PROTOCOL_VERSION_V1,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V2,
+            ],
+            daemon_build_version: default_daemon_build_version(),
+            supported_capabilities: Vec::new(),
+        }
+    }
 }
 
 /// Default daemon build version: the canonical product development
@@ -255,7 +292,9 @@ mod tests {
     fn g2_daemon_serves_both_versions_with_v1_current() {
         let g2 = ServerConfig::g2_default();
         assert_eq!(g2.supported_versions, vec![0, 1]);
-        assert_eq!(IPC_PROTOCOL_VERSION, IPC_PROTOCOL_VERSION_V1);
+        // The current protocol is now v2 (G5); the G2 profile itself is
+        // unchanged: it still offers exactly [0, 1].
+        assert_eq!(IPC_PROTOCOL_VERSION, ipc_contracts::IPC_PROTOCOL_VERSION_V2);
         // Old G1 client [0] x new daemon [0,1] -> 0.
         let old_client = request(&[0], "agentctl", "0.1.0", &[]);
         let params = evaluate_handshake(&old_client, &g2).expect("old client stays valid");
@@ -287,7 +326,54 @@ mod tests {
         }
         assert!(!is_business_allowed(0));
         assert!(is_business_allowed(1));
+        assert!(is_business_allowed(2));
         assert!(!is_business_allowed(99));
+    }
+
+    #[test]
+    fn execution_gate_allows_only_v2() {
+        assert!(validate_execution_allowed(2).is_ok());
+        assert!(validate_execution_allowed(0).is_err());
+        assert!(validate_execution_allowed(1).is_err());
+        match validate_execution_allowed(1) {
+            Err(ControlError::UnsupportedProtocol {
+                negotiated,
+                required,
+            }) => {
+                assert_eq!(negotiated, 1);
+                assert_eq!(required, ipc_contracts::IPC_PROTOCOL_VERSION_V2);
+            }
+            other => panic!("expected UnsupportedProtocol, got {other:?}"),
+        }
+        assert!(!is_execution_allowed(0));
+        assert!(!is_execution_allowed(1));
+        assert!(is_execution_allowed(2));
+        assert!(!is_execution_allowed(99));
+    }
+
+    #[test]
+    fn g5_daemon_serves_all_versions_with_v2_current() {
+        let g5 = ServerConfig::g5_default();
+        assert_eq!(g5.supported_versions, vec![0, 1, 2]);
+        assert_eq!(IPC_PROTOCOL_VERSION, ipc_contracts::IPC_PROTOCOL_VERSION_V2);
+        // Old G1 client [0] x new daemon [0,1,2] -> 0 (bootstrap only).
+        let old_client = request(&[0], "agentctl", "0.1.0", &[]);
+        let params = evaluate_handshake(&old_client, &g5).expect("old client stays valid");
+        assert_eq!(params.selected_version, 0);
+        assert!(!is_business_allowed(params.selected_version));
+        assert!(!is_execution_allowed(params.selected_version));
+        // G2 client [0,1] x new daemon -> 1 (business, no execution).
+        let g2_client = request(&[0, 1], "agentctl", "0.1.0", &[]);
+        let params = evaluate_handshake(&g2_client, &g5).expect("g2 client negotiates");
+        assert_eq!(params.selected_version, 1);
+        assert!(is_business_allowed(params.selected_version));
+        assert!(!is_execution_allowed(params.selected_version));
+        // New client [0,1,2] x new daemon -> 2 (both).
+        let new_client = request(&[0, 1, 2], "agentctl", "0.1.0", &[]);
+        let params = evaluate_handshake(&new_client, &g5).expect("new client negotiates");
+        assert_eq!(params.selected_version, 2);
+        assert!(is_business_allowed(params.selected_version));
+        assert!(is_execution_allowed(params.selected_version));
     }
 
     #[test]

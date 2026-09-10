@@ -118,6 +118,9 @@ fn base_event(
         execution_id,
         attempt_id,
         attempt_outcome,
+        workspace_id: None,
+        from_workspace_state: None,
+        to_workspace_state: None,
     }
 }
 
@@ -128,11 +131,11 @@ fn journal_len(store: &SqliteStore) -> usize {
 // -- migration ------------------------------------------------------------
 
 #[test]
-fn fresh_database_reaches_v4() {
-    let db = TestDb::new("fresh-v4");
+fn fresh_database_reaches_v5() {
+    let db = TestDb::new("fresh-v5");
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 4);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 4);
+    assert_eq!(store.schema_version().unwrap(), 5);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 5);
     assert!(store.list_events_ordered().unwrap().is_empty());
     assert!(store
         .get_execution(&ExecutionId::new("MISSING").unwrap())
@@ -141,7 +144,7 @@ fn fresh_database_reaches_v4() {
 }
 
 #[test]
-fn v4_reopen_is_a_no_op() {
+fn v5_reopen_is_a_no_op() {
     let db = TestDb::new("reopen");
     {
         let mut store = db.open();
@@ -161,7 +164,7 @@ fn v4_reopen_is_a_no_op() {
             .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 4);
+    assert_eq!(store.schema_version().unwrap(), 5);
     assert!(store
         .get_execution(&ExecutionId::new("E-1").unwrap())
         .unwrap()
@@ -170,8 +173,8 @@ fn v4_reopen_is_a_no_op() {
 }
 
 /// A real v3 database (built from the canonical 0001..0003 files, not a
-/// hand copy) with G2 state and journal rows migrates to v4 with every
-/// historical fact preserved bit-for-bit and NULL runtime scope.
+/// hand copy) with G2 state and journal rows migrates to v5 with every
+/// historical fact preserved bit-for-bit and NULL runtime/workspace scope.
 #[test]
 fn v3_database_with_g2_data_migrates_preserving_everything() {
     const M0001: &str = include_str!("../migrations/0001_task_core.sql");
@@ -202,8 +205,8 @@ fn v3_database_with_g2_data_migrates_preserving_everything() {
             .unwrap();
     }
     let mut store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 4);
-    // History decodes unchanged through the v4 codec.
+    assert_eq!(store.schema_version().unwrap(), 5);
+    // History decodes unchanged through the v5 codec.
     let history = store.list_events_ordered().unwrap();
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].id, EventId::parse("evt-1").unwrap());
@@ -252,6 +255,9 @@ fn v3_database_with_g2_data_migrates_preserving_everything() {
         execution_id: None,
         attempt_id: None,
         attempt_outcome: None,
+        workspace_id: None,
+        from_workspace_state: None,
+        to_workspace_state: None,
     };
     let mut live = task.clone();
     live.claim().unwrap();

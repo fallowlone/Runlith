@@ -15,7 +15,7 @@
 use agent_runtime::{
     Attempt, AttemptId, AttemptSnapshot, Execution, ExecutionId, ExecutionSnapshot, ProviderRef,
 };
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
 use crate::error::{map_constraint, StorageError, StorageResult};
 use crate::event::{AttemptOutcome, EventType, JournalEvent, NewJournalEvent};
@@ -94,7 +94,9 @@ impl crate::task_store::SqliteStore {
             )));
         }
         require_execution_created_envelope(execution, &task.project_id().clone(), event)?;
-        let transaction = self.connection_mut().transaction()?;
+        let transaction = self
+            .connection_mut()
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction
             .execute(
                 "INSERT INTO executions (id, task_id) VALUES (?1, ?2)",
@@ -125,7 +127,9 @@ impl crate::task_store::SqliteStore {
             )));
         }
         require_attempt_created_envelope(attempt, event)?;
-        let transaction = self.connection_mut().transaction()?;
+        let transaction = self
+            .connection_mut()
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let execution_exists: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM executions WHERE id = ?1)",
             params![attempt.execution_id().as_str()],
@@ -193,7 +197,9 @@ impl crate::task_store::SqliteStore {
             ));
         }
         require_attempt_concluded_envelope(attempt_id, outcome, event)?;
-        let transaction = self.connection_mut().transaction()?;
+        let transaction = self
+            .connection_mut()
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let updated = transaction.execute(
             "UPDATE execution_attempts SET outcome = ?1, detail = ?2
              WHERE attempt_id = ?3 AND outcome IS NULL",

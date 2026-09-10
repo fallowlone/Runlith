@@ -47,6 +47,19 @@ impl From<StorageError> for ServiceError {
     }
 }
 
+impl From<workspace::WorkspaceFailure> for ServiceError {
+    fn from(error: workspace::WorkspaceFailure) -> Self {
+        // Same frozen-taxonomy rule as RuntimeError above: workspace
+        // discipline rejections (ownership mismatch, dirty worktree,
+        // live owner, lease conflicts) surface as explicit constraint
+        // violations carrying the verbatim workspace reason. The durable
+        // facts committed before the failure stay committed — the caller
+        // sees a legitimate recoverable intermediate, never a hidden
+        // rollback.
+        Self::Storage(StorageError::ConstraintViolation(error.to_string()))
+    }
+}
+
 impl From<RuntimeError> for ServiceError {
     fn from(error: RuntimeError) -> Self {
         // Deliberately no new variant: bins/agentd matches ServiceError

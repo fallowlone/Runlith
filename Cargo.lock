@@ -27,15 +27,21 @@ dependencies = [
 name = "agentd"
 version = "0.1.0"
 dependencies = [
+ "agent-runtime",
  "app-services",
  "bytes",
+ "evaluation",
+ "git-cli",
  "ipc-contracts",
  "ipc-control",
  "ipc-transport",
  "prost",
+ "provider-claude",
+ "scheduler",
  "storage-sqlite",
  "task-domain",
  "tokio",
+ "workspace",
 ]
 
 [[package]]
@@ -61,9 +67,12 @@ dependencies = [
  "evaluation",
  "fake-agent",
  "fake-evaluator",
+ "git-cli",
+ "provider-claude",
  "scheduler",
  "storage-sqlite",
  "task-domain",
+ "workspace",
 ]
 
 [[package]]
@@ -198,6 +207,13 @@ name = "futures-sink"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
+
+[[package]]
+name = "git-cli"
+version = "0.1.0"
+dependencies = [
+ "workspace",
+]
 
 [[package]]
 name = "hashbrown"
@@ -524,6 +540,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95067976aca6421a523e491fce939a3e65249bac4b977adee0ee9771568e8aa3"
 
 [[package]]
+name = "provider-claude"
+version = "0.1.0"
+dependencies = [
+ "agent-runtime",
+ "scheduler",
+ "task-domain",
+ "workspace",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -654,6 +680,7 @@ dependencies = [
  "agent-runtime",
  "rusqlite",
  "task-domain",
+ "workspace",
 ]
 
 [[package]]
@@ -830,4 +857,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "workspace"
+version = "0.1.0"
+dependencies = [
+ "agent-runtime",
+ "task-domain",
 ]

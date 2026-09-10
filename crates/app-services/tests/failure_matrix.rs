@@ -1570,7 +1570,7 @@ fn event_journal_agrees_with_relational_state_and_reads_create_nothing() {
     }
     // No evaluator-specific event type exists: the closed 15-type codec
     // covers everything observed.
-    assert_eq!(EventType::all().len(), 15);
+    assert_eq!(EventType::all().len(), 17);
 
     // Reads create no events.
     let before = service
@@ -1944,7 +1944,7 @@ fn non_ready_states_invoke_nothing_and_create_no_runtime_facts() {
 fn no_scenario_expands_the_durable_taxonomy() {
     // Closed vocabularies stay closed across the whole matrix.
     assert_eq!(TaskState::all().len(), 12);
-    assert_eq!(EventType::all().len(), 15);
+    assert_eq!(EventType::all().len(), 17);
     assert_eq!(storage_sqlite::AttemptOutcome::all().len(), 4);
     assert_eq!(FakeScenario::all().len(), 11);
 
@@ -1987,10 +1987,10 @@ fn no_scenario_expands_the_durable_taxonomy() {
                 );
             }
         }
-        // Schema stays v4: asserted structurally by the storage adapter
-        // (SUPPORTED_SCHEMA_VERSION == 4); the absence of migration 0005 is
-        // proven by the workspace file census in the task document.
-        assert_eq!(storage_sqlite::SUPPORTED_SCHEMA_VERSION, 4);
+        // Schema version is asserted structurally by the storage adapter
+        // (SUPPORTED_SCHEMA_VERSION); the closed workload-bearing migration
+        // sequence (0001..0005) is proven by the storage census tests.
+        assert_eq!(storage_sqlite::SUPPORTED_SCHEMA_VERSION, 5);
     }
 }
 

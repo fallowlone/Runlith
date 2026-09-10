@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use ipc_contracts::proto::{
-    control_request, control_response, ControlRequest, ControlResponse, ShutdownRequest,
-    TaskCoreRequest, TaskCoreResponse,
+    control_request, control_response, ControlRequest, ControlResponse, ExecutionCoreRequest,
+    ExecutionCoreResponse, ShutdownRequest, TaskCoreRequest, TaskCoreResponse,
 };
 use ipc_control::{ClientConfig, ClientSession, ControlError, CLIENT_KIND_AGENTCTL};
 use ipc_transport::{FramedTransport, TransportError};
@@ -47,6 +47,13 @@ pub const DISAPPEAR_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Deadline for a business response after the request is written.
 pub const BUSINESS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Deadline for an execution response after the request is written.
+/// `run` commits its durable entry synchronously (service open plus
+/// three atomic commits) before the provider half starts in the
+/// background, so this stays a fast-exchange bound — never provider
+/// time. Terminal results arrive via `status` polling.
+pub const EXECUTION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Poll interval while waiting for endpoint disappearance.
 const ABSENCE_POLL: Duration = Duration::from_millis(50);
@@ -110,6 +117,12 @@ pub enum ClientError {
     /// callers must re-probe with a read (get/list/events) instead.
     /// G2 provides no generic automatic mutation retry.
     BusinessAmbiguous(String),
+    /// An execution exchange was sent (or may have been sent) but its
+    /// outcome is unconfirmed. `run` is NOT replayed: the caller re-probes
+    /// with `status` on the client-minted execution id instead (the id is
+    /// known even when the reply is lost). `status` is a pure read and
+    /// may be retried freely; `cancel` is idempotent and may be re-issued.
+    ExecutionAmbiguous(String),
     /// OS/runtime I/O failure.
     Io(io::Error),
 }
@@ -132,6 +145,9 @@ impl fmt::Display for ClientError {
             }
             Self::BusinessAmbiguous(detail) => {
                 write!(f, "ambiguous business result (not replayed): {detail}")
+            }
+            Self::ExecutionAmbiguous(detail) => {
+                write!(f, "ambiguous execution result (run not replayed): {detail}")
             }
             Self::Io(error) => write!(f, "client I/O failure: {error}"),
         }
@@ -409,6 +425,150 @@ pub async fn business_request(
 ) -> Result<TaskCoreResponse, ClientError> {
     let session = connect_or_start_with(spawn, || connect_and_handshake_v1(pipe_name)).await?;
     business_session(session, request, absence_note(pipe_name)).await
+}
+
+/// Performs a version-2 handshake over a connected stream with a fresh
+/// session. Execution (`execution_core`) authority requires the
+/// negotiated version to be exactly 2; anything lower is a typed error
+/// here (before any execution byte is written), never a silent fallback.
+async fn handshake_stream_v2<S>(stream: S) -> Result<ClientSession<S>, ClientError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut session = ClientSession::new(
+        FramedTransport::new(stream),
+        ClientConfig::execution_default(CLIENT_KIND_AGENTCTL),
+    );
+    session
+        .perform_handshake()
+        .await
+        .map_err(classify_control)?;
+    if !session.execution_allowed() {
+        return Err(ClientError::Control(ControlError::UnsupportedProtocol {
+            negotiated: session.negotiated_version().unwrap_or(0),
+            required: 2,
+        }));
+    }
+    Ok(session)
+}
+
+/// Connects to an existing daemon and handshakes at protocol v2. No
+/// spawning, no retries.
+#[cfg(unix)]
+pub async fn connect_and_handshake_v2(
+    endpoint: &UnixEndpoint,
+) -> Result<ClientSession<UnixStream>, ClientError> {
+    let stream = transport_connect(endpoint)
+        .await
+        .map_err(|error| match error {
+            TransportError::EndpointUnavailable { endpoint } => {
+                ClientError::DaemonUnavailable(endpoint)
+            }
+            other => classify_transport(other),
+        })?;
+    handshake_stream_v2(stream).await
+}
+
+/// Connects to an existing daemon and handshakes at protocol v2. No
+/// spawning, no retries.
+#[cfg(windows)]
+pub async fn connect_and_handshake_v2(
+    pipe_name: &str,
+) -> Result<ClientSession<NamedPipeClient>, ClientError> {
+    let stream = connect_client(pipe_name).map_err(|error| match error {
+        TransportError::EndpointUnavailable { endpoint } => {
+            ClientError::DaemonUnavailable(endpoint)
+        }
+        other => classify_transport(other),
+    })?;
+    handshake_stream_v2(stream).await
+}
+
+fn execution_request_frame(request: ExecutionCoreRequest) -> Bytes {
+    Bytes::from(
+        ControlRequest {
+            payload: Some(control_request::Payload::ExecutionCore(request)),
+        }
+        .encode_to_vec(),
+    )
+}
+
+/// Sends one execution request and validates the execution reply. Shared
+/// across platforms over any connected v2 session.
+///
+/// After the request is written, any failure (lost response, undecodable
+/// reply, wrong variant, timeout) is [`ClientError::ExecutionAmbiguous`]:
+/// `run` is never replayed — the caller re-probes with `status` on the
+/// client-minted execution id. A well-formed reply — including a typed
+/// execution-error payload — is a successful exchange, not an ambiguity.
+async fn execution_session<S>(
+    session: ClientSession<S>,
+    request: ExecutionCoreRequest,
+    absence: &str,
+) -> Result<ExecutionCoreResponse, ClientError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut transport = session.into_inner();
+    transport
+        .write_frame(execution_request_frame(request))
+        .await
+        .map_err(|error| {
+            ClientError::ExecutionAmbiguous(format!(
+                "ExecutionCoreRequest send failed ({error}); endpoint {absence}; run not replayed — re-probe status"
+            ))
+        })?;
+    let frame = tokio::time::timeout(EXECUTION_RESPONSE_TIMEOUT, transport.read_frame())
+        .await
+        .map_err(|_| {
+            ClientError::ExecutionAmbiguous(format!(
+                "execution response timeout; endpoint {absence}; run not replayed — re-probe status"
+            ))
+        })?;
+    let frame = match frame {
+        Ok(frame) => frame,
+        Err(error) => {
+            return Err(ClientError::ExecutionAmbiguous(format!(
+                "execution response lost ({error}); endpoint {absence}; run not replayed — re-probe status"
+            )));
+        }
+    };
+    let response = ControlResponse::decode(&frame[..]).map_err(|error| {
+        ClientError::ExecutionAmbiguous(format!(
+            "execution response undecodable ({error}); endpoint {absence}; run not replayed — re-probe status"
+        ))
+    })?;
+    match response.payload {
+        Some(control_response::Payload::ExecutionCore(business)) => Ok(business),
+        other => Err(ClientError::ExecutionAmbiguous(format!(
+            "unexpected execution reply ({other:?}); endpoint {absence}; run not replayed — re-probe status"
+        ))),
+    }
+}
+
+/// Runs one execution request against the daemon, starting it first when
+/// genuinely missing (connect-first plus bounded retry, exactly like the
+/// G1 lifecycle). `run` executes at most once per call.
+#[cfg(unix)]
+pub async fn execution_request(
+    endpoint: &UnixEndpoint,
+    spawn: impl FnOnce() -> io::Result<Child>,
+    request: ExecutionCoreRequest,
+) -> Result<ExecutionCoreResponse, ClientError> {
+    let session = connect_or_start_with(spawn, || connect_and_handshake_v2(endpoint)).await?;
+    execution_session(session, request, absence_note(endpoint)).await
+}
+
+/// Runs one execution request against the daemon, starting it first when
+/// genuinely missing.
+#[cfg(windows)]
+pub async fn execution_request(
+    pipe_name: &str,
+    spawn: impl FnOnce() -> io::Result<Child>,
+    request: ExecutionCoreRequest,
+) -> Result<ExecutionCoreResponse, ClientError> {
+    let session = connect_or_start_with(spawn, || connect_and_handshake_v2(pipe_name)).await?;
+    execution_session(session, request, absence_note(pipe_name)).await
 }
 
 /// Shared connect-first + spawn-once + bounded-retry lifecycle.
@@ -860,6 +1020,11 @@ mod tests {
         // caller re-probes with a read instead. G2 has no generic
         // automatic mutation retry.
         assert!(!is_retryable(&ClientError::BusinessAmbiguous(
+            "x".to_owned()
+        )));
+        // Same rule for execution exchanges: `run` is never replayed
+        // (re-probe `status` on the client-minted execution id instead).
+        assert!(!is_retryable(&ClientError::ExecutionAmbiguous(
             "x".to_owned()
         )));
     }

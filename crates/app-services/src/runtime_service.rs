@@ -249,6 +249,10 @@ impl<C: Clock> RuntimeService<C> {
             execution_id,
             attempt_id,
             attempt_outcome: attempt_outcome.map(storage_sqlite::AttemptOutcome::from),
+            // Runtime facts never carry workspace scope.
+            workspace_id: None,
+            from_workspace_state: None,
+            to_workspace_state: None,
         }
     }
 }

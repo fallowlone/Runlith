@@ -8,14 +8,20 @@ name = "agentd"
 path = "src/main.rs"
 
 [dependencies]
+agent-runtime = { path = "../../crates/agent-runtime" }
 app-services = { path = "../../crates/app-services" }
 bytes = "1"
+evaluation = { path = "../../crates/evaluation" }
+git-cli = { path = "../../adapters/git-cli" }
 ipc-contracts = { path = "../../crates/ipc-contracts" }
 ipc-control = { path = "../../crates/ipc-control" }
 ipc-transport = { path = "../../crates/ipc-transport" }
+provider-claude = { path = "../../adapters/provider-claude" }
+scheduler = { path = "../../crates/scheduler" }
 storage-sqlite = { path = "../../adapters/storage-sqlite" }
 task-domain = { path = "../../crates/task" }
 tokio = { version = "~1.51", features = ["macros", "rt", "net", "sync", "time"] }
+workspace = { path = "../../crates/workspace" }
 
 [dev-dependencies]
 bytes = "1"

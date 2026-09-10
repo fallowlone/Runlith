@@ -1,0 +1,132 @@
+syntax = "proto3";
+
+package ai_engineering_os.ipc;
+
+// G5 execution IPC contract (protocol version 2 only).
+import "task_core.proto";
+//
+// Imported by `agentd_control.proto`, which carries it as
+// `ControlRequest.execution_core = 5` / `ControlResponse.execution_core = 5`.
+// This file stays a bounded execution schema: durable Task/Execution/Attempt
+// identities, workspace binding inputs, provider-neutral status, and
+// cancellation. It never grows provider concepts (no provider names, CLI
+// flags, model names, session ids, credentials), prompt text, transcripts,
+// token streaming, routing, or verification verdicts — those belong to
+// later protocol versions with their own contract files.
+//
+// Authority rules (TASK-0047, following ADR-0021):
+// - An execution request on a negotiated session below version 2 is
+//   rejected as unsupported for the negotiated protocol; it never executes.
+// - The client never mints authoritative outcome/provenance: no attempt
+//   outcome, no evaluation verdict, no event ids, no timestamps travel on
+//   the wire. The server owns those.
+// - There is no provider-selection field: the daemon runs its configured
+//   default real provider. There is no complete-task request: provider
+//   success becomes attempt evidence, and only the verification path can
+//   complete a Task.
+// - `RunExecution` starts a background orchestration cycle and returns the
+//   durable identities immediately; `GetExecution` observes durable state;
+//   `CancelExecution` signals the live provider session for one execution.
+
+// One request to start a real-provider orchestration cycle for a task.
+// The server commits the durable entry (claim, start, execution) and then
+// runs lease, attempt, provider execution, and verification routing in the
+// background. Identity fields left blank are minted server-side.
+message RunExecutionRequest {
+  // Durable Task to execute (required).
+  string task_id = 1;
+  // Desired Execution identity (optional; blank means server-minted).
+  string execution_id = 2;
+  // Desired Attempt identity (optional; blank means server-minted).
+  string attempt_id = 3;
+  // Provider-neutral repository identity for the workspace lease.
+  string repository_ref = 4;
+  // Server-local path of that repository (operational input, never
+  // persisted). Must resolve to a Git repository the daemon can read.
+  string repository_path = 5;
+  // Base revision request (branch name, HEAD, or OID). Blank means HEAD.
+  string base_revision = 6;
+}
+
+// Accepted run: the background cycle owns these durable identities now.
+// The provider result is NOT in this response; observe it with Get.
+message RunExecutionResponse {
+  string task_id = 1;
+  string execution_id = 2;
+  string attempt_id = 3;
+  // Task state right after the committed entry (always RUNNING here).
+  string task_state = 4;
+}
+
+// One read of durable execution state. Read-only: emits no journal
+// evidence and never touches the provider.
+message GetExecutionRequest {
+  string execution_id = 1;
+}
+
+// One durable attempt view. `outcome` is one of OPEN, SUCCEEDED, FAILED,
+// TIMED_OUT, CANCELLED. `detail` is bounded server-side and never carries
+// secrets; it may be empty for open attempts.
+message AttemptView {
+  string attempt_id = 1;
+  string outcome = 2;
+  string provider_ref = 3;
+  string detail = 4;
+}
+
+// Durable execution status: task state, every attempt, the lease path,
+// and whether the daemon still has a live background run for it.
+// `execution_live` true means a background cycle is still working (or
+// starting); false with an open attempt means stranded/concluding —
+// reconcilable, never silently successful.
+message GetExecutionResponse {
+  string task_id = 1;
+  string execution_id = 2;
+  string task_state = 3;
+  repeated AttemptView attempts = 4;
+  // Opaque provider identity recorded on attempts (e.g. "claude-code").
+  // Identity only; the server never branches domain logic on it.
+  string provider_ref = 5;
+  // Lease worktree path, or empty when no lease exists yet.
+  string workspace_path = 6;
+  bool execution_live = 7;
+}
+
+// One cancellation signal for the live background run of an execution.
+// Targets durable execution identity, never a PID or process name.
+message CancelExecutionRequest {
+  string execution_id = 1;
+}
+
+// Cancellation outcome. Idempotent: cancelling a concluded execution
+// reports the terminal state instead of failing.
+message CancelExecutionResponse {
+  string execution_id = 1;
+  // True when a live background run was signalled by this call.
+  bool cancel_requested = 2;
+  // Machine-readable run posture: LIVE_SIGNalled, ALREADY_CONCLUDED,
+  // NO_LIVE_RUN, or NOT_FOUND context in `detail`.
+  string run_state = 3;
+  string detail = 4;
+}
+
+// One inbound G5 execution request (protocol v2 only).
+message ExecutionCoreRequest {
+  oneof payload {
+    RunExecutionRequest run = 1;
+    GetExecutionRequest get = 2;
+    CancelExecutionRequest cancel = 3;
+  }
+}
+
+// One outbound G5 execution response: exactly one success variant or the
+// typed `error` variant (field 4, kept clear of the success range).
+// Reuses the G2 `BusinessError` taxonomy plus PROVIDER_UNAVAILABLE.
+message ExecutionCoreResponse {
+  oneof payload {
+    RunExecutionResponse run = 1;
+    GetExecutionResponse get = 2;
+    CancelExecutionResponse cancel = 3;
+    BusinessError error = 4;
+  }
+}

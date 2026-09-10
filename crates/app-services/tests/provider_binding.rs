@@ -1,0 +1,513 @@
+//! TASK-0046 orchestration binding: `schedule_in_workspace` proves the
+//! first-provider vertical slice through the durable provider-neutral
+//! architecture without rewriting it.
+//!
+//! ```text
+//! durable Task → Execution → Attempt → WorkspaceLease → executor
+//! → canonical WorkEvidence → conclude → submit → independent verify
+//! ```
+//!
+//! Portable tests use a pure-Rust stub executor (no process) to prove the
+//! binding is provider-neutral — any `ExecutionPort` binds, not just
+//! Claude. Unix tests drive the real `ClaudeExecutor` against fixture
+//! executables to prove cwd binding, canonical translation, completion
+//! authority, and failure preservation end to end.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use agent_runtime::{AttemptId, ExecutionId, ProviderRef};
+use app_services::{
+    FixedClock, ManagedWorkspaceRoot, OrchestrationIds, OrchestrationService, RuntimeService,
+    TaskService, WorkspaceRequest, WorkspaceService,
+};
+use fake_evaluator::{EvaluatorMode, FakeEvaluator};
+use git_cli::GitCli;
+use scheduler::{ExecutionPort, ExecutionProblem, OrchestrationOutcome, WorkEvidence, WorkItem};
+use task_domain::{Project, ProjectId, Task, TaskId, TaskState};
+
+static COUNTER: AtomicU64 = AtomicU64::new(9000);
+const FIXED_MILLIS: u64 = 1_704_067_200_000;
+
+struct TestEnv {
+    dir: PathBuf,
+    db: PathBuf,
+    repo: PathBuf,
+    root: PathBuf,
+}
+
+impl TestEnv {
+    fn new(suite: &str) -> Self {
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "runlith-provider-binding-{suite}-{id}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("case dir");
+        let db = dir.join("test.db");
+        let repo = dir.join("repo");
+        let root = dir.join("managed-roots");
+        std::fs::create_dir_all(&root).expect("managed root");
+        let root = std::fs::canonicalize(&root).expect("canonical root");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        Self {
+            dir,
+            db,
+            repo,
+            root,
+        }
+    }
+
+    fn orchestration(&self) -> OrchestrationService<FixedClock> {
+        OrchestrationService::open(&self.db, FixedClock(FIXED_MILLIS)).expect("open")
+    }
+
+    fn workspace_service(&self) -> WorkspaceService<GitCli, FixedClock> {
+        WorkspaceService::open(
+            &self.db,
+            GitCli::new(),
+            ManagedWorkspaceRoot::new(&self.root).expect("managed root"),
+            FixedClock(FIXED_MILLIS),
+        )
+        .expect("open workspace service")
+    }
+
+    fn repo_path(&self) -> String {
+        self.repo.to_string_lossy().into_owned()
+    }
+}
+
+impl Drop for TestEnv {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn git(repo: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(repo)
+        .stdin(Stdio::null())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .expect("fixture git");
+    assert!(output.status.success(), "git {args:?} failed");
+}
+
+fn seed_ready(tasks: &mut TaskService<FixedClock>, project: &str, id: &str) -> TaskId {
+    if tasks
+        .get_project(&ProjectId::new(project).unwrap())
+        .unwrap()
+        .is_none()
+    {
+        tasks
+            .create_project(
+                &Project::new(
+                    ProjectId::new(project).unwrap(),
+                    format!("project {project}"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    let task = Task::draft(
+        TaskId::new(id).unwrap(),
+        ProjectId::new(project).unwrap(),
+        format!("objective {id}"),
+    )
+    .unwrap();
+    tasks.create_task(&task).unwrap();
+    tasks.mark_ready(&task.id().clone()).unwrap();
+    task.id().clone()
+}
+
+fn ids(execution: &str, attempt: &str) -> OrchestrationIds {
+    OrchestrationIds {
+        execution_id: ExecutionId::new(execution).unwrap(),
+        attempt_id: AttemptId::new(attempt).unwrap(),
+    }
+}
+
+fn workspace_request(env: &TestEnv, exec: &ExecutionId) -> WorkspaceRequest {
+    WorkspaceRequest {
+        execution_id: exec.clone(),
+        repository_ref: workspace::RepositoryRef::new("repo-local:binding").unwrap(),
+        repository_path: env.repo_path(),
+        base_revision: "HEAD".to_owned(),
+    }
+}
+
+/// Pure-Rust stub executor proving the binding is provider-neutral: no
+/// Claude involved at all, yet the full lease-bound cycle runs.
+struct StubExecutor {
+    executes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl ExecutionPort for StubExecutor {
+    fn provider_ref(&self) -> ProviderRef {
+        ProviderRef::new("binding-stub").unwrap()
+    }
+
+    fn execute(&self, work: &WorkItem) -> Result<WorkEvidence, ExecutionProblem> {
+        self.executes.fetch_add(1, Ordering::SeqCst);
+        Ok(WorkEvidence {
+            summary: format!("stub evidence for attempt {}", work.attempt_id),
+            evidence_ref: format!("stub-evidence:{}", work.attempt_id),
+            partial: false,
+        })
+    }
+}
+
+#[test]
+fn workspace_bound_cycle_verifies_through_independent_evaluation() {
+    let env = TestEnv::new("stub-verify");
+    let mut orchestration = env.orchestration();
+    let task_id = seed_ready(orchestration.tasks_mut(), "P-1", "T-1");
+    let mut workspace = env.workspace_service();
+    let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let executor = StubExecutor {
+        executes: calls.clone(),
+    };
+
+    let outcome = orchestration
+        .schedule_in_workspace(
+            &mut workspace,
+            &task_id,
+            ids("E-1", "A-1"),
+            workspace_request(&env, &ExecutionId::new("E-1").unwrap()),
+            |task, lease| {
+                // The factory observes durable Task + ready lease only.
+                assert_eq!(task.id(), &task_id);
+                assert_eq!(lease.owner().as_str(), "E-1");
+                assert!(Path::new(lease.worktree_ref()).is_dir());
+                executor
+            },
+            &evaluator,
+        )
+        .expect("workspace-bound cycle");
+    assert!(
+        matches!(
+            outcome,
+            OrchestrationOutcome::ExecutionSucceededAndVerified { .. }
+        ),
+        "stub success must verify, got {outcome:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(evaluator.call_count(), 1);
+    // The lease outlives the cycle: attempts share it, evaluation owns
+    // completion, teardown stays explicit.
+    let lease = workspace
+        .workspace_for_execution(&ExecutionId::new("E-1").unwrap())
+        .unwrap()
+        .expect("lease persists after verification");
+    assert_eq!(lease.lifecycle(), workspace::LeaseLifecycle::Ready);
+}
+
+#[test]
+fn provider_success_without_verification_never_completes() {
+    // G5 completion-authority regression through the new binding: a
+    // successful provider result with a rejecting evaluator ends
+    // RETRY_READY — never COMPLETED. Provider output is evidence, and
+    // only the evaluation verdict grants completion.
+    let env = TestEnv::new("stub-reject");
+    let mut orchestration = env.orchestration();
+    let task_id = seed_ready(orchestration.tasks_mut(), "P-1", "T-1");
+    let mut workspace = env.workspace_service();
+    let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysRejected);
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let executor = StubExecutor {
+        executes: calls.clone(),
+    };
+
+    let outcome = orchestration
+        .schedule_in_workspace(
+            &mut workspace,
+            &task_id,
+            ids("E-1", "A-1"),
+            workspace_request(&env, &ExecutionId::new("E-1").unwrap()),
+            |_, _| executor,
+            &evaluator,
+        )
+        .expect("workspace-bound cycle");
+    assert!(
+        matches!(
+            outcome,
+            OrchestrationOutcome::ExecutionSucceededButRejected { .. }
+        ),
+        "rejecting evaluator must reject, got {outcome:?}"
+    );
+    let state = orchestration
+        .tasks()
+        .get_task(&task_id)
+        .unwrap()
+        .unwrap()
+        .state();
+    assert_eq!(
+        state,
+        TaskState::RetryReady,
+        "rejection routes to retry, never completion"
+    );
+}
+
+#[test]
+fn provider_failure_is_attempt_failure_never_task_failure() {
+    struct FailExecutor;
+    impl ExecutionPort for FailExecutor {
+        fn provider_ref(&self) -> ProviderRef {
+            ProviderRef::new("fail-stub").unwrap()
+        }
+        fn execute(&self, _work: &WorkItem) -> Result<WorkEvidence, ExecutionProblem> {
+            Err(ExecutionProblem::Failed {
+                detail: "simulated provider failure".to_owned(),
+            })
+        }
+    }
+
+    let env = TestEnv::new("stub-fail");
+    let mut orchestration = env.orchestration();
+    let task_id = seed_ready(orchestration.tasks_mut(), "P-1", "T-1");
+    let mut workspace = env.workspace_service();
+    let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
+    let executor = FailExecutor;
+
+    let outcome = orchestration
+        .schedule_in_workspace(
+            &mut workspace,
+            &task_id,
+            ids("E-1", "A-1"),
+            workspace_request(&env, &ExecutionId::new("E-1").unwrap()),
+            |_, _| executor,
+            &evaluator,
+        )
+        .expect("cycle reports failure");
+    assert!(
+        matches!(outcome, OrchestrationOutcome::ExecutionFailed { .. }),
+        "provider failure must surface, got {outcome:?}"
+    );
+    assert_eq!(evaluator.call_count(), 0, "no evidence → no evaluation");
+    let state = orchestration
+        .tasks()
+        .get_task(&task_id)
+        .unwrap()
+        .unwrap()
+        .state();
+    assert_eq!(
+        state,
+        TaskState::Running,
+        "provider failure != task failure"
+    );
+}
+
+#[test]
+fn execution_id_mismatch_fails_before_any_mutation() {
+    let env = TestEnv::new("mismatch");
+    let mut orchestration = env.orchestration();
+    let task_id = seed_ready(orchestration.tasks_mut(), "P-1", "T-1");
+    let mut workspace = env.workspace_service();
+    let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let executor = StubExecutor {
+        executes: calls.clone(),
+    };
+
+    let bad_request = WorkspaceRequest {
+        execution_id: ExecutionId::new("E-OTHER").unwrap(),
+        repository_ref: workspace::RepositoryRef::new("repo-local:binding").unwrap(),
+        repository_path: env.repo_path(),
+        base_revision: "HEAD".to_owned(),
+    };
+    let err = orchestration
+        .schedule_in_workspace(
+            &mut workspace,
+            &task_id,
+            ids("E-1", "A-1"),
+            bad_request,
+            |_, _| executor,
+            &evaluator,
+        )
+        .expect_err("mismatched execution must fail");
+    let state = orchestration
+        .tasks()
+        .get_task(&task_id)
+        .unwrap()
+        .unwrap()
+        .state();
+    assert_eq!(
+        state,
+        TaskState::Ready,
+        "failed binding commits nothing, got {err:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn lease_failure_leaves_honest_recoverable_intermediate() {
+    let env = TestEnv::new("lease-fail");
+    let mut orchestration = env.orchestration();
+    let task_id = seed_ready(orchestration.tasks_mut(), "P-1", "T-1");
+    let mut workspace = env.workspace_service();
+    let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let executor = StubExecutor {
+        executes: calls.clone(),
+    };
+
+    let mut bad_request = workspace_request(&env, &ExecutionId::new("E-1").unwrap());
+    bad_request.base_revision = "no-such-ref-anywhere".to_owned();
+    let err = orchestration
+        .schedule_in_workspace(
+            &mut workspace,
+            &task_id,
+            ids("E-1", "A-1"),
+            bad_request,
+            |_, _| executor,
+            &evaluator,
+        )
+        .expect_err("bad base must fail at the lease step");
+    // Honest intermediate: RUNNING + execution committed, no attempt, no
+    // executor invocation, no silent rollback. A retry may create A-2
+    // under E-1 or reconcile explicitly — never a hidden mega-state.
+    let state = orchestration
+        .tasks()
+        .get_task(&task_id)
+        .unwrap()
+        .unwrap()
+        .state();
+    assert_eq!(
+        state,
+        TaskState::Running,
+        "entry facts stay committed, got {err:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(evaluator.call_count(), 0);
+    assert!(
+        workspace
+            .workspace_for_execution(&ExecutionId::new("E-1").unwrap())
+            .unwrap()
+            .is_none(),
+        "no lease on lease failure"
+    );
+}
+
+// -- real ClaudeExecutor through the binding (unix fixtures) -----------------
+
+#[cfg(unix)]
+mod unix {
+    use super::*;
+    use provider_claude::{build_task_prompt, ClaudeConfig, ClaudeExecutor};
+    use std::io::Write;
+    use std::time::Duration;
+
+    fn fixture(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        let mut file = std::fs::File::create(&path).expect("fixture file");
+        file.write_all(b"#!/bin/sh\n").expect("shebang");
+        file.write_all(body.as_bytes()).expect("fixture body");
+        drop(file);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("fixture chmod");
+        path
+    }
+
+    #[test]
+    fn claude_shaped_success_runs_in_lease_and_submits() {
+        let env = TestEnv::new("claude-e2e");
+        // Fixture Claude: drops a marker file in its cwd (proves lease
+        // binding) and reports structured success.
+        let fixture_path = fixture(
+            &env.dir,
+            "claude-fixture.sh",
+            r#"echo proof > ./fixture-proof.txt; printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture worked","session_id":"22222222-3333-4444-5555-666666666666","usage":{"input_tokens":3,"output_tokens":5}}'"#,
+        );
+        let mut orchestration = env.orchestration();
+        let task_id = seed_ready(orchestration.tasks_mut(), "P-1", "T-1");
+        let mut workspace = env.workspace_service();
+        let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
+
+        let outcome = orchestration
+            .schedule_in_workspace(
+                &mut workspace,
+                &task_id,
+                ids("E-9", "A-9"),
+                workspace_request(&env, &ExecutionId::new("E-9").unwrap()),
+                |task, lease| {
+                    let prompt = build_task_prompt(task.objective(), task.acceptance());
+                    let config = ClaudeConfig::default()
+                        .with_executable(fixture_path.clone())
+                        .expect("fixture exe")
+                        .with_timeout(Duration::from_secs(30))
+                        .expect("timeout");
+                    ClaudeExecutor::bind(config, prompt, lease.worktree_ref().to_owned())
+                        .expect("bind executor to lease path")
+                },
+                &evaluator,
+            )
+            .expect("claude-shaped cycle");
+        assert!(
+            matches!(
+                outcome,
+                OrchestrationOutcome::ExecutionSucceededAndVerified { .. }
+            ),
+            "fixture success must verify, got {outcome:?}"
+        );
+        // The child provably ran inside the lease worktree (G4 isolation
+        // through the real binding): the marker file exists exactly there
+        // and nowhere else. The attempt evidence references the opaque
+        // provider session — never a durable identity.
+        let lease = workspace
+            .workspace_for_execution(&ExecutionId::new("E-9").unwrap())
+            .unwrap()
+            .expect("lease");
+        let marker = Path::new(lease.worktree_ref()).join("fixture-proof.txt");
+        assert!(
+            marker.is_file(),
+            "fixture child must have run in the lease worktree"
+        );
+        assert_eq!(
+            std::fs::read(&marker).expect("marker bytes"),
+            b"proof\n",
+            "marker content intact (no TOCTOU games in this path)"
+        );
+        let runtime = RuntimeService::open(&env.db, FixedClock(FIXED_MILLIS)).expect("runtime");
+        let execution = runtime
+            .get_execution(&ExecutionId::new("E-9").unwrap())
+            .expect("read execution")
+            .expect("execution exists");
+        let attempt = execution
+            .get_attempt(&AttemptId::new("A-9").unwrap())
+            .expect("attempt");
+        assert_eq!(
+            attempt.outcome(),
+            Some(agent_runtime::AttemptOutcome::Succeeded)
+        );
+        let detail = attempt.detail().expect("attempt detail");
+        assert!(
+            detail.contains("claude:session:22222222-3333-4444-5555-666666666666"),
+            "got {detail:?}"
+        );
+        let state = orchestration
+            .tasks()
+            .get_task(&task_id)
+            .unwrap()
+            .unwrap()
+            .state();
+        assert_eq!(
+            state,
+            TaskState::Completed,
+            "verified path completes via evaluation"
+        );
+    }
+}

@@ -1,0 +1,16 @@
+[package]
+name = "provider-claude"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "provider_claude"
+path = "src/lib.rs"
+
+[dependencies]
+agent-runtime = { path = "../../crates/agent-runtime" }
+task-domain = { path = "../../crates/task" }
+scheduler = { path = "../../crates/scheduler" }
+workspace = { path = "../../crates/workspace" }
+
+[dev-dependencies]

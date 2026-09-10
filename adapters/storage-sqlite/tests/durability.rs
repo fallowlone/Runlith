@@ -71,7 +71,7 @@ fn fresh_database_migrates_to_current() {
     let db = TestDb::new("fresh");
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 4);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 5);
 }
 
 #[test]

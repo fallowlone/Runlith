@@ -296,8 +296,9 @@ fn internal(message: &str) -> TaskCoreResponse {
 /// Maps service failures onto the wire taxonomy (ADR-0021 §11). Details
 /// that embed validated identifiers or state names are preserved
 /// (truncated); everything that could carry SQL, paths, stored garbage,
-/// or debug output is replaced with static text.
-fn map_error(error: &ServiceError) -> (BusinessErrorCode, String) {
+/// or debug output is replaced with static text. Shared with the G5
+/// execution dispatcher, which reports the same taxonomy.
+pub(crate) fn map_error(error: &ServiceError) -> (BusinessErrorCode, String) {
     match error {
         ServiceError::Domain(domain) => match domain {
             DomainError::InvalidInput(detail) => {

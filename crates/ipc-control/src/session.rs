@@ -26,7 +26,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::error::{ControlError, ControlResult};
 use crate::negotiation::{
     default_client_build_version, evaluate_handshake, rejection_for, validate_business_allowed,
-    ServerConfig,
+    validate_execution_allowed, ServerConfig,
 };
 
 /// Deadline for a full client/server handshake exchange.
@@ -62,9 +62,12 @@ pub enum ReadyRequest {
     /// Shutdown asked; exposed upward with no lifecycle effect.
     /// TASK-0020 owns authorization, reply, and process behavior.
     Shutdown,
-    /// Decoded G2 business request on a version-1 session. The version
+    /// Decoded G2 business request on a version-1+ session. The version
     /// gate already passed; nothing has executed.
     Business(ipc_contracts::proto::TaskCoreRequest),
+    /// Decoded G5 execution request on a version-2 session. The version
+    /// gate already passed; nothing has executed.
+    Execution(ipc_contracts::proto::ExecutionCoreRequest),
 }
 
 /// Client-side handshake outcome.
@@ -133,6 +136,24 @@ impl ClientConfig {
             requested_capabilities: Vec::new(),
         }
     }
+
+    /// G5 execution-capable client configuration (TASK-0047): offers
+    /// protocols `[0, 1, 2]` so an old daemon negotiates its best
+    /// version while a new daemon negotiates 2 (execution IPC). The
+    /// caller must check `execution_allowed` — a negotiated 0/1 session
+    /// carries no execution authority.
+    pub fn execution_default(client_kind: impl Into<String>) -> Self {
+        Self {
+            supported_versions: vec![
+                ipc_contracts::IPC_PROTOCOL_VERSION_V0,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V1,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V2,
+            ],
+            client_kind: client_kind.into(),
+            client_build_version: default_client_build_version(),
+            requested_capabilities: Vec::new(),
+        }
+    }
 }
 
 /// Client side of the bootstrap control protocol.
@@ -181,12 +202,20 @@ where
     }
 
     /// Reports whether this session negotiated business (G2 `task_core`)
-    /// authority: only version 1 qualifies. Descriptive gate for future
+    /// authority: versions 1 and 2 qualify. Descriptive gate for future
     /// client-side checks; the server enforces the same rule.
     #[must_use]
     pub fn business_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_business_allowed)
+    }
+
+    /// Reports whether this session negotiated execution (G5
+    /// `execution_core`) authority: only version 2 qualifies.
+    #[must_use]
+    pub fn execution_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_execution_allowed)
     }
 
     /// Unwraps into the framed transport for lifecycle-owned exchanges
@@ -317,7 +346,7 @@ where
     /// `ControlResponse.task_core` envelope and writes the frame. Executes
     /// nothing — dispatch belongs to `agentd`. Valid only after a
     /// successful handshake; the caller guarantees the session negotiated
-    /// version 1 (only v1 sessions can observe `Business`).
+    /// version 1+ (only v1+ sessions can observe `Business`).
     pub async fn respond_business(
         &mut self,
         response: ipc_contracts::proto::TaskCoreResponse,
@@ -326,6 +355,28 @@ where
         let frame = bytes::Bytes::from(
             ControlResponse {
                 payload: Some(control_response::Payload::TaskCore(response)),
+            }
+            .encode_to_vec(),
+        );
+        match self.transport.write_frame(frame).await {
+            Ok(()) => Ok(()),
+            Err(error) => self.fail(error.into()),
+        }
+    }
+
+    /// Protocol framing only: encodes the `ExecutionCoreResponse` inside
+    /// the `ControlResponse.execution_core` envelope and writes the frame.
+    /// Executes nothing — dispatch belongs to `agentd`. Valid only after
+    /// a successful handshake; the caller guarantees the session
+    /// negotiated version 2 (only v2 sessions can observe `Execution`).
+    pub async fn respond_execution(
+        &mut self,
+        response: ipc_contracts::proto::ExecutionCoreResponse,
+    ) -> ControlResult<()> {
+        self.require_ready()?;
+        let frame = bytes::Bytes::from(
+            ControlResponse {
+                payload: Some(control_response::Payload::ExecutionCore(response)),
             }
             .encode_to_vec(),
         );
@@ -359,18 +410,26 @@ where
     }
 
     /// Negotiated version after a successful handshake, else `None`.
-    /// Gates business (`task_core`) authority: only 1 qualifies.
+    /// Gates business (`task_core`) authority: versions 1 and 2 qualify.
     #[must_use]
     pub fn negotiated_version(&self) -> Option<u32> {
         self.negotiated_version
     }
 
     /// Reports whether this session negotiated business (G2 `task_core`)
-    /// authority: only version 1 qualifies.
+    /// authority: versions 1 and 2 qualify.
     #[must_use]
     pub fn business_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_business_allowed)
+    }
+
+    /// Reports whether this session negotiated execution (G5
+    /// `execution_core`) authority: only version 2 qualifies.
+    #[must_use]
+    pub fn execution_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_execution_allowed)
     }
 
     /// Reads the first request (within [`HANDSHAKE_TIMEOUT`]), requires it
@@ -490,14 +549,27 @@ where
             Some(control_request::Payload::Shutdown(_)) => Ok(ReadyRequest::Shutdown),
             Some(control_request::Payload::TaskCore(request)) => {
                 // Version gate, not dispatch: a v0 session rejects with
-                // UnsupportedProtocol and the request never executes; a v1
-                // session surfaces the decoded request for the `agentd`
-                // dispatcher, which owns handling (TASK-0028).
+                // UnsupportedProtocol and the request never executes; a
+                // v1+ session surfaces the decoded request for the
+                // `agentd` dispatcher, which owns handling (TASK-0028).
                 let negotiated = self
                     .negotiated_version
                     .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
                 match validate_business_allowed(negotiated) {
                     Ok(()) => Ok(ReadyRequest::Business(request)),
+                    Err(error) => self.fail(error),
+                }
+            }
+            Some(control_request::Payload::ExecutionCore(request)) => {
+                // Same gate discipline one version higher: only a v2
+                // session surfaces the decoded request; v0/v1 reject
+                // with UnsupportedProtocol and the request never
+                // executes (TASK-0047).
+                let negotiated = self
+                    .negotiated_version
+                    .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
+                match validate_execution_allowed(negotiated) {
+                    Ok(()) => Ok(ReadyRequest::Execution(request)),
                     Err(error) => self.fail(error),
                 }
             }
@@ -1079,6 +1151,12 @@ mod tests {
         assert_eq!(legacy.supported_versions, vec![0]);
     }
 
+    #[test]
+    fn execution_default_client_offers_all_versions() {
+        let config = ClientConfig::execution_default(CLIENT_KIND_AGENTCTL);
+        assert_eq!(config.supported_versions, vec![0, 1, 2]);
+    }
+
     fn task_core_frame() -> Bytes {
         use ipc_contracts::proto::{task_core_request, CreateTaskRequest, TaskCoreRequest};
         Bytes::from(
@@ -1178,6 +1256,116 @@ mod tests {
         }
         // The session survives a business request: version-gated dispatch
         // never terminates the connection on its own.
+        assert!(server.is_ready());
+    }
+
+    fn execution_core_frame() -> Bytes {
+        use ipc_contracts::proto::{
+            execution_core_request, ExecutionCoreRequest, GetExecutionRequest,
+        };
+        Bytes::from(
+            ControlRequest {
+                payload: Some(control_request::Payload::ExecutionCore(
+                    ExecutionCoreRequest {
+                        payload: Some(execution_core_request::Payload::Get(GetExecutionRequest {
+                            execution_id: "E-1".to_owned(),
+                        })),
+                    },
+                )),
+            }
+            .encode_to_vec(),
+        )
+    }
+
+    #[tokio::test]
+    async fn v1_session_rejects_execution_as_unsupported() {
+        // G2 daemon profile negotiates 1 with a [0,1] client: business is
+        // allowed, execution is not — the request never executes.
+        let (mut raw_client, raw_server) = raw_pair();
+        let mut server = ServerSession::new(raw_server, ServerConfig::g2_default());
+        raw_client
+            .write_frame(handshake_request_frame(HandshakeRequest {
+                supported_protocol_versions: vec![0, 1],
+                client_kind: CLIENT_KIND_AGENTCTL.to_owned(),
+                client_build_version: "test".to_owned(),
+                requested_capabilities: Vec::new(),
+            }))
+            .await
+            .expect("write");
+        let info = server.run_handshake().await.expect("ready");
+        assert_eq!(info.selected_version, 1);
+        assert!(server.business_allowed());
+        assert!(!server.execution_allowed());
+        raw_client
+            .write_frame(execution_core_frame())
+            .await
+            .expect("write");
+        match server.next_request().await {
+            Err(ControlError::UnsupportedProtocol {
+                negotiated,
+                required,
+            }) => {
+                assert_eq!(negotiated, 1);
+                assert_eq!(required, 2);
+            }
+            other => panic!("expected UnsupportedProtocol, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_session_surfaces_execution_without_executing() {
+        // New client [0,1,2] against the G5 daemon profile negotiates 2
+        // on both sides of a live pair.
+        let (pair, client_outcome, server_outcome) = run_handshake_pair(
+            ClientConfig::execution_default(CLIENT_KIND_AGENTCTL),
+            ServerConfig::g5_default(),
+        )
+        .await;
+        assert_eq!(
+            client_outcome.expect("client handshake").selected_version,
+            2
+        );
+        assert_eq!(
+            server_outcome.expect("server handshake").selected_version,
+            2
+        );
+        assert!(pair.client.business_allowed());
+        assert!(pair.client.execution_allowed());
+        assert!(pair.server.business_allowed());
+        assert!(pair.server.execution_allowed());
+        assert_eq!(pair.client.negotiated_version(), Some(2));
+        assert_eq!(pair.server.negotiated_version(), Some(2));
+        drop(pair);
+
+        // The wire shape is valid on a v2 session: the decoded request is
+        // surfaced for the dispatcher with nothing executed here.
+        let (mut raw_client, raw_server) = raw_pair();
+        let mut server = ServerSession::new(raw_server, ServerConfig::g5_default());
+        raw_client
+            .write_frame(handshake_request_frame(HandshakeRequest {
+                supported_protocol_versions: vec![0, 1, 2],
+                client_kind: CLIENT_KIND_AGENTCTL.to_owned(),
+                client_build_version: "test".to_owned(),
+                requested_capabilities: Vec::new(),
+            }))
+            .await
+            .expect("write");
+        let info = server.run_handshake().await.expect("ready");
+        assert_eq!(info.selected_version, 2);
+        assert!(server.execution_allowed());
+        raw_client
+            .write_frame(execution_core_frame())
+            .await
+            .expect("write");
+        match server.next_request().await {
+            Ok(ReadyRequest::Execution(request)) => match request.payload {
+                Some(ipc_contracts::proto::execution_core_request::Payload::Get(get)) => {
+                    assert_eq!(get.execution_id, "E-1");
+                }
+                other => panic!("expected get payload, got {other:?}"),
+            },
+            other => panic!("expected Execution request, got {other:?}"),
+        }
         assert!(server.is_ready());
     }
 }
