@@ -12,6 +12,7 @@
 //! single append-only Event Journal. No application mutation service,
 //! no scheduler/provider/session concepts.
 
+mod entry_store;
 mod error;
 mod event;
 mod migration;
@@ -19,6 +20,7 @@ mod runtime_store;
 mod task_store;
 mod workspace_store;
 
+pub use entry_store::{AdmittedExecutionEntry, ExecutionEntryAdmission};
 pub use error::{StorageError, StorageResult};
 pub use event::{
     AttemptOutcome, EventId, EventType, JournalEvent, NewJournalEvent, EVENT_SCHEMA_VERSION,

@@ -142,6 +142,33 @@ impl crate::task_store::SqliteStore {
                 attempt.id()
             )));
         }
+        // Attempt-identity reservation discipline (TASK-0051, G5): the
+        // atomic entry boundary reserves the future Attempt identity for
+        // its owning execution. A reservation held by another execution
+        // refuses this write with no attempt and no event — this is what
+        // keeps a concurrent duplicate-Attempt race from detonating here
+        // after both entries committed. A reservation held by THIS
+        // execution is consumed below together with the Attempt insert.
+        // No reservation row (legacy/test-direct creation without entry)
+        // keeps the historical behavior: global Attempt uniqueness still
+        // holds through the PRIMARY KEY.
+        let reserved_owner: Option<String> = transaction
+            .query_row(
+                "SELECT execution_id FROM attempt_reservations WHERE attempt_id = ?1",
+                params![attempt.id().as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(owner) = &reserved_owner {
+            if owner != attempt.execution_id().as_str() {
+                return Err(StorageError::Duplicate(format!(
+                    "attempt {} is reserved by execution {owner}; \
+                     execution {} cannot create it",
+                    attempt.id(),
+                    attempt.execution_id()
+                )));
+            }
+        }
         let open: Option<String> = transaction
             .query_row(
                 "SELECT attempt_id FROM execution_attempts
@@ -174,6 +201,12 @@ impl crate::task_store::SqliteStore {
                 ],
             )
             .map_err(|error| map_constraint(error, "create attempt"))?;
+        if reserved_owner.is_some() {
+            transaction.execute(
+                "DELETE FROM attempt_reservations WHERE attempt_id = ?1",
+                params![attempt.id().as_str()],
+            )?;
+        }
         let committed = insert_journal_event(&transaction, event)?;
         transaction.commit()?;
         Ok(committed)
@@ -339,7 +372,7 @@ impl AttemptRow {
 
 /// Validates that `event` is the `execution.created` evidence for
 /// exactly `execution` under the authoritative owning project.
-fn require_execution_created_envelope(
+pub(crate) fn require_execution_created_envelope(
     execution: &Execution,
     project_id: &task_domain::ProjectId,
     event: &NewJournalEvent,

@@ -110,6 +110,35 @@ impl crate::task_store::SqliteStore {
             .map_err(storage_failure)
     }
 
+    /// Returns the owning execution of any lease recording `branch`, if
+    /// any. Read-only fail-fast helper for the execution-entry boundary
+    /// (TASK-0051, G5 §32): with injective managed-branch derivation two
+    /// distinct executions never share a branch, so a hit owned by another
+    /// execution refuses entry before the first mutation. Not a
+    /// correctness boundary by itself — Git state can still change
+    /// afterwards; that stays a recoverable saga concern.
+    pub fn find_lease_owner_by_branch(
+        &self,
+        branch: &str,
+    ) -> Result<Option<ExecutionId>, WorkspaceFailure> {
+        let owner: Option<String> = self
+            .connection()
+            .query_row(
+                "SELECT execution_id FROM workspace_leases WHERE branch_ref = ?1",
+                params![branch],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_failure)?;
+        owner
+            .map(|raw| {
+                ExecutionId::new(raw).map_err(|error| WorkspaceFailure::StorageFailure {
+                    detail: format!("stored lease owner is not a valid execution id: {error}"),
+                })
+            })
+            .transpose()
+    }
+
     /// Translates service-minted workspace evidence into a journal fact.
     /// The lifecycle pair always comes from the evidence kind's fixed
     /// transition — never from caller input.

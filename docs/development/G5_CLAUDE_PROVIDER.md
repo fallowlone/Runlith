@@ -136,7 +136,7 @@ durable Task state is untouched (cancellation maps to
 | Signal | Canonical outcome |
 |---|---|
 | CLI missing (PATH/spawn) | `Failed(cli_missing …)` |
-| Version incompatible | `Incompatible` at detect; never spawned blindly |
+| Version incompatible | `Incompatible` at detect; production fast precheck is PATH-presence-only (adapter owns compatibility policy; structured execution/parser fails closed for incompatible behavior; bounded-fast version gate deferred, TASK-0051 H5) |
 | Spawn failure | `CliMissing` / `SpawnFailed` |
 | Deadline exceeded | `TimedOut` (tree killed) |
 | Cancel flag | `Cancelled` |

@@ -596,3 +596,79 @@ fn concurrent_allocations_from_separate_instances_never_collide() {
     );
     let _ = (exec_a, exec_b);
 }
+
+/// TASK-0051 H4 keeper (service level): the exact production pair that
+/// used to wedge the second task (`E/S` vs `E-2FS` both deriving
+/// `refs/heads/agent/E-2FS`) now allocates independent managed
+/// workspaces in the same repository — distinct branches, distinct
+/// worktrees, both materialized, both `CreatedFresh`.
+#[test]
+fn h4_collision_pair_allocates_independent_workspaces() {
+    let env = TestEnv::new("h4-pair");
+    let mut tasks = env.task_service();
+    for (project, task) in [("P-A", "T-A"), ("P-B", "T-B")] {
+        let project_id = ProjectId::new(project).unwrap();
+        tasks
+            .create_project(&Project::new(project_id.clone(), "p".to_owned()).unwrap())
+            .unwrap();
+        let task_id = TaskId::new(task).unwrap();
+        tasks
+            .create_task(&Task::draft(task_id.clone(), project_id, "o".to_owned()).unwrap())
+            .unwrap();
+        tasks.mark_ready(&task_id).unwrap();
+    }
+    drop(tasks);
+    let mut runtime = env.runtime_service();
+    let exec_slash = ExecutionId::new("E/S").unwrap();
+    let exec_mimic = ExecutionId::new("E-2FS").unwrap();
+    runtime
+        .create_execution(exec_slash.clone(), TaskId::new("T-A").unwrap())
+        .unwrap();
+    runtime
+        .create_execution(exec_mimic.clone(), TaskId::new("T-B").unwrap())
+        .unwrap();
+    drop(runtime);
+
+    let mut service = env.workspace_service();
+    let ensured_slash = service
+        .ensure_workspace_ready(&request(&env, &exec_slash, "repo-local:h4"))
+        .expect("E/S allocates");
+    let ensured_mimic = service
+        .ensure_workspace_ready(&request(&env, &exec_mimic, "repo-local:h4"))
+        .expect("E-2FS allocates");
+    assert_eq!(ensured_slash.outcome, EnsureOutcome::CreatedFresh);
+    assert_eq!(ensured_mimic.outcome, EnsureOutcome::CreatedFresh);
+    assert_ne!(
+        ensured_slash.lease.branch(),
+        ensured_mimic.lease.branch(),
+        "the H4 pair must hold distinct managed branches"
+    );
+    assert_eq!(
+        ensured_slash.lease.branch().as_str(),
+        "refs/heads/agent/E%2FS"
+    );
+    assert_eq!(
+        ensured_mimic.lease.branch().as_str(),
+        "refs/heads/agent/E-2FS"
+    );
+    assert_ne!(
+        ensured_slash.lease.worktree_ref(),
+        ensured_mimic.lease.worktree_ref(),
+        "the H4 pair must hold distinct worktrees"
+    );
+    for lease in [&ensured_slash.lease, &ensured_mimic.lease] {
+        assert!(
+            git_exists(
+                &env.repo,
+                &["show-ref", "--verify", "--quiet", lease.branch().as_str()]
+            ),
+            "managed branch {} must exist in the fixture repository",
+            lease.branch()
+        );
+        assert!(
+            Path::new(lease.worktree_ref()).is_dir(),
+            "worktree {} must be materialized",
+            lease.worktree_ref()
+        );
+    }
+}

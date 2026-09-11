@@ -19,11 +19,11 @@ mod workspace_service;
 pub use clock::{format_rfc3339, Clock, FixedClock, SystemClock};
 pub use error::{ServiceError, ServiceResult};
 pub use orchestration_service::{ExecutionEntry, OrchestrationIds, OrchestrationService};
-pub use runtime_service::{AppliedExecution, RuntimeService};
-pub use task_service::{AppliedTransition, TaskService};
+pub use runtime_service::{AppliedExecution, PlannedExecution, RuntimeService};
+pub use task_service::{AppliedTransition, PlannedTransition, TaskService};
 pub use workspace_service::{
-    CleanedWorkspace, CleanupOutcome, EnsureOutcome, EnsuredWorkspace, ManagedWorkspaceRoot,
-    WorkspaceRequest, WorkspaceService,
+    branch_for_execution, CleanedWorkspace, CleanupOutcome, EnsureOutcome, EnsuredWorkspace,
+    ManagedWorkspaceRoot, WorkspaceRequest, WorkspaceService,
 };
 
 // Orchestration contract re-exports: these types are the public vocabulary

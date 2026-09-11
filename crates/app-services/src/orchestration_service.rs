@@ -9,18 +9,21 @@
 //! independent evaluator ([`evaluation::EvaluationPort`]) are injected per
 //! call; for G3 tests those are the FakeAgent wrapper and `FakeEvaluator`.
 //!
-//! Durability boundaries: each step below is its own atomic commit. The
-//! executor runs outside every SQLite transaction (service calls return
-//! before it is invoked), so a crash leaves a legitimate recoverable
-//! intermediate state (`RUNNING` + `E1` + open `A1`) instead of a hidden
-//! in-memory mega-transaction.
+//! Durability boundaries: entry (readiness, claim, start, execution,
+//! attempt reservation, journal) is ONE atomic commit
+//! ([`SqliteStore::admit_execution_entry`](storage_sqlite::SqliteStore::admit_execution_entry)).
+//! The executor runs outside every SQLite transaction (service calls
+//! return before it is invoked), so a crash leaves a legitimate
+//! recoverable intermediate state (`RUNNING` + `E1` + reserved `A1`)
+//! instead of a hidden in-memory mega-transaction.
 //!
 //! ```text
 //! readiness (derived, read-only)
-//! → TaskService::claim → TaskService::start          (durable)
-//! → RuntimeService::create_execution                 (durable)
-//! → RuntimeService::create_attempt                   (durable)
+//! → plan claim + plan start + plan execution (validated, uncommitted)
+//! → atomic admission: claim + start + execution + attempt reservation
+//!   + journal facts (one durable commit)
 //! → [executor runs outside any transaction]
+//! → RuntimeService::create_attempt (consumes the reservation) (durable)
 //! → RuntimeService::conclude_attempt                 (durable)
 //! → TaskService::submit_result                       (durable, if submittable)
 //! → TaskService::route_to_review → begin_verification (durable)
@@ -279,9 +282,18 @@ impl<C: Clock> OrchestrationService<C> {
         self.run_workspace_attempt(work, executor, evaluator)
     }
 
-    /// Durable entry half of a cycle: readiness, claim, start, execution.
-    /// Shared by [`Self::schedule`] and [`Self::schedule_in_workspace`]
-    /// so both spell the entry boundary exactly once.
+    /// Durable entry half of a cycle: readiness, then ONE atomic
+    /// admission (claim + start + execution + attempt reservation +
+    /// journal). Shared by [`Self::schedule`] and
+    /// [`Self::schedule_in_workspace`] so both spell the entry boundary
+    /// exactly once.
+    ///
+    /// Concurrency contract (TASK-0051, G5): the pre-entry reads below
+    /// are diagnostics only. Correctness comes from the single
+    /// `IMMEDIATE` admission transaction: a concurrent duplicate
+    /// execution/attempt identity, or a concurrent claim of the same
+    /// task, rolls the loser back with zero unrelated mutations — the
+    /// loser keeps its pre-run state and a typed conflict.
     fn enter(&mut self, task_id: &TaskId, ids: OrchestrationIds) -> ServiceResult<Entered> {
         // -- derived readiness (read-only) ---------------------------------
         let task = self.tasks.get_task(task_id)?.ok_or_else(|| {
@@ -314,13 +326,11 @@ impl<C: Clock> OrchestrationService<C> {
         }
 
         // -- identity preflight (TASK-0049, G5): synchronously detectable
-        // identity conflicts must refuse before the first mutation. A
-        // rejected run commits no claim, no start, no execution, no
-        // lease, no attempt, and no journal evidence, so the Task stays
-        // in its pre-run state and is rerunnable with fresh identities.
-        // The store-level uniqueness guards stay the backstop for
-        // concurrent races; this preflight fixes the deterministic
-        // ordering (refusal must precede unrelated lifecycle facts).
+        // identity conflicts refuse before the first mutation with a typed
+        // error naming the owner. This is a diagnostic fast path only —
+        // it cannot close the concurrent race (read-before-write). The
+        // atomic admission below is the correctness boundary: under
+        // concurrency the loser fails there with zero mutations.
         // There is no idempotent-replay path: a duplicate identity is
         // always a refusal, whether it collides with another Task's
         // execution or reuses an attempt, because the entry boundary
@@ -339,19 +349,74 @@ impl<C: Clock> OrchestrationService<C> {
                 existing.execution_id()
             ))));
         }
+        if let Some((owner, _)) = self
+            .tasks
+            .store()
+            .get_attempt_reservation(&ids.attempt_id)?
+        {
+            return Err(ServiceError::Storage(StorageError::Duplicate(format!(
+                "attempt {} is already reserved by execution {}; supply a fresh attempt identity",
+                ids.attempt_id.as_str(),
+                owner.as_str()
+            ))));
+        }
 
-        // -- durable entry path: READY → CLAIMED → RUNNING ------------------
-        // Each call is its own atomic state+journal commit. A failure here
-        // (e.g. a concurrent claim moved first) reports without creating
-        // any runtime fact and without retrying.
-        self.tasks.claim(task_id)?;
-        self.tasks.start(task_id)?;
+        // -- managed workspace identity preflight (TASK-0051, G5 H4/§32):
+        // the derived branch for this entry must not already be recorded
+        // for another execution. Derivation is injective, so a hit means
+        // foreign interference, never a second valid entry — refuse
+        // before the first mutation either way. (Git state itself can
+        // still change afterwards; that stays a recoverable saga
+        // concern, not an entry concern.)
+        let branch = crate::workspace_service::branch_for_execution(&ids.execution_id)?;
+        if let Some(owner) = self
+            .tasks
+            .store()
+            .find_lease_owner_by_branch(branch.as_str())
+            .map_err(ServiceError::from)?
+        {
+            if owner != ids.execution_id {
+                return Err(ServiceError::Storage(StorageError::Duplicate(format!(
+                    "managed branch {} is already owned by execution {}; \
+                     supply a fresh execution identity",
+                    branch.as_str(),
+                    owner.as_str()
+                ))));
+            }
+        }
+
+        // -- validated plans (domain rules applied, nothing committed) ----
+        // Task lifecycle rules come from `task-domain` via the service
+        // planners; the execution intent is begun by `agent-runtime`.
+        // Each plan carries its own journal evidence, minted here.
+        let claimed = self.tasks.plan_claim(task_id)?;
+        let started = self.tasks.plan_start(&claimed.task)?;
+        let planned = self
+            .runtime
+            .plan_execution(ids.execution_id.clone(), task_id.clone())?;
+
+        // -- atomic admission: READY → CLAIMED → RUNNING + execution +
+        // attempt reservation + journal, one IMMEDIATE transaction -------
+        // A failure here (duplicate identity, concurrent claim moved
+        // first) reports without creating any runtime fact and without
+        // retrying. Exactly one winner exists per identity; every loser
+        // rolls back completely.
+        let admission = storage_sqlite::ExecutionEntryAdmission {
+            task_id,
+            claimed_task: &claimed.task,
+            claimed_event: &claimed.event,
+            started_task: &started.task,
+            started_event: &started.event,
+            execution: &planned.execution,
+            execution_event: &planned.event,
+            attempt_id: &ids.attempt_id,
+            reserved_at: planned.reserved_at.clone(),
+        };
+        self.tasks.store_mut().admit_execution_entry(&admission)?;
 
         // -- durable execution fact ------------------------------------------
         let execution_id = ids.execution_id;
         let attempt_id = ids.attempt_id;
-        self.runtime
-            .create_execution(execution_id.clone(), task_id.clone())?;
 
         Ok(Entered::Runnable(EnteredCycle {
             work: WorkItem {

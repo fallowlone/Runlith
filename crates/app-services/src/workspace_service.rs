@@ -70,36 +70,57 @@ fn domain_failure(error: workspace::WorkspaceError) -> WorkspaceFailure {
     }
 }
 
-/// FNV-1a 64-bit digest for overlong identity slugs. Only reached by
-/// identities that cannot fit a readable encoding; short identities keep
-/// the injective byte encoding below.
-fn fnv1a_64(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
+/// Budget for the readable form of a managed slug. Escaped identities at
+/// or below this length stay human-readable; longer ones use the digest
+/// form, which is longer than any readable form by construction, so the
+/// two ranges can never overlap.
+const MAX_READABLE_SLUG: usize = 64;
 
-/// Injective, filesystem-safe slug body for one validated identity:
-/// ASCII alphanumerics plus `-`/`_` pass through, every other byte becomes
-/// `-XX` hex. The output never contains `/`, never forms `.`/`..`, and
-/// never starts with `-` after the caller's fixed prefix, so it is always
-/// a single safe path component / ref segment. Inputs longer than 64 bytes
-/// use a stable digest instead (length-bounded, still deterministic).
+/// Injective, filesystem-safe slug body for one validated identity
+/// (TASK-0051, G5 H4 — replaces the old `-XX` scheme whose raw `-`
+/// passthrough made `E/S` and `E-2FS` derive the same branch).
+///
+/// `%`-escaping over the exact input bytes: ASCII alphanumerics plus
+/// `-`/`_` pass through, `%` becomes `%%`, every other byte becomes
+/// `%XX` uppercase hex. The output never contains `/`, never forms
+/// `.`/`..`, and is a single safe path component / ref segment. Decoding
+/// is deterministic (`%%` → `%`, `%XX` → byte, otherwise literal), so
+/// distinct inputs always produce distinct readable outputs.
+///
+/// Inputs whose escaped form exceeds [`MAX_READABLE_SLUG`] use the digest
+/// form `h<sha256-lowerhex>-`: the SHA-256 of the exact input bytes
+/// (no Unicode normalization — managed identity follows `ExecutionId`
+/// exact-equality semantics), rendered lowercase with a trailing `-`.
+/// Length alone separates the ranges (66 > 64), and distinct inputs share
+/// a digest only up to SHA-256 collision resistance. Total managed ref
+/// length stays far below Git/filesystem component limits.
 fn slug_body(raw: &str) -> String {
-    if raw.len() > 64 {
-        return format!("h{:016X}", fnv1a_64(raw.as_bytes()));
-    }
-    let mut out = String::with_capacity(raw.len());
+    let mut escaped = String::with_capacity(raw.len());
     for byte in raw.bytes() {
         if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
-            out.push(byte as char);
+            escaped.push(byte as char);
+        } else if byte == b'%' {
+            escaped.push_str("%%");
         } else {
-            out.push('-');
-            out.push_str(&format!("{byte:02X}"));
+            escaped.push('%');
+            escaped.push_str(&format!("{byte:02X}"));
         }
+    }
+    if escaped.len() <= MAX_READABLE_SLUG {
+        return escaped;
+    }
+    format!("h{}-", sha256_hex(raw.as_bytes()))
+}
+
+/// SHA-256 rendered as 64 lowercase hex characters (TASK-0051 managed
+/// branch digests). Small pure-Rust `sha2` dependency, already the
+/// standard choice — no hand-rolled crypto.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        out.push_str(&format!("{byte:02x}"));
     }
     out
 }
@@ -107,8 +128,10 @@ fn slug_body(raw: &str) -> String {
 /// Derives the managed branch for one execution (`refs/heads/agent/<slug>`,
 /// ADR-0023: the branch-safe slug comes from the owner ExecutionId and the
 /// exact ref is recorded durably). Deterministic, so reopen and
-/// reconciliation derive the same branch without new input.
-fn branch_for_execution(owner: &ExecutionId) -> Result<BranchRef, WorkspaceFailure> {
+/// reconciliation derive the same branch without new input. Injective
+/// across the whole valid `ExecutionId` domain (TASK-0051 H4): distinct
+/// execution identities never share a managed branch.
+pub fn branch_for_execution(owner: &ExecutionId) -> Result<BranchRef, WorkspaceFailure> {
     BranchRef::new(format!("refs/heads/agent/{}", slug_body(owner.as_str())))
         .map_err(domain_failure)
 }
@@ -1345,6 +1368,8 @@ mod tests {
             "trailing-",
             "semi;colon",
             "dollar$tick`",
+            "percent%sign",
+            "mix-2F-escape",
         ] {
             let body = slug_body(raw);
             assert!(!body.is_empty(), "slug for {raw:?} must not be empty");
@@ -1356,13 +1381,142 @@ mod tests {
         }
         // Short identities stay readable and injective.
         assert_eq!(slug_body("E-1"), "E-1");
+        assert_eq!(slug_body("E-9"), "E-9");
+        assert_eq!(slug_body("ws-123"), "ws-123");
         assert_ne!(slug_body("a/b"), slug_body("a-b"));
         assert_ne!(slug_body("a/b"), slug_body("a_b"));
-        // Long identities stay bounded and deterministic.
+        // Long identities stay bounded and deterministic (TASK-0051: the
+        // digest form is 66 chars — longer than any readable form, which
+        // is exactly what keeps the two ranges disjoint).
         let long = "x".repeat(300);
         let hashed = slug_body(&long);
-        assert!(hashed.len() < 32);
+        assert!(hashed.len() <= 80, "digest slug must stay bounded");
         assert_eq!(hashed, slug_body(&long));
+        assert!(hashed.starts_with('h') && hashed.ends_with('-'));
+    }
+
+    /// TASK-0051 H4 keeper (unit level): the exact production pair that
+    /// wedged the second task must derive distinct managed branches.
+    #[test]
+    fn known_h4_collision_pair_is_resolved() {
+        let slash = ExecutionId::new("E/S").unwrap();
+        let mimic = ExecutionId::new("E-2FS").unwrap();
+        let first = branch_for_execution(&slash).unwrap();
+        let second = branch_for_execution(&mimic).unwrap();
+        assert_ne!(
+            first, second,
+            "E/S and E-2FS must never share a managed branch"
+        );
+        assert_eq!(first.as_str(), "refs/heads/agent/E%2FS");
+        assert_eq!(second.as_str(), "refs/heads/agent/E-2FS");
+    }
+
+    /// TASK-0051 H4 keeper (unit level): adversarial families around the
+    /// escape scheme — every pair that could mimic an encoded sequence
+    /// must derive distinct branches.
+    #[test]
+    fn escape_mimic_families_stay_injective() {
+        let pairs = [
+            ("a/b", "a%2Fb"),
+            ("a%b", "a%%b"),
+            ("a%%b", "a%%%%b"),
+            ("x%2F", "x%252F"),
+            ("-", "--"),
+            ("--", "----"),
+            ("E-", "E--"),
+            ("100%25", "100%%25"),
+            ("a b", "a%20b"),
+            ("a%20b", "a%%20b"),
+            ("dot.name", "dot%2Ename"),
+            ("semi;colon", "semi%3Bcolon"),
+        ];
+        for (left, right) in pairs {
+            let a = branch_for_execution(&ExecutionId::new(left).unwrap()).unwrap();
+            let b = branch_for_execution(&ExecutionId::new(right).unwrap()).unwrap();
+            assert_ne!(a, b, "{left:?} and {right:?} must derive distinct branches");
+        }
+    }
+
+    /// TASK-0051 H4 keeper (unit level): bounded deterministic corpus
+    /// across the valid `ExecutionId` domain — every derived branch is
+    /// unique, single-component, and managed-scoped.
+    #[test]
+    fn branch_derivation_is_injective_over_corpus() {
+        let mut corpus = vec![
+            "E-1".to_owned(),
+            "E/S".to_owned(),
+            "E-2FS".to_owned(),
+            "E%2FS".to_owned(),
+            "a".repeat(64),
+            "a".repeat(65),
+            "x".repeat(256),
+            "y".repeat(255),
+            "-".to_owned(),
+            "--".to_owned(),
+            "%".to_owned(),
+            "%%".to_owned(),
+            "h".to_owned() + &"a".repeat(64) + "-",
+            "日本語-日本語".to_owned(),
+            "é".repeat(100),
+            "Mixed_Case-123.ok".to_owned(),
+            "..".to_owned(),
+            ".".to_owned(),
+            "HEAD".to_owned(),
+            "main".to_owned(),
+            "refs".to_owned(),
+        ];
+        // Raw control bytes (valid `ExecutionId` content when embedded
+        // mid-string) must escape, never leak into the ref.
+        for byte in [0x00u8, 0x01, 0x1F, 0x7F] {
+            corpus.push(format!("a{}b", byte as char));
+        }
+        for prefix in ["E", "E-", "E-2", "E-2F", "E-2FS", "E-2FS-"] {
+            if !corpus.iter().any(|existing| existing == prefix) {
+                corpus.push(prefix.to_owned());
+            }
+            corpus.push(format!("{prefix}/x"));
+        }
+        let mut seen = std::collections::BTreeMap::new();
+        for raw in &corpus {
+            let id = ExecutionId::new(raw).unwrap();
+            let derived = branch_for_execution(&id).unwrap();
+            assert!(
+                derived.is_managed(),
+                "{raw:?} must stay in the managed scope"
+            );
+            let slug = derived.short_name().strip_prefix("agent/").unwrap();
+            assert!(!slug.contains('/'), "{raw:?} slug must be one component");
+            assert!(
+                derived.as_str().len() <= 128,
+                "{raw:?} branch must stay bounded"
+            );
+            if let Some(previous) = seen.insert(derived.as_str().to_owned(), raw.clone()) {
+                panic!("branch collision: {previous:?} and {raw:?} share a branch");
+            }
+        }
+        // Long-identity digests are distinguished by exact input bytes:
+        // same length, one byte apart → different branches.
+        let mut long_a = "z".repeat(200);
+        let mut long_b = "z".repeat(200);
+        long_b.replace_range(100..101, "y");
+        assert_ne!(slug_body(&long_a), slug_body(&long_b));
+        long_a.push('q');
+        assert_ne!(slug_body(&long_a), slug_body(&long_b));
+    }
+
+    /// Managed identity follows `ExecutionId` exact-equality semantics:
+    /// no Unicode normalization is applied — canonically equivalent but
+    /// byte-distinct inputs stay distinct (documented choice, TASK-0051
+    /// §31). Both still derive valid branches.
+    #[test]
+    fn unicode_branches_are_byte_exact() {
+        let composed = "caf\u{e9}";
+        let decomposed = "cafe\u{301}";
+        assert_ne!(composed.as_bytes(), decomposed.as_bytes());
+        let a = branch_for_execution(&ExecutionId::new(composed).unwrap()).unwrap();
+        let b = branch_for_execution(&ExecutionId::new(decomposed).unwrap()).unwrap();
+        assert_ne!(a, b);
+        assert!(a.is_managed() && b.is_managed());
     }
 
     #[test]
