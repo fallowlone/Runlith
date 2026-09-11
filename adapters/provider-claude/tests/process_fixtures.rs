@@ -313,20 +313,28 @@ fn prompt_with_shell_metacharacters_stays_argv_safe() {
 fn daemon_grandchild_holding_pipes_does_not_block_finalization() {
     // Natural-exit caveat (TASK-0046 §12): the fixture CLI prints valid
     // success JSON and exits at once, but a double-forked grandchild
-    // outlives it for 5 s while holding the inherited stdout/stderr
-    // pipes open. Finalization must be bounded by the capture grace
-    // (~1 s here), never by the grandchild's lifetime.
+    // outlives it for 10 s while holding the inherited stdout/stderr
+    // pipes open. Finalization must be bounded by the single capture
+    // grace (1 s here), never by the grandchild's lifetime.
+    //
+    // Deterministic contract (TASK-0049 B2): the bound is expressed
+    // relative to the configured grace plus an explicit scheduling
+    // margin for full-suite load — not as a fixed wall-clock number
+    // divorced from the implementation. It still fails if execution
+    // ever blocks for the grandchild's full lifetime (10 s >> bound).
+    let grace = Duration::from_secs(1);
+    let grandchild_lifetime = Duration::from_secs(10);
     let case = Case::named("grandchild");
     let fixture = case.fixture(
         "daemon.sh",
-        "( sleep 5 & )\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"parent exited first\",\"session_id\":\"dddddddd-dddd-dddd-dddd-dddddddddddd\"}'\nexit 0\n",
+        "( sleep 10 & )\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"parent exited first\",\"session_id\":\"dddddddd-dddd-dddd-dddd-dddddddddddd\"}'\nexit 0\n",
     );
     let config = ClaudeConfig::default()
         .with_executable(&fixture)
         .unwrap()
         .with_timeout(Duration::from_secs(60))
         .unwrap()
-        .with_capture_grace(Duration::from_secs(1))
+        .with_capture_grace(grace)
         .unwrap();
     let executor =
         ClaudeExecutor::bind(config, "fixture prompt", case.workdir().to_path_buf()).unwrap();
@@ -336,9 +344,19 @@ fn daemon_grandchild_holding_pipes_does_not_block_finalization() {
         .execute(&work("E-1", "A-1"))
         .expect("parent output finalizes despite the grandchild");
     let elapsed = before.elapsed();
+    // Grace-relative bound: one shared grace for both drains (TASK-0049
+    // H3) plus an explicit 3 s scheduling margin for loaded machines.
+    // A regression to per-stream sequential graces (~2 s) still passes;
+    // a regression to unbounded grandchild blocking (~10 s) fails.
     assert!(
-        elapsed < Duration::from_secs(4),
+        elapsed < grace * 2 + Duration::from_secs(3),
         "finalization must be grace-bounded, took {elapsed:?}"
+    );
+    // Explicitly far below the grandchild's lifetime: proves detachment,
+    // not patience.
+    assert!(
+        elapsed + Duration::from_secs(2) < grandchild_lifetime,
+        "finalization must end well before the grandchild exits, took {elapsed:?}"
     );
     assert!(
         evidence.summary.contains("parent exited first"),
@@ -348,6 +366,46 @@ fn daemon_grandchild_holding_pipes_does_not_block_finalization() {
     assert_eq!(
         evidence.evidence_ref,
         "claude:session:dddddddd-dddd-dddd-dddd-dddddddddddd"
+    );
+}
+
+#[test]
+fn preset_cancel_flag_spawns_no_child() {
+    // TASK-0049 H8: a flag set before `execute` must yield Cancelled
+    // without spawning. The fixture drops a marker file if it ever runs;
+    // an absent marker proves no child started (not merely "started then
+    // killed on the first quantum").
+    let case = Case::named("prespawn-cancel");
+    let marker = case.dir.join("spawn-marker.txt");
+    let fixture = case.fixture(
+        "marker.sh",
+        &format!(
+            "echo spawned > {}\nprintf '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"must never run\",\"session_id\":\"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee\"}}'\n",
+            marker.display()
+        ),
+    );
+    let workdir = case.workdir();
+    let flag = CancelFlag::fresh();
+    flag.cancel();
+    let config = ClaudeConfig::default()
+        .with_executable(&fixture)
+        .unwrap()
+        .with_timeout(Duration::from_secs(60))
+        .unwrap();
+    let executor = ClaudeExecutor::bind(config, "fixture prompt", workdir.to_path_buf())
+        .unwrap()
+        .with_cancel_flag(flag);
+
+    let err = executor
+        .execute(&work("E-1", "A-1"))
+        .expect_err("pre-set cancel must win");
+    assert!(
+        matches!(err, scheduler::ExecutionProblem::Cancelled),
+        "pre-set cancel must be Cancelled, got {err:?}"
+    );
+    assert!(
+        !marker.is_file(),
+        "no child may spawn under a pre-set cancel flag"
     );
 }
 

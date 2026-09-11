@@ -110,6 +110,12 @@ pub fn spawn_and_supervise(
             )),
         });
     }
+    // Already cancelled before spawn: report without spawning a child at
+    // all (TASK-0049 H8). Structural failures above still beat the cancel
+    // check; there is simply no child to cancel here.
+    if cancel.is_cancelled() {
+        return Ok(ChildOutcome::Cancelled);
+    }
     let mut command = Command::new(executable);
     command
         .args(argv)
@@ -164,8 +170,11 @@ pub fn spawn_and_supervise(
                 // Finalize with a bounded grace instead of an unbounded
                 // join: provider plumbing must never block daemon
                 // reconciliation indefinitely.
-                let stdout = join_drain_graceful(stdout_buf, stdout_handle, capture_grace);
-                let stderr = join_drain_graceful(stderr_buf, stderr_handle, capture_grace);
+                let (stdout, stderr) = join_drains_graceful(
+                    (stdout_buf, stdout_handle),
+                    (stderr_buf, stderr_handle),
+                    capture_grace,
+                );
                 break ChildOutcome::Exited {
                     code: status.code(),
                     stdout,
@@ -286,31 +295,51 @@ fn join_drain(shared: SharedCapture, handle: Option<std::thread::JoinHandle<()>>
     take_shared(&shared)
 }
 
-/// Bounded join for the natural-exit path: waits up to `grace` for the
-/// drain thread to observe EOF, then finalizes with whatever was
-/// captured. A still-blocked thread is detached (its handle dropped) —
-/// it exits on its own when the surviving pipe finally closes, and it
-/// never blocks execution finalization.
-fn join_drain_graceful(
-    shared: SharedCapture,
-    handle: Option<std::thread::JoinHandle<()>>,
+/// Bounded joint join for the natural-exit path: waits up to ONE `grace`
+/// total for BOTH drain threads to observe EOF, then finalizes with the
+/// bytes collected so far. A still-blocked thread is detached (its handle
+/// dropped) — it exits on its own when the surviving pipe finally closes,
+/// and it never blocks execution finalization.
+///
+/// Single deadline, not per-stream (TASK-0049 H3): the drains already run
+/// concurrently on dedicated threads, so sequential per-stream graces
+/// would double the bound for no reason. Total natural-exit
+/// finalization is bounded by `grace` plus spawn/scheduling overhead —
+/// never by a surviving grandchild's lifetime.
+fn join_drains_graceful(
+    stdout_drain: (SharedCapture, Option<std::thread::JoinHandle<()>>),
+    stderr_drain: (SharedCapture, Option<std::thread::JoinHandle<()>>),
     grace: Duration,
-) -> Vec<u8> {
-    let Some(handle) = handle else {
-        return take_shared(&shared);
-    };
+) -> (Vec<u8>, Vec<u8>) {
     let deadline = Instant::now() + grace;
-    while !handle.is_finished() {
-        if Instant::now() >= deadline {
-            // Detach: drop the handle and finalize with partial bytes.
-            // The thread owns only its pipe end and the shared buffer;
-            // dropping the handle leaks no lock and blocks nothing.
-            drop(handle);
-            return take_shared(&shared);
+    loop {
+        let stdout_done = stdout_drain
+            .1
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished);
+        let stderr_done = stderr_drain
+            .1
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished);
+        if (stdout_done && stderr_done) || Instant::now() >= deadline {
+            break;
         }
         std::thread::sleep(WAIT_POLL_QUANTUM);
     }
-    let _ = handle.join();
+    (take_drain(stdout_drain), take_drain(stderr_drain))
+}
+
+/// Takes one drain's bytes: joins a finished thread promptly, detaches a
+/// still-blocked one (dropping its handle leaks no lock and blocks
+/// nothing — the thread owns only its pipe end and the shared buffer).
+fn take_drain((shared, handle): (SharedCapture, Option<std::thread::JoinHandle<()>>)) -> Vec<u8> {
+    if let Some(handle) = handle {
+        if handle.is_finished() {
+            let _ = handle.join();
+        } else {
+            drop(handle);
+        }
+    }
     take_shared(&shared)
 }
 
@@ -364,11 +393,15 @@ mod tests {
     }
 
     #[test]
-    fn spawn_failure_beats_cancel_check_order_transparently() {
-        // With a missing binary the spawn error surfaces (there is no
-        // child to cancel); with a live child a pre-set flag yields
-        // Cancelled — pinned with real fixtures in the unix process
-        // integration tests.
+    fn preset_cancel_beats_spawn_attempt() {
+        // TASK-0049 H8 reorder (explicitly authorized behavior change):
+        // an already-cancelled flag reports Cancelled WITHOUT spawning —
+        // no child starts just to be killed on the first quantum. A
+        // missing binary under a pre-set flag is therefore Cancelled, not
+        // CliMissing: the cancellation won before any spawn was attempted,
+        // and the missing binary is irrelevant to a run that never started.
+        // (Previously this pinned spawn-failure-beats-cancel; the new
+        // ordering removes the spawn-then-kill side effect.)
         let dir = std::env::temp_dir();
         let cancel = CancelFlag::fresh();
         cancel.cancel();
@@ -382,8 +415,8 @@ mod tests {
             crate::config::DEFAULT_CAPTURE_GRACE,
         );
         assert!(
-            matches!(outcome, Err(ClaudeFailure::CliMissing { .. })),
-            "spawn failure is structural, got {outcome:?}"
+            matches!(outcome, Ok(ChildOutcome::Cancelled)),
+            "pre-set cancel must win without spawning, got {outcome:?}"
         );
     }
 }

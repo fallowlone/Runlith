@@ -8,7 +8,7 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0047
+completed_through: TASK-0049
 current_gate: G5
 
 items:
@@ -618,4 +618,52 @@ items:
       - TASK-0047
     blocked_by: []
     references:
+      - docs/architecture/providers.md
+      - docs/development/G5_CLOSURE_AUDIT.md
+
+  - id: TASK-0049
+    gate: G5
+    title: G5 Closure Remediation
+    objective: Resolve the three TASK-0048 blockers without widening gate
+      scope. B1 - execution run refuses execution/attempt identity
+      conflicts before any durable mutation (no claim, start, execution,
+      lease, or attempt committed). B2 - the capture-grace supervision
+      test becomes deterministic under full-suite load without weakening
+      what it proves. B3 - the G5 provider contract becomes authority, as
+      an ADR for the ExecutionPort provider seam and IPC v2 execution
+      semantics, updates to providers.md, ipc.md, COVERAGE.md and
+      VERSIONING.md, and a shared ExecutionPort contract suite run against
+      the FakeAgent executor and ClaudeExecutor fixtures.
+    scope: Identity pre-checks in the agentd execution entry and
+      orchestration entry with regression tests through
+      dispatch_execution; the process_fixtures timing assertion; one new
+      ADR plus the named docs; shared contract-suite test code;
+      product/version.toml and queue update. Recommended same-locus
+      hardening is multibyte-safe identifier truncation (audit H1). No new
+      provider and no G6, G7, G8, G9 or G11 scope.
+    exit_criteria_summary: Identity conflicts refuse with zero committed
+      facts; repeated full workspace verification green; ADR accepted and
+      the contract suite passing for both executors; workspace green.
+    depends_on:
+      - TASK-0048
+    blocked_by: []
+    references:
+      - docs/development/G5_CLOSURE_AUDIT.md
+      - docs/architecture/providers.md
+      - docs/architecture/adr/ADR-0009-provider-adapters-acl.md
+      - docs/architecture/adr/ADR-0019-gate-scoped-adr-activation.md
+
+  - id: TASK-0050
+    gate: G5
+    title: G5 Closure Re-Audit
+    objective: Re-run the G5 closure verification after the TASK-0049
+      remediation and report G5_CLOSED or G5_REMEDIATION_REQUIRED.
+    scope: Audit only; no repairs, no implementation.
+    exit_criteria_summary: A closure audit report exists with an explicit
+      overall status.
+    depends_on:
+      - TASK-0049
+    blocked_by: []
+    references:
+      - docs/development/G5_CLOSURE_AUDIT.md
       - docs/architecture/providers.md

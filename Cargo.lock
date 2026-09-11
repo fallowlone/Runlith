@@ -140,10 +140,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "execution-contract"
+version = "0.1.0"
+dependencies = [
+ "agent-runtime",
+ "scheduler",
+ "task-domain",
+]
+
+[[package]]
 name = "fake-agent"
 version = "0.1.0"
 dependencies = [
  "agent-runtime",
+ "execution-contract",
+ "scheduler",
  "task-domain",
 ]
 
@@ -544,6 +555,7 @@ name = "provider-claude"
 version = "0.1.0"
 dependencies = [
  "agent-runtime",
+ "execution-contract",
  "scheduler",
  "task-domain",
  "workspace",

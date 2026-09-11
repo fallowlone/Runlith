@@ -349,13 +349,25 @@ pub(crate) fn map_error(error: &ServiceError) -> (BusinessErrorCode, String) {
     }
 }
 
+/// Floors a byte bound to a UTF-8 char boundary so slicing an
+/// externally influenced string never panics (TASK-0049 H1: validated
+/// identifiers may be multibyte, and a raw `[..N]` cut can land
+/// mid-char). Shared by this module and the execution dispatcher, which
+/// reports the same taxonomy over the same identifier shapes.
+pub(crate) fn floor_char_boundary(value: &str, max_bytes: usize) -> usize {
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
 /// Defensive bound on client-facing detail: static text plus validated
 /// identifiers only, never raw internals.
 fn truncate(detail: &str) -> String {
     let mut message = detail.to_owned();
-    if message.len() > MAX_ERROR_MESSAGE_LEN {
-        message.truncate(MAX_ERROR_MESSAGE_LEN);
-    }
+    let end = floor_char_boundary(&message, MAX_ERROR_MESSAGE_LEN);
+    message.truncate(end);
     message
 }
 
@@ -363,7 +375,10 @@ fn truncate(detail: &str) -> String {
 fn truncate_id(value: &str) -> String {
     const MAX_ID_MESSAGE_LEN: usize = 64;
     if value.len() > MAX_ID_MESSAGE_LEN {
-        format!("{}…", &value[..MAX_ID_MESSAGE_LEN])
+        format!(
+            "{}…",
+            &value[..floor_char_boundary(value, MAX_ID_MESSAGE_LEN)]
+        )
     } else {
         value.to_owned()
     }
@@ -593,5 +608,63 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].fact.event_type, EventType::TaskCreated);
         assert_eq!(history[1].fact.event_type, EventType::MarkedReady);
+    }
+
+    // -- H1 multibyte truncation safety (TASK-0049) --------------------------
+    //
+    // Client-facing truncation must cut on char boundaries: validated
+    // identifiers and details may be multibyte, and a raw byte cut
+    // panics the connection handler.
+
+    #[test]
+    fn floor_char_boundary_never_splits_a_char() {
+        assert_eq!(floor_char_boundary("abcdef", 4), 4);
+        assert_eq!(floor_char_boundary("abc", 99), 3);
+        assert_eq!(floor_char_boundary("", 64), 0);
+        // 2/3/4-byte chars straddling the bound floor to the char start.
+        assert_eq!(floor_char_boundary(&format!("{}é", "A".repeat(63)), 64), 63);
+        assert_eq!(floor_char_boundary(&format!("{}€", "A".repeat(62)), 64), 62);
+        assert_eq!(
+            floor_char_boundary(&format!("{}😀", "A".repeat(63)), 64),
+            63
+        );
+        for (input, max) in [
+            (format!("{}é{}", "A".repeat(63), "B".repeat(10)), 64),
+            (format!("{}€{}", "A".repeat(62), "B".repeat(10)), 64),
+            (format!("{}😀{}", "A".repeat(63), "B".repeat(10)), 64),
+            ("é".repeat(300), MAX_ERROR_MESSAGE_LEN),
+        ] {
+            let end = floor_char_boundary(&input, max);
+            assert!(input.is_char_boundary(end), "cut must be a boundary");
+            assert!(end <= max, "cut must respect the bound");
+        }
+    }
+
+    #[test]
+    fn truncate_and_truncate_id_are_multibyte_safe_and_bounded() {
+        for id in [
+            format!("E-{}", "x".repeat(100)),
+            format!("{}é{}", "A".repeat(63), "B".repeat(10)),
+            format!("{}€{}", "A".repeat(62), "B".repeat(10)),
+            format!("{}😀{}", "A".repeat(63), "B".repeat(10)),
+            format!("{}é€😀{}", "A".repeat(61), "B".repeat(10)),
+        ] {
+            let cut = truncate_id(&id);
+            assert!(cut.ends_with('…'), "long id must truncate, got {cut:?}");
+            let kept = cut.strip_suffix('…').expect("marker");
+            assert!(kept.len() <= 64, "kept part must fit, got {cut:?}");
+            assert!(id.starts_with(kept), "must keep a prefix, got {cut:?}");
+        }
+        assert_eq!(truncate_id("E-short"), "E-short");
+
+        let long_detail = "é".repeat(400);
+        let cut = truncate(&long_detail);
+        assert!(
+            cut.len() <= MAX_ERROR_MESSAGE_LEN,
+            "detail must stay bounded, got {} bytes",
+            cut.len()
+        );
+        assert!(long_detail.starts_with(&cut), "must keep a prefix");
+        assert_eq!(truncate("short"), "short");
     }
 }

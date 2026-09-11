@@ -8,6 +8,7 @@ members = [
     "crates/task",
     "crates/agent-runtime",
     "crates/scheduler",
+    "crates/execution-contract",
     "crates/evaluation",
     "crates/workspace",
     "crates/app-services",

@@ -10,3 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 agent-runtime = { path = "../../crates/agent-runtime" }
 task-domain = { path = "../../crates/task" }
+
+[dev-dependencies]
+scheduler = { path = "../../crates/scheduler" }
+execution-contract = { path = "../../crates/execution-contract" }

@@ -42,24 +42,50 @@ The Provider Adapter is an anti-corruption layer: it translates canonical
 requests to provider runtimes and back so no provider shapes the domain
 model (ADR-0009).
 
-## 2. Conceptual interface
+## 2. Canonical execution seam
 
-Accepted conceptual shape (SoT §15):
+The execution half of the conceptual interface is frozen as
+`scheduler::ExecutionPort` (ADR-0024 §1) — the provider-neutral seam
+the orchestrator injects, one executor per cycle:
 
 ```text
-AgentProvider
-├── detect
-├── capabilities
-├── start
-├── send
-└── cancel
+WorkItem { task_id, execution_id, attempt_id }   (durable identities only)
+  → ExecutionPort::execute
+  → Ok(WorkEvidence { summary, evidence_ref, partial })
+  → Err(ExecutionProblem::{TimedOut, Cancelled, Failed})
 ```
 
-> Conceptual interface examples are architectural guidance, not the final
-> language-level API.
+`provider_ref()` is opaque identity only; orchestration never branches
+on it. There is no `cancel` method on the seam — cancellation reaches
+the provider out-of-band (composition-owned signal → executor wait loop
+→ owned-tree kill), and provider wiring differs (§15).
 
-No Rust trait signature is frozen here. The final `AgentProviderPort` shape,
-sync/async boundary, and configuration representation are open design items.
+The remainder of the conceptual `AgentProvider` shape (detect,
+capabilities negotiation, session send, capability taxonomy, routing)
+stays open for later gates; G5 freezes the execution half only. No
+second Rust trait was created: future real adapters implement this
+same seam without touching orchestration.
+
+## 2a. First implementations (not the architecture)
+
+Claude is the first implementation, not the architecture. Two
+executors pass the same seam today:
+
+- **FakeAgent** (test double): deterministic per-scenario behavior
+  behind the seam via a test-side wrapper; virtual timeouts, no
+  process. Remains valid alongside real providers; its scenario matrix
+  is provider-specific behavior tests, not the shared contract.
+- **ClaudeExecutor** (`provider-claude`): the installed Claude Code
+  CLI (argv-only, cwd-bound to the attempt's lease, no shell),
+  adapter-local version policy (tested major 2, minor ≥ 1), bounded
+  hand-rolled JSON parsing, structured-signal failure mapping with a
+  narrow auth-marker fallback. Subscription-native authentication stays
+  provider-owned (§7): the adapter never reads, persists, logs,
+  forwards, or repairs credentials, and detection never probes auth.
+
+A future `provider-codex` implements the same trait behind its own
+factory closure; orchestration, storage, workspace, and completion
+semantics do not change (§13a).
 
 ## 3. Provider Adapter owns
 
@@ -253,6 +279,29 @@ approved by architecture review. Provider implementations must not hard-code
 `Docker`, `Podman`, native shell, or VM mechanics into provider-domain
 semantics; that belongs to the Runner side.
 
+## 13a. Shared contract suite and second-provider recipe
+
+Proof mechanism (ADR-0009 consequence, AGENT.md §6):
+`crates/execution-contract` is the reusable provider-neutral contract
+suite against `ExecutionPort`. It asserts only seam-promised behavior —
+success yields submittable bounded evidence (never completion),
+failure yields canonical `Failed`, malformed output never becomes
+success, timeout yields canonical `TimedOut`, provider refs stay opaque
+— using deterministic executors only (FakeAgent scenarios; Claude
+fixture executables; never live provider access). Cancellation,
+cwd-binding, partial results, and Task mutation are deliberately out of
+the shared contract: not on the seam (see the crate docs for why each
+is excluded and where it is proven instead).
+
+FakeAgent and Claude fixture executors both pass it from
+provider-owned test targets; the contract crate depends only on
+neutral crates, and no domain crate depends on a provider in
+production. Adding a provider validates mechanically: new adapter crate
+implementing `ExecutionPort` → dev-depend on the contract crate →
+build success/failure/malformed/timeout executors → invoke the shared
+suite → register the factory in the `agentd` composition root. No
+Task/Storage/Workspace/orchestration/completion/journal/IPC change.
+
 ## 14. Composition and contract size
 
 Only the application/composition root knows concrete implementations;
@@ -278,8 +327,16 @@ where justified; the exact mechanism is open.
 
 Cancellation spans two levels — Provider owns provider/session cancellation
 semantics, Runner owns process/environment termination mechanics
-(runners.md); exact ordering/race semantics are an open design item and this
-document does not resolve TASK-0006 cancellation authority. Timeout layers
+(runners.md). Accepted G5 wiring (ADR-0024 §9): cancellation reaches the
+provider out-of-band, never through a seam method — the `agentd`
+composition root owns one `CancelFlag` per execution, signals it from a
+later `cancel` IPC, and the executor's wait loop kills only its owned
+child tree (direct kill + reap + process-group kill; never by name).
+`CancelFlag` and `LiveProcessTracker` live in `provider-claude` for now
+even though they are provider-neutral in shape: no extraction until a
+second provider proves the abstraction. The tracker feeds
+workspace-cleanup liveness through the neutral `OwnerLiveness` seam
+(execution id only — no provider types cross it). Timeout layers
 (provider response timeout, process timeout, Task retry policy, workflow
 deadline) are distinct concepts; no single global timeout field is defined.
 Provider CLI/runtime versions change independently of our application, so
@@ -301,17 +358,19 @@ user/model-controlled values must never become unsafe shell interpolation.
 
 ## 16. Open Provider Design Items
 
-Unresolved by accepted architecture; listed, not decided:
+Unresolved by accepted architecture; listed, not decided. The G5
+execution half is closed (ADR-0024): `ExecutionPort` shape, canonical
+`WorkEvidence` / `ExecutionProblem` vocabulary, provider-owned auth,
+adapter-local version policy, out-of-band cancellation, and the shared
+contract suite are decided. Still open:
 
 ```text
-final AgentProviderPort Rust shape
+full AgentProviderPort Rust shape (detect/capabilities/send halves)
 sync vs async trait boundary
 provider installation identity format
 provider capability taxonomy
 provider-specific extension mechanism
-canonical normalized provider-result shape
-provider error taxonomy
-provider version compatibility policy
+provider version compatibility policy (beyond the Claude-first line)
 provider session identity format
 provider availability canonical owner/persistence/freshness
 model identity representation

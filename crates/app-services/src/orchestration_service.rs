@@ -313,6 +313,33 @@ impl<C: Clock> OrchestrationService<C> {
             ScheduleReadiness::Runnable => {}
         }
 
+        // -- identity preflight (TASK-0049, G5): synchronously detectable
+        // identity conflicts must refuse before the first mutation. A
+        // rejected run commits no claim, no start, no execution, no
+        // lease, no attempt, and no journal evidence, so the Task stays
+        // in its pre-run state and is rerunnable with fresh identities.
+        // The store-level uniqueness guards stay the backstop for
+        // concurrent races; this preflight fixes the deterministic
+        // ordering (refusal must precede unrelated lifecycle facts).
+        // There is no idempotent-replay path: a duplicate identity is
+        // always a refusal, whether it collides with another Task's
+        // execution or reuses an attempt, because the entry boundary
+        // never re-enters an existing Execution/Attempt.
+        if let Some(existing) = self.runtime.get_execution(&ids.execution_id)? {
+            return Err(ServiceError::Storage(StorageError::Duplicate(format!(
+                "execution {} already exists for task {}; supply a fresh execution identity",
+                ids.execution_id.as_str(),
+                existing.task_id()
+            ))));
+        }
+        if let Some(existing) = self.runtime.get_attempt(&ids.attempt_id)? {
+            return Err(ServiceError::Storage(StorageError::Duplicate(format!(
+                "attempt {} already exists for execution {}; supply a fresh attempt identity",
+                ids.attempt_id.as_str(),
+                existing.execution_id()
+            ))));
+        }
+
         // -- durable entry path: READY → CLAIMED → RUNNING ------------------
         // Each call is its own atomic state+journal commit. A failure here
         // (e.g. a concurrent claim moved first) reports without creating
