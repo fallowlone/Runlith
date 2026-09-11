@@ -131,11 +131,11 @@ fn journal_len(store: &SqliteStore) -> usize {
 // -- migration ------------------------------------------------------------
 
 #[test]
-fn fresh_database_reaches_v5() {
-    let db = TestDb::new("fresh-v5");
+fn fresh_database_reaches_v6() {
+    let db = TestDb::new("fresh-v6");
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 5);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 5);
+    assert_eq!(store.schema_version().unwrap(), 6);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 6);
     assert!(store.list_events_ordered().unwrap().is_empty());
     assert!(store
         .get_execution(&ExecutionId::new("MISSING").unwrap())
@@ -144,7 +144,7 @@ fn fresh_database_reaches_v5() {
 }
 
 #[test]
-fn v5_reopen_is_a_no_op() {
+fn v6_reopen_is_a_no_op() {
     let db = TestDb::new("reopen");
     {
         let mut store = db.open();
@@ -164,7 +164,7 @@ fn v5_reopen_is_a_no_op() {
             .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 5);
+    assert_eq!(store.schema_version().unwrap(), 6);
     assert!(store
         .get_execution(&ExecutionId::new("E-1").unwrap())
         .unwrap()
@@ -173,7 +173,7 @@ fn v5_reopen_is_a_no_op() {
 }
 
 /// A real v3 database (built from the canonical 0001..0003 files, not a
-/// hand copy) with G2 state and journal rows migrates to v5 with every
+/// hand copy) with G2 state and journal rows migrates to v6 with every
 /// historical fact preserved bit-for-bit and NULL runtime/workspace scope.
 #[test]
 fn v3_database_with_g2_data_migrates_preserving_everything() {
@@ -205,8 +205,8 @@ fn v3_database_with_g2_data_migrates_preserving_everything() {
             .unwrap();
     }
     let mut store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 5);
-    // History decodes unchanged through the v5 codec.
+    assert_eq!(store.schema_version().unwrap(), 6);
+    // History decodes unchanged through the v6 codec.
     let history = store.list_events_ordered().unwrap();
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].id, EventId::parse("evt-1").unwrap());

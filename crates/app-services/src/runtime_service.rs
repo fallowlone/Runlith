@@ -40,6 +40,21 @@ pub struct AppliedExecution {
     pub event: JournalEvent,
 }
 
+/// A validated execution intent that is minted but not yet committed:
+/// the begun execution plus its authoritative journal record. The caller
+/// must commit both through the atomic entry admission. Nothing is
+/// persisted and no event is appended here.
+#[derive(Debug, Clone)]
+pub struct PlannedExecution {
+    /// Execution begun for its task (no attempts yet).
+    pub execution: Execution,
+    /// Journal record to commit with it.
+    pub event: NewJournalEvent,
+    /// Reservation timestamp for the future Attempt identity (service
+    /// clock, RFC 3339 — the adapter never mints time).
+    pub reserved_at: String,
+}
+
 /// Trusted owner of durable runtime mutations.
 pub struct RuntimeService<C: Clock = SystemClock> {
     store: SqliteStore,
@@ -67,6 +82,39 @@ impl<C: Clock> RuntimeService<C> {
     /// queries for callers/tests).
     pub fn store(&self) -> &SqliteStore {
         &self.store
+    }
+
+    /// Validates the execution intent for an existing task and mints its
+    /// authoritative `execution.created` journal evidence without
+    /// committing anything. The returned plan must be committed through
+    /// the atomic entry admission. Nothing is persisted and no event is
+    /// appended here.
+    pub fn plan_execution(
+        &mut self,
+        execution_id: ExecutionId,
+        task_id: TaskId,
+    ) -> ServiceResult<PlannedExecution> {
+        let task = self.store.get_task(&task_id)?.ok_or_else(|| {
+            ServiceError::Storage(StorageError::NotFound(format!(
+                "task {task_id} does not exist for execution {execution_id}"
+            )))
+        })?;
+        let execution = Execution::begin(execution_id.clone(), task_id.clone());
+        let reserved_at = format_rfc3339(self.clock.now_millis());
+        let event = self.runtime_event(
+            EventType::ExecutionCreated,
+            task_id,
+            task.project_id().clone(),
+            Some(execution_id),
+            None,
+            None,
+            "create_execution",
+        );
+        Ok(PlannedExecution {
+            execution,
+            event,
+            reserved_at,
+        })
     }
 
     /// Persists a new execution for an existing task together with its

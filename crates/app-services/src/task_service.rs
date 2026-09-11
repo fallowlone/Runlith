@@ -32,6 +32,19 @@ pub struct AppliedTransition {
     pub event: JournalEvent,
 }
 
+/// A domain-validated Task transition that is minted but not yet
+/// committed: the resulting task plus its authoritative journal record.
+/// The caller must commit both through one atomic store boundary (single
+/// transition via `commit_planned`, or the multi-fact entry transaction
+/// for claim+start). Nothing is persisted and no event is appended here.
+#[derive(Debug, Clone)]
+pub struct PlannedTransition {
+    /// Task after the validated command.
+    pub task: Task,
+    /// Journal record to commit with it.
+    pub event: NewJournalEvent,
+}
+
 /// Trusted owner of durable Task mutations.
 pub struct TaskService<C: Clock = SystemClock> {
     store: SqliteStore,
@@ -60,6 +73,15 @@ impl<C: Clock> TaskService<C> {
     /// queries for callers/tests).
     pub fn store(&self) -> &SqliteStore {
         &self.store
+    }
+
+    /// Mutable access to the underlying store for multi-fact atomic
+    /// boundaries owned elsewhere (the execution-entry admission commits
+    /// through exactly one store handle so its transaction is truly one
+    /// transaction). No domain rule lives in the caller's use of this:
+    /// every fact committed through it must already be domain-validated.
+    pub fn store_mut(&mut self) -> &mut SqliteStore {
+        &mut self.store
     }
 
     /// Persists a new project together with its authoritative
@@ -172,6 +194,29 @@ impl<C: Clock> TaskService<C> {
         Ok(self.store.list_events_for_project(project_id)?)
     }
 
+    /// Validates `READY → CLAIMED` against the stored task and mints its
+    /// journal evidence without committing anything. The returned plan
+    /// must be committed through one atomic store boundary (the
+    /// execution-entry admission). Domain rejection fails before any SQL
+    /// runs. Nothing is persisted and no event is appended here.
+    pub fn plan_claim(&mut self, task_id: &TaskId) -> ServiceResult<PlannedTransition> {
+        let task = self.store.get_task(task_id)?.ok_or_else(|| {
+            ServiceError::Storage(StorageError::NotFound(format!(
+                "task {task_id} does not exist"
+            )))
+        })?;
+        self.plan_on(&task, TransitionCommand::Claim)
+    }
+
+    /// Validates `CLAIMED → RUNNING` against an already-claimed task
+    /// object (normally the [`PlannedTransition::task`] from
+    /// [`Self::plan_claim`]) and mints its journal evidence without
+    /// committing anything. Same no-persistence contract as
+    /// [`Self::plan_claim`].
+    pub fn plan_start(&mut self, claimed: &Task) -> ServiceResult<PlannedTransition> {
+        self.plan_on(claimed, TransitionCommand::Start)
+    }
+
     /// `DRAFT → READY`.
     pub fn mark_ready(&mut self, task_id: &TaskId) -> ServiceResult<AppliedTransition> {
         self.mutate(task_id, TransitionCommand::MarkReady)
@@ -265,21 +310,43 @@ impl<C: Clock> TaskService<C> {
         task_id: &TaskId,
         command: TransitionCommand,
     ) -> ServiceResult<AppliedTransition> {
-        let mut task = self.store.get_task(task_id)?.ok_or_else(|| {
+        let task = self.store.get_task(task_id)?.ok_or_else(|| {
             ServiceError::Storage(StorageError::NotFound(format!(
                 "task {task_id} does not exist"
             )))
         })?;
         let from = task.state();
-        task.apply(command.clone())?;
-        let to = task.state();
+        let planned = self.plan_on(&task, command)?;
+        let committed =
+            self.store
+                .apply_lifecycle_transition(task_id, from, &planned.task, &planned.event)?;
+        Ok(AppliedTransition {
+            task: planned.task,
+            event: committed,
+        })
+    }
+
+    /// Validates one command against one task object via the canonical
+    /// domain op and mints its journal evidence. Shared by the immediate
+    /// [`Self::mutate`] path and the deferred entry-admission planners
+    /// ([`Self::plan_claim`], [`Self::plan_start`]) so both spell the
+    /// validation boundary exactly once. Nothing is persisted here.
+    fn plan_on(
+        &mut self,
+        task: &Task,
+        command: TransitionCommand,
+    ) -> ServiceResult<PlannedTransition> {
+        let mut next = task.clone();
+        let from = next.state();
+        next.apply(command.clone())?;
+        let to = next.state();
         let (event_type, reason) = classify(&command)?;
         let now = self.clock.now_millis();
         self.op_counter += 1;
         let event = NewJournalEvent {
             event_type,
-            task_id: Some(task_id.clone()),
-            project_id: task.project_id().clone(),
+            task_id: Some(next.id().clone()),
+            project_id: next.project_id().clone(),
             from_state: Some(from),
             to_state: Some(to),
             reason,
@@ -300,13 +367,7 @@ impl<C: Clock> TaskService<C> {
             from_workspace_state: None,
             to_workspace_state: None,
         };
-        let committed = self
-            .store
-            .apply_lifecycle_transition(task_id, from, &task, &event)?;
-        Ok(AppliedTransition {
-            task,
-            event: committed,
-        })
+        Ok(PlannedTransition { task: next, event })
     }
 
     /// Mints the journal evidence for one creation/dependency mutation.

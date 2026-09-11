@@ -75,17 +75,34 @@ evidence. Provider success becomes submittable attempt evidence; only
 the independent evaluation path grants completion (ADR-0018). There is
 no provider-reachable complete-task operation on any seam.
 
-### 6. Entry is identity-safe before mutation (fail-fast start contract)
+### 6. Entry is identity-safe before mutation (atomic start contract,
+### amended by TASK-0051)
 
 `run` refuses synchronously detectable execution/attempt identity
 conflicts with typed `ALREADY_EXISTS` before the first mutation — no
 claim, no start, no execution, no lease, no attempt, no worktree, and
 no journal lifecycle facts. A rejected Task stays in its pre-run state
 and is rerunnable with fresh identities. There is no idempotent-replay
-path: a duplicate identity is always a refusal. Store-level uniqueness
-guards remain the backstop for concurrent races. Post-entry failures
+path: a duplicate identity is always a refusal. Post-entry failures
 (lease refusal, provider crash, timeout, cancel) legitimately commit
 recoverable intermediate state instead.
+
+Atomicity (TASK-0051 amendment): the pre-entry reads are diagnostics
+only. Execution-entry admission — Task claim + Task start + Execution
+insert + Attempt-identity reservation + the three matching journal
+facts — commits in ONE `IMMEDIATE` SQLite transaction
+(`SqliteStore::admit_execution_entry`, migration 0006
+`attempt_reservations`). Store-level uniqueness constraints remain the
+final integrity guards, but lifecycle state and journal mutations
+participate in the same logical admission, so a uniqueness conflict
+cannot leave a partially-started Task: exactly one concurrent entrant
+wins per identity and every loser rolls back completely with a typed
+`Duplicate`/`Stale` conflict. The later `create_attempt` consumes the
+reservation for the owning execution and refuses an identity reserved
+by (or created under) another execution. Crash before `COMMIT` admits
+zero lifecycle facts; crash after admits the complete entry. Git and
+provider effects stay outside the transaction (INV-145) as recoverable
+sagas.
 
 ### 7. First real provider is the Claude Code CLI
 

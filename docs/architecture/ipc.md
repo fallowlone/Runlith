@@ -486,7 +486,11 @@ express):
 - `run` is async `start → status → cancel`, not one blocking call: it
   commits the durable entry synchronously (claim → start → execution,
   refusing identity conflicts before any mutation) and returns the
-  identities immediately; the provider half runs detached. A client
+  identities immediately; the provider half runs detached. The entry
+  commits atomically — claim, start, execution insert, attempt-identity
+  reservation, and journal facts in one transaction (TASK-0051) — so a
+  concurrent duplicate identity loses with zero mutations and a typed
+  conflict. A client
   disconnect never redefines the outcome; `status` re-observes it;
   `cancel` targets the durable execution identity (never a PID).
 - Identity fields left blank are minted server-side

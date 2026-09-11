@@ -14,6 +14,7 @@ workspace = { path = "../workspace" }
 storage-sqlite = { path = "../../adapters/storage-sqlite" }
 scheduler = { path = "../scheduler" }
 evaluation = { path = "../evaluation" }
+sha2 = "0.10"
 
 [dev-dependencies]
 fake-agent = { path = "../../adapters/fake-agent" }

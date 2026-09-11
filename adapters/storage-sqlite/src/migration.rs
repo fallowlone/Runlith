@@ -1,9 +1,10 @@
 //! Deterministic checked-in migrations with an explicit schema version.
 //!
 //! Versioning uses SQLite `PRAGMA user_version`: 0 means a fresh database,
-//! 5 is the supported version (`0001_task_core.sql`, then
+//! 6 is the supported version (`0001_task_core.sql`, then
 //! `0002_event_journal.sql`, then `0003_event_scope.sql`, then
-//! `0004_runtime_core.sql`, then `0005_workspace_leases.sql`). Newer
+//! `0004_runtime_core.sql`, then `0005_workspace_leases.sql`, then
+//! `0006_attempt_reservations.sql`). Newer
 //! versions fail closed; re-opening the current version is a no-op (never
 //! destructively re-applied). Executing migrations inside one SQLite
 //! transaction is storage consistency only — not TASK-0024 event atomicity.
@@ -13,13 +14,14 @@ use rusqlite::Connection;
 use crate::error::{StorageError, StorageResult};
 
 /// Schema version this adapter understands.
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 5;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 6;
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_task_core.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_event_journal.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_event_scope.sql");
 const MIGRATION_0004: &str = include_str!("../migrations/0004_runtime_core.sql");
 const MIGRATION_0005: &str = include_str!("../migrations/0005_workspace_leases.sql");
+const MIGRATION_0006: &str = include_str!("../migrations/0006_attempt_reservations.sql");
 
 /// Applies pending migrations to `connection`, which must already have
 /// `PRAGMA foreign_keys = ON`. Migrations run in order inside one SQLite
@@ -81,7 +83,12 @@ pub(crate) fn migrate(connection: &mut Connection) -> StorageResult<u32> {
             StorageError::Migration(format!("0005_workspace_leases.sql failed: {error}"))
         })?;
     }
-    transaction.execute_batch("PRAGMA user_version = 5")?;
+    if current < 6 {
+        transaction.execute_batch(MIGRATION_0006).map_err(|error| {
+            StorageError::Migration(format!("0006_attempt_reservations.sql failed: {error}"))
+        })?;
+    }
+    transaction.execute_batch("PRAGMA user_version = 6")?;
     transaction.commit()?;
     Ok(SUPPORTED_SCHEMA_VERSION)
 }

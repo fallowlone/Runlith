@@ -8,7 +8,7 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0049
+completed_through: TASK-0051
 current_gate: G5
 
 items:
@@ -666,4 +666,52 @@ items:
     blocked_by: []
     references:
       - docs/development/G5_CLOSURE_AUDIT.md
+      - docs/architecture/providers.md
+
+  - id: TASK-0051
+    gate: G5
+    title: G5 Entry-Atomicity Remediation
+    objective: Make the execution entry boundary atomic so concurrent
+      identity races and slug collisions refuse before the first durable
+      mutation. Make preflight plus claim plus start plus create_execution
+      one atomic commit (single Immediate transaction or equivalent
+      serialization) so a concurrent duplicate execution or attempt
+      identity leaves the loser Task in its pre-run state with zero
+      unrelated facts. Add entry-time managed slug/branch-conflict
+      preflight (or an injective slug redesign) for distinct execution
+      identities deriving the same branch, with orphan Allocated-lease
+      disposition. Amend ADR-0024 section 6 (store backstop claim) and
+      correct the stale "never spawned blindly" line in
+      G5_CLAUDE_PROVIDER.md. No new provider and no G6, G7, G8, G9 or
+      G11 scope.
+    scope: Orchestration entry atomicity plus store-level support with
+      concurrent regression tests through enter_execution and
+      dispatch_execution; slug-conflict preflight or redesign with
+      regression tests; ADR-0024 amendment plus the named doc line;
+      product/version.toml and queue update.
+    exit_criteria_summary: Concurrent duplicate execution/attempt
+      identities refuse with zero committed facts on the loser and a
+      rerunnable Task; slug collisions refuse before mutation; repeated
+      full workspace verification green; workspace green.
+    depends_on:
+      - TASK-0050
+    blocked_by: []
+    references:
+      - docs/development/G5_CLOSURE_REAUDIT.md
+      - docs/architecture/adr/ADR-0024-g5-provider-execution-seam.md
+
+  - id: TASK-0052
+    gate: G5
+    title: G5 Closure Re-Re-Audit
+    objective: Re-run the G5 closure verification after the TASK-0051
+      entry-atomicity remediation and report G5_CLOSED or
+      G5_REMEDIATION_REQUIRED.
+    scope: Audit only; no repairs, no implementation.
+    exit_criteria_summary: A closure audit report exists with an explicit
+      overall status.
+    depends_on:
+      - TASK-0051
+    blocked_by: []
+    references:
+      - docs/development/G5_ENTRY_ATOMICITY_REMEDIATION.md
       - docs/architecture/providers.md

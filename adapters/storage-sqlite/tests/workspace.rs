@@ -1,7 +1,7 @@
 //! Durable WorkspaceLease ownership tests: lease CRUD and guarded
 //! transitions through the [`workspace::WorkspaceStore`] port, journal
 //! scope enforcement (write path, SQL CHECK backstop, read-path decode),
-//! corruption matrix, v4→v5 migration preservation, and the no-dirtiness
+//! corruption matrix, v4→v6 migration preservation, and the no-dirtiness
 //! invariant. Every database file is test-owned.
 
 use std::path::PathBuf;
@@ -752,7 +752,7 @@ fn v4_database_with_g2_g3_data_migrates_preserving_everything() {
             .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 5);
+    assert_eq!(store.schema_version().unwrap(), 6);
 
     // Every historical fact survives verbatim: seq, ids, types, versions,
     // scopes, outcomes, states, correlation/causation, timestamps,
@@ -818,6 +818,108 @@ fn v4_database_with_g2_g3_data_migrates_preserving_everything() {
         .get_workspace(&WorkspaceId::new("ws-1").unwrap())
         .unwrap()
         .is_none());
+}
+
+/// A real v5 database (built from the canonical 0001..0005 files) with an
+/// old-format managed branch, an open attempt, and an `Allocated` lease
+/// migrates to v6 with every durable fact preserved bit-for-bit and an
+/// empty reservation table (TASK-0051 §58 upgrade compat: persisted
+/// branch/path facts are never recomputed, so the old `agent/E-1` branch
+/// stays observable, managed-scoped, and reconcilable under the new
+/// application version).
+#[test]
+fn v5_database_with_lease_migrates_to_v6_preserving_everything() {
+    const M0001: &str = include_str!("../migrations/0001_task_core.sql");
+    const M0002: &str = include_str!("../migrations/0002_event_journal.sql");
+    const M0003: &str = include_str!("../migrations/0003_event_scope.sql");
+    const M0004: &str = include_str!("../migrations/0004_runtime_core.sql");
+    const M0005: &str = include_str!("../migrations/0005_workspace_leases.sql");
+    let db = TestDb::new("v5-migrate");
+    {
+        let connection = db.raw();
+        connection.execute_batch(M0001).unwrap();
+        connection.execute_batch(M0002).unwrap();
+        connection.execute_batch(M0003).unwrap();
+        connection.execute_batch(M0004).unwrap();
+        connection.execute_batch(M0005).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO projects (id, name) VALUES ('P-1', 'project P-1');
+                 INSERT INTO tasks (id, project_id, objective, state)
+                    VALUES ('T-1', 'P-1', 'objective T-1', 'RUNNING');
+                 INSERT INTO executions (id, task_id) VALUES ('E-1', 'T-1');
+                 INSERT INTO execution_attempts
+                    (attempt_id, execution_id, position, provider_ref, outcome, detail)
+                 VALUES ('A-1', 'E-1', 0, 'fake:scenario', NULL, NULL);
+                 INSERT INTO workspace_leases
+                    (workspace_id, execution_id, repository_ref, base_revision,
+                     branch_ref, worktree_ref, lifecycle)
+                 VALUES ('ws-1', 'E-1', 'repo-local:v5',
+                         'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                         'refs/heads/agent/E-1', '/tmp/runlith-ws-v5/ws-1', 'ALLOCATED');
+                 INSERT INTO event_journal
+                    (event_type, event_version, task_id, project_id, from_state,
+                     to_state, reason, correlation_id, causation_id, occurred_at,
+                     provenance, execution_id, attempt_id, attempt_outcome, workspace_id)
+                 VALUES
+                    ('task.created', 1, 'T-1', 'P-1', 'DRAFT', 'DRAFT', NULL,
+                     'op-1', 'req-1', '2024-01-01T00:00:00Z', 'task-application-service/create_task',
+                     NULL, NULL, NULL, NULL),
+                    ('task.claimed', 1, 'T-1', 'P-1', 'READY', 'CLAIMED', NULL,
+                     'op-2', 'req-2', '2024-01-01T00:00:01Z', 'task-application-service/claim',
+                     NULL, NULL, NULL, NULL),
+                    ('task.started', 1, 'T-1', 'P-1', 'CLAIMED', 'RUNNING', NULL,
+                     'op-3', 'req-3', '2024-01-01T00:00:02Z', 'task-application-service/start',
+                     NULL, NULL, NULL, NULL),
+                    ('execution.created', 1, 'T-1', 'P-1', NULL, NULL, NULL,
+                     'op-4', 'req-4', '2024-01-01T00:00:03Z', 'runtime-application-service/create_execution',
+                     'E-1', NULL, NULL, NULL),
+                    ('attempt.created', 1, 'T-1', 'P-1', NULL, NULL, NULL,
+                     'op-5', 'req-5', '2024-01-01T00:00:04Z', 'runtime-application-service/create_attempt',
+                     'E-1', 'A-1', NULL, NULL);
+                 PRAGMA user_version = 5;",
+            )
+            .unwrap();
+    }
+    let store = db.open();
+    assert_eq!(store.schema_version().unwrap(), 6);
+
+    // Execution with its still-open attempt survived.
+    let execution = store
+        .get_execution(&ExecutionId::new("E-1").unwrap())
+        .unwrap()
+        .expect("E-1 survives");
+    assert_eq!(execution.attempts().len(), 1);
+    assert!(execution.attempts()[0].is_open());
+
+    // The old-format lease survived verbatim and stays managed-scoped:
+    // old branches are observed/cleaned through their persisted facts,
+    // never re-derived.
+    let lease = store
+        .get_workspace(&WorkspaceId::new("ws-1").unwrap())
+        .unwrap()
+        .expect("ws-1 survives");
+    assert_eq!(lease.branch().as_str(), "refs/heads/agent/E-1");
+    assert!(lease.branch().is_managed());
+    assert_eq!(lease.worktree_ref(), "/tmp/runlith-ws-v5/ws-1");
+    assert_eq!(lease.lifecycle(), LeaseLifecycle::Allocated);
+
+    // Journal history intact (5 facts, no workspace scope mixed in).
+    let history = store.list_events_ordered().unwrap();
+    assert_eq!(history.len(), 5);
+    for event in &history {
+        assert!(event.fact.workspace_id.is_none());
+    }
+
+    // The new reservation table exists and starts empty — migration
+    // invents no reservations for historical attempts.
+    let raw = db.raw();
+    let reservations: i64 = raw
+        .query_row("SELECT COUNT(*) FROM attempt_reservations", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(reservations, 0);
 }
 
 // -- structural invariants ---------------------------------------------------

@@ -79,11 +79,17 @@ grounds diff provenance, reproducibility, stale detection, and review.
 ## Branch Semantics
 
 `BranchRef` (`refs/heads/<name>`) is recorded on the lease, separate from
-`WorkspaceId`. The adapter derives a branch-safe slug from the owner
-ExecutionId and records the exact ref; branch collisions are detectable
-because a new lease is never silently attached to an unrelated existing
+`WorkspaceId`. The managed-branch derivation maps the owner ExecutionId
+to `refs/heads/agent/<slug>` injectively (TASK-0051): `%`-escaping over
+the exact identity bytes (`%` → `%%`, other non-safe bytes → `%XX`),
+with overlong identities in the disjoint digest form
+`h<sha256-lowerhex>-` — distinct execution identities never share a
+managed branch. The exact ref is recorded durably; branch collisions are
+detectable because a new lease is never silently attached to an unrelated existing
 branch — a ref that exists without matching recorded ownership is an
-`OwnershipMismatch` typed failure. Application-created vs user/external
+`OwnershipMismatch` typed failure. Execution entry additionally refuses
+before its first mutation when the derived branch is already recorded
+for another execution. Application-created vs user/external
 branches are distinguished by explicit recorded ownership; an unproven
 external branch is never deleted or rewritten as cleanup. Managed
 worktrees live on managed branches; an unexpected detached HEAD is
