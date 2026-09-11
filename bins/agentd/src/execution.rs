@@ -534,6 +534,19 @@ fn start_run(
 /// Cheap provider precheck without spawning: the configured executable
 /// must resolve. Version/auth surface later as typed attempt outcomes —
 /// this gate only refuses the structurally hopeless case before entry.
+///
+/// NOTE (TASK-0049 H5, evaluated and DEFERRED): wiring the adapter's
+/// `detect` version gate here would be the natural fast-fail for an
+/// incompatible CLI, but `detect` can block up to its 10 s probe timeout
+/// while `start_run` must answer within the 5 s IPC exchange bound — a
+/// hanging executable wedges `run` past the client deadline (proven when
+/// the gate was trialled: the cancel-path binary test timed out on its
+/// 5 s frame). A production version gate needs a bounded-fast probe
+/// design (cached/background detection) owned by a dedicated follow-up,
+/// not a synchronous spawn on the entry path. The deferral is safe: an
+/// incompatible CLI still fails closed at parse time with honest state
+/// and no corruption (parse rejects it as `MalformedOutput`; it is never
+/// granted authority).
 fn provider_precheck(composition: &ExecutionComposition) -> Result<(), String> {
     if let Some(exe) = &composition.provider_executable {
         if Path::new(exe).exists() {
@@ -825,25 +838,27 @@ fn exec_error(code: BusinessErrorCode, message: impl Into<String>) -> ExecutionC
 
 /// Defensive bound on status/error detail: validated identifiers only,
 /// never raw internals, never provider output beyond the attempt detail
-/// the domain already bounds.
+/// the domain already bounds. Cuts on a char boundary: detail is
+/// operator-facing text and may be multibyte (TASK-0049 H1).
 fn truncate_detail(detail: &str) -> String {
     const MAX: usize = MAX_STATUS_DETAIL_CHARS;
     if detail.len() <= MAX {
         return detail.to_owned();
     }
-    // Truncate on a char boundary; detail is operator-facing text.
-    let mut end = MAX;
-    while !detail.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = crate::dispatch::floor_char_boundary(detail, MAX);
     format!("{}…", &detail[..end])
 }
 
-/// Tighter bound for identifiers embedded in messages.
+/// Tighter bound for identifiers embedded in messages. Cuts on a char
+/// boundary: validated execution/attempt identities may be multibyte,
+/// and a raw byte cut would panic the connection handler (TASK-0049 H1).
 fn truncate_id(value: &str) -> String {
     const MAX_ID_MESSAGE_LEN: usize = 64;
     if value.len() > MAX_ID_MESSAGE_LEN {
-        format!("{}…", &value[..MAX_ID_MESSAGE_LEN])
+        format!(
+            "{}…",
+            &value[..crate::dispatch::floor_char_boundary(value, MAX_ID_MESSAGE_LEN)]
+        )
     } else {
         value.to_owned()
     }
@@ -950,6 +965,42 @@ mod tests {
             repository_ref: "repo-local:composition".to_owned(),
             repository_path: repo.to_string_lossy().into_owned(),
             base_revision: "HEAD".to_owned(),
+        }
+    }
+
+    fn custom_run(task: &str, execution: &str, attempt: &str, repo: &Path) -> RunExecutionRequest {
+        RunExecutionRequest {
+            task_id: task.to_owned(),
+            execution_id: execution.to_owned(),
+            attempt_id: attempt.to_owned(),
+            repository_ref: "repo-local:keeper".to_owned(),
+            repository_path: repo.to_string_lossy().into_owned(),
+            base_revision: "HEAD".to_owned(),
+        }
+    }
+
+    fn run_via_dispatch(
+        composition: &ExecutionComposition,
+        req: RunExecutionRequest,
+    ) -> (ExecutionCoreResponse, Option<BackgroundJob>) {
+        dispatch_execution(
+            composition,
+            ExecutionCoreRequest {
+                payload: Some(execution_core_request::Payload::Run(req)),
+            },
+        )
+    }
+
+    fn already_exists(response: &ExecutionCoreResponse) {
+        match &response.payload {
+            Some(execution_core_response::Payload::Error(error)) => {
+                assert_eq!(
+                    error.code,
+                    BusinessErrorCode::AlreadyExists as i32,
+                    "expected ALREADY_EXISTS, got {error:?}"
+                );
+            }
+            other => panic!("expected ALREADY_EXISTS, got {other:?}"),
         }
     }
 
@@ -1182,5 +1233,349 @@ mod tests {
         workspace
             .cleanup_workspace(lease.id(), &sandbox.repo.to_string_lossy())
             .expect("post-terminal cleanup proceeds");
+    }
+
+    // -- B1 identity-safety keepers (TASK-0049) ------------------------------
+    //
+    // A synchronously detectable execution/attempt identity conflict must
+    // refuse with ALREADY_EXISTS before committing any unrelated durable
+    // fact: no claim, no start, no execution, no lease, no attempt, no
+    // worktree, and no misleading journal lifecycle facts. The rejected
+    // Task stays in its pre-run state and is rerunnable with fresh ids.
+
+    #[test]
+    fn run_execution_id_collision_refuses_without_mutation() {
+        let sandbox = Sandbox::named("exec-collision");
+        seed_ready(&sandbox.db, "P-A", "T-A");
+        seed_ready(&sandbox.db, "P-B", "T-B");
+        let fixture = fixture_script(&sandbox.dir, "unused.sh", "exit 0\n");
+        let composition = sandbox.composition(Some(fixture));
+
+        // Task A owns execution E-A (entry committed; background not spawned).
+        let (accepted, job_a) =
+            run_via_dispatch(&composition, custom_run("T-A", "E-A", "A-A", &sandbox.repo));
+        assert_eq!(run_payload(&accepted).execution_id, "E-A");
+        assert!(job_a.is_some());
+
+        // Task B requests the execution identity owned by Task A.
+        let (refused, job_b) =
+            run_via_dispatch(&composition, custom_run("T-B", "E-A", "A-B", &sandbox.repo));
+        assert!(
+            job_b.is_none(),
+            "refused run must not yield a background job"
+        );
+        already_exists(&refused);
+
+        // Task B is untouched: still READY, owns nothing, no lease, no
+        // worktree, and no lifecycle facts in the journal.
+        let store = storage_sqlite::SqliteStore::open(&sandbox.db).expect("open store");
+        let task_b = store
+            .get_task(&TaskId::new("T-B").unwrap())
+            .expect("read task")
+            .expect("T-B exists");
+        assert_eq!(
+            task_b.state(),
+            TaskState::Ready,
+            "refused run must not claim/start Task B"
+        );
+        let execution_a = store
+            .get_execution(&ExecutionId::new("E-A").unwrap())
+            .expect("read execution")
+            .expect("E-A exists");
+        assert_eq!(
+            execution_a.task_id().to_string(),
+            "T-A",
+            "E-A must stay owned by Task A"
+        );
+        assert!(
+            store
+                .get_attempt(&agent_runtime::AttemptId::new("A-B").unwrap())
+                .expect("read attempt")
+                .is_none(),
+            "no attempt may be created for the refused run"
+        );
+        assert!(
+            store
+                .get_workspace_for_execution(&ExecutionId::new("E-A").unwrap())
+                .expect("read lease")
+                .is_none(),
+            "entry alone creates no lease"
+        );
+        let workspaces = sandbox.db.parent().unwrap().join("workspaces");
+        if workspaces.is_dir() {
+            let entries = std::fs::read_dir(&workspaces).expect("read workspaces");
+            assert_eq!(
+                entries.count(),
+                0,
+                "refused run must not allocate a worktree"
+            );
+        }
+        for event in store
+            .list_events_for_task(&TaskId::new("T-B").unwrap())
+            .expect("journal")
+        {
+            assert!(
+                !matches!(
+                    event.fact.event_type,
+                    storage_sqlite::EventType::Claimed
+                        | storage_sqlite::EventType::Started
+                        | storage_sqlite::EventType::ExecutionCreated
+                        | storage_sqlite::EventType::AttemptCreated
+                        | storage_sqlite::EventType::WorkspaceCreated
+                ),
+                "refused run must leave no lifecycle facts, got {:?}",
+                event.fact.event_type
+            );
+        }
+
+        // Correcting the identities lets Task B start normally: the
+        // rejected call did not poison its lifecycle.
+        let (retry, job_retry) =
+            run_via_dispatch(&composition, custom_run("T-B", "E-B", "A-B", &sandbox.repo));
+        assert_eq!(run_payload(&retry).task_state, "RUNNING");
+        assert!(job_retry.is_some());
+    }
+
+    #[test]
+    fn run_attempt_id_collision_refuses_without_mutation() {
+        let sandbox = Sandbox::named("attempt-collision");
+        seed_ready(&sandbox.db, "P-A", "T-A");
+        seed_ready(&sandbox.db, "P-B", "T-B");
+        let fixture = fixture_script(&sandbox.dir, "unused.sh", "exit 0\n");
+        let composition = sandbox.composition(Some(fixture));
+
+        // Task A owns execution E-A; attempt A-1 exists under it.
+        let (accepted, job_a) =
+            run_via_dispatch(&composition, custom_run("T-A", "E-A", "A-1", &sandbox.repo));
+        assert_eq!(run_payload(&accepted).execution_id, "E-A");
+        assert!(job_a.is_some());
+        let mut runtime =
+            app_services::RuntimeService::open(&sandbox.db, app_services::SystemClock)
+                .expect("open runtime service");
+        runtime
+            .create_attempt(
+                &ExecutionId::new("E-A").unwrap(),
+                agent_runtime::AttemptId::new("A-1").unwrap(),
+                agent_runtime::ProviderRef::new("keeper-stub").unwrap(),
+            )
+            .expect("setup attempt A-1");
+
+        // Task B requests a fresh execution but a reused attempt identity.
+        let (refused, job_b) =
+            run_via_dispatch(&composition, custom_run("T-B", "E-B", "A-1", &sandbox.repo));
+        assert!(
+            job_b.is_none(),
+            "refused run must not yield a background job"
+        );
+        already_exists(&refused);
+
+        // Task B is untouched and E-B was never created: no execution, no
+        // lease, no worktree, no journal lifecycle facts. A-1 still
+        // belongs to E-A.
+        let store = storage_sqlite::SqliteStore::open(&sandbox.db).expect("open store");
+        let task_b = store
+            .get_task(&TaskId::new("T-B").unwrap())
+            .expect("read task")
+            .expect("T-B exists");
+        assert_eq!(
+            task_b.state(),
+            TaskState::Ready,
+            "refused run must not claim/start Task B"
+        );
+        assert!(
+            store
+                .get_execution(&ExecutionId::new("E-B").unwrap())
+                .expect("read execution")
+                .is_none(),
+            "refused run must not create execution E-B"
+        );
+        let attempt = store
+            .get_attempt(&agent_runtime::AttemptId::new("A-1").unwrap())
+            .expect("read attempt")
+            .expect("A-1 exists");
+        assert_eq!(
+            attempt.execution_id().to_string(),
+            "E-A",
+            "A-1 must stay owned by E-A"
+        );
+        assert!(
+            store
+                .get_workspace_for_execution(&ExecutionId::new("E-B").unwrap())
+                .expect("read lease")
+                .is_none(),
+            "refused run must not allocate a lease"
+        );
+        let workspaces = sandbox.db.parent().unwrap().join("workspaces");
+        if workspaces.is_dir() {
+            let entries = std::fs::read_dir(&workspaces).expect("read workspaces");
+            assert_eq!(
+                entries.count(),
+                0,
+                "refused run must not allocate a worktree"
+            );
+        }
+        for event in store
+            .list_events_for_task(&TaskId::new("T-B").unwrap())
+            .expect("journal")
+        {
+            assert!(
+                !matches!(
+                    event.fact.event_type,
+                    storage_sqlite::EventType::Claimed
+                        | storage_sqlite::EventType::Started
+                        | storage_sqlite::EventType::ExecutionCreated
+                        | storage_sqlite::EventType::AttemptCreated
+                        | storage_sqlite::EventType::WorkspaceCreated
+                ),
+                "refused run must leave no lifecycle facts, got {:?}",
+                event.fact.event_type
+            );
+        }
+
+        // Correcting the identities lets Task B start normally.
+        let (retry, job_retry) = run_via_dispatch(
+            &composition,
+            custom_run("T-B", "E-B2", "A-2", &sandbox.repo),
+        );
+        assert_eq!(run_payload(&retry).task_state, "RUNNING");
+        assert!(job_retry.is_some());
+    }
+
+    // -- H1 multibyte identifier robustness (TASK-0049) ----------------------
+    //
+    // Validated execution identities may be multibyte (up to 256 bytes).
+    // Error rendering must cut on char boundaries: a long multibyte id
+    // on the NOT_FOUND paths must yield a typed error, never panic the
+    // connection handler, and leave the composition usable.
+
+    fn multibyte_ids() -> Vec<(&'static str, String, bool)> {
+        vec![
+            ("ascii", format!("E-{}", "x".repeat(100)), false),
+            (
+                "two-byte",
+                format!("{}é{}", "A".repeat(63), "B".repeat(10)),
+                true,
+            ),
+            (
+                "three-byte",
+                format!("{}€{}", "A".repeat(62), "B".repeat(10)),
+                true,
+            ),
+            (
+                "four-byte",
+                format!("{}😀{}", "A".repeat(63), "B".repeat(10)),
+                true,
+            ),
+            (
+                "mixed",
+                format!("{}é€😀{}", "A".repeat(61), "B".repeat(10)),
+                true,
+            ),
+        ]
+    }
+
+    #[test]
+    fn multibyte_execution_ids_never_panic_status_or_cancel() {
+        let sandbox = Sandbox::named("multibyte-ids");
+        seed_ready(&sandbox.db, "P-1", "T-1");
+        let fixture = fixture_script(&sandbox.dir, "unused.sh", "exit 0\n");
+        let composition = sandbox.composition(Some(fixture));
+
+        for (name, id, mid_char) in multibyte_ids() {
+            // Sanity: the id is valid, long enough to truncate, and (for
+            // the Unicode shapes) byte 64 sits strictly inside a char —
+            // the exact shape that panicked a raw byte cut.
+            assert!(
+                id.len() > 64,
+                "{name}: test id must exceed the message bound"
+            );
+            assert!(
+                id.len() <= 256,
+                "{name}: test id must stay a valid identifier"
+            );
+            assert!(
+                ExecutionId::new(&id).is_ok(),
+                "{name}: test id must validate"
+            );
+            assert_eq!(
+                !id.is_char_boundary(64),
+                mid_char,
+                "{name}: byte-64 boundary expectation"
+            );
+
+            // Status for the absent execution: typed NOT_FOUND, no panic.
+            let (status, status_job) = dispatch_execution(
+                &composition,
+                ExecutionCoreRequest {
+                    payload: Some(execution_core_request::Payload::Get(GetExecutionRequest {
+                        execution_id: id.clone(),
+                    })),
+                },
+            );
+            assert!(status_job.is_none());
+            match &status.payload {
+                Some(execution_core_response::Payload::Error(error)) => {
+                    assert_eq!(
+                        error.code,
+                        BusinessErrorCode::NotFound as i32,
+                        "{name} status: got {error:?}"
+                    );
+                    assert!(
+                        error.message.contains("does not exist"),
+                        "{name} status message must stay meaningful, got {:?}",
+                        error.message
+                    );
+                }
+                other => panic!("{name} status: expected NOT_FOUND, got {other:?}"),
+            }
+
+            // Cancel for the absent execution: typed NOT_FOUND, no panic.
+            let (cancel, cancel_job) = dispatch_execution(
+                &composition,
+                ExecutionCoreRequest {
+                    payload: Some(execution_core_request::Payload::Cancel(
+                        CancelExecutionRequest {
+                            execution_id: id.clone(),
+                        },
+                    )),
+                },
+            );
+            assert!(cancel_job.is_none());
+            match &cancel.payload {
+                Some(execution_core_response::Payload::Error(error)) => {
+                    assert_eq!(
+                        error.code,
+                        BusinessErrorCode::NotFound as i32,
+                        "{name} cancel: got {error:?}"
+                    );
+                }
+                other => panic!("{name} cancel: expected NOT_FOUND, got {other:?}"),
+            }
+        }
+
+        // The composition is still fully usable after all ten error paths:
+        // the handler survived every multibyte refusal.
+        let (retry, job) = run_via_dispatch(&composition, run_request("T-1", &sandbox.repo));
+        assert_eq!(run_payload(&retry).task_state, "RUNNING");
+        assert!(job.is_some());
+    }
+
+    #[test]
+    fn truncate_id_cuts_multibyte_on_char_boundaries() {
+        for (_, id, _) in multibyte_ids() {
+            let cut = truncate_id(&id);
+            assert!(
+                cut.ends_with('…'),
+                "long id must be marked truncated, got {cut:?}"
+            );
+            // Stripping the marker leaves valid UTF-8 within the bound.
+            let kept = cut.strip_suffix('…').expect("marker");
+            assert!(kept.len() <= 64, "kept {kept:?} must fit the bound");
+            assert!(
+                id.starts_with(kept),
+                "truncation must keep a prefix, got {cut:?}"
+            );
+        }
+        assert_eq!(truncate_id("E-short"), "E-short");
     }
 }

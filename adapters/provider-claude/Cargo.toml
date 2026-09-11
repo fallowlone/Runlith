@@ -14,3 +14,4 @@ scheduler = { path = "../../crates/scheduler" }
 workspace = { path = "../../crates/workspace" }
 
 [dev-dependencies]
+execution-contract = { path = "../../crates/execution-contract" }

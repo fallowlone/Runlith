@@ -935,3 +935,112 @@ fn two_tasks_execute_through_separate_adapters_without_interference() {
         TaskState::Completed
     );
 }
+
+// -- identity preflight (TASK-0049, G5) --------------------------------------
+//
+// `enter_execution` refuses synchronously detectable execution/attempt
+// identity conflicts before the first mutation (claim/start), so a
+// rejected entry commits no lifecycle fact and leaves the Task
+// rerunnable with fresh identities. The store-level uniqueness guards
+// stay the backstop for concurrent races.
+
+#[test]
+fn enter_execution_refuses_duplicate_identities_before_any_mutation() {
+    use app_services::ExecutionEntry;
+
+    let db = TestDb::new("identity-preflight");
+    let mut service = db.orchestration();
+    let first = seed_ready(&mut service, "P-1", "T-1");
+    let second = seed_ready(&mut service, "P-1", "T-2");
+
+    // First entry commits: T-1 RUNNING + E-1, no attempt yet.
+    match service
+        .enter_execution(&first, ids("E-1", "A-1"))
+        .expect("first entry")
+    {
+        ExecutionEntry::Runnable(_) => {}
+        ExecutionEntry::NotRunnable(outcome) => {
+            panic!("T-1 must be runnable, got {outcome:?}")
+        }
+    }
+    // Attempt A-1 exists under E-1 (created here directly; the daemon
+    // creates it later in the background half).
+    service
+        .runtime_mut()
+        .create_attempt(
+            &ExecutionId::new("E-1").unwrap(),
+            AttemptId::new("A-1").unwrap(),
+            ProviderRef::new("preflight-stub").unwrap(),
+        )
+        .expect("setup attempt");
+
+    // Execution-id collision (owned by T-1) refuses before claim/start.
+    let err = service
+        .enter_execution(&second, ids("E-1", "A-2"))
+        .expect_err("duplicate execution must refuse");
+    assert!(
+        matches!(
+            err,
+            app_services::ServiceError::Storage(storage_sqlite::StorageError::Duplicate(_))
+        ),
+        "duplicate execution must be typed, got {err:?}"
+    );
+    // Attempt-id collision refuses before claim/start.
+    let err = service
+        .enter_execution(&second, ids("E-2", "A-1"))
+        .expect_err("duplicate attempt must refuse");
+    assert!(
+        matches!(
+            err,
+            app_services::ServiceError::Storage(storage_sqlite::StorageError::Duplicate(_))
+        ),
+        "duplicate attempt must be typed, got {err:?}"
+    );
+
+    // T-2 is untouched and rerunnable: still READY, no runtime facts,
+    // and only its setup journal facts (created + ready).
+    assert_eq!(
+        service.tasks().get_task(&second).unwrap().unwrap().state(),
+        TaskState::Ready,
+        "refused entries must not claim/start T-2"
+    );
+    assert!(
+        service
+            .runtime()
+            .get_execution(&ExecutionId::new("E-2").unwrap())
+            .unwrap()
+            .is_none(),
+        "refused entry must not create E-2"
+    );
+    assert!(
+        service
+            .runtime()
+            .get_attempt(&AttemptId::new("A-2").unwrap())
+            .unwrap()
+            .is_none(),
+        "refused entry must not create A-2"
+    );
+    let types: Vec<EventType> = service
+        .tasks()
+        .list_events_for_task(&second)
+        .unwrap()
+        .iter()
+        .map(|event| event.fact.event_type)
+        .collect();
+    assert_eq!(
+        types,
+        vec![EventType::TaskCreated, EventType::MarkedReady],
+        "refused entries must leave no lifecycle facts, got {types:?}"
+    );
+
+    // Fresh identities enter normally: the rejections did not poison T-2.
+    match service
+        .enter_execution(&second, ids("E-2", "A-2"))
+        .expect("retry with fresh identities")
+    {
+        ExecutionEntry::Runnable(_) => {}
+        ExecutionEntry::NotRunnable(outcome) => {
+            panic!("retry must be runnable, got {outcome:?}")
+        }
+    }
+}

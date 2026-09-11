@@ -433,3 +433,69 @@ this contract atomically — including the three new journal types
 (`project.created`, `task.created`, `task.dependency_added`) — before
 any CLI command shipped, and old-G1-client compatibility is preserved
 and tested.
+
+## 16. G5 protocol v2: provider-neutral execution IPC (implemented)
+
+Accepted in
+[`adr/ADR-0024-g5-provider-execution-seam.md`](./adr/ADR-0024-g5-provider-execution-seam.md);
+implemented in TASK-0047 (see
+[`../development/G5_CLAUDE_COMPOSITION.md`](../development/G5_CLAUDE_COMPOSITION.md)):
+`agentd` dispatches the `execution_core` envelope through the
+production execution composition, and `agentctl` exposes
+`execution run/status/cancel`. What follows is the accepted contract in
+its implemented form.
+
+Protocol `0` (handshake, ping, shutdown) and protocol `1` (task_core)
+stay supported; protocol `2` adds the bounded `execution_core`
+envelope (`crates/ipc-contracts/proto/execution_core.proto`, carried
+as `ControlRequest.execution_core = 5` /
+`ControlResponse.execution_core = 5`; G1 field numbers 1–3 and the
+`task_core = 4` allocation are frozen). Highest-common negotiation is
+unchanged: old `[0]` / `[0,1]` clients negotiate down and keep their
+exact surfaces (an execution frame on a sub-v2 session is rejected as
+unsupported for the negotiated protocol and never executes), new
+`[0,1,2]` clients negotiate `2` against a `[0,1,2]` daemon. Build
+versions stay diagnostic metadata and never gate compatibility.
+
+The v2 surface is exactly: `RunExecution { task_id, execution_id?,
+attempt_id?, repository_ref, repository_path, base_revision? }` with
+`RunExecutionResponse { task_id, execution_id, attempt_id,
+task_state }`; `GetExecution { execution_id }` with
+`GetExecutionResponse { task_id, execution_id, task_state, attempts[],
+provider_ref, workspace_path, execution_live }` (`AttemptView {
+attempt_id, outcome, provider_ref, detail }`, outcome one of
+`OPEN/SUCCEEDED/FAILED/TIMED_OUT/CANCELLED`); `CancelExecution {
+execution_id }` with `CancelExecutionResponse { execution_id,
+cancel_requested, run_state, detail }` (`run_state` one of
+`LIVE_SIGNALLED/ALREADY_CONCLUDED/NO_LIVE_RUN`, not-found context in
+`detail`). Responses reuse the v1 `BusinessError` taxonomy plus one
+additive code `PROVIDER_UNAVAILABLE = 10` (execution surface only; old
+clients never observe it on task_core paths); success variants stay
+fields 1–3 with `error = 4`.
+
+Business semantics and compatibility rules (what Protobuf alone cannot
+express):
+
+- Operations are provider-neutral: durable Task/Execution/Attempt
+  identities, workspace binding inputs, opaque `provider_ref`
+  identity, bounded detail. No provider name, model, flag, credential,
+  session, prompt, transcript, outcome, or verdict travels on the wire;
+  there is no provider-selection field (the daemon runs its configured
+  default) and no complete-task request (provider success becomes
+  attempt evidence; only verification completes).
+- `run` is async `start → status → cancel`, not one blocking call: it
+  commits the durable entry synchronously (claim → start → execution,
+  refusing identity conflicts before any mutation) and returns the
+  identities immediately; the provider half runs detached. A client
+  disconnect never redefines the outcome; `status` re-observes it;
+  `cancel` targets the durable execution identity (never a PID).
+- Identity fields left blank are minted server-side
+  (`E-<millis>-<counter>` / `A-<millis>-<counter>`); supplied
+  identities are validated as bounded identifiers and refused with
+  `ALREADY_EXISTS` before any mutation when already owned.
+- Error detail is bounded and char-boundary safe (validated
+  identifiers may be multibyte); raw storage errors, paths, SQL, and
+  provider output beyond domain-bounded attempt detail never cross.
+- Unknown `execution_core` oneof payloads and empty execution payloads
+  are typed errors; the sequential one-in-flight model is preserved
+  (no request IDs, multiplexing, streaming, gRPC, or HTTP).

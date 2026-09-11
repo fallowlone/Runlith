@@ -284,13 +284,11 @@ impl Parser<'_> {
                     return Err(JsonError::at("unescaped control character", self.pos));
                 }
                 _ => {
-                    // Copy one full UTF-8 sequence through verbatim.
-                    let rest = &self.bytes[self.pos..];
-                    let text = std::str::from_utf8(rest)
-                        .map_err(|_| JsonError::at("invalid UTF-8 in string", self.pos))?;
-                    let ch = text
-                        .chars()
-                        .next()
+                    // Copy one full UTF-8 sequence through verbatim,
+                    // decoding only its own bytes (TASK-0049 H2:
+                    // validating the whole remaining input per char is
+                    // quadratic — 512 KiB of two-byte text took ~45 s).
+                    let ch = decode_first_char(&self.bytes[self.pos..])
                         .ok_or_else(|| JsonError::at("invalid UTF-8 in string", self.pos))?;
                     out.push(ch);
                     self.pos += ch.len_utf8();
@@ -355,6 +353,27 @@ impl Parser<'_> {
         self.pos += 4;
         Ok(value)
     }
+}
+
+/// Decodes the single UTF-8 char at the start of `bytes` without
+/// validating the rest. `None` for an empty slice, a truncated sequence,
+/// or bytes that start no valid char (lone continuations, overlong
+/// `C0/C1`, out-of-range `F5+`; overlong/surrogate shapes inside the
+/// length classes are still rejected by the slice validation).
+/// Constant-time (at most the 4 bytes of one char), so long strings
+/// scan linearly. Accept/reject behavior matches whole-rest validation:
+/// invalid bytes are always an error, only reported when reached.
+fn decode_first_char(bytes: &[u8]) -> Option<char> {
+    let first = *bytes.first()?;
+    let len = match first {
+        0x00..=0x7F => 1,
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => return None,
+    };
+    let slice = bytes.get(..len)?;
+    std::str::from_utf8(slice).ok()?.chars().next()
 }
 
 #[cfg(test)]
@@ -429,5 +448,60 @@ mod tests {
     fn unicode_passthrough_and_empty_shapes() {
         let json = parse_json(r#"{"emoji":"héllo 😀","empty_obj":{},"empty_arr":[]}"#).unwrap();
         assert_eq!(json.get("emoji").and_then(|v| v.as_str()), Some("héllo 😀"));
+    }
+
+    #[test]
+    fn first_char_decoder_covers_all_widths_and_rejects_bad_lead_bytes() {
+        // Structural unit test for the linear-scan decoder: valid
+        // 1/2/3/4-byte heads decode, truncated sequences and bad lead
+        // bytes fail. (Unreachable through `parse_json(&str)`, whose
+        // input is always valid UTF-8 — this pins the helper itself.)
+        assert_eq!(decode_first_char(b"abc"), Some('a'));
+        assert_eq!(decode_first_char("é".as_bytes()), Some('é'));
+        assert_eq!(decode_first_char("€".as_bytes()), Some('€'));
+        assert_eq!(decode_first_char("😀".as_bytes()), Some('😀'));
+        assert_eq!(decode_first_char(b""), None);
+        assert_eq!(decode_first_char(&[0xE2]), None);
+        assert_eq!(decode_first_char(&[0xE2, 0x82]), None);
+        assert_eq!(decode_first_char(&[0x80]), None);
+        assert_eq!(decode_first_char(&[0xC0, 0xAF]), None);
+        assert_eq!(decode_first_char(&[0xF5, 0x80, 0x80, 0x80]), None);
+        assert_eq!(decode_first_char(&[0xFF]), None);
+    }
+
+    #[test]
+    fn long_strings_scan_linearly() {
+        // Regression guard for the quadratic string scan (TASK-0049 H2:
+        // 512 KiB of two-byte text took ~45 s before the fix). The bound
+        // is deliberately generous (orders of magnitude above the fixed
+        // cost, well below the quadratic cost) — it guards the
+        // complexity, it does not benchmark the machine.
+        let two_byte = "é".repeat(256 * 1024);
+        let doc = format!("{{\"big\":\"{two_byte}\"}}");
+        let before = std::time::Instant::now();
+        let json = parse_json(&doc).expect("large two-byte string must parse");
+        let elapsed = before.elapsed();
+        assert_eq!(
+            json.get("big").and_then(|v| v.as_str()),
+            Some(two_byte.as_str())
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "512 KiB two-byte string must parse in linear time, took {elapsed:?}"
+        );
+
+        let ascii = "x".repeat(1024 * 1024);
+        let doc = format!("{{\"big\":\"{ascii}\"}}");
+        let before = std::time::Instant::now();
+        let json = parse_json(&doc).expect("1 MiB ascii string must parse");
+        let elapsed = before.elapsed();
+        assert_eq!(
+            json.get("big").and_then(|v| v.as_str()),
+            Some(ascii.as_str())
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "1 MiB ascii string must parse in linear time, took {elapsed:?}"
+        );
     }
 }

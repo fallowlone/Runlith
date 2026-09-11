@@ -1,0 +1,13 @@
+[package]
+name = "execution-contract"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "execution_contract"
+path = "src/lib.rs"
+
+[dependencies]
+agent-runtime = { path = "../agent-runtime" }
+task-domain = { path = "../task" }
+scheduler = { path = "../scheduler" }

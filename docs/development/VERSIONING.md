@@ -64,9 +64,11 @@ can never drift independently.
 Product version != IPC protocol version.
 ```
 
-Today: product development `0.1.0-dev.task0029`, supported IPC `0, 1`.
-A product-version bump MUST NOT automatically change protocol version;
-protocol versions change only for wire-contract compatibility reasons.
+Today (see `product/version.toml` for the current development task):
+supported IPC `0, 1, 2` (`2` adds the G5 `execution_core` envelope; see
+`docs/architecture/ipc.md` §16 and ADR-0024). A product-version bump
+MUST NOT automatically change protocol version; protocol versions
+change only for wire-contract compatibility reasons.
 
 ## Cargo-package-version independence
 
