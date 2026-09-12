@@ -108,8 +108,8 @@ fn journal_len(store: &SqliteStore) -> usize {
 fn fresh_database_reaches_current_schema() {
     let db = TestDb::new("fresh-current");
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 9);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 9);
+    assert_eq!(store.schema_version().unwrap(), 10);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 10);
     assert!(store.list_events_ordered().unwrap().is_empty());
 }
 
@@ -143,7 +143,7 @@ fn v1_database_with_data_migrates_preserving_state() {
             .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 10);
     let task = store
         .get_task(&TaskId::new("T-1").unwrap())
         .unwrap()
@@ -161,7 +161,7 @@ fn current_schema_reopen_is_a_no_op() {
         ready_task_via_store(&mut store);
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 10);
     assert!(store
         .get_task(&TaskId::new("T-1").unwrap())
         .unwrap()
@@ -177,7 +177,7 @@ fn future_version_rejected_after_current() {
     db.raw().execute_batch("PRAGMA user_version = 99").unwrap();
     match SqliteStore::open(&db.path) {
         Err(StorageError::UnsupportedSchemaVersion { found, supported }) => {
-            assert_eq!((found, supported), (99, 9));
+            assert_eq!((found, supported), (99, 10));
         }
         _ => panic!("expected UnsupportedSchemaVersion, open must fail closed"),
     }
@@ -236,7 +236,7 @@ fn v2_journal_rows_survive_migration_to_current() {
             .unwrap();
     }
     let mut store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 10);
     // Every existing row survives verbatim: seq, identity, type, refs,
     // states, payload, and provenance.
     let history = store.list_events_ordered().unwrap();

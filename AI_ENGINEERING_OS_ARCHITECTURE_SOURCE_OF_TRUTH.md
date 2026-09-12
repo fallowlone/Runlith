@@ -3207,6 +3207,19 @@ SECRET
 
 Кто запросил privileged action, policy decision, approval, result.
 
+TASK-0066 materializes the local persistence boundary as a dedicated typed
+Security Audit, separate from Event Journal, operational logs and model-visible
+receipts. SQLite schema v10 stores only structured product-authored security
+facts and typed references/capability scopes; it exposes no generic payload,
+secret value, provider/model text, transcript or environment-dump field.
+Records receive stable `aud-<seq>` identities and are chained with SHA-256 plus
+a persisted head; normal update/delete is trigger-rejected and reads verify the
+chain. The local hash chain is tamper-evidence, not an external signature
+against full host compromise. v1 has no automatic TTL/compaction or per-record
+deletion; whole app-owned local data deletion remains the deletion boundary.
+Ordered and correlation-scoped reads are the TASK-0066 query surface.
+Production-path atomic action/audit integration remains TASK-0067.
+
 ## Agent Transcript
 
 Отдельная user-controlled data category.
