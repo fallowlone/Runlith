@@ -10,6 +10,7 @@ members = [
     "crates/scheduler",
     "crates/execution-contract",
     "crates/policy",
+    "crates/runner",
     "crates/secrets",
     "crates/evaluation",
     "crates/workspace",
@@ -20,6 +21,7 @@ members = [
     "adapters/fake-evaluator",
     "adapters/git-cli",
     "adapters/keychain-native",
+    "adapters/runner-native",
     "crates/product-version",
 ]
 resolver = "2"

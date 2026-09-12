@@ -2,8 +2,9 @@
 
 > Repository-local contract for the execution Runner: where and how
 > executable work runs, what isolation is actually enforced, and how runtime
-> evidence flows back. Documents accepted architecture; invents none;
-> implements nothing.
+> evidence flows back. TASK-0064 materializes the bounded provider-neutral
+> isolation/enforcement foundation described here; the full Runner lifecycle
+> and concrete OS/container sandbox backends remain incremental work.
 >
 > - Binding rules: [`INVARIANTS.md`](./INVARIANTS.md)
 > - Task lifecycle: [`task-engine.md`](./task-engine.md)
@@ -227,8 +228,32 @@ actually enforce.
 Future OS-specific adapters consume those effective requirements behind this
 Runner boundary: product-compatible macOS sandbox mechanisms, Linux
 namespace/seccomp/cgroup/filesystem/network mechanisms, and Windows restricted
-token/Job Object/AppContainer-equivalent mechanisms as appropriate. TASK-0060
-selects no backend.
+token/Job Object/AppContainer-equivalent mechanisms as appropriate.
+
+TASK-0064 materializes the provider-neutral enforcement foundation in
+`crates/runner`. `IsolationPlan::compile` consumes only already-computed
+`EffectiveCapabilities` plus non-authorizing `IsolationRequirements`, requires
+the exact `ProcessExecute` capability for the process about to run, and
+extracts filesystem/process/network scope without absorbing Git, secret, tool
+or external-action authority. Filesystem capabilities for a different managed
+workspace fail closed.
+
+`IsolationBackend` returns an `EnforcementReport` bound to the exact compiled
+plan and backend identity. The operation boundary rejects stale/mismatched
+reports and rejects any backend that cannot prove every required isolation
+axis before the process operation is invoked. Filesystem, network and process
+enforcement stay independent axes.
+
+`adapters/runner-native` is the first bounded adapter. It is honestly a
+`NativeRunner`: `Trusted Host`, with zero OS-sandbox enforcement axes. It can
+therefore satisfy only an explicit trusted-host requirement; any required
+filesystem/network/process isolation fails closed rather than silently
+downgrading. TASK-0064 deliberately selects no concrete macOS/Linux/Windows
+sandbox or container backend because that matrix remains an accepted open
+design item.
+
+Provider HOME/XDG/state/scratch construction remains TASK-0065. Full production
+composition of Policy/approval/Secrets/Runner boundaries remains TASK-0067.
 
 ## 12. Replacement test
 
@@ -241,7 +266,7 @@ explicit capability negotiation/composition.
 Unresolved by accepted architecture; listed, not decided:
 
 ```text
-final RunnerPort Rust shape
+full Runner process-lifecycle/result shape beyond the TASK-0064 isolation boundary
 RunnerResult taxonomy
 process identity format
 process lifecycle state model
@@ -252,8 +277,7 @@ output size/backpressure policy
 environment construction
 working-directory enforcement
 resource-limit capability taxonomy
-isolation-profile representation
-sandbox capability representation
+user-facing runner profile/preset representation
 network-policy enforcement integration
 provider HOME/XDG/state/scratch environment construction (H7; TASK-0065)
 runner cancellation ordering with provider cancellation
