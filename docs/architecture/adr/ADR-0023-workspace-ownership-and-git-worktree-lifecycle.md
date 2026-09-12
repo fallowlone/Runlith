@@ -53,6 +53,16 @@ must not appear in authoritative G4 contracts.
   records the exact ref durably. Collision detection compares the recorded
   ref against actual ref state — a new lease is never silently attached to
   an unrelated existing branch.
+- Persisted lease format is classified from the complete durable identity,
+  not a branch prefix. TASK-0053 v2 emits canonical `e2-…`/`h2-…` slugs,
+  but historical ExecutionIds could themselves begin with those bytes and
+  therefore produce lexically overlapping pre-v2 branches. Current-v2
+  classification requires the exact current branch/worktree derivation and
+  its durable managed-identity reservation. A supported historical lease
+  must match one complete historical branch/worktree derivation; its
+  persisted branch and worktree reference remain byte-for-byte authority.
+  Mixed or otherwise unprovable pairs fail closed as ownership corruption
+  (TASK-0058, B-OL).
 - Every autonomous workspace records its exact `base_revision` (the commit
   OID the worktree was created from) for diff provenance, reproducibility,
   stale detection, and review.

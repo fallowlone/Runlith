@@ -314,6 +314,14 @@ is ephemeral, invalidatable, hashed-snapshot or rebuildable).
 | Device Resource / Model Residency ports | Accepted boundary, implementation deferred |
 | Artifact Store (content-addressed tool outputs) | Accepted boundary, implementation deferred |
 | Local Inference port (utility models) | Optional adapter, future |
+| Mission / Role Profiles (`RoleProfile`, `MissionSpec`) | Accepted future orchestration vocabulary; G7 design materialization deferred |
+| Human Decision Queue (`HumanDecisionRequest`) | Accepted future coordination/verification primitive; G7/G8 |
+| Typed Agent Messaging (`AgentMessage`) | Accepted future provider-neutral coordination primitive; G9 |
+| Playbooks / Procedures / Routines | Accepted future workflow hierarchy (`Tool → Playbook → Procedure → Routine`); G6/G10/G11 |
+| Advisory Work Claims (`WorkClaim`) | Accepted coordination hint; never replaces worktree isolation; G7 |
+| MicroAgents / cheap watcher → strong reasoner escalation | Optional background optimization; G11 / Router |
+| Provider Capacity / quota state | Accepted routing input, never Task semantics; future Router |
+| Context Disclosure Preview | Accepted privacy UX projection over Context/Policy decisions; G6/G9 |
 | Tournament Mode, Consensus Mode, Shadow Agents, Semantic Conflict Detection | Post-v1 concepts (explicitly not v1) |
 | Context Replay / Time Travel / Architecture Guardian | Future research |
 

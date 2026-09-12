@@ -105,11 +105,11 @@ fn journal_len(store: &SqliteStore) -> usize {
 // -- migration ------------------------------------------------------------
 
 #[test]
-fn fresh_database_reaches_v6() {
-    let db = TestDb::new("fresh-v6");
+fn fresh_database_reaches_v7() {
+    let db = TestDb::new("fresh-v7");
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 6);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 6);
+    assert_eq!(store.schema_version().unwrap(), 7);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 7);
     assert!(store.list_events_ordered().unwrap().is_empty());
 }
 
@@ -143,7 +143,7 @@ fn v1_database_with_data_migrates_preserving_state() {
             .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 6);
+    assert_eq!(store.schema_version().unwrap(), 7);
     let task = store
         .get_task(&TaskId::new("T-1").unwrap())
         .unwrap()
@@ -154,14 +154,14 @@ fn v1_database_with_data_migrates_preserving_state() {
 }
 
 #[test]
-fn v6_reopen_is_a_no_op() {
-    let db = TestDb::new("v6-noop");
+fn v7_reopen_is_a_no_op() {
+    let db = TestDb::new("v7-noop");
     {
         let mut store = db.open();
         ready_task_via_store(&mut store);
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 6);
+    assert_eq!(store.schema_version().unwrap(), 7);
     assert!(store
         .get_task(&TaskId::new("T-1").unwrap())
         .unwrap()
@@ -169,22 +169,22 @@ fn v6_reopen_is_a_no_op() {
 }
 
 #[test]
-fn future_version_rejected_after_v6() {
-    let db = TestDb::new("future-v6");
+fn future_version_rejected_after_v7() {
+    let db = TestDb::new("future-v7");
     {
         let _store = db.open();
     }
     db.raw().execute_batch("PRAGMA user_version = 99").unwrap();
     match SqliteStore::open(&db.path) {
         Err(StorageError::UnsupportedSchemaVersion { found, supported }) => {
-            assert_eq!((found, supported), (99, 6));
+            assert_eq!((found, supported), (99, 7));
         }
         _ => panic!("expected UnsupportedSchemaVersion, open must fail closed"),
     }
 }
 
 #[test]
-fn v2_journal_rows_survive_migration_to_v6() {
+fn v2_journal_rows_survive_migration_to_v7() {
     let db = TestDb::new("v2-preserve");
     {
         // Hand-built v2 layout: 0001 + 0002 tables, version stamp 2, real
@@ -236,7 +236,7 @@ fn v2_journal_rows_survive_migration_to_v6() {
             .unwrap();
     }
     let mut store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 6);
+    assert_eq!(store.schema_version().unwrap(), 7);
     // Every existing row survives verbatim: seq, identity, type, refs,
     // states, payload, and provenance.
     let history = store.list_events_ordered().unwrap();

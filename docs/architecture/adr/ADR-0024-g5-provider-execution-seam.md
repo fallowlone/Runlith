@@ -104,6 +104,28 @@ zero lifecycle facts; crash after admits the complete entry. Git and
 provider effects stay outside the transaction (INV-145) as recoverable
 sagas.
 
+Managed-identity reservation (TASK-0053 amendment): the same admission
+transaction additionally reserves the entry's canonical managed branch
+(migration 0007 `managed_identity_reservations`; the branch is derived
+purely from the ExecutionId before the transaction — still no Git,
+filesystem, or provider work inside). The v2 derivation
+(`e2-…` reversible readable / `h2-…` collision-resistant digest, both
+canonical-lowercase) keeps case-distinct ExecutionIds on independent
+branches; a residual same-string hazard (digest collision) refuses here
+with typed `Duplicate` before the first Task mutation instead of
+wedging RUNNING on a later Git `BranchCollision`. Crash semantics are
+unchanged; recovery of stranded pre-attempt entries (including their
+reservations) belongs to the post-admission recovery path.
+
+Post-admission recovery (TASK-0054 amendment, decided in ADR-0025): an
+admitted-but-not-attempted entry recovers by resuming the SAME execution
+with its reserved attempt — explicit `ResumeExecution` IPC operation
+(additive, protocol v2 field 5) plus a read-only daemon-startup scan,
+with no Task lifecycle transition and no new event types or schema.
+Deterministic repository/revision failures refuse before admission
+(read-only Git preflight). Post-attempt crash/orphan recovery stays an
+explicit G11 deferral.
+
 ### 7. First real provider is the Claude Code CLI
 
 `provider-claude` drives the installed `claude` CLI (argv-only,

@@ -26,7 +26,9 @@ import "task_core.proto";
 //   complete a Task.
 // - `RunExecution` starts a background orchestration cycle and returns the
 //   durable identities immediately; `GetExecution` observes durable state;
-//   `CancelExecution` signals the live provider session for one execution.
+//   `CancelExecution` signals the live provider session for one execution;
+//   `ResumeExecution` (TASK-0054) re-drives an admitted-but-not-attempted
+//   execution with its reserved attempt identity after a crash.
 
 // One request to start a real-provider orchestration cycle for a task.
 // The server commits the durable entry (claim, start, execution) and then
@@ -104,10 +106,50 @@ message CancelExecutionResponse {
   string execution_id = 1;
   // True when a live background run was signalled by this call.
   bool cancel_requested = 2;
-  // Machine-readable run posture: LIVE_SIGNalled, ALREADY_CONCLUDED,
-  // NO_LIVE_RUN, or NOT_FOUND context in `detail`.
+  // Machine-readable run posture: LIVE_SIGNALLED, ALREADY_CONCLUDED,
+  // NO_LIVE_RUN, AWAITING_RESUME (committed entry, zero attempts: resume
+  // with ResumeExecution), or NOT_FOUND context in `detail`.
   string run_state = 3;
   string detail = 4;
+}
+
+// One request to resume an admitted-but-not-attempted execution
+// (TASK-0054 recovery): the daemon re-drives the SAME execution with its
+// reserved attempt identity through the normal background half (lease →
+// attempt → provider → submit → verify). No Task transition, no new
+// execution, no new attempt identity: the attempt identity is recovered
+// from the durable reservation, never minted here.
+//
+// `repository_path` is always required (server-local operational input,
+// never persisted). When no lease exists yet, `repository_ref` and
+// `base_revision` (blank means HEAD) are required; when a lease exists,
+// they default to the recorded lease values and supplied values must
+// agree with them. Refusals are typed (NOT_FOUND for a missing
+// execution, INVALID_TRANSITION outside the pre-attempt posture,
+// INVALID_ARGUMENT for unusable workspace inputs) with no mutation.
+message ResumeExecutionRequest {
+  // Durable Execution to resume (required).
+  string execution_id = 1;
+  // Server-local path of the repository (operational input, never
+  // persisted). Must resolve to a Git repository the daemon can read.
+  string repository_path = 2;
+  // Provider-neutral repository identity. Required when no lease exists
+  // yet; otherwise defaults to the recorded lease value.
+  string repository_ref = 3;
+  // Base revision request (branch name, HEAD, or OID). Blank means HEAD
+  // when no lease exists, and the recorded base OID when one exists.
+  string base_revision = 4;
+}
+
+// Accepted resume: the background cycle owns the recovered identities
+// now. The provider result is NOT in this response; observe it with Get.
+message ResumeExecutionResponse {
+  string task_id = 1;
+  string execution_id = 2;
+  // The reserved attempt identity being resumed (never a fresh identity).
+  string attempt_id = 3;
+  // Task state at resume acceptance (always RUNNING here).
+  string task_state = 4;
 }
 
 // One inbound G5 execution request (protocol v2 only).
@@ -116,6 +158,7 @@ message ExecutionCoreRequest {
     RunExecutionRequest run = 1;
     GetExecutionRequest get = 2;
     CancelExecutionRequest cancel = 3;
+    ResumeExecutionRequest resume = 5;
   }
 }
 
@@ -127,6 +170,7 @@ message ExecutionCoreResponse {
     RunExecutionResponse run = 1;
     GetExecutionResponse get = 2;
     CancelExecutionResponse cancel = 3;
+    ResumeExecutionResponse resume = 5;
     BusinessError error = 4;
   }
 }

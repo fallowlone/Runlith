@@ -21,3 +21,4 @@ fake-agent = { path = "../../adapters/fake-agent" }
 fake-evaluator = { path = "../../adapters/fake-evaluator" }
 git-cli = { path = "../../adapters/git-cli" }
 provider-claude = { path = "../../adapters/provider-claude" }
+rusqlite = { version = "0.40.2", features = ["bundled"] }

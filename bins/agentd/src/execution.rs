@@ -33,8 +33,10 @@
 //! `cancel` targets the durable execution identity. The background thread
 //! is intentionally detached (not joined on shutdown): daemon shutdown or
 //! restart orphans the provider child and strands the attempt as
-//! reconcilable open state — never as silent success. Full recovery is
-//! G11 work, explicitly deferred.
+//! reconcilable open state — never as silent success. Pre-attempt strands
+//! (entry committed, no attempt yet) recover through the explicit `resume`
+//! operation (TASK-0054); post-attempt orphan recovery stays G11 work,
+//! explicitly deferred.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -53,11 +55,12 @@ use evaluation::{EvaluationPort, EvaluationRequest, EvaluationResult, Evaluation
 use ipc_contracts::proto::{
     execution_core_request, execution_core_response, AttemptView, BusinessError, BusinessErrorCode,
     CancelExecutionRequest, CancelExecutionResponse, ExecutionCoreRequest, ExecutionCoreResponse,
-    GetExecutionRequest, GetExecutionResponse, RunExecutionRequest, RunExecutionResponse,
+    GetExecutionRequest, GetExecutionResponse, ResumeExecutionRequest, ResumeExecutionResponse,
+    RunExecutionRequest, RunExecutionResponse,
 };
 use scheduler::OrchestrationOutcome;
 use task_domain::{TaskId, TaskState};
-use workspace::{RepositoryRef, WorkspaceStore};
+use workspace::{GitPort, RepositoryRef, Revision, WorkspaceFailure, WorkspaceStore};
 
 /// Wall-clock bound for one production provider execution. Matches the
 /// adapter default: the daemon does not invent its own timeout policy.
@@ -79,39 +82,97 @@ const MAX_STATUS_DETAIL_CHARS: usize = 1024;
 /// Monotonic mint for server-generated execution/attempt identities.
 static MINT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Per-execution cancellation flags owned by the composition root. One
-/// entry per background run, from `run` entry until the terminal outcome
-/// is committed. Signalling kills only the registered run's owned child
-/// tree (via the executor's shared flag) — never by process name.
+/// Monotonic mint for process-local live-run owner tokens. Starts at 1 so
+/// the zero value never names an owner; tokens are opaque runtime identity
+/// only (never persisted, never wall-clock derived) and distinguish
+/// successive owners of one execution for ABA-safe release.
+static OWNER_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Opaque process-local identity of one live-run owner (TASK-0056, G5
+/// B-CR). At most one owner exists per execution per daemon: the registry
+/// hands a fresh token to the single claim winner, and only that token can
+/// retire the entry. Tokens die with the daemon process — durable
+/// restart/recovery stays governed by TASK-0054 semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LiveOwnerToken(u64);
+
+/// One live owner's registry entry: the cancellation handle that belongs
+/// to the owner identity, so `cancel` always signals the current owner's
+/// provider path and a rejected loser can neither replace nor clear it.
+#[derive(Debug, Clone)]
+struct LiveOwner {
+    token: LiveOwnerToken,
+    flag: provider_claude::CancelFlag,
+}
+
+/// Per-execution live-run ownership owned by the composition root
+/// (TASK-0056, G5 B-CR). One entry per live background run, from the
+/// atomic claim until the owning run's terminal outcome is committed.
+/// Signalling kills only the registered owner's child tree (via the
+/// executor's shared flag) — never by process name.
+///
+/// Claim is insert-if-absent and release is owner-scoped: a second
+/// run/resume for a live execution is refused without touching the entry,
+/// and a stale/losing path can never unregister the current owner.
 #[derive(Debug, Clone, Default)]
 pub struct CancelRegistry {
-    inner: Arc<Mutex<HashMap<String, provider_claude::CancelFlag>>>,
+    inner: Arc<Mutex<HashMap<String, LiveOwner>>>,
 }
 
 impl CancelRegistry {
-    /// Empty registry.
+    /// Empty registry. A fresh daemon always starts empty: process-local
+    /// ownership never survives a restart by construction.
     #[must_use]
     pub fn fresh() -> Self {
         Self::default()
     }
 
-    /// Registers the live flag for one execution.
-    pub fn register(&self, execution: &ExecutionId, flag: provider_claude::CancelFlag) {
+    /// Atomically claims exclusive live ownership of `execution` for one
+    /// run/resume path. Returns the owner token on success; returns `None`
+    /// — leaving any current owner untouched — when another live owner
+    /// already exists. Never overwrites. The critical section is one
+    /// `HashMap` lookup/insert only: no provider, Git, or database work
+    /// under the lock.
+    pub fn try_claim(
+        &self,
+        execution: &ExecutionId,
+        flag: provider_claude::CancelFlag,
+    ) -> Option<LiveOwnerToken> {
+        let token = LiveOwnerToken(OWNER_COUNTER.fetch_add(1, Ordering::SeqCst));
         if let Ok(mut inner) = self.inner.lock() {
-            inner.insert(execution.as_str().to_owned(), flag);
+            use std::collections::hash_map::Entry;
+            match inner.entry(execution.as_str().to_owned()) {
+                Entry::Vacant(vacant) => {
+                    vacant.insert(LiveOwner { token, flag });
+                    Some(token)
+                }
+                Entry::Occupied(_) => None,
+            }
+        } else {
+            None
         }
     }
 
-    /// Retires the flag for one execution. Idempotent.
-    pub fn unregister(&self, execution: &ExecutionId) {
-        self.unregister_id(execution.as_str());
+    /// Retires the entry for `execution` only when `token` is still the
+    /// current owner. Returns true when the entry was retired. A stale
+    /// token (loser cleanup, delayed exit after a newer owner claimed)
+    /// returns false and removes nothing.
+    pub fn release(&self, execution: &ExecutionId, token: LiveOwnerToken) -> bool {
+        self.release_id(execution.as_str(), token)
     }
 
-    /// Retires the flag for one raw execution identity. Idempotent.
-    pub fn unregister_id(&self, execution_id: &str) {
+    /// Token-scoped retire for one raw execution identity. See [`Self::release`].
+    pub fn release_id(&self, execution_id: &str, token: LiveOwnerToken) -> bool {
         if let Ok(mut inner) = self.inner.lock() {
-            inner.remove(execution_id);
+            let owned = inner
+                .get(execution_id)
+                .is_some_and(|owner| owner.token == token);
+            if owned {
+                inner.remove(execution_id);
+                return true;
+            }
         }
+        false
     }
 
     /// Whether a background run is currently registered for `execution`.
@@ -125,6 +186,9 @@ impl CancelRegistry {
     /// Signals the live run for `execution`. Returns false when no live
     /// run is registered (already concluded, never started, or stranded
     /// by a restart) — the caller then reports durable state instead.
+    /// Always reaches the CURRENT owner's flag: rejected losers never
+    /// replace the entry, so a `LIVE_SIGNALLED` report always names the
+    /// provider path that actually observes the signal.
     pub fn signal(&self, execution: &ExecutionId) -> bool {
         let flag = self
             .inner
@@ -132,8 +196,8 @@ impl CancelRegistry {
             .ok()
             .and_then(|inner| inner.get(execution.as_str()).cloned());
         match flag {
-            Some(flag) => {
-                flag.cancel();
+            Some(owner) => {
+                owner.flag.cancel();
                 true
             }
             None => false,
@@ -197,12 +261,15 @@ impl ExecutionComposition {
 pub type ExecutionHandle = Arc<ExecutionComposition>;
 
 /// A committed background run: the daemon entry is durable, the provider
-/// half still has to execute. Spawned detached by the serve loop.
+/// half still has to execute. Spawned detached by the serve loop. Carries
+/// the owner token won at claim time so the terminal path retires exactly
+/// the entry it owns — never a newer owner's.
 pub struct BackgroundJob {
     composition: ExecutionComposition,
     work: scheduler::WorkItem,
     workspace_request: WorkspaceRequest,
     cancel: provider_claude::CancelFlag,
+    owner: LiveOwnerToken,
 }
 
 impl BackgroundJob {
@@ -212,18 +279,28 @@ impl BackgroundJob {
     pub fn work_execution_id(&self) -> String {
         self.work.execution_id.to_string()
     }
+
+    /// The owner token this job won at claim time. The serve loop passes
+    /// it to [`abort_start`] when the background thread cannot spawn; the
+    /// background half passes it to the token-scoped release on exit.
+    #[must_use]
+    pub fn owner_token(&self) -> LiveOwnerToken {
+        self.owner
+    }
 }
 
 /// Builds the error response when the serve loop cannot spawn the
 /// background thread (resource exhaustion): the durable entry is already
 /// committed, so the response names the execution for recovery via
-/// `status` instead of pretending nothing happened. Also unregisters
-/// the cancel flag — there is no live run to signal.
+/// `status` instead of pretending nothing happened. Also retires the
+/// owner's registry entry — there is no live run to signal — scoped to
+/// the claiming token so a newer owner is never disturbed.
 pub fn abort_start(
     composition: &ExecutionComposition,
     execution_id: &str,
+    owner: LiveOwnerToken,
 ) -> ExecutionCoreResponse {
-    composition.cancels.unregister_id(execution_id);
+    composition.cancels.release_id(execution_id, owner);
     eprintln!(
         "agentd: background spawn failed for execution {execution_id}; entry committed without a run"
     );
@@ -237,14 +314,16 @@ pub fn abort_start(
 }
 
 /// Dispatches one decoded execution request. `run` may yield a background
-/// job for the caller to spawn detached; `get`/`cancel` are fully
-/// synchronous reads/signals.
+/// job for the caller to spawn detached; `resume` re-drives a stranded
+/// pre-attempt entry the same way; `get`/`cancel` are fully synchronous
+/// reads/signals.
 pub fn dispatch_execution(
     composition: &ExecutionComposition,
     request: ExecutionCoreRequest,
 ) -> (ExecutionCoreResponse, Option<BackgroundJob>) {
     match request.payload {
         Some(execution_core_request::Payload::Run(req)) => start_run(composition, req),
+        Some(execution_core_request::Payload::Resume(req)) => resume_run(composition, req),
         Some(execution_core_request::Payload::Get(req)) => (handle_get(composition, req), None),
         Some(execution_core_request::Payload::Cancel(req)) => {
             (handle_cancel(composition, req), None)
@@ -269,27 +348,30 @@ pub fn execution_unavailable() -> ExecutionCoreResponse {
 
 /// Runs the background half of one committed run to its terminal outcome.
 /// Blocking: call on a dedicated thread, never on the async serve loop.
-/// Unregisters the cancel flag on every path (success, failure, lease
-/// refusal, bind refusal) so `status`/`cancel` observe honest state.
+/// Retires the owner's registry entry on every path (success, failure,
+/// lease refusal, bind refusal) so `status`/`cancel` observe honest state.
+/// Release is scoped to the job's owner token: a stale exit path can never
+/// retire a newer owner that claimed the execution afterwards.
 pub fn run_background(job: BackgroundJob) {
     let BackgroundJob {
         composition,
         work,
         workspace_request,
         cancel,
+        owner,
     } = job;
     let execution_id = workspace_request.execution_id.clone();
     let attempt_id = work.attempt_id.clone();
     match run_background_inner(&composition, work, &workspace_request, &cancel) {
         Ok(outcome) => {
-            composition.cancels.unregister(&execution_id);
+            composition.cancels.release(&execution_id, owner);
             eprintln!(
                 "agentd: execution {execution_id} concluded: {}",
                 outcome_tag(&outcome)
             );
         }
         Err(detail) => {
-            composition.cancels.unregister(&execution_id);
+            composition.cancels.release(&execution_id, owner);
             // G5 posture, not a failure of evidence: provider success
             // with no automated verifier commits attempt Succeeded plus
             // Task VERIFYING, then reports the absent verdict as an
@@ -400,6 +482,66 @@ fn outcome_tag(outcome: &OrchestrationOutcome) -> &'static str {
 
 // -- run -----------------------------------------------------------------
 
+/// Read-only Git preflight for execution-entry workspace inputs
+/// (TASK-0054, G5 B-RS boundary B′).
+///
+/// A repository path that is not a working repository, or a base revision
+/// that does not resolve to a commit, is synchronously detectable with two
+/// read-only Git observations — no mutation, no lease, no worktree. Such
+/// deterministic failures refuse here with typed `INVALID_ARGUMENT`
+/// before admission, instead of wedging a Task `RUNNING` in the
+/// background where no production path could recover it.
+///
+/// Preflight is a diagnostic fast path, not a concurrency or security
+/// boundary: Git state can still change afterwards, and that stays a
+/// recoverable-saga concern. Client-facing messages are static text —
+/// never the supplied path, which is untrusted operational input.
+/// Small refusal for the entry preflight: a wire code plus static text.
+/// Kept small (instead of returning the full response) so the helper
+/// stays `Result`-shaped without tripping the large-error lint; callers
+/// render it with [`exec_error`].
+struct EntryPreflightFailure {
+    code: BusinessErrorCode,
+    message: &'static str,
+}
+
+fn resolve_entry_revision(
+    repository_path: &str,
+    base_revision: &str,
+) -> Result<Revision, EntryPreflightFailure> {
+    let git = git_cli::GitCli::new();
+    match git.is_repository(repository_path) {
+        Ok(true) => {}
+        Ok(false)
+        | Err(WorkspaceFailure::NotRepository { .. })
+        | Err(WorkspaceFailure::BareRepositoryUnsupported { .. }) => {
+            return Err(EntryPreflightFailure {
+                code: BusinessErrorCode::InvalidArgument,
+                message: "repository path is not a usable git repository",
+            });
+        }
+        Err(_) => {
+            return Err(EntryPreflightFailure {
+                code: BusinessErrorCode::Internal,
+                message: "execution repository precheck unavailable",
+            });
+        }
+    }
+    match git.resolve_revision(repository_path, base_revision) {
+        Ok(revision) => Ok(revision),
+        Err(WorkspaceFailure::InvalidRevision { .. } | WorkspaceFailure::NotRepository { .. }) => {
+            Err(EntryPreflightFailure {
+                code: BusinessErrorCode::InvalidArgument,
+                message: "base revision is not resolvable to a commit in the repository",
+            })
+        }
+        Err(_) => Err(EntryPreflightFailure {
+            code: BusinessErrorCode::Internal,
+            message: "execution repository precheck unavailable",
+        }),
+    }
+}
+
 /// Validates a `run` request, fails the provider precheck fast, commits
 /// the durable entry, registers the cancel flag, and returns the accepted
 /// identities plus the background job. Nothing provider-side runs here.
@@ -478,6 +620,14 @@ fn start_run(
         return (exec_error(BusinessErrorCode::Internal, detail), None);
     }
 
+    // Fail fast before any mutation: deterministic repository/revision
+    // failures are synchronously detectable (read-only Git) and must
+    // refuse here — never as a stranded RUNNING entry in the background
+    // (TASK-0054, G5 B-RS boundary B′).
+    if let Err(failure) = resolve_entry_revision(&req.repository_path, &base_revision) {
+        return (exec_error(failure.code, failure.message), None);
+    }
+
     let ids = OrchestrationIds {
         execution_id: execution_id.clone(),
         attempt_id: attempt_id.clone(),
@@ -503,8 +653,26 @@ fn start_run(
         };
     match orchestration.enter_execution(&task_id, ids) {
         Ok(ExecutionEntry::Runnable(work)) => {
+            // Exclusive live ownership (TASK-0056, G5 B-CR): the run owns
+            // the live provider/cancellation lifecycle only after winning
+            // the atomic claim. A live owner for the same execution can
+            // only exist when the execution already committed elsewhere,
+            // which `enter_execution` refuses first — so a lost claim here
+            // is unreachable in practice and fails closed without touching
+            // the current owner's entry or spawning a competing run.
             let cancel = provider_claude::CancelFlag::fresh();
-            composition.cancels.register(&execution_id, cancel.clone());
+            let Some(owner) = composition.cancels.try_claim(&execution_id, cancel.clone()) else {
+                return (
+                    exec_error(
+                        BusinessErrorCode::Conflict,
+                        format!(
+                            "execution {} already has a live run; status shows the owner",
+                            truncate_id(execution_id.as_str())
+                        ),
+                    ),
+                    None,
+                );
+            };
             let response = ExecutionCoreResponse {
                 payload: Some(execution_core_response::Payload::Run(
                     RunExecutionResponse {
@@ -520,6 +688,7 @@ fn start_run(
                 work,
                 workspace_request,
                 cancel,
+                owner,
             };
             (response, Some(job))
         }
@@ -531,6 +700,341 @@ fn start_run(
     }
 }
 
+// -- resume --------------------------------------------------------------
+///
+/// Recovers one admitted-but-not-attempted execution (TASK-0054, G5 B-RS)
+/// through the production control plane: a crash (or deterministic
+/// failure) after admission `COMMIT` but before `create_attempt` leaves
+/// Task `RUNNING` + one execution + one Attempt reservation with zero
+/// attempts, which ordinary `run` honestly refuses.
+///
+/// Resume re-drives the SAME execution with its reserved attempt identity
+/// on a detached background thread (the same [`run_background`] half
+/// `run` uses): no Task transition, no new execution, no fresh attempt
+/// identity, no provider history. Refusals are typed with no mutation:
+/// missing execution (`NOT_FOUND`), an execution that already records
+/// attempts or whose task left `RUNNING` (`INVALID_TRANSITION`), a live
+/// owner already running this execution in this daemon (`CONFLICT` — the
+/// loser spawns nothing and disturbs no registry entry), and unusable
+/// workspace inputs (`INVALID_ARGUMENT`). Corrupt reservation or lease
+/// state fails closed (`CORRUPT_STATE`).
+///
+/// `repository_path` is always required (server-local operational input,
+/// never persisted). When no lease exists yet, `repository_ref` and
+/// `base_revision` are required; when a lease exists they default to the
+/// recorded lease values and supplied values must agree (fail fast here,
+/// not in the background).
+fn resume_run(
+    composition: &ExecutionComposition,
+    req: ResumeExecutionRequest,
+) -> (ExecutionCoreResponse, Option<BackgroundJob>) {
+    let execution_id = match ExecutionId::new(req.execution_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                exec_error(
+                    BusinessErrorCode::InvalidArgument,
+                    "execution id must be a non-blank bounded identifier",
+                ),
+                None,
+            );
+        }
+    };
+    if req.repository_path.trim().is_empty() || req.repository_path.len() > MAX_PATH_LEN {
+        return (
+            exec_error(
+                BusinessErrorCode::InvalidArgument,
+                "repository path must be non-blank bounded text",
+            ),
+            None,
+        );
+    }
+
+    // Fail fast before any mutation: same operational gates as `run`.
+    if let Err(detail) = provider_precheck(composition) {
+        return (
+            exec_error(BusinessErrorCode::ProviderUnavailable, detail),
+            None,
+        );
+    }
+    let resume_root = match ensure_managed_root(&composition.db_path) {
+        Ok(root) => root,
+        Err(detail) => return (exec_error(BusinessErrorCode::Internal, detail), None),
+    };
+
+    // Read-only recovery plan: exactly one healthy pre-Attempt entry, or
+    // a typed refusal with nothing mutated.
+    let orchestration =
+        match OrchestrationService::open(&composition.db_path, app_services::SystemClock) {
+            Ok(service) => service,
+            Err(error) => {
+                return (
+                    exec_error(
+                        BusinessErrorCode::Internal,
+                        format!("execution recovery unavailable: {error}"),
+                    ),
+                    None,
+                );
+            }
+        };
+    let plan = match orchestration.plan_pre_attempt_resume(&execution_id) {
+        Ok(plan) => plan,
+        Err(error) => {
+            // A concurrent winner may have claimed this execution and
+            // created its Attempt after this request began planning. Live
+            // ownership is then the current refusal reason (TASK-0056),
+            // even though the durable snapshot now also says recovery is
+            // past the pre-Attempt boundary.
+            if composition.cancels.is_live(&execution_id) {
+                return (
+                    exec_error(
+                        BusinessErrorCode::Conflict,
+                        format!(
+                            "execution {} already has a live run; status shows the owner",
+                            truncate_id(execution_id.as_str())
+                        ),
+                    ),
+                    None,
+                );
+            }
+            let (code, message) = crate::dispatch::map_error(&error);
+            return (exec_error(code, message), None);
+        }
+    };
+
+    // Workspace inputs: lease-recorded defaults, operator overrides must
+    // agree. Supplied values that disagree with a recorded lease refuse
+    // here — not as a second strand in the background.
+    let repository_ref = match plan.repository_ref.as_deref() {
+        Some(recorded) => {
+            if !req.repository_ref.trim().is_empty() && req.repository_ref != recorded {
+                return (
+                    exec_error(
+                        BusinessErrorCode::InvalidArgument,
+                        "repository ref disagrees with the recorded lease; omit it to reuse the recorded value",
+                    ),
+                    None,
+                );
+            }
+            recorded.to_owned()
+        }
+        None => {
+            if req.repository_ref.trim().is_empty() {
+                return (
+                    exec_error(
+                        BusinessErrorCode::InvalidArgument,
+                        "repository ref is required when no workspace lease exists yet",
+                    ),
+                    None,
+                );
+            }
+            req.repository_ref.clone()
+        }
+    };
+    let repository_ref = match RepositoryRef::new(repository_ref) {
+        Ok(reference) => reference,
+        Err(_) => {
+            return (
+                exec_error(
+                    BusinessErrorCode::InvalidArgument,
+                    "repository ref must be a non-blank bounded identifier",
+                ),
+                None,
+            );
+        }
+    };
+    let base_revision = match plan.base_revision.as_deref() {
+        Some(recorded) => {
+            if req.base_revision.trim().is_empty() || req.base_revision == recorded {
+                recorded.to_owned()
+            } else {
+                if req.base_revision.len() > MAX_REVISION_LEN {
+                    return (
+                        exec_error(
+                            BusinessErrorCode::InvalidArgument,
+                            "base revision exceeds the bounded length",
+                        ),
+                        None,
+                    );
+                }
+                req.base_revision.clone()
+            }
+        }
+        None => {
+            if req.base_revision.trim().is_empty() {
+                "HEAD".to_owned()
+            } else if req.base_revision.len() > MAX_REVISION_LEN {
+                return (
+                    exec_error(
+                        BusinessErrorCode::InvalidArgument,
+                        "base revision exceeds the bounded length",
+                    ),
+                    None,
+                );
+            } else {
+                req.base_revision.clone()
+            }
+        }
+    };
+
+    // Synchronous read-only Git validation, exactly like `run` entry:
+    // deterministic failures refuse here with no mutation. For a
+    // lease-backed resume the recorded base OID must additionally still
+    // resolve in the supplied repository (wrong-repository paths fail
+    // closed here); an explicitly supplied revision must resolve to that
+    // same recorded base (bases are immutable).
+    let resolved = match resolve_entry_revision(&req.repository_path, &base_revision) {
+        Ok(revision) => revision,
+        Err(failure) => return (exec_error(failure.code, failure.message), None),
+    };
+    if let Some(recorded) = plan.base_revision.as_deref() {
+        if resolved.as_str() != recorded {
+            return (
+                exec_error(
+                    BusinessErrorCode::InvalidArgument,
+                    "base revision disagrees with the recorded lease base; omit it to reuse the recorded value",
+                ),
+                None,
+            );
+        }
+    }
+
+    let workspace_request = WorkspaceRequest {
+        execution_id: execution_id.clone(),
+        repository_ref,
+        repository_path: req.repository_path.clone(),
+        base_revision,
+    };
+
+    // TASK-0057 B-RS2: refuse deterministic workspace ambiguity before
+    // reporting resume acceptance or claiming live ownership. This is a
+    // read-only early diagnostic only; the background cycle re-runs the
+    // authoritative reconciliation immediately before mutation, so races
+    // between this check and execution remain fail-closed.
+    let workspace_preflight = match WorkspaceService::open(
+        &composition.db_path,
+        git_cli::GitCli::new(),
+        resume_root,
+        app_services::SystemClock,
+    ) {
+        Ok(service) => service,
+        Err(error) => {
+            return (
+                exec_error(
+                    BusinessErrorCode::CorruptState,
+                    format!("workspace recovery preflight unavailable: {error}"),
+                ),
+                None,
+            );
+        }
+    };
+    if let Err(error) = workspace_preflight.validate_resume_workspace(&workspace_request) {
+        let code = match error {
+            WorkspaceFailure::NotRepository { .. }
+            | WorkspaceFailure::BareRepositoryUnsupported { .. }
+            | WorkspaceFailure::InvalidRevision { .. } => BusinessErrorCode::InvalidArgument,
+            WorkspaceFailure::StorageFailure { .. } => BusinessErrorCode::CorruptState,
+            _ => BusinessErrorCode::Conflict,
+        };
+        return (
+            exec_error(code, format!("workspace recovery refused: {error}")),
+            None,
+        );
+    }
+
+    // Exclusive live ownership (TASK-0056, G5 B-CR): resume shares the
+    // SAME ownership domain as run. All validation above is read-only, so
+    // a lost claim refuses with a typed conflict and zero mutation: no
+    // competing background continuation, no replaced cancel handle, no
+    // unregistration of the winner. A request reports acceptance of the
+    // live continuation only after winning this claim.
+    let cancel = provider_claude::CancelFlag::fresh();
+    let Some(owner) = composition.cancels.try_claim(&execution_id, cancel.clone()) else {
+        return (
+            exec_error(
+                BusinessErrorCode::Conflict,
+                format!(
+                    "execution {} already has a live run; status shows the owner",
+                    truncate_id(execution_id.as_str())
+                ),
+            ),
+            None,
+        );
+    };
+    let response = ExecutionCoreResponse {
+        payload: Some(execution_core_response::Payload::Resume(
+            ResumeExecutionResponse {
+                task_id: plan.work.task_id.to_string(),
+                execution_id: execution_id.to_string(),
+                attempt_id: plan.work.attempt_id.to_string(),
+                task_state: TaskState::Running.as_str().to_owned(),
+            },
+        )),
+    };
+    let job = BackgroundJob {
+        composition: composition.clone(),
+        work: plan.work,
+        workspace_request,
+        cancel,
+        owner,
+    };
+    (response, Some(job))
+}
+
+// -- recovery scan -------------------------------------------------------
+///
+/// One stranded pre-attempt entry for operator triage: durable identities
+/// only, no Git or provider state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StrandedPreAttemptEntry {
+    /// Execution admitted without an attempt.
+    pub execution_id: String,
+    /// Task owning the execution.
+    pub task_id: String,
+    /// Reserved Attempt identity owned by the execution.
+    pub attempt_id: String,
+}
+
+/// Lists the stranded pre-attempt entries in one database. Read-only:
+/// opens the store, answers from committed rows, emits no events. An
+/// unreadable database yields an empty list — this scan is triage
+/// reporting, never a correctness boundary (the resume dispatch
+/// re-validates everything before acting).
+#[must_use]
+pub fn scan_pre_attempt_strands(db_path: &Path) -> Vec<StrandedPreAttemptEntry> {
+    let store = match storage_sqlite::SqliteStore::open(db_path) {
+        Ok(store) => store,
+        Err(_) => return Vec::new(),
+    };
+    match store.list_pre_attempt_stranded_executions() {
+        Ok(entries) => entries
+            .into_iter()
+            .map(|entry| StrandedPreAttemptEntry {
+                execution_id: entry.execution_id.to_string(),
+                task_id: entry.task_id.to_string(),
+                attempt_id: entry.attempt_id.to_string(),
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Best-effort daemon-startup report of stranded pre-attempt entries:
+/// each line names the execution, its task and reserved attempt, plus the
+/// exact resume invocation. Emits nothing when no strand exists. Never
+/// mutates, never spawns provider work: automatic background resurrection
+/// is rejected (the workspace inputs are operator-supplied operational
+/// data, and surprise provider spawns after a restart are the G11 orphan
+/// class) — the architecturally correct startup action is to surface the
+/// strand honestly and await the explicit, auditable resume.
+pub fn log_pre_attempt_strands(db_path: &Path) {
+    for strand in &scan_pre_attempt_strands(db_path) {
+        eprintln!(
+            "agentd: pre-attempt recovery: execution {} (task {}, attempt {}) committed entry but recorded no attempt; resume with: agentctl execution resume {} <repository-path>",
+            strand.execution_id, strand.task_id, strand.attempt_id, strand.execution_id,
+        );
+    }
+}
 /// Cheap provider precheck without spawning: the configured executable
 /// must resolve. Version/auth surface later as typed attempt outcomes —
 /// this gate only refuses the structurally hopeless case before entry.
@@ -801,6 +1305,9 @@ fn handle_cancel(
             )),
         },
         None => {
+            if execution.attempts().is_empty() {
+                return handle_cancel_no_attempt(&store, &execution_id);
+            }
             let last = execution
                 .attempts()
                 .last()
@@ -826,6 +1333,68 @@ fn handle_cancel(
 }
 
 // -- wire helpers ----------------------------------------------------------
+
+/// Honest cancel posture for an execution with zero attempts (TASK-0054,
+/// HARD-3): the old code reported `ALREADY_CONCLUDED … no attempts
+/// recorded` for a strand that never concluded anything. A committed
+/// entry with its reservation intact is recoverable work awaiting an
+/// explicit resume — never a conclusion. Zero attempts with no (or an
+/// ambiguous) reservation is unexpected durable state: reported as no
+/// live run with an inspection pointer, never as concluded.
+fn handle_cancel_no_attempt(
+    store: &storage_sqlite::SqliteStore,
+    execution_id: &ExecutionId,
+) -> ExecutionCoreResponse {
+    let reservations = match store.list_attempt_reservations_for_execution(execution_id) {
+        Ok(reservations) => reservations,
+        Err(_) => {
+            return exec_error(BusinessErrorCode::Internal, "internal storage failure");
+        }
+    };
+    if reservations.len() != 1 {
+        return ExecutionCoreResponse {
+            payload: Some(execution_core_response::Payload::Cancel(
+                CancelExecutionResponse {
+                    execution_id: execution_id.to_string(),
+                    cancel_requested: false,
+                    run_state: "NO_LIVE_RUN".to_owned(),
+                    detail: format!(
+                        "no live provider run for execution {}; no attempts recorded and no pending reservation (unexpected durable state) — inspect status",
+                        truncate_id(execution_id.as_str())
+                    ),
+                },
+            )),
+        };
+    }
+    let hint = match store.get_workspace_for_execution(execution_id) {
+        Ok(None) => format!(
+            "resume with: agentctl execution resume {} <repository-path> --ref <repository-ref> --rev <base-revision>",
+            truncate_id(execution_id.as_str())
+        ),
+        Ok(Some(lease)) => format!(
+            "resume with: agentctl execution resume {} <repository-path> (lease {})",
+            truncate_id(execution_id.as_str()),
+            lease.lifecycle(),
+        ),
+        Err(_) => {
+            return exec_error(BusinessErrorCode::Internal, "internal storage failure");
+        }
+    };
+    ExecutionCoreResponse {
+        payload: Some(execution_core_response::Payload::Cancel(
+            CancelExecutionResponse {
+                execution_id: execution_id.to_string(),
+                cancel_requested: false,
+                run_state: "AWAITING_RESUME".to_owned(),
+                detail: format!(
+                    "execution {} committed entry but recorded no attempt; {}",
+                    truncate_id(execution_id.as_str()),
+                    hint,
+                ),
+            },
+        )),
+    }
+}
 
 fn exec_error(code: BusinessErrorCode, message: impl Into<String>) -> ExecutionCoreResponse {
     ExecutionCoreResponse {
@@ -1012,14 +1581,15 @@ mod tests {
     }
 
     #[test]
-    fn cancel_registry_is_per_execution_and_idempotent() {
+    fn cancel_registry_is_per_execution_and_owner_scoped() {
         let registry = CancelRegistry::fresh();
         let live = ExecutionId::new("E-live").unwrap();
         let other = ExecutionId::new("E-other").unwrap();
         assert!(!registry.is_live(&live));
         assert!(!registry.signal(&live));
-        let flag = provider_claude::CancelFlag::fresh();
-        registry.register(&live, flag);
+        let owner = registry
+            .try_claim(&live, provider_claude::CancelFlag::fresh())
+            .expect("first claim wins");
         assert!(registry.is_live(&live));
         assert!(!registry.is_live(&other));
         assert!(registry.signal(&live));
@@ -1027,10 +1597,54 @@ mod tests {
             registry.signal(&live),
             "repeat signal stays true while live"
         );
-        registry.unregister(&live);
+        // A foreign token retires nothing.
+        assert!(!registry.release(&live, LiveOwnerToken(u64::MAX)));
+        assert!(registry.is_live(&live));
+        assert!(registry.release(&live, owner));
         assert!(!registry.is_live(&live));
         assert!(!registry.signal(&live));
-        registry.unregister(&live);
+        // Releasing twice is a safe no-op, never an error.
+        assert!(!registry.release(&live, owner));
+    }
+
+    #[test]
+    fn cancel_registry_claim_never_overwrites_and_stale_release_is_safe() {
+        // ABA keeper (TASK-0056 B-CR): A claims, A completes, B claims, a
+        // delayed cleanup carrying A's token runs — B must stay registered
+        // with its own cancel handle intact.
+        let registry = CancelRegistry::fresh();
+        let execution = ExecutionId::new("E-aba").unwrap();
+        let flag_a = provider_claude::CancelFlag::fresh();
+        let token_a = registry
+            .try_claim(&execution, flag_a.clone())
+            .expect("A claims");
+        // A second claim for the live execution loses without disturbing A.
+        assert!(
+            registry
+                .try_claim(&execution, provider_claude::CancelFlag::fresh())
+                .is_none(),
+            "live execution refuses a second claim"
+        );
+        assert!(registry.signal(&execution));
+        assert!(flag_a.is_cancelled(), "signal reaches A's handle");
+        assert!(registry.release(&execution, token_a));
+        assert!(!registry.is_live(&execution));
+
+        let flag_b = provider_claude::CancelFlag::fresh();
+        let token_b = registry
+            .try_claim(&execution, flag_b.clone())
+            .expect("B claims after A released");
+        assert_ne!(token_a, token_b, "successive owners differ");
+        // Stale cleanup from A is a no-op: B stays live and signallable.
+        assert!(!registry.release(&execution, token_a));
+        assert!(registry.is_live(&execution));
+        assert!(registry.signal(&execution));
+        assert!(
+            flag_b.is_cancelled(),
+            "signal still reaches the current owner's handle"
+        );
+        assert!(registry.release(&execution, token_b));
+        assert!(!registry.is_live(&execution));
     }
 
     #[test]

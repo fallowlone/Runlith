@@ -132,6 +132,91 @@ pub fn create_worktree(
     )
 }
 
+/// Continues a proven branch-only materialization crash by attaching the
+/// already-existing managed branch. No branch is created, reset, or deleted.
+pub fn attach_worktree(
+    executable: &OsStr,
+    lease: &WorkspaceLease,
+    repository_path: &str,
+    worktree_path: &str,
+) -> Result<(), WorkspaceFailure> {
+    let target_abs =
+        absolutize(worktree_path).map_err(|_| WorkspaceFailure::WorktreeCollision {
+            detail: bounded_detail("git-cli: invalid worktree target path".to_owned()),
+        })?;
+    let root = observe::repository_root(executable, repository_path)?;
+    let base_oid = lease.base_revision().as_str().to_owned();
+    prove_base_revision(executable, &root, &base_oid)?;
+    check_branch_argv_safety(lease)?;
+
+    if !observe::branch_exists(executable, root_to_str(&root)?, lease.branch())? {
+        return Err(WorkspaceFailure::BranchCollision {
+            detail: bounded_detail(format!(
+                "git-cli: managed branch {} disappeared before recovery",
+                lease.branch().as_str()
+            )),
+        });
+    }
+    let (tip_out, tip) = run_git_text(
+        executable,
+        &root,
+        &["rev-parse", "--verify", lease.branch().as_str()],
+    )?;
+    if !tip_out.status.success() || tip != base_oid {
+        return Err(WorkspaceFailure::BranchCollision {
+            detail: bounded_detail(format!(
+                "git-cli: managed branch {} is not exactly at recorded base {}; refusing recovery",
+                lease.branch().as_str(),
+                base_oid
+            )),
+        });
+    }
+    if let Some(holder) =
+        observe::worktree_for_branch(executable, root_to_str(&root)?, lease.branch())?
+    {
+        return Err(WorkspaceFailure::WorktreeCollision {
+            detail: bounded_detail(format!(
+                "git-cli: managed branch {} is already checked out at {holder}",
+                lease.branch().as_str()
+            )),
+        });
+    }
+
+    check_target_path(&root, &target_abs)?;
+    let baseline = observe_primary(executable, &root)?;
+    let target_arg = target_abs.clone().into_os_string();
+    let add = run_git(
+        executable,
+        &root,
+        &[
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            OsStr::new("--"),
+            target_arg.as_os_str(),
+            OsStr::new(lease.branch().short_name()),
+        ],
+    )?;
+    if !add.status.success() {
+        return Err(mutation_failure(
+            executable,
+            &root,
+            &target_abs,
+            lease.branch(),
+            &add,
+        ));
+    }
+
+    verify_postconditions(
+        executable,
+        lease,
+        &root,
+        &target_abs,
+        &base_oid,
+        lease.branch().as_str(),
+        &baseline,
+    )
+}
+
 /// Proves the exact base OID names a commit in this repository.
 fn prove_base_revision(
     executable: &OsStr,

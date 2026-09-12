@@ -16,8 +16,8 @@ use ipc_contracts::proto::{
     AddDependencyRequest, CancelExecutionRequest, CreateProjectRequest, CreateTaskRequest,
     ExecutionCoreRequest, ExecutionCoreResponse, GetExecutionRequest, GetProjectRequest,
     GetTaskRequest, LifecycleRequest, ListDependenciesRequest, ListProjectsRequest,
-    ListTasksForProjectRequest, RunExecutionRequest, TaskCoreRequest, TaskCoreResponse,
-    TaskLifecycleOp,
+    ListTasksForProjectRequest, ResumeExecutionRequest, RunExecutionRequest, TaskCoreRequest,
+    TaskCoreResponse, TaskLifecycleOp,
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -44,6 +44,7 @@ async fn main() -> ExitCode {
             eprintln!("  agentctl execution run <task-id> <repository-path> [--rev <R>] [--ref <name>] [--execution <E>] [--attempt <A>] [--detach]");
             eprintln!("  agentctl execution status <execution-id>");
             eprintln!("  agentctl execution cancel <execution-id>");
+            eprintln!("  agentctl execution resume <execution-id> <repository-path> [--ref <name>] [--rev <R>]");
             ExitCode::FAILURE
         }
     }
@@ -512,10 +513,13 @@ const STATUS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_mill
 const RUN_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(420);
 
 fn usage_execution() -> ExitCode {
-    eprintln!("usage: agentctl execution <run|status|cancel> ...");
+    eprintln!("usage: agentctl execution <run|status|cancel|resume> ...");
     eprintln!("  agentctl execution run <task-id> <repository-path> [--rev <R>] [--ref <name>] [--execution <E>] [--attempt <A>] [--detach]");
     eprintln!("  agentctl execution status <execution-id>");
     eprintln!("  agentctl execution cancel <execution-id>");
+    eprintln!(
+        "  agentctl execution resume <execution-id> <repository-path> [--ref <name>] [--rev <R>]"
+    );
     ExitCode::FAILURE
 }
 
@@ -652,6 +656,48 @@ fn execution_action(args: &[String]) -> Result<ExecutionAction, ()> {
                 payload: Some(execution_core_request::Payload::Cancel(
                     CancelExecutionRequest {
                         execution_id: execution_id.clone(),
+                    },
+                )),
+            }))
+        }
+        "resume" => {
+            // Recovery for an admitted-but-not-attempted execution: the
+            // daemon re-drives the same execution with its reserved
+            // attempt. `--ref`/`--rev` are required only when no lease
+            // exists yet; otherwise the recorded lease values apply.
+            let rest = &args[1..];
+            if rest.len() < 2 {
+                return Err(());
+            }
+            let execution_id = rest[0].clone();
+            let repository_path = rest[1].clone();
+            if execution_id.trim().is_empty() || repository_path.trim().is_empty() {
+                return Err(());
+            }
+            let mut repository_ref = String::new();
+            let mut base_revision = String::new();
+            let mut index = 2;
+            while index < rest.len() {
+                match rest[index].as_str() {
+                    "--ref" => {
+                        index += 1;
+                        repository_ref = rest.get(index).cloned().ok_or(())?;
+                    }
+                    "--rev" => {
+                        index += 1;
+                        base_revision = rest.get(index).cloned().ok_or(())?;
+                    }
+                    _ => return Err(()),
+                }
+                index += 1;
+            }
+            Ok(ExecutionAction::Once(ExecutionCoreRequest {
+                payload: Some(execution_core_request::Payload::Resume(
+                    ResumeExecutionRequest {
+                        execution_id,
+                        repository_path,
+                        repository_ref,
+                        base_revision,
                     },
                 )),
             }))
@@ -842,8 +888,8 @@ fn terminal_status(response: &ExecutionCoreResponse) -> Option<ExitCode> {
                     print_execution_response(response, false);
                     if get.attempts.is_empty() {
                         eprintln!(
-                            "agentctl: execution {} ended before its attempt; task {} is {}; see daemon logs",
-                            get.execution_id, get.task_id, get.task_state
+                            "agentctl: execution {} ended before its attempt; task {} is {}; resume with: agentctl execution resume {} <repository-path> [--ref <name>] [--rev <R>]",
+                            get.execution_id, get.task_id, get.task_state, get.execution_id
                         );
                     } else {
                         eprintln!(
@@ -869,6 +915,13 @@ fn print_execution_response(response: &ExecutionCoreResponse, direct: bool) -> E
             println!(
                 "execution {} attempt {} task {} {}",
                 run.execution_id, run.attempt_id, run.task_id, run.task_state
+            );
+            ExitCode::SUCCESS
+        }
+        Some(execution_core_response::Payload::Resume(resumed)) => {
+            println!(
+                "resumed execution {} attempt {} task {} {}",
+                resumed.execution_id, resumed.attempt_id, resumed.task_id, resumed.task_state
             );
             ExitCode::SUCCESS
         }

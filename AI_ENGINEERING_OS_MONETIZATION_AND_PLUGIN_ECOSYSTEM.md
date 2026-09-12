@@ -58,6 +58,100 @@ Exact prices are commercial hypotheses and may change without an architecture
 decision. The tier structure and local-first licensing principles in this file
 are the canonical product direction.
 
+
+
+## 2.1 Licensing and IP strategy
+
+The commercial core is **not intended to use a permissive license that allows an
+unrelated company to fork, rebrand and resell AI Engineering OS without a
+separate agreement**. Source visibility and source-code commercialization are
+separate questions.
+
+Current strategic direction (subject to qualified legal review before public
+release):
+
+```text
+Public/source-available core
+  + useful Community rights
+  + ordinary product subscriptions/licenses
+  + separate Commercial/OEM rights
+  + trademark protection
+```
+
+The project should distinguish three different rights:
+
+```text
+1. Use AI Engineering OS to build commercial software
+   → normal user/product entitlement; should be broadly allowed.
+
+2. Run AI Engineering OS internally at a company
+   → controlled by the applicable Community/Team/Enterprise product terms.
+
+3. Reuse, redistribute, white-label, host-resell, embed or commercialize
+   AI Engineering OS source/core itself
+   → requires explicit source-code/commercial/OEM rights.
+```
+
+A developer paying for Pro must be able to build and sell their own SaaS or
+software with AI Engineering OS. That does **not** automatically grant the right
+to extract the orchestration core, repackage it as a competing product or offer
+AI Engineering OS itself as a managed service.
+
+### Main-license candidates
+
+The final license is not frozen yet. The current research ranking for the core is:
+
+1. **Established source-available anti-competition license such as PolyForm
+   Shield + separate Commercial License**, if its exact competitive-use boundary
+   matches the desired product rights after legal review.
+2. **Counsel-drafted AI Engineering OS Community Source License + separate
+   Commercial/OEM License** if standard terms cannot express the required
+   boundaries clearly enough.
+3. **BSL/Fair Source-style delayed-open licensing** only if deliberately opening
+   old versions later becomes part of product strategy.
+4. **AGPLv3** only if reciprocal source disclosure is sufficient; AGPL does not
+   prohibit commercial competition itself.
+
+MIT/Apache-2.0/GPL/AGPL are therefore not assumed to satisfy the owner's core
+anti-clone goal merely because they are common software licenses.
+
+This section is product strategy, not legal advice. Before public release or
+accepting material third-party contributions, obtain qualified legal review of
+the final license text, contributor terms and commercial agreements.
+
+## 2.2 Contributor, trademark and repository licensing boundaries
+
+Before broad external contribution starts, decide how dual licensing and future
+relicensing will work. The project should choose an explicit contributor-rights
+mechanism (for example an appropriate CLA and/or DCO strategy) so accepted
+contributions can legally remain compatible with both Community and Commercial
+licensing. Do not wait until hundreds of contributors exist before deciding.
+
+Trademark is a separate protection layer. The product/company should reserve the
+right to control the **AI Engineering OS** name, logo and implication of official
+endorsement even when a code license permits some forms of modification.
+
+Potential repository/license split once the extension contracts stabilize:
+
+| Surface | Likely licensing direction |
+| --- | --- |
+| Core desktop/runtime/orchestration product | protected source-available Community license |
+| Commercial/OEM/white-label rights | separate negotiated Commercial License |
+| Plugin SDK / protocol schemas / examples | potentially permissive where ecosystem adoption benefits from it |
+| Enterprise/cloud services | commercial/private as appropriate |
+| Brand/trademark | separate trademark policy |
+
+The split must follow real architectural boundaries. Do not create artificial
+package boundaries solely to game licensing.
+
+## 2.3 Anti-clone protection is not the whole moat
+
+License restrictions reduce direct code appropriation; they do not replace a
+product moat. The durable advantages should come from reliability, verification,
+security, provider integrations, UX, cross-provider continuity, plugin/playbook
+ecosystem, trusted distribution, enterprise governance, support and operational
+experience.
+
 ## 3. Product tiers
 
 | Tier | Commercial model | Product role |
@@ -241,6 +335,41 @@ extension boundaries. Marketplace implementation begins later still.
 The plugin ecosystem must extend a strong standalone product. It must never be
 used as a reason to postpone core reliability, policy, verification or Tools /
 Skills foundations.
+
+
+
+### 5.1 Playbooks, procedures and routines as extension products
+
+The extension ecosystem should preserve distinct concepts rather than calling
+all reusable automation a plugin:
+
+```text
+Tool
+→ atomic capability
+
+Playbook
+→ versioned executable sequence with typed inputs/outputs, scopes and evidence
+
+Procedure
+→ conditional orchestration of tools/playbooks
+
+Routine
+→ scheduled/event/condition-triggered execution of an approved procedure
+
+PluginPackage
+→ distribution container that may ship tools, skills, playbooks, procedures,
+  routines, connectors and small UI contributions
+```
+
+A high-value marketplace can therefore sell or distribute more than executable
+code. Examples include audited Playbooks, policy packs, specialized reviewers,
+security procedures, release workflows, context optimizers and integration
+bundles.
+
+Approved/locked Playbook versions should be executable without granting the
+agent authority to rewrite the workflow itself. Updates create a new version and
+may require review/re-approval when permissions, network access, secrets or
+behavior change.
 
 ## 6. Library vs marketplace
 
@@ -921,3 +1050,808 @@ Plugin Ecosystem
 The core economic principle is stable: **users can keep their execution
 providers while paying AI Engineering OS for the durable, secure, extensible
 engineering control plane around them.**
+
+
+---
+
+# Appendix — Detailed licensing and monetization research notes (2026-09-11)
+
+> Historical research merged from the former staging file. The canonical
+> commercial direction is defined by the main sections above. Questions and
+> candidate licenses in this appendix remain subject to legal and market
+> validation and do not override accepted architecture/security policy.
+
+> Status: staging document for later consolidation into product strategy, repository policy, licensing decision memo, and commercialization roadmap.
+>
+> Important: this document records current strategic ideas and constraints. It is **not** legal advice and does not constitute a final license decision.
+>
+> Current development work remains unchanged: these notes must not alter G5 / TASK-0051.
+
+## 1. Core owner requirement
+
+A central strategic requirement is now explicit:
+
+> The repository may be publicly visible and users should be able to inspect and use the product, but third parties should not be able to take AI Engineering OS, fork it, rebrand it, resell it, offer it as a competing hosted service, or freely reuse substantial parts of its core code to build a commercial competing product without a separate commercial license.
+
+This requirement materially changes the licensing search space.
+
+## 2. Open source vs source-available
+
+```text
+Open Source
+-----------
+must allow commercial use under OSI-style principles
+
+Source Available
+----------------
+source can be public/inspectable
+but commercial, competitive, hosted, redistribution,
+or embedding rights may be restricted
+```
+
+Because the project owner wants to prevent commercial clones and commercial reuse of core code without permission, the likely direction is:
+
+```text
+source-available product
++ free/community rights
++ paid application subscriptions
++ separate commercial/OEM rights
+```
+
+rather than classic MIT/Apache/GPL/AGPL open source for the whole commercial core.
+
+## 3. Licenses preliminarily deprioritized for the main commercial core
+
+### MIT
+Broad commercial reuse, redistribution, modification, and sublicensing are allowed subject to minimal notice requirements.
+
+**Conclusion:** excellent for adoption; poor for protecting against commercial forks.
+
+### Apache-2.0
+Also broadly permits commercial reuse and modification, with stronger patent provisions.
+
+**Conclusion:** excellent for ecosystem adoption; poor for preventing commercial forks or repackaging.
+
+### GPLv3
+Strong copyleft on distributed derivative works, but commercial use and sale are allowed.
+
+**Conclusion:** does not satisfy a requirement that commercial reuse itself be prohibited.
+
+### AGPLv3
+Adds network-source obligations for modified network-interactive deployments.
+
+Useful against closed SaaS forks, but commercial use is still allowed and competitors may potentially operate commercial services if they comply with AGPL. Enterprise procurement may also avoid AGPL.
+
+**Conclusion:** potentially valuable for reciprocal openness; not sufficient if the owner's goal is to prevent commercial competing use itself.
+
+## 4. Candidate strategy: Source-Available Community License + Commercial License
+
+Current strongest strategic direction:
+
+```text
+Public repository
+        │
+        ├── Community / Personal rights
+        │     inspect source
+        │     run product
+        │     modify for own use
+        │     learn/evaluate
+        │     contribute
+        │     build plugins via supported APIs
+        │
+        ├── Product subscription rights
+        │     use AI Engineering OS to build commercial software
+        │     use existing Claude/Codex/Gemini subscriptions
+        │
+        └── Commercial source-code rights
+              OEM
+              redistribution
+              white-label
+              embedding
+              source-code commercialization
+              competing products
+              hosted resale
+              managed service based substantially on the core
+              → separate agreement
+```
+
+This cleanly separates:
+
+```text
+using AI Engineering OS
+≠
+obtaining commercial rights to AI Engineering OS source code
+```
+
+## 5. Community rights concept
+
+Potential free/community rights:
+
+- inspect source;
+- compile and run locally;
+- personal use;
+- educational use;
+- evaluation;
+- research;
+- local modification for own use;
+- contribution;
+- development of plugins/extensions through documented extension points;
+- potentially small-scale indie use, depending on final policy.
+
+Potentially restricted without commercial license:
+
+- selling AI Engineering OS itself;
+- selling a rebranded fork;
+- commercial redistribution;
+- white-label redistribution;
+- offering a hosted/managed clone;
+- creating a substantially competing product from the source;
+- extracting substantial core modules into another commercial competing product;
+- OEM embedding;
+- removing licensing/attribution protections;
+- claiming official affiliation;
+- commercial relicensing or sublicensing.
+
+Final legal wording must be drafted/reviewed by qualified counsel.
+
+## 6. Commercial use of the product should remain allowed
+
+A customer should be allowed to use AI Engineering OS to build software that they themselves sell.
+
+```text
+Developer pays for AI Engineering OS Pro
+→ uses it to build a SaaS product
+→ sells that SaaS
+→ fully allowed
+```
+
+This is different from:
+
+```text
+Developer takes AI Engineering OS core
+→ embeds/rebrands it as their own product
+→ sells that product
+```
+
+The second case should require a separate commercial/OEM agreement.
+
+This distinction is essential to avoid making the product unattractive to professional developers.
+
+## 7. PolyForm Shield as a serious candidate
+
+PolyForm Shield is currently an interesting standard source-available candidate because its design focuses on allowing broad use while restricting use to build competing products.
+
+Potential advantages:
+- avoids inventing an entirely custom license from scratch;
+- directly addresses competition;
+- source remains visible;
+- can be paired with a separate commercial license.
+
+Potential concerns:
+- need careful legal review of what counts as a competing product;
+- may not cover every desired “commercial code extraction” scenario exactly as intended;
+- enterprise legal teams may be less familiar with it than standard OSS licenses.
+
+Current status: strong runner-up / possible default source-available license; not final.
+
+## 8. Custom Community Source License
+
+A custom AI Engineering OS Community License could precisely encode the desired commercial boundaries.
+
+Potential benefits:
+- exact control over hosted use, redistribution, embedding, OEM, competition, and commercial forks;
+- clear separation of app usage from source-code exploitation.
+
+Potential downsides:
+- custom licenses create legal uncertainty;
+- enterprises dislike unfamiliar terms;
+- ecosystem tooling may not recognize the license;
+- legal drafting cost is higher;
+- mistakes can create unenforceable or ambiguous terms.
+
+Recommendation: if a custom license is ever used, do not write it casually. Base it on established source-available patterns and have it reviewed professionally.
+
+## 9. BSL / Business Source License
+
+BSL-style licensing is attractive because source is visible and current versions may restrict production/competitive use, while older versions later convert to an open-source license.
+
+Concern: the automatic Change Date means old versions eventually become open source.
+
+If the owner strongly wants permanent anti-clone protection for the commercial core, BSL may not fit.
+
+Could still be valuable if strategy becomes:
+
+```text
+current versions protected
+older versions eventually open
+```
+
+## 10. FSL / Fair Source style delayed-open approach
+
+Similar strategic concern:
+
+```text
+current code protected
+→ after delay
+→ older code becomes open source
+```
+
+This is attractive for ecosystem trust but weaker if the long-term goal is to prevent commercial reuse of even old core technology.
+
+Use only if delayed openness becomes an intentional product strategy.
+
+## 11. Elastic License / managed-service protection
+
+Elastic-style licensing is useful as inspiration because it is designed to prevent third parties from simply offering the product itself as a managed service.
+
+However, it may not map exactly to the desired restrictions on code extraction, competing products, OEM embedding, or commercial reuse of core modules.
+
+Treat it as a reference model rather than an automatic answer.
+
+## 12. Recommended licensing architecture — current hypothesis
+
+```text
+Core application / orchestration code
+→ source-available community license
+  (PolyForm Shield or professionally drafted equivalent)
+
+Commercial rights
+→ separate Commercial License
+
+Plugins / SDK / client libraries
+→ possibly more permissive license
+  e.g. Apache-2.0 or MIT where ecosystem adoption matters
+
+Examples / templates
+→ permissive
+
+Brand
+→ trademark policy
+
+Hosted/team proprietary services
+→ separate commercial code where appropriate
+```
+
+This allows the project to protect its moat while still encouraging plugin/integration adoption.
+
+## 13. Repository split strategy
+
+Potential future split:
+
+```text
+ai-engineering-os
+  core product
+  source-available
+
+ai-engineering-os-sdk
+  plugin SDK
+  permissive
+
+ai-engineering-os-examples
+  permissive
+
+ai-engineering-os-protocol
+  protocol/schema definitions
+  potentially permissive
+
+ai-engineering-os-enterprise
+  private/commercial or separate repository
+
+ai-engineering-os-cloud
+  private/commercial
+```
+
+The final split should follow actual architecture boundaries, not artificial licensing boundaries.
+
+## 14. Plugin ecosystem strategy
+
+Possible approach:
+
+```text
+Core
+→ protected source-available
+
+Plugin SDK / API contracts
+→ permissive
+
+Third-party plugin
+→ author chooses their own compatible license
+
+Marketplace
+→ separate terms / revenue share
+```
+
+This lets businesses safely integrate without receiving unrestricted rights to the commercial core.
+
+## 15. Trademark strategy
+
+Trademark can protect:
+- “AI Engineering OS” name;
+- official logo;
+- product identity;
+- official distributions;
+- marketplace branding.
+
+Potential future need:
+- trademark usage policy;
+- official/unofficial distribution rules.
+
+## 16. Contributor / IP strategy before broad public contributions
+
+Before accepting many external contributors, decide how future dual licensing/relicensing will work.
+
+Potential mechanisms:
+
+```text
+DCO
+CLA
+copyright assignment
+or
+no future relicensing strategy
+```
+
+For dual licensing, the company/project must have sufficient rights to distribute contributions under both community and commercial terms.
+
+Potential contributor model:
+
+```text
+Contributor retains copyright
++
+grants project/company broad rights
+to distribute/relicense contribution
+under community and commercial terms
+```
+
+This should be legally reviewed.
+
+Important: do not wait until hundreds of contributors exist before deciding this.
+
+## 17. Dual licensing
+
+Potential structure:
+
+```text
+Community License
+→ free/community/local use under defined restrictions
+
+Commercial License
+→ additional rights for:
+   OEM
+   embedding
+   commercial redistribution
+   hosted resale
+   white-label
+   competing-product rights
+   special contractual terms
+```
+
+## 18. Subscription rights vs source rights
+
+Keep two commercial layers conceptually separate.
+
+### Product subscription
+Pays for access to product features/services.
+
+Examples:
+- Pro;
+- Team;
+- Enterprise.
+
+### Source-code commercial license
+Pays for IP rights.
+
+Examples:
+- OEM;
+- redistribution;
+- embedding;
+- commercial fork;
+- white-label;
+- managed-service rights.
+
+A Pro subscription should not implicitly grant OEM rights.
+
+An Enterprise subscription should not automatically grant unrestricted source-code reuse unless explicitly contracted.
+
+## 19. Preliminary monetization structure
+
+Likely future product tiers:
+
+```text
+Community / Free
+Pro Individual
+Team / Business
+Enterprise
+Commercial / OEM License
+```
+
+The Commercial/OEM License is not necessarily a normal self-serve subscription tier. It may be contract-based.
+
+## 20. Community / Free philosophy
+
+Goal: make the local product genuinely useful rather than crippleware.
+
+Potential Community features:
+- local agentd;
+- agentctl;
+- local Task Graph;
+- SQLite/Event Journal;
+- local worktree isolation;
+- use own Claude/Codex/Gemini subscriptions;
+- manual provider selection;
+- local verification basics;
+- basic UI;
+- community plugins/playbooks;
+- no mandatory account;
+- telemetry off by default.
+
+Free should demonstrate the complete product concept, not merely act as a demo.
+
+## 21. Pro Individual philosophy
+
+Target: solo developer / power user.
+
+Potential paid value:
+- advanced UI;
+- advanced orchestration;
+- richer automation;
+- provider routing;
+- cross-provider handoff;
+- advanced history/search;
+- premium Playbooks;
+- advanced review workflows;
+- background routines;
+- productivity analytics;
+- optional sync.
+
+Target price hypothesis for later research:
+
+```text
+~€15–25/month
+```
+
+with annual discount.
+
+Important: do not charge users again for model tokens when they are using their existing provider subscriptions/CLI access.
+
+## 22. Team / Business philosophy
+
+Target: small teams and SMBs.
+
+Potential value:
+- shared Task Graph;
+- team workspaces;
+- approvals;
+- shared policies;
+- shared playbooks;
+- audit history;
+- centralized provider controls;
+- team usage visibility;
+- GitHub/Jira/Linear/Slack integrations;
+- role-based permissions;
+- shared remote workers.
+
+Potential price hypothesis:
+
+```text
+~€35–70 / user / month
+```
+
+Final price requires market benchmarking and cost modeling.
+
+## 23. Enterprise philosophy
+
+Target: larger organizations, regulated teams, on-prem customers.
+
+Potential features:
+- SSO/SAML/OIDC;
+- SCIM;
+- advanced RBAC;
+- centralized governance;
+- audit retention;
+- security/compliance controls;
+- enterprise secrets integration;
+- private/on-prem deployment;
+- remote worker fleet management;
+- policy packs;
+- support/SLA;
+- procurement/legal terms;
+- deployment assistance.
+
+Possible pricing:
+
+```text
+custom annual contract
+```
+
+Avoid making enterprise merely “Team with a higher price”.
+
+## 24. Commercial / OEM License
+
+Separate from ordinary subscription pricing.
+
+Use cases:
+
+```text
+embed AI Engineering OS in another product
+redistribute the product
+white-label it
+sell a managed version
+commercially fork the core
+ship it as part of another commercial platform
+```
+
+Pricing should likely be negotiated, with an annual minimum and potentially royalty/revenue-linked terms.
+
+Do not publish a cheap self-serve OEM price early.
+
+## 25. BYO-provider strategy
+
+A major product advantage:
+
+```text
+User already pays for:
+Claude
+Codex
+Gemini
+etc.
+```
+
+AI Engineering OS should, where technically and contractually possible, orchestrate those existing subscription-backed CLIs/accounts.
+
+Principle:
+
+> Do not force users to buy tokens from AI Engineering OS when AI Engineering OS did not bear the inference cost.
+
+## 26. Hosted/managed compute should be separately billable
+
+If AI Engineering OS actually incurs cost, charge for it.
+
+Examples:
+- hosted remote workers;
+- managed cloud execution;
+- artifact storage;
+- team synchronization;
+- premium connectors;
+- retained logs;
+- hosted model inference;
+- managed browser/computer workers.
+
+Possible model:
+
+```text
+base subscription
++
+usage-based hosted resources
+```
+
+## 27. Avoid double charging
+
+Bad model:
+
+```text
+€40/month app subscription
++
+forced token markup
++
+forced cloud runner fee
+```
+
+when the user already has provider subscriptions and wants everything local.
+
+Preferred:
+
+```text
+local BYO-provider path
+→ predictable subscription
+
+optional managed services
+→ explicit usage price
+```
+
+## 28. Pricing balance principle
+
+Too cheap can create:
+- weak perceived value;
+- support burden;
+- difficult sustainable development;
+- difficult future price increases.
+
+Too expensive can:
+- compete directly with Claude/Codex subscription cost;
+- make users feel double-charged;
+- damage solo-developer adoption.
+
+A key pricing benchmark will be:
+
+```text
+AI provider subscription cost
++
+developer tool subscription cost
++
+team collaboration value
+```
+
+## 29. Open/local core vs monetized layer
+
+Strong future boundary:
+
+```text
+Local core
+----------
+should remain useful
+should not require account
+should not require cloud
+should support own provider subscriptions
+
+Paid value
+----------
+advanced orchestration convenience
+team collaboration
+managed infrastructure
+organization governance
+enterprise security
+support
+premium integrations
+premium marketplace content
+```
+
+Do not intentionally cripple fundamental local execution merely to create artificial paywalls.
+
+## 30. Marketplace monetization
+
+Future plugin/playbook marketplace could monetize through:
+- paid plugins;
+- paid Playbooks;
+- organization policy packs;
+- specialized reviewers;
+- security packs;
+- integration packs;
+- release automation;
+- context-optimization modules.
+
+Possible later model:
+
+```text
+creator keeps majority
+platform revenue share
+```
+
+Exact percentage should be researched later.
+
+## 31. Anti-clone protection does not replace product moat
+
+Real moat can come from:
+
+```text
+architecture quality
+reliability
+verification quality
+security
+provider integrations
+UX
+plugin/playbook ecosystem
+community
+release trust
+team workflows
+enterprise integrations
+brand
+customer support
+historical execution intelligence
+```
+
+## 32. Protection layers
+
+```text
+Copyright
+→ protects source expression
+
+License
+→ defines permitted uses
+
+Commercial contracts
+→ grant additional paid rights
+
+Trademark
+→ protects brand identity
+
+Architecture / product moat
+→ protects market position
+
+Trade secrets / private services
+→ protect non-public operational know-how where appropriate
+```
+
+## 33. Current preliminary ranking
+
+Given the anti-commercial-fork requirement:
+
+```text
+1. PolyForm Shield-style Community License
+   + separate Commercial License
+
+2. Professionally drafted AI Engineering OS
+   Community Source License
+   + separate Commercial License
+
+3. BSL
+   only if delayed open-source conversion is acceptable
+
+4. FSL/Fair Source
+   only if delayed openness becomes intentional
+
+5. AGPLv3
+   if reciprocal open-source SaaS use is acceptable
+
+MIT / Apache
+   poor fit for protected commercial core
+```
+
+Final ranking must be based on deeper legal/business research.
+
+## 34. Critical unresolved questions
+
+Before final licensing decision, answer:
+
+1. Should commercial internal business use of Community edition be free?
+2. Should small companies have free internal use?
+3. What exactly counts as a “competitive product”?
+4. Should commercial internal use require Team subscription?
+5. Is commercial redistribution always contract-only?
+6. Should old versions ever become open source?
+7. Is dual licensing required?
+8. Do we want broad external contributions?
+9. Will proprietary Enterprise modules exist?
+10. Should plugin SDK/protocols use permissive licenses?
+11. What legal entity will own IP?
+12. Which jurisdictions matter most?
+13. Should Community license permit SaaS use that is not competitive?
+14. Should consultants be allowed to deploy the product for clients?
+15. Should resellers/MSPs need a partner license?
+
+## 35. Current recommendation direction
+
+```text
+AI Engineering OS
+-----------------
+
+Public source
++
+useful local Community edition
++
+paid Pro/Team/Enterprise product tiers
++
+BYO provider subscriptions
++
+optional paid hosted resources
++
+separate Commercial/OEM source-code license
++
+trademark protection
++
+early contributor-rights strategy
+```
+
+This currently appears to best balance:
+
+```text
+user trust
+local-first adoption
+solo affordability
+business value
+enterprise monetization
+anti-clone protection
+source transparency
+```
+
+## 36. Current project impact
+
+No current implementation change.
+
+```text
+G5: IN PROGRESS
+TASK-0051: current
+TASK-0052: next re-audit
+G6: not started
+```
+
+Licensing and monetization remain a separate product-strategy track until a formal decision memo is approved.

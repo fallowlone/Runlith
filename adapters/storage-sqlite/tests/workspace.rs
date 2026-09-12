@@ -1,7 +1,7 @@
 //! Durable WorkspaceLease ownership tests: lease CRUD and guarded
 //! transitions through the [`workspace::WorkspaceStore`] port, journal
 //! scope enforcement (write path, SQL CHECK backstop, read-path decode),
-//! corruption matrix, v4→v6 migration preservation, and the no-dirtiness
+//! corruption matrix, v4→v7 migration preservation, and the no-dirtiness
 //! invariant. Every database file is test-owned.
 
 use std::path::PathBuf;
@@ -752,7 +752,7 @@ fn v4_database_with_g2_g3_data_migrates_preserving_everything() {
             .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 6);
+    assert_eq!(store.schema_version().unwrap(), 7);
 
     // Every historical fact survives verbatim: seq, ids, types, versions,
     // scopes, outcomes, states, correlation/causation, timestamps,
@@ -822,13 +822,14 @@ fn v4_database_with_g2_g3_data_migrates_preserving_everything() {
 
 /// A real v5 database (built from the canonical 0001..0005 files) with an
 /// old-format managed branch, an open attempt, and an `Allocated` lease
-/// migrates to v6 with every durable fact preserved bit-for-bit and an
+/// migrates to v7 with every durable fact preserved bit-for-bit and an
 /// empty reservation table (TASK-0051 §58 upgrade compat: persisted
 /// branch/path facts are never recomputed, so the old `agent/E-1` branch
 /// stays observable, managed-scoped, and reconcilable under the new
-/// application version).
+/// application version; TASK-0053 adds the empty managed-identity
+/// reservation table the same way).
 #[test]
-fn v5_database_with_lease_migrates_to_v6_preserving_everything() {
+fn v5_database_with_lease_migrates_to_v7_preserving_everything() {
     const M0001: &str = include_str!("../migrations/0001_task_core.sql");
     const M0002: &str = include_str!("../migrations/0002_event_journal.sql");
     const M0003: &str = include_str!("../migrations/0003_event_scope.sql");
@@ -882,7 +883,7 @@ fn v5_database_with_lease_migrates_to_v6_preserving_everything() {
             .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 6);
+    assert_eq!(store.schema_version().unwrap(), 7);
 
     // Execution with its still-open attempt survived.
     let execution = store
@@ -920,6 +921,17 @@ fn v5_database_with_lease_migrates_to_v6_preserving_everything() {
         })
         .unwrap();
     assert_eq!(reservations, 0);
+    // TASK-0053: the managed-identity reservation table migrates in empty
+    // as well — historical leases keep no reservation rows, and the old
+    // mixed-case branch above is untouched by the new backstop.
+    let identity_reservations: i64 = raw
+        .query_row(
+            "SELECT COUNT(*) FROM managed_identity_reservations",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(identity_reservations, 0);
 }
 
 // -- structural invariants ---------------------------------------------------

@@ -15,6 +15,7 @@
 | G3 runtime Event Journal scope (execution/attempt aggregate references, initial runtime vocabulary, outcome/version/provenance semantics) | ACTIVE DECISION | G3 | ADR-0022 | none — covered; implementation in TASK-0035 (migration 0004 + RuntimeService) before FakeAgent |
 | Workspace/Git ownership and worktree lifecycle (lease ownership, identities, base revision, cleanup safety, reconciliation, failure taxonomy) | ACTIVE DECISION | G4 | ADR-0023 | none — covered; implementation in TASK-0041/0042/0043 against this contract |
 | G5 provider execution seam (`ExecutionPort` shape, adapter ACL concretization, composition-root ownership, IPC v2 execution ops, fail-fast entry, Claude-first policy, provider-owned auth) | ACTIVE DECISION | G5 | ADR-0024 | none — covered; implementation in TASK-0046/0047/0049 against this contract |
+| G5 post-admission entry recovery (explicit resume of pre-attempt strands, pre-admission workspace validation, fail-closed reservation/lease posture, G11 deferral for attempted executions) | ACTIVE DECISION | G5 | ADR-0025 | none — covered; implementation in TASK-0054 against this contract |
 | Planning / Orchestration | ACTIVE DECISION | PRE-G3 | ADR-0017 | none — covered |
 | Evaluation / Verification | ACTIVE DECISION | PRE-G3 | ADR-0018 | none — covered |
 | Policy Engine | Covered by existing ADR (detail PRE-G6) | G6 | ADR-0013 (baseline: engine + isolation layers) | dedicated G6 design ADR before G6 implementation |
