@@ -18,9 +18,9 @@
 | G5 post-admission entry recovery (explicit resume of pre-attempt strands, pre-admission workspace validation, fail-closed reservation/lease posture, G11 deferral for attempted executions) | ACTIVE DECISION | G5 | ADR-0025 | none — covered; implementation in TASK-0054 against this contract |
 | Planning / Orchestration | ACTIVE DECISION | PRE-G3 | ADR-0017 | none — covered |
 | Evaluation / Verification | ACTIVE DECISION | PRE-G3 | ADR-0018 | none — covered |
-| Policy Engine | Covered by existing ADR (detail PRE-G6) | G6 | ADR-0013 (baseline: engine + isolation layers) | dedicated G6 design ADR before G6 implementation |
-| Secrets Broker | DEFERRED ARCHITECTURE TARGET | G6 (PRE-G6) | direction in ADR-0013 / ADR-0014; no dedicated ADR | dedicated ADR before first G6 credential work |
-| Security Audit | DEFERRED ARCHITECTURE TARGET | G6 (PRE-G6) | direction in ADR-0006 / ADR-0013 | finalization ADR before G6 audit work |
+| Policy Engine | ACTIVE DECISION | G6 | ADR-0013 + ADR-0026 | implement deterministic engine in TASK-0061 against `crates/policy` |
+| Secrets Broker | ACTIVE BOUNDARY / DEFERRED IMPLEMENTATION | G6 | ADR-0026 + ADR-0013 / ADR-0014 | implement credential backend/delivery in TASK-0063; no plaintext application state |
+| Security Audit | ACTIVE BOUNDARY / DEFERRED PERSISTENCE | G6 | ADR-0026 + ADR-0006 / ADR-0013 | implement append-oriented persistence in TASK-0066; keep separate from Event Journal |
 | Resource Engine | DEFERRED ARCHITECTURE TARGET | PRE-G9 | none yet | dedicated ADR before G9 retrieval work |
 | Adaptive Model Router | DEFERRED ARCHITECTURE TARGET | PRE_RELEVANT_GATE | none yet | dedicated ADR before first adaptive-routing implementation (no gate assigned yet) |
 | DeviceResourceManager | DEFERRED ARCHITECTURE TARGET | PRE_RELEVANT_GATE | none yet | dedicated ADR before first device-resource implementation |

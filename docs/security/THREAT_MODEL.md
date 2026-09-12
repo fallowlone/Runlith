@@ -67,6 +67,16 @@ is one of: `Mitigated by architecture` (control exists in accepted design),
 | THR-015 | Logs / transcripts | Accidental secret retention in logs or transcripts | Category separation (ops/audit/transcript); secrets excluded by construction | Human pastes secret into chat | Partially mitigated | INV-008 |
 | THR-016 | TB4 / availability | Sandbox unavailable while task requires isolation | Fail closed: BLOCKED / REQUIRE USER ACTION, never silent fallback | User overrides block under pressure | Mitigated by architecture | INV-076 |
 | THR-017 | Routing / execution | Stateful provider failover replays side effects | New/recovered attempt per failover; no transparent replay | Adapter bug replaying effects | Partially mitigated | INV-066 |
+| THR-018 | Policy / delegation | Confused deputy uses a more-privileged parent/runtime to perform an operation outside the requester's authority | Typed requested/effective capabilities; child authority subset; operation-bound enforcement | Incorrect scope modeling | Partially mitigated | ADR-0026; INV-147, INV-153 |
+| THR-019 | Policy / child execution | Child agent/process gains a new capability or widens filesystem/network/secret scope | Monotonic capability narrowing; widening is a typed refusal | Future runner implementation defect | Partially mitigated | ADR-0026; INV-147 |
+| THR-020 | Approval | Stale approval is replayed for another operation, policy revision or wider path/resource | Approval binds exact request/scope/provenance/policy fingerprint/expiry | Persistent approval-store bugs | Partially mitigated | ADR-0026; INV-150 |
+| THR-021 | Filesystem | Path traversal or symlink/race escapes a managed workspace | Typed relative scope rejects traversal; future enforcement canonicalizes/revalidates adjacent to operation | OS/filesystem TOCTOU | Open | ADR-0026; INV-149, INV-153 |
+| THR-022 | Repository/process | Malicious Git hook, test/build script or project executable escalates from repository code to ambient host authority | Repository remains untrusted; process capability + runner isolation + controlled environment | Backend escape or over-broad process scope | Open | ADR-0013, ADR-0026; INV-013, INV-146 |
+| THR-023 | Provider process / credentials | Provider subprocess inherits HOME/XDG/environment secrets or writes provider state into the managed worktree (H7) | Sanitized provider environment; scoped HOME/XDG/state/scratch outside worktree; filesystem policy | Provider behavior/version changes | Open | ADR-0026; G5 final audit H7; TASK-0065 |
+| THR-024 | Secrets / network | Environment-variable or credential leakage enables network exfiltration | Secrets Broker releases scoped material only after policy; broad inheritance forbidden; network separate capability | Side channels inside approved tool | Open | ADR-0026; INV-151 |
+| THR-025 | Audit | Provider/model tampers with or fabricates security logs to hide a denied/elevated action | Product-authored Security Audit separate from provider output/Event Journal; append-oriented persistence planned | Local host compromise | Open | ADR-0026; INV-152; TASK-0066 |
+| THR-026 | Policy/enforcement | State changes between policy check and operation (TOCTOU), invalidating approved scope | Preflight is not authority; enforcement revalidates/couples restriction at operation boundary | Backend-specific atomicity limits | Open | ADR-0026; INV-153 |
+| THR-027 | Plugins/tools/external services | Tool/plugin request is treated as self-authorizing or provider-native permission silently widens product policy | Canonical PolicyDecision before invocation; provider-native controls defense in depth only | New extension point bypass | Partially mitigated | ADR-0026; INV-146, INV-148 |
 
 ## 4. Tool execution evidence
 
@@ -100,6 +110,11 @@ Unresolved by accepted architecture; listed, not decided:
 - plugin permission-model details;
 - data-at-rest encryption policy;
 - audit retention policy.
+
+G6 authorization semantics, capability monotonicity, approval binding and
+security-audit authority are no longer open design items; ADR-0026 and
+`POLICY_CONTRACT.md` define their foundation. Their persistence/enforcement
+implementations remain open by the G6 task sequence.
 
 ## 7. Accepted and deferred risks
 

@@ -218,6 +218,18 @@ execution. No `CodexContainerRunner` / `ClaudeNativeRunner` core types;
 canonical contracts stay separate even if concrete adapter composition
 later needs internal integration glue.
 
+G6 uses scoped capabilities as canonical authority (ADR-0026). If named
+"security levels" or runner profiles are introduced, they are presets that
+compile to explicit capability/isolation requirements. They cannot authorize
+an operation or bypass Policy, and a Runner reports only restrictions it can
+actually enforce.
+
+Future OS-specific adapters consume those effective requirements behind this
+Runner boundary: product-compatible macOS sandbox mechanisms, Linux
+namespace/seccomp/cgroup/filesystem/network mechanisms, and Windows restricted
+token/Job Object/AppContainer-equivalent mechanisms as appropriate. TASK-0060
+selects no backend.
+
 ## 12. Replacement test
 
 Can NativeRunner be replaced with ContainerRunner without modifying Provider
@@ -243,6 +255,7 @@ resource-limit capability taxonomy
 isolation-profile representation
 sandbox capability representation
 network-policy enforcement integration
+provider HOME/XDG/state/scratch environment construction (H7; TASK-0065)
 runner cancellation ordering with provider cancellation
 runner timeout semantics
 container backend choice

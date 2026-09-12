@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0059
-current_gate: G5
-gate_status: CLOSED  # TASK-0059 independent closure audit: G5_CLOSED; G6 Security is next
+completed_through: TASK-0060
+current_gate: G6
+gate_status: IN_PROGRESS
 
 items:
   - id: TASK-0012
@@ -876,7 +876,8 @@ items:
       classifications. No G6 scope and no remediation implementation.
     exit_criteria_summary: An independent adversarial closure report exists
       with an explicit G5_CLOSED or G5_REMEDIATION_REQUIRED verdict.
-    outcome: G5_CLOSED. No G5 blocker remains; B-CF, B-CR, B-RS2 and B-OL
+    outcome: >-
+      G5_CLOSED. No G5 blocker remains; B-CF, B-CR, B-RS2 and B-OL
       independently re-verified against genuine historical schema-6 data,
       real daemon SIGKILL recovery, real Git loose/packed refs on a proven
       case-insensitive filesystem, and real Claude Code 2.1.268 through the
@@ -895,3 +896,179 @@ items:
       - docs/development/G5_BRANCH_ONLY_MATERIALIZATION_RECOVERY.md
       - docs/development/G5_LEGACY_WORKSPACE_IDENTITY_REMEDIATION.md
       - docs/development/G5_FINAL_CLOSURE_AUDIT.md
+
+  - id: TASK-0060
+    gate: G6
+    title: G6 Security Boundary Foundation and Policy Contracts
+    objective: Establish the G6 threat/trust boundary, canonical product
+      security authority, scoped capability algebra, approval/audit/secrets
+      boundaries and executable provider-neutral contracts before security
+      implementation.
+    scope: ADR-0026; canonical security docs; crates/policy contracts/tests;
+      G6 roadmap; no production Policy Engine, Secrets Broker, sandbox,
+      approval UI or audit persistence.
+    exit_criteria_summary: Threat model and enforcement map explicit;
+      ALLOW/DENY/REQUIRE_APPROVAL and child-authority monotonicity executable;
+      H7 assigned; G6 remains in progress; workspace green.
+    outcome: G6 foundation materialized. Canonical authorization belongs to
+      AI Engineering OS core; requested/effective capabilities are distinct;
+      child authority cannot widen; hard deny is non-approvable; approvals
+      are exact-bound; provider-native controls are defense in depth; H7 is
+      assigned to TASK-0065. G6 remains IN_PROGRESS.
+    depends_on:
+      - TASK-0059
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
+      - docs/security/POLICY_CONTRACT.md
+      - docs/security/THREAT_MODEL.md
+      - docs/security/TRUST_BOUNDARIES.md
+      - crates/policy/src/lib.rs
+
+  - id: TASK-0061
+    gate: G6
+    title: Policy Engine Core
+    objective: Implement deterministic layered policy evaluation over the
+      TASK-0060 contracts, including hard-deny precedence, approvable rules,
+      requested/effective capability derivation and fail-closed typed errors.
+    scope: Policy evaluation only; no approval persistence/UI, secrets,
+      sandbox implementation or Security Audit persistence.
+    exit_criteria_summary: Identical canonical inputs produce identical
+      decisions; hard policy cannot be weakened by lower layers; unknown or
+      unsupported security requirements fail closed; contract tests green.
+    depends_on:
+      - TASK-0060
+    blocked_by: []
+    references:
+      - docs/security/POLICY_CONTRACT.md
+      - crates/policy/src/lib.rs
+
+  - id: TASK-0062
+    gate: G6
+    title: Approval and Human Decision Enforcement
+    objective: Add the durable bounded approval lifecycle and control-plane
+      enforcement for REQUIRE_APPROVAL without allowing approval to bypass
+      hard policy or replay outside the bound request.
+    scope: Approval persistence/state, expiry/replay enforcement and minimal
+      IPC/CLI contract; no production graphical approval UI.
+    exit_criteria_summary: Exact-scope approvals authorize only their bound
+      request; stale/widened/replayed approvals refuse; deny remains final;
+      restart durability proven.
+    depends_on:
+      - TASK-0061
+    blocked_by: []
+    references:
+      - docs/security/POLICY_CONTRACT.md
+
+  - id: TASK-0063
+    gate: G6
+    title: Secrets Broker
+    objective: Implement opaque secret references and the local OS credential
+      backend boundary with policy-authorized scoped delivery at execution/tool
+      boundaries.
+    scope: Secret backend port/adapters, refs/bindings, scoped release,
+      redaction; no cloud secret manager requirement.
+    exit_criteria_summary: Secret values never persist in ordinary SQLite,
+      Event Journal, logs, frontend state or model context; unauthorized
+      release fails closed; local backends contract-tested.
+    depends_on:
+      - TASK-0061
+    blocked_by: []
+    references:
+      - docs/security/POLICY_CONTRACT.md
+
+  - id: TASK-0064
+    gate: G6
+    title: Runner and OS Isolation Foundation
+    objective: Implement the capability-to-runner enforcement boundary and
+      fail-closed isolation backend contracts, keeping platform mechanisms
+      replaceable and reporting only restrictions actually enforced.
+    scope: Runner/isolation ports and deterministic enforcement contracts;
+      bounded platform foundation only, no remote worker.
+    exit_criteria_summary: Required isolation cannot silently downgrade;
+      filesystem/network/process restrictions remain distinct; platform
+      adapters consume canonical effective authority.
+    depends_on:
+      - TASK-0061
+    blocked_by: []
+    references:
+      - docs/architecture/runners.md
+      - docs/security/POLICY_CONTRACT.md
+
+  - id: TASK-0065
+    gate: G6
+    title: Provider Environment Isolation and H7 Closure
+    objective: Close H7 by moving provider-owned HOME/XDG/data/scratch state
+      outside managed worktrees, sanitizing inherited environment and proving
+      provider execution cannot dirty the worktree with ambient state.
+    scope: Provider-process environment construction and filesystem policy;
+      real Claude keeper plus provider-neutral contracts; no new provider.
+    exit_criteria_summary: Real Claude production-path runs no longer create
+      data/sessions.db or equivalent provider state in the managed worktree;
+      cleanup remains safe; mandatory restrictions fail closed.
+    depends_on:
+      - TASK-0064
+    blocked_by: []
+    references:
+      - docs/development/G5_FINAL_CLOSURE_AUDIT.md
+      - docs/architecture/providers.md
+      - docs/architecture/runners.md
+
+  - id: TASK-0066
+    gate: G6
+    title: Security Audit Persistence
+    objective: Persist canonical product-authored security evidence in an
+      append-oriented Security Audit store separate from Event Journal,
+      operational logs and model-visible receipts.
+    scope: Security audit storage/correlation/read surface only; no enterprise
+      SIEM/compliance platform.
+    exit_criteria_summary: Policy/approval/secret/elevation/denial/isolation
+      events are durably correlated without secret payloads; provider text
+      cannot author canonical audit decisions.
+    depends_on:
+      - TASK-0062
+      - TASK-0063
+      - TASK-0065
+    blocked_by: []
+    references:
+      - docs/security/POLICY_CONTRACT.md
+      - docs/architecture/adr/ADR-0006-state-event-journal-event-sourcing.md
+
+  - id: TASK-0067
+    gate: G6
+    title: G6 Integration and Adversarial Security Verification
+    objective: Integrate the G6 policy, approval, secrets, isolation,
+      provider-environment and audit boundaries and exercise the complete
+      deterministic/adversarial security failure matrix.
+    scope: Integration and verification/remediation inside G6 only; no G7.
+    exit_criteria_summary: Privileged operations enforce canonical decisions
+      across execution boundaries; child escalation, approval replay,
+      unsupported isolation, secret leakage and H7 regressions are covered;
+      workspace regression green. Does not itself close G6.
+    depends_on:
+      - TASK-0062
+      - TASK-0063
+      - TASK-0064
+      - TASK-0065
+      - TASK-0066
+    blocked_by: []
+    references:
+      - docs/security/POLICY_CONTRACT.md
+      - docs/security/THREAT_MODEL.md
+
+  - id: TASK-0068
+    gate: G6
+    title: Independent Adversarial G6 Closure Audit
+    objective: Independently verify every G6 acceptance criterion and report
+      G6_CLOSED or G6_REMEDIATION_REQUIRED without implementing repairs.
+    scope: Audit only; no G7 work and no remediation implementation.
+    exit_criteria_summary: Independent report verifies policy authority,
+      approvals, secrets, isolation, H7 closure, Security Audit and full
+      regression before any G6 closure claim.
+    depends_on:
+      - TASK-0067
+    blocked_by: []
+    references:
+      - docs/security/POLICY_CONTRACT.md
+      - docs/security/THREAT_MODEL.md
+      - docs/security/TRUST_BOUNDARIES.md

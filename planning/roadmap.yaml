@@ -8,7 +8,7 @@
 # Near-term work lives in planning/tasks/queue.yaml, not here.
 
 schema_version: 1
-current_gate: G5
+current_gate: G6
 task_queue: planning/tasks/queue.yaml
 
 gates:
@@ -49,17 +49,20 @@ gates:
 
   - id: G5
     name: First real provider
-    status: in_progress
+    status: completed
     objective: One provider passes the AgentProvider contract; the second
       must add cleanly without core changes.
     scope_ref: docs/architecture/providers.md
 
   - id: G6
     name: Security
-    status: planned
+    status: in_progress
     objective: Policy Engine, approvals, Secret Broker, audit, runner
       security levels.
-    scope_ref: docs/architecture/adr/ADR-0013-policy-engine-os-isolation.md
+    scope_ref:
+      - docs/architecture/adr/ADR-0013-policy-engine-os-isolation.md
+      - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
+      - docs/security/POLICY_CONTRACT.md
 
   - id: G7
     name: Multi-agent DAG + bounded adaptive planning
