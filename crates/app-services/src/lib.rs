@@ -15,6 +15,7 @@ mod error;
 mod managed_identity;
 mod orchestration_service;
 mod runtime_service;
+mod security_service;
 mod task_service;
 mod workspace_service;
 
@@ -30,6 +31,9 @@ pub use orchestration_service::{
     ExecutionEntry, OrchestrationIds, OrchestrationService, PreAttemptResumePlan,
 };
 pub use runtime_service::{AppliedExecution, PlannedExecution, RuntimeService};
+pub use security_service::{
+    G6Authorization, G6SecurityError, G6SecurityService, PrivilegedOperation, ProcessSecuritySpec,
+};
 pub use task_service::{AppliedTransition, PlannedTransition, TaskService};
 pub use workspace_service::{
     CleanedWorkspace, CleanupOutcome, EnsureOutcome, EnsuredWorkspace, ManagedWorkspaceRoot,

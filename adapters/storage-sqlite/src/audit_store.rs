@@ -1,6 +1,6 @@
 //! Append-oriented Security Audit persistence (TASK-0066).
 
-use rusqlite::{params, TransactionBehavior};
+use rusqlite::{params, Transaction, TransactionBehavior};
 use security_audit::{
     AuditCapability, NewSecurityAuditRecord, SecurityAuditAuthor, SecurityAuditError,
     SecurityAuditEvent, SecurityAuditId, SecurityAuditOutcome, SecurityAuditRecord,
@@ -18,94 +18,12 @@ impl SqliteStore {
         &mut self,
         record: &NewSecurityAuditRecord,
     ) -> StorageResult<SecurityAuditRecord> {
-        let fact = record
-            .validated()
-            .map_err(|error| StorageError::ConstraintViolation(error.to_string()))?;
-        let occurred_at_ms = to_sql_millis(fact.occurred_at_ms)?;
         let transaction = self
             .connection_mut()
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (head_seq, previous_hash): (i64, String) = transaction.query_row(
-            "SELECT seq, record_hash FROM security_audit_head WHERE singleton = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let seq = head_seq.checked_add(1).ok_or_else(|| {
-            StorageError::ConstraintViolation("security audit sequence exhausted".to_owned())
-        })?;
-        let record_hash = hash_record(seq, &previous_hash, &fact);
-        let (subject_kind, subject_id) = fact
-            .subject
-            .as_ref()
-            .map(|subject| (Some(subject.kind.as_str()), Some(subject.id.as_str())))
-            .unwrap_or((None, None));
-        transaction.execute(
-            "INSERT INTO security_audit (
-                seq, record_version, event_type, author, outcome, occurred_at_ms,
-                correlation_id, causation_id, operation_id, task_id, execution_id,
-                attempt_id, subject_kind, subject_id, policy_fingerprint, rule_id,
-                reason_code, approval_request_id, previous_hash, record_hash
-             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                ?15, ?16, ?17, ?18, ?19, ?20
-             )",
-            params![
-                seq,
-                SECURITY_AUDIT_RECORD_VERSION,
-                fact.event.as_str(),
-                fact.author.as_str(),
-                fact.outcome.map(SecurityAuditOutcome::as_str),
-                occurred_at_ms,
-                fact.correlation_id,
-                fact.causation_id,
-                fact.operation_id,
-                fact.task_id,
-                fact.execution_id,
-                fact.attempt_id,
-                subject_kind,
-                subject_id,
-                fact.policy_fingerprint,
-                fact.rule_id,
-                fact.reason_code,
-                fact.approval_request_id,
-                previous_hash,
-                record_hash,
-            ],
-        )?;
-        for (position, capability) in fact.capabilities.iter().enumerate() {
-            transaction.execute(
-                "INSERT INTO security_audit_capabilities
-                    (audit_seq, position, capability_kind, workspace, scope)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    seq,
-                    i64::try_from(position).map_err(|_| StorageError::ConstraintViolation(
-                        "too many security audit capabilities".to_owned()
-                    ))?,
-                    capability.kind.as_str(),
-                    capability.workspace,
-                    capability.scope,
-                ],
-            )?;
-        }
-        let changed = transaction.execute(
-            "UPDATE security_audit_head SET seq = ?1, record_hash = ?2
-             WHERE singleton = 1 AND seq = ?3 AND record_hash = ?4",
-            params![seq, record_hash, head_seq, previous_hash],
-        )?;
-        if changed != 1 {
-            return Err(StorageError::ConstraintViolation(
-                "security audit head changed concurrently".to_owned(),
-            ));
-        }
+        let persisted = append_security_audit_in_transaction(&transaction, record)?;
         transaction.commit()?;
-        Ok(SecurityAuditRecord {
-            id: SecurityAuditId::from_seq(seq).map_err(map_audit_corruption)?,
-            seq,
-            fact,
-            previous_hash,
-            record_hash,
-        })
+        Ok(persisted)
     }
 
     pub fn list_security_audit_ordered(&self) -> StorageResult<Vec<SecurityAuditRecord>> {
@@ -210,6 +128,96 @@ impl SqliteStore {
             .filter(|record| record.fact.correlation_id == correlation_id)
             .collect())
     }
+}
+
+pub(crate) fn append_security_audit_in_transaction(
+    transaction: &Transaction<'_>,
+    record: &NewSecurityAuditRecord,
+) -> StorageResult<SecurityAuditRecord> {
+    let fact = record
+        .validated()
+        .map_err(|error| StorageError::ConstraintViolation(error.to_string()))?;
+    let occurred_at_ms = to_sql_millis(fact.occurred_at_ms)?;
+    let (head_seq, previous_hash): (i64, String) = transaction.query_row(
+        "SELECT seq, record_hash FROM security_audit_head WHERE singleton = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let seq = head_seq.checked_add(1).ok_or_else(|| {
+        StorageError::ConstraintViolation("security audit sequence exhausted".to_owned())
+    })?;
+    let record_hash = hash_record(seq, &previous_hash, &fact);
+    let (subject_kind, subject_id) = fact
+        .subject
+        .as_ref()
+        .map(|subject| (Some(subject.kind.as_str()), Some(subject.id.as_str())))
+        .unwrap_or((None, None));
+    transaction.execute(
+        "INSERT INTO security_audit (
+                seq, record_version, event_type, author, outcome, occurred_at_ms,
+                correlation_id, causation_id, operation_id, task_id, execution_id,
+                attempt_id, subject_kind, subject_id, policy_fingerprint, rule_id,
+                reason_code, approval_request_id, previous_hash, record_hash
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                ?15, ?16, ?17, ?18, ?19, ?20
+             )",
+        params![
+            seq,
+            SECURITY_AUDIT_RECORD_VERSION,
+            fact.event.as_str(),
+            fact.author.as_str(),
+            fact.outcome.map(SecurityAuditOutcome::as_str),
+            occurred_at_ms,
+            fact.correlation_id,
+            fact.causation_id,
+            fact.operation_id,
+            fact.task_id,
+            fact.execution_id,
+            fact.attempt_id,
+            subject_kind,
+            subject_id,
+            fact.policy_fingerprint,
+            fact.rule_id,
+            fact.reason_code,
+            fact.approval_request_id,
+            previous_hash,
+            record_hash,
+        ],
+    )?;
+    for (position, capability) in fact.capabilities.iter().enumerate() {
+        transaction.execute(
+            "INSERT INTO security_audit_capabilities
+                    (audit_seq, position, capability_kind, workspace, scope)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                seq,
+                i64::try_from(position).map_err(|_| StorageError::ConstraintViolation(
+                    "too many security audit capabilities".to_owned()
+                ))?,
+                capability.kind.as_str(),
+                capability.workspace,
+                capability.scope,
+            ],
+        )?;
+    }
+    let changed = transaction.execute(
+        "UPDATE security_audit_head SET seq = ?1, record_hash = ?2
+             WHERE singleton = 1 AND seq = ?3 AND record_hash = ?4",
+        params![seq, record_hash, head_seq, previous_hash],
+    )?;
+    if changed != 1 {
+        return Err(StorageError::ConstraintViolation(
+            "security audit head changed concurrently".to_owned(),
+        ));
+    }
+    Ok(SecurityAuditRecord {
+        id: SecurityAuditId::from_seq(seq).map_err(map_audit_corruption)?,
+        seq,
+        fact,
+        previous_hash,
+        record_hash,
+    })
 }
 
 struct RawAuditRow {

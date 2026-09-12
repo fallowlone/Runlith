@@ -256,8 +256,11 @@ TASK-0065 now materializes provider-process environment hygiene at the Claude
 adapter/composition boundary: inherited environment is cleared, provider-
 writable XDG/state/cache/scratch paths live outside managed worktrees, and
 unsafe environment preparation fails before provider spawn. This is launch
-hygiene, not Runner authorization or an OS sandbox. Full production composition
-of Policy/approval/Secrets/Runner boundaries remains TASK-0067.
+hygiene, not Runner authorization or an OS sandbox. TASK-0067 composes the
+current production provider launch through canonical Policy evaluation and
+exact Runner enforcement immediately around provider execution. NativeRunner
+still satisfies only explicit Trusted Host requirements; stronger required
+isolation fails closed.
 
 ## 12. Replacement test
 
