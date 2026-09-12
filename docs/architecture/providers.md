@@ -352,9 +352,21 @@ provider output cannot fabricate a valid trusted Tool Execution Receipt;
 receipt generation belongs to the trusted runtime/tool boundary (INV-072).
 No provider may gain stronger OS access by emitting text; capability
 escalation goes through the Policy Engine with required approval/isolation.
+The canonical G6 authority is the effective capability set from ADR-0026.
+Provider adapters may translate that set into provider-native flags/modes, but
+must never decide ALLOW/DENY, grant capabilities, broaden scope, approve an
+operation, or reinterpret a hard denial. Provider-native permission/sandbox
+features are defense in depth only; an unrepresentable mandatory restriction
+must fail closed or be enforced by the selected Runner/isolation backend.
 Process mechanics (environment variables, PATH, working directory, PTY,
 stdio framing, shell strategy) are undecided unless already accepted, and
 user/model-controlled values must never become unsafe shell interpolation.
+
+G6 owns provider-process environment isolation. In particular, the H7 finding
+from TASK-0059 (`data/sessions.db` written by real Claude into a managed
+worktree) belongs to TASK-0065: provider HOME/XDG/data/scratch locations and
+inherited environment must be controlled outside the worktree without moving
+authorization authority into this adapter.
 
 ## 16. Open Provider Design Items
 

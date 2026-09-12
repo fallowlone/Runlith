@@ -168,8 +168,8 @@ this document; physical decomposition happens incrementally.
 - Outbound: decisions consumed by Agent Runtime, runners, web/document
   pipelines; denials are never retried as transient errors.
 - Authoritative state: policies, bindings, approvals.
-- Refs: ADR-0013 (partial; dedicated Policy ADR not yet materialized);
-  INV-007, INV-013, INV-076, INV-133.
+- Refs: ADR-0013, ADR-0026; `docs/security/POLICY_CONTRACT.md`;
+  INV-007, INV-013, INV-146…153.
 
 ### Evaluation / Verification — Later core (G8)
 
@@ -206,8 +206,8 @@ this document; physical decomposition happens incrementally.
 - Outbound: append-only audit reads for incident review and compliance; never
   into model context.
 - Authoritative state: audit records (hashes/references, not secret payloads).
-- Refs: ADR-0006, ADR-0013 (partial). ADR status: Not yet materialized.
-  INV-073.
+- Refs: ADR-0006, ADR-0013, ADR-0026; persistence remains TASK-0066.
+  INV-073, INV-152.
 
 ### Secrets — Later core (G6)
 
@@ -222,8 +222,8 @@ this document; physical decomposition happens incrementally.
   broker boundary into application state.
 - Authoritative state: secret values live only in the external OS store; the
   context owns refs/bindings, never plaintext.
-- Refs: ADR-0013, ADR-0014 (partial). ADR status: Not yet materialized.
-  INV-008, INV-099, INV-106.
+- Refs: ADR-0013, ADR-0014, ADR-0026; implementation remains TASK-0063.
+  INV-008, INV-099, INV-106, INV-151.
 
 ### Usage / Model Routing — Later core (gate unassigned)
 

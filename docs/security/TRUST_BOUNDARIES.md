@@ -12,6 +12,36 @@ action passes the Policy Engine (ALLOW / DENY / REQUIRE_APPROVAL) **and**
 executes under real runtime/OS/container/VM isolation. Neither layer replaces
 the other.
 
+## G6 request / decision / enforcement chain
+
+The TB IDs below remain stable. G6 additionally assigns authority roles across
+the internal execution path:
+
+```text
+User/UI              request only; never authorization authority
+  ↓ TB1
+Tauri host           validate/forward; never widen authority
+  ↓ TB2
+agentd/core          canonical product trust boundary
+  ↓
+orchestration        constructs PolicyRequest from product state
+  ↓
+Policy               deterministic ALLOW | DENY | REQUIRE_APPROVAL
+  ↓
+workspace/runtime    consumes effective capabilities
+  ↓ TB3
+provider adapter     translates restrictions; cannot broaden them
+  ↓
+provider process     untrusted/partially trusted executor
+  ↓ TB4/TB5/TB6
+filesystem/process/Git/network/tool/secret operation
+```
+
+The final privileged operation owner enforces the decided scope. A UI dialog,
+policy preflight or provider-native permission prompt does not itself enforce
+the operation. Security Audit records canonical product decisions/results at
+the trusted boundaries; provider text is contextual evidence only.
+
 ## TB1 — WebView → Tauri Host
 
 - From: application WebView (React UI). To: thin Tauri host.

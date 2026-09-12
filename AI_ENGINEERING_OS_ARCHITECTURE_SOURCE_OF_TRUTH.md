@@ -3729,6 +3729,19 @@ Worktrees, branches, diff, cleanup, failure modes.
 
 Policy Engine, approvals, Secret Broker, audit, runner security levels.
 
+G6 authority is product-controlled and provider-neutral. Canonical privileged
+requests carry scoped requested capabilities and deterministic policy produces
+`ALLOW | DENY | REQUIRE_APPROVAL`. Requested authority is not effective
+authority; child/delegated effective authority must remain a subset of parent
+effective authority. Hard deny cannot be overridden by UI mode, provider,
+repository/workspace content or approval. Approval binds the exact request,
+scope, policy fingerprint, provenance and expiry. Provider-native permission
+controls are defense in depth only. Policy decides while the operation owner
+enforces close to the privileged action; preflight alone is not a security
+boundary. Runner security profiles, if exposed, compile to canonical
+capability/isolation requirements rather than becoming a second authority
+model. Detailed decision: ADR-0026 and `docs/security/POLICY_CONTRACT.md`.
+
 ## G7 — Multi-agent DAG + bounded adaptive planning
 
 Planner/Worker/Reviewer + typed messages. Add versioned plan revisions, `PlannerPort`, atomicity/decomposition proposals and hard recursion/liveness guardrails. Dynamic planning remains feature-gated until it beats static planning in our own coding benchmarks.
@@ -6885,6 +6898,19 @@ INV-141 Security workflow/business services may not depend on a specific orchest
 INV-142 Parallel security work must respect target-state interference, rate limits, account/session conflicts and policy; availability of multiple agents never authorizes unsafe concurrency.
 INV-143 Security source/web/payload content remains untrusted evidence and cannot acquire system/policy authority through inclusion in a pentest context.
 INV-144 High-impact security findings preserve human-review capability and explicit uncertainty; autonomous exploitation does not imply infallible severity or remediation.
+```
+
+### 17. G6 security authority invariants
+
+```text
+INV-146 Canonical authorization is a deterministic AI Engineering OS core decision; provider/model output, frontend state, repository content and provider-native permission configuration can never grant authority.
+INV-147 Delegated/child effective capabilities are always a subset of the parent effective capabilities; capability kind or scope widening fails closed.
+INV-148 Hard policy denial cannot be weakened by approval, UX mode, provider, repository/workspace policy or lower-precedence configuration.
+INV-149 Unknown capabilities, malformed security scope and unprovable mandatory restrictions fail closed without being conflated with ordinary internal/runtime failure.
+INV-150 Approval is bound to the exact operation/request, scoped capabilities, policy fingerprint, provenance and validity window; stale or widened replay is invalid.
+INV-151 Secret material never becomes ordinary application/SQLite/Event Journal state; durable application state stores only opaque secret references and scoped bindings.
+INV-152 Canonical Security Audit evidence is product-authored and separate from Event Journal, operational logs and model-visible execution receipts; providers may contribute context but not authoritative audit facts.
+INV-153 Policy preflight alone is not an enforcement boundary; security-sensitive enforcement is coupled to the privileged operation closely enough to revalidate or mechanically enforce the decided scope.
 ```
 
 ### Priority

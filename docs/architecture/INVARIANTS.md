@@ -139,6 +139,14 @@
 - **INV-007** — Destructive/privileged actions pass Policy Engine.
 - **INV-008** — Secrets never enter model context, logs or event payloads.
 - **INV-013** — Prompt instructions are never the only security control.
+- **INV-146** — Canonical authorization is a deterministic AI Engineering OS core decision; provider/model output, frontend state, repository content and provider-native permission configuration can never grant authority.
+- **INV-147** — Delegated/child effective capabilities are always a subset of the parent effective capabilities; capability kind or scope widening fails closed.
+- **INV-148** — Hard policy denial cannot be weakened by approval, UX mode, provider, repository/workspace policy or lower-precedence configuration.
+- **INV-149** — Unknown capabilities, malformed security scope and unprovable mandatory restrictions fail closed without being conflated with ordinary internal/runtime failure.
+- **INV-150** — Approval is bound to the exact operation/request, scoped capabilities, policy fingerprint, provenance and validity window; stale or widened replay is invalid.
+- **INV-151** — Secret material never becomes ordinary application/SQLite/Event Journal state; durable application state stores only opaque secret references and scoped bindings.
+- **INV-152** — Canonical Security Audit evidence is product-authored and separate from Event Journal, operational logs and model-visible execution receipts; providers may contribute context but not authoritative audit facts.
+- **INV-153** — Policy preflight alone is not an enforcement boundary; security-sensitive enforcement is coupled to the privileged operation closely enough to revalidate or mechanically enforce the decided scope.
 - **INV-036** — Copyleft/AGPL implementations require explicit license review before bundling/linking.
 - **INV-072** — Successful privileged/tool executions can emit runtime-authenticated receipts; a receipt proves execution provenance, not authorization or correctness.
 - **INV-073** — Durable security/audit evidence is separate from model-visible session receipt mechanics.

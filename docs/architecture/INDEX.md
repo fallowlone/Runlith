@@ -13,7 +13,8 @@
 - Accepted decisions: [`adr/INDEX.md`](./adr/INDEX.md)
 - Security contracts: [`../security/THREAT_MODEL.md`](../security/THREAT_MODEL.md),
   [`../security/TRUST_BOUNDARIES.md`](../security/TRUST_BOUNDARIES.md),
-  [`../security/DATA_CLASSIFICATION.md`](../security/DATA_CLASSIFICATION.md)
+  [`../security/DATA_CLASSIFICATION.md`](../security/DATA_CLASSIFICATION.md),
+  [`../security/POLICY_CONTRACT.md`](../security/POLICY_CONTRACT.md)
 - Privacy contracts: [`../privacy/PRIVACY_ARCHITECTURE.md`](../privacy/PRIVACY_ARCHITECTURE.md),
   [`../privacy/TECHNICAL_PRIVACY_CONTRACT.md`](../privacy/TECHNICAL_PRIVACY_CONTRACT.md),
   [`../privacy/DATA_FLOW_MAP.md`](../privacy/DATA_FLOW_MAP.md)
@@ -82,10 +83,12 @@ Memory work
 
 Security / runtime isolation work
 → adr/ADR-0013-policy-engine-os-isolation.md
+→ adr/ADR-0026-g6-security-authority-and-capability-contracts.md
 → adr/ADR-0007-no-direct-frontend-shell.md
 → adr/ADR-0008-worktree-isolation.md
 → ../security/TRUST_BOUNDARIES.md
 → ../security/THREAT_MODEL.md
+→ ../security/POLICY_CONTRACT.md
 
 Local-first / privacy / data work
 → adr/ADR-0014-local-first-privacy.md
