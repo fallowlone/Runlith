@@ -390,7 +390,7 @@ mod contract_tests {
     fn execution_core_envelope_uses_field_five_and_round_trips() {
         use crate::proto::{
             execution_core_request, CancelExecutionRequest, ExecutionCoreRequest,
-            GetExecutionRequest, RunExecutionRequest,
+            GetExecutionRequest, ResumeExecutionRequest, RunExecutionRequest,
         };
         let business = ControlRequest {
             payload: Some(control_request::Payload::ExecutionCore(
@@ -423,7 +423,7 @@ mod contract_tests {
             },
             other => panic!("expected execution_core envelope, got {other:?}"),
         }
-        // Get and cancel variants decode on the same envelope.
+        // Get, cancel, and resume variants decode on the same envelope.
         for request in [
             ExecutionCoreRequest {
                 payload: Some(execution_core_request::Payload::Get(GetExecutionRequest {
@@ -437,10 +437,49 @@ mod contract_tests {
                     },
                 )),
             },
+            ExecutionCoreRequest {
+                payload: Some(execution_core_request::Payload::Resume(
+                    ResumeExecutionRequest {
+                        execution_id: "E-1".to_owned(),
+                        repository_path: "/srv/demo".to_owned(),
+                        repository_ref: String::new(),
+                        base_revision: String::new(),
+                    },
+                )),
+            },
         ] {
             let bytes = request.encode_to_vec();
             let decoded = ExecutionCoreRequest::decode(bytes.as_slice()).expect("must decode");
             assert!(decoded.payload.is_some());
+        }
+    }
+
+    #[test]
+    fn execution_resume_response_round_trip() {
+        use crate::proto::{
+            execution_core_response, ExecutionCoreResponse, ResumeExecutionResponse,
+        };
+        // The additive TASK-0054 variant keeps the error field clear: the
+        // success range grows (resume = 5) while error stays 4.
+        let resumed = ExecutionCoreResponse {
+            payload: Some(execution_core_response::Payload::Resume(
+                ResumeExecutionResponse {
+                    task_id: "T-1".to_owned(),
+                    execution_id: "E-1".to_owned(),
+                    attempt_id: "A-1".to_owned(),
+                    task_state: "RUNNING".to_owned(),
+                },
+            )),
+        };
+        let bytes = resumed.encode_to_vec();
+        let decoded = ExecutionCoreResponse::decode(bytes.as_slice()).expect("must decode");
+        match decoded.payload {
+            Some(execution_core_response::Payload::Resume(resumed)) => {
+                assert_eq!(resumed.execution_id, "E-1");
+                assert_eq!(resumed.attempt_id, "A-1");
+                assert_eq!(resumed.task_state, "RUNNING");
+            }
+            other => panic!("expected resume, got {other:?}"),
         }
     }
 

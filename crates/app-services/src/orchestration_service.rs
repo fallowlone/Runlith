@@ -10,7 +10,8 @@
 //! call; for G3 tests those are the FakeAgent wrapper and `FakeEvaluator`.
 //!
 //! Durability boundaries: entry (readiness, claim, start, execution,
-//! attempt reservation, journal) is ONE atomic commit
+//! attempt reservation, managed-identity reservation, journal) is ONE atomic
+//! commit
 //! ([`SqliteStore::admit_execution_entry`](storage_sqlite::SqliteStore::admit_execution_entry)).
 //! The executor runs outside every SQLite transaction (service calls
 //! return before it is invoked), so a crash leaves a legitimate
@@ -39,8 +40,8 @@ use scheduler::{
     ScheduleReadiness, WorkItem,
 };
 use storage_sqlite::StorageError;
-use task_domain::{Task, TaskId, TaskState};
-use workspace::{GitPort, WorkspaceLease};
+use task_domain::{DomainError, Task, TaskId, TaskState};
+use workspace::{GitPort, WorkspaceLease, WorkspaceStore};
 
 use crate::workspace_service::{WorkspaceRequest, WorkspaceService};
 
@@ -91,6 +92,43 @@ pub enum ExecutionEntry {
 struct EnteredCycle {
     /// Durable identities for the one attempt this cycle may create.
     work: WorkItem,
+}
+
+/// Read-only recovery plan for one admitted-but-not-attempted execution
+/// (TASK-0054, G5 B-RS).
+///
+/// A production crash (or deterministic background failure) after the
+/// atomic admission `COMMIT` but before `create_attempt` leaves Task
+/// `RUNNING` + one execution + one Attempt reservation + the journal
+/// triple, with zero attempts. This plan detects exactly that shape and
+/// carries the identities the resume half needs to continue the SAME
+/// execution with its reserved attempt.
+///
+/// Read-only: emits no journal evidence, performs no Task transition, and
+/// creates no lease, attempt, or provider work. Resuming performs no Task
+/// lifecycle transition either, so the canonical state machine is
+/// untouched — recovery never invents a `RUNNING → READY` edge.
+///
+/// Fail-closed contract: anything that is not exactly one healthy
+/// pre-Attempt entry refuses — a missing execution (`NotFound`), an
+/// execution that already records attempts or whose task left `RUNNING`
+/// (`InvalidTransition`), a missing or ambiguous reservation and any
+/// ownership disagreement (`Corrupt`). Corruption is never healed by
+/// guessing ownership.
+#[derive(Debug, Clone)]
+pub struct PreAttemptResumePlan {
+    /// The work item the resume half must continue: the admitted
+    /// execution with its reserved attempt identity.
+    pub work: WorkItem,
+    /// Recorded repository identity when a lease already exists; `None`
+    /// when no lease exists and the operator must supply it.
+    pub repository_ref: Option<String>,
+    /// Recorded base commit OID when a lease already exists; `None` when
+    /// no lease exists and the operator must supply the revision.
+    pub base_revision: Option<String>,
+    /// Lease lifecycle when a lease already exists (`Allocated` or
+    /// `Ready` only — anything else refuses above).
+    pub lease_lifecycle: Option<workspace::LeaseLifecycle>,
 }
 
 /// Trusted owner of the G3 orchestration cycle. Composes the two existing
@@ -248,6 +286,130 @@ impl<C: Clock> OrchestrationService<C> {
         }
     }
 
+    /// Plans recovery for one admitted-but-not-attempted execution
+    /// (TASK-0054, G5 B-RS).
+    ///
+    /// Read-only: validates the exact stranded shape (execution exists,
+    /// zero attempts, exactly one owned reservation, reservation task
+    /// agrees with execution ownership, task is `RUNNING`, lease absent
+    /// or `Allocated`/`Ready`) and returns the work item plus any
+    /// lease-recorded workspace inputs the resume half needs. Emits no
+    /// journal evidence and performs no Task transition.
+    ///
+    /// Every refusal is fail-closed: `NotFound` for a missing execution,
+    /// `InvalidTransition` for an execution that already records attempts
+    /// (attempt recovery belongs to G11, never to this path) or whose
+    /// task left `RUNNING`, `Corrupt` for a missing/ambiguous reservation,
+    /// ownership disagreement, a missing task row, or a terminal lease.
+    pub fn plan_pre_attempt_resume(
+        &self,
+        execution_id: &agent_runtime::ExecutionId,
+    ) -> ServiceResult<PreAttemptResumePlan> {
+        let execution = self
+            .runtime
+            .store()
+            .get_execution(execution_id)?
+            .ok_or_else(|| {
+                ServiceError::Storage(StorageError::NotFound(format!(
+                    "execution {execution_id} does not exist"
+                )))
+            })?;
+        if !execution.attempts().is_empty() {
+            return Err(ServiceError::Domain(DomainError::InvalidTransition(
+                format!(
+                    "execution {execution_id} already records {} attempt(s); \
+                     pre-attempt recovery does not apply",
+                    execution.attempts().len()
+                ),
+            )));
+        }
+        let reservations = self
+            .tasks
+            .store()
+            .list_attempt_reservations_for_execution(execution_id)?;
+        let (attempt_id, reservation_task) = match reservations.as_slice() {
+            [(attempt_id, reservation_task)] => (attempt_id, reservation_task),
+            _ => {
+                return Err(ServiceError::Storage(StorageError::Corrupt(format!(
+                    "execution {execution_id} holds {} attempt reservations with no attempt; \
+                     expected exactly one owned reservation",
+                    reservations.len()
+                ))));
+            }
+        };
+        if reservation_task != execution.task_id() {
+            return Err(ServiceError::Storage(StorageError::Corrupt(format!(
+                "execution {execution_id} reservation for attempt {attempt_id} names task \
+                 {reservation_task} but the execution belongs to task {}; refusing",
+                execution.task_id()
+            ))));
+        }
+        let task = self
+            .tasks
+            .store()
+            .get_task(execution.task_id())?
+            .ok_or_else(|| {
+                ServiceError::Storage(StorageError::Corrupt(format!(
+                    "execution {execution_id} references missing task {}",
+                    execution.task_id()
+                )))
+            })?;
+        if task.state() != TaskState::Running {
+            let state = task.state();
+            let remedy = if state == TaskState::Blocked {
+                " resume the task to RUNNING before execution recovery"
+            } else {
+                ""
+            };
+            return Err(ServiceError::Domain(DomainError::InvalidTransition(
+                format!(
+                    "task {} is {state}; pre-attempt recovery requires RUNNING.{remedy}",
+                    task.id()
+                ),
+            )));
+        }
+        let lease = self
+            .tasks
+            .store()
+            .get_workspace_for_execution(execution_id)
+            .map_err(|error| {
+                ServiceError::Storage(StorageError::Corrupt(format!(
+                    "execution {execution_id} lease read failed: {error}"
+                )))
+            })?;
+        let (repository_ref, base_revision, lease_lifecycle) = match &lease {
+            None => (None, None, None),
+            Some(lease)
+                if lease.lifecycle() == workspace::LeaseLifecycle::Allocated
+                    || lease.lifecycle() == workspace::LeaseLifecycle::Ready =>
+            {
+                (
+                    Some(lease.repository().as_str().to_owned()),
+                    Some(lease.base_revision().as_str().to_owned()),
+                    Some(lease.lifecycle()),
+                )
+            }
+            Some(lease) => {
+                return Err(ServiceError::Storage(StorageError::Corrupt(format!(
+                    "execution {execution_id} lease {} is {}; pre-attempt recovery \
+                     cannot proceed",
+                    lease.id().as_str(),
+                    lease.lifecycle(),
+                ))));
+            }
+        };
+        Ok(PreAttemptResumePlan {
+            work: WorkItem {
+                task_id: execution.task_id().clone(),
+                execution_id: execution_id.clone(),
+                attempt_id: attempt_id.clone(),
+            },
+            repository_ref,
+            base_revision,
+            lease_lifecycle,
+        })
+    }
+
     /// Continues a committed [`ExecutionEntry::Runnable`] work item
     /// through the workspace-bound provider half: ensure lease → build
     /// executor → create attempt → execute (outside transactions) →
@@ -284,7 +446,7 @@ impl<C: Clock> OrchestrationService<C> {
 
     /// Durable entry half of a cycle: readiness, then ONE atomic
     /// admission (claim + start + execution + attempt reservation +
-    /// journal). Shared by [`Self::schedule`] and
+    /// managed-identity reservation + journal). Shared by [`Self::schedule`] and
     /// [`Self::schedule_in_workspace`] so both spell the entry boundary
     /// exactly once.
     ///
@@ -361,14 +523,20 @@ impl<C: Clock> OrchestrationService<C> {
             ))));
         }
 
-        // -- managed workspace identity preflight (TASK-0051, G5 H4/§32):
+        // -- managed workspace identity preflight (TASK-0053 v2, G5 B-CF):
         // the derived branch for this entry must not already be recorded
-        // for another execution. Derivation is injective, so a hit means
-        // foreign interference, never a second valid entry — refuse
+        // for another execution. Readable derivation is reversible over
+        // exact bytes and canonical-lowercase (fold-stable), and the
+        // digest fallback is collision-resistant with a fail-closed
+        // durable backstop — so a hit means either foreign interference
+        // or a digest collision, never a second valid entry. Refuse
         // before the first mutation either way. (Git state itself can
         // still change afterwards; that stays a recoverable saga
-        // concern, not an entry concern.)
-        let branch = crate::workspace_service::branch_for_execution(&ids.execution_id)?;
+        // concern, not an entry concern.) This preflight is diagnostic
+        // only: the atomic admission below re-checks inside its
+        // transaction, which is the correctness boundary under
+        // concurrency.
+        let branch = crate::managed_identity::branch_for_execution(&ids.execution_id)?;
         if let Some(owner) = self
             .tasks
             .store()
@@ -378,6 +546,21 @@ impl<C: Clock> OrchestrationService<C> {
             if owner != ids.execution_id {
                 return Err(ServiceError::Storage(StorageError::Duplicate(format!(
                     "managed branch {} is already owned by execution {}; \
+                     supply a fresh execution identity",
+                    branch.as_str(),
+                    owner.as_str()
+                ))));
+            }
+        }
+        if let Some(owner) = self
+            .tasks
+            .store()
+            .find_identity_reservation_owner(branch.as_str())
+            .map_err(ServiceError::from)?
+        {
+            if owner != ids.execution_id {
+                return Err(ServiceError::Storage(StorageError::Duplicate(format!(
+                    "managed branch {} is already reserved by execution {}; \
                      supply a fresh execution identity",
                     branch.as_str(),
                     owner.as_str()
@@ -396,11 +579,14 @@ impl<C: Clock> OrchestrationService<C> {
             .plan_execution(ids.execution_id.clone(), task_id.clone())?;
 
         // -- atomic admission: READY → CLAIMED → RUNNING + execution +
-        // attempt reservation + journal, one IMMEDIATE transaction -------
+        // attempt reservation + managed-identity reservation + journal,
+        // one IMMEDIATE transaction -------------------------------------
         // A failure here (duplicate identity, concurrent claim moved
-        // first) reports without creating any runtime fact and without
-        // retrying. Exactly one winner exists per identity; every loser
-        // rolls back completely.
+        // first, managed-branch collision) reports without creating any
+        // runtime fact and without retrying. Exactly one winner exists per
+        // identity; every loser rolls back completely. The branch was
+        // derived purely above (no Git/filesystem/provider work inside the
+        // transaction — INV-145); the transaction owns the reservation.
         let admission = storage_sqlite::ExecutionEntryAdmission {
             task_id,
             claimed_task: &claimed.task,
@@ -411,6 +597,7 @@ impl<C: Clock> OrchestrationService<C> {
             execution_event: &planned.event,
             attempt_id: &ids.attempt_id,
             reserved_at: planned.reserved_at.clone(),
+            managed_branch: branch.as_str(),
         };
         self.tasks.store_mut().admit_execution_entry(&admission)?;
 

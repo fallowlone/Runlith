@@ -184,6 +184,23 @@ impl GitPort for GitCli {
         observe::is_registered_worktree(self.exe(), repository_path, worktree_path)
     }
 
+    fn worktree_for_branch(
+        &self,
+        repository_path: &str,
+        branch: &BranchRef,
+    ) -> Result<Option<String>, WorkspaceFailure> {
+        observe::worktree_for_branch(self.exe(), repository_path, branch)
+    }
+
+    fn attach_worktree(
+        &self,
+        lease: &WorkspaceLease,
+        repository_path: &str,
+        worktree_path: &str,
+    ) -> Result<(), WorkspaceFailure> {
+        create::attach_worktree(self.exe(), lease, repository_path, worktree_path)
+    }
+
     /// Owner liveness from the wired [`OwnerLiveness`] source when present
     /// (G5: a real provider process tracker supplied by the composition
     /// root); honestly `false` when unwired (the G4 posture — full Runner

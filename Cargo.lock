@@ -13,6 +13,7 @@ dependencies = [
 name = "agentctl"
 version = "0.1.0"
 dependencies = [
+ "agent-runtime",
  "agentd",
  "bytes",
  "ipc-contracts",
@@ -21,6 +22,7 @@ dependencies = [
  "prost",
  "storage-sqlite",
  "tokio",
+ "workspace",
 ]
 
 [[package]]
@@ -69,6 +71,7 @@ dependencies = [
  "fake-evaluator",
  "git-cli",
  "provider-claude",
+ "rusqlite",
  "scheduler",
  "sha2",
  "storage-sqlite",

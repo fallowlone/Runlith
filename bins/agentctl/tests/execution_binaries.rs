@@ -172,6 +172,292 @@ fn stop_daemon(mut child: Child) {
     let _ = child.wait();
 }
 
+/// RAII daemon handle for the TASK-0056 keepers: kills and reaps the child
+/// on drop so a keeper failure can never leak a daemon (TEST-H).
+struct DaemonGuard {
+    child: Option<Child>,
+}
+
+impl DaemonGuard {
+    fn spawn(sandbox: &Sandbox) -> Self {
+        Self {
+            child: Some(sandbox.spawn_agentd()),
+        }
+    }
+
+    fn kill(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    fn restart(&mut self, sandbox: &Sandbox) {
+        self.kill();
+        self.child = Some(sandbox.spawn_agentd());
+        sandbox.wait_ready();
+    }
+}
+
+impl Drop for DaemonGuard {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+/// TASK-0056 (B-CR) binary keepers: the same live-ownership races as the
+/// in-process suite, driven through the shipped `agentd`/`agentctl`
+/// processes with parallel client processes racing one daemon.
+///
+/// Strand setup: `run --detach` commits the entry synchronously and
+/// returns; an immediate SIGKILL of the daemon lands inside the
+/// pre-attempt window (lease/Git/attempt work still pending), and the
+/// restarted daemon reports the execution `RUNNING`, `live=false`, zero
+/// attempts — the genuine crash shape. Retried with fresh identities when
+/// the kill lands past attempt creation.
+mod live_ownership {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static ROUND: AtomicU64 = AtomicU64::new(0);
+
+    fn repo(sandbox: &Sandbox) -> String {
+        sandbox.repo.to_string_lossy().into_owned()
+    }
+
+    fn seed_task(sandbox: &Sandbox, project: &str, task: &str) {
+        seed_ready(sandbox, project, task);
+    }
+
+    fn status_out(sandbox: &Sandbox, execution: &str) -> String {
+        let status = sandbox.agentctl(&["execution", "status", execution]);
+        assert!(status.status.success(), "status: {}", stderr(&status));
+        stdout(&status)
+    }
+
+    fn cancel_out(sandbox: &Sandbox, execution: &str) -> String {
+        let cancel = sandbox.agentctl(&["execution", "cancel", execution]);
+        assert!(cancel.status.success(), "cancel: {}", stderr(&cancel));
+        stdout(&cancel)
+    }
+
+    fn wait_no_live(sandbox: &Sandbox, execution: &str) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if status_out(sandbox, execution).contains("live=false") {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "execution {execution} stayed live: {}",
+                    status_out(sandbox, execution)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    fn wait_attempt_line(sandbox: &Sandbox, execution: &str, needle: &str) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let out = status_out(sandbox, execution);
+            if out.contains(needle) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!("status never showed {needle:?} for {execution}: {out:?}");
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    /// Commits a genuine pre-attempt strand through the shipped binaries.
+    /// Returns the (task, execution) identities of the strand.
+    fn strand_via_kill(sandbox: &Sandbox, daemon: &mut DaemonGuard) -> (String, String) {
+        for _ in 0..6 {
+            let n = ROUND.fetch_add(1, Ordering::SeqCst);
+            let project = format!("P-S{n}");
+            let task = format!("T-S{n}");
+            let execution = format!("E-S{n}");
+            let attempt = format!("A-S{n}");
+            seed_task(sandbox, &project, &task);
+            let run = sandbox.agentctl(&[
+                "execution",
+                "run",
+                &task,
+                &repo(sandbox),
+                "--execution",
+                &execution,
+                "--attempt",
+                &attempt,
+                "--detach",
+            ]);
+            assert!(run.status.success(), "detach run: {}", stderr(&run));
+            // Crash inside the pre-attempt window: the entry is committed,
+            // the background half dies with the daemon.
+            daemon.kill();
+            daemon.restart(sandbox);
+            let out = status_out(sandbox, &execution);
+            assert!(out.contains(&execution), "status names it: {out:?}");
+            if !out.contains("attempt ") {
+                assert!(out.contains("live=false"), "strand is honest: {out:?}");
+                return (task, execution);
+            }
+            // Missed the window (attempt already created): cancel the slow
+            // run for cleanliness and retry with fresh identities.
+            let cancelled = cancel_out(sandbox, &execution);
+            assert!(
+                cancelled.contains("LIVE_SIGNALLED") || cancelled.contains("ALREADY_CONCLUDED"),
+                "cleanup cancel honest: {cancelled:?}"
+            );
+            wait_no_live(sandbox, &execution);
+        }
+        panic!("could not strand a pre-attempt entry in 6 tries");
+    }
+
+    fn resume_cmd(execution: &str, repo: &str, task: &str) -> Vec<String> {
+        vec![
+            "execution".to_owned(),
+            "resume".to_owned(),
+            execution.to_owned(),
+            repo.to_owned(),
+            "--ref".to_owned(),
+            format!("repo-local:{task}"),
+            "--rev".to_owned(),
+            "HEAD".to_owned(),
+        ]
+    }
+
+    /// Runs `n` `agentctl execution resume` client processes in parallel
+    /// against one daemon. Returns (accepted, refused) by stdout/stderr.
+    fn race_resumes(
+        sandbox: &Sandbox,
+        execution: &str,
+        task: &str,
+        n: usize,
+    ) -> (Vec<String>, Vec<String>) {
+        let repo = repo(sandbox);
+        let mut accepted = Vec::new();
+        let mut refused = Vec::new();
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(n);
+            for _ in 0..n {
+                let args = resume_cmd(execution, &repo, task);
+                handles.push(scope.spawn(move || {
+                    sandbox.agentctl(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+                }));
+            }
+            for handle in handles {
+                let output = handle.join().expect("client joins");
+                let out = stdout(&output);
+                let err = stderr(&output);
+                if output.status.success() && out.contains("resumed execution") {
+                    accepted.push(out);
+                } else {
+                    refused.push(format!("exit={} out={out:?} err={err:?}", output.status));
+                }
+            }
+        });
+        (accepted, refused)
+    }
+    #[test]
+    fn binary_concurrent_resumes_elect_a_single_owner() {
+        let sandbox = Sandbox::new("liveown-race", SLOW_BODY);
+        let mut daemon = DaemonGuard::spawn(&sandbox);
+        sandbox.wait_ready();
+
+        // 2-client race on the first strand, then an 8-client race on a
+        // fresh strand: each keeper observes a full claim → live →
+        // cancel → release cycle through the real daemon.
+        for clients in [2usize, 8usize] {
+            let (task, execution) = strand_via_kill(&sandbox, &mut daemon);
+            let (accepted, refused) = race_resumes(&sandbox, &execution, &task, clients);
+            assert_eq!(
+                accepted.len(),
+                1,
+                "{clients}-client race: exactly one owner, got {} accepted: {accepted:?} refused: {refused:?}",
+                accepted.len()
+            );
+            for refusal in &refused {
+                assert!(
+                    refusal.contains("CONFLICT"),
+                    "loser refused honestly, got {refusal:?}"
+                );
+            }
+            // Winner stays live and cancellable through the real daemon.
+            let status = status_out(&sandbox, &execution);
+            assert!(status.contains("live=true"), "winner live: {status:?}");
+            let cancelled = cancel_out(&sandbox, &execution);
+            assert!(
+                cancelled.contains("LIVE_SIGNALLED"),
+                "cancel reaches the actual winner: {cancelled:?}"
+            );
+            wait_attempt_line(&sandbox, &execution, "CANCELLED");
+            wait_no_live(&sandbox, &execution);
+        }
+    }
+
+    #[test]
+    fn binary_run_then_resume_keeps_the_run_owner() {
+        let sandbox = Sandbox::new("liveown-runresume", SLOW_BODY);
+        let _daemon = DaemonGuard::spawn(&sandbox);
+        sandbox.wait_ready();
+
+        // Several run+resume overlaps: the resume must NEVER report
+        // `resumed` while the run owns the execution. Rounds where the
+        // resume lands post-attempt refuse INVALID_TRANSITION (honest, but
+        // not the race); at least one round must land the pre-attempt
+        // CONFLICT overlap to prove the keeper bites.
+        let mut conflict_rounds = 0;
+        for _ in 0..5 {
+            let n = ROUND.fetch_add(1, Ordering::SeqCst);
+            let project = format!("P-R{n}");
+            let task = format!("T-R{n}");
+            let execution = format!("E-R{n}");
+            let attempt = format!("A-R{n}");
+            seed_task(&sandbox, &project, &task);
+            let run = sandbox.agentctl(&[
+                "execution",
+                "run",
+                &task,
+                &repo(&sandbox),
+                "--execution",
+                &execution,
+                "--attempt",
+                &attempt,
+                "--detach",
+            ]);
+            assert!(run.status.success(), "detach run: {}", stderr(&run));
+            let resume_args = resume_cmd(&execution, &repo(&sandbox), &task);
+            let resume =
+                sandbox.agentctl(&resume_args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+            let out = stdout(&resume);
+            let err = stderr(&resume);
+            assert!(
+                !out.contains("resumed execution"),
+                "resume must never overwrite the live run owner (B-CR): {out:?}"
+            );
+            if !resume.status.success() && err.contains("CONFLICT") {
+                conflict_rounds += 1;
+                // Ownership intact: the run is still the live owner.
+                let status = status_out(&sandbox, &execution);
+                assert!(status.contains("live=true"), "run stays live: {status:?}");
+            }
+            // Cleanup: cancel the slow run and wait for release.
+            let cancelled = cancel_out(&sandbox, &execution);
+            assert!(
+                cancelled.contains("LIVE_SIGNALLED") || cancelled.contains("ALREADY_CONCLUDED"),
+                "cleanup cancel honest: {cancelled:?}"
+            );
+            wait_no_live(&sandbox, &execution);
+        }
+        assert!(
+            conflict_rounds >= 1,
+            "at least one round must hit the pre-attempt overlap"
+        );
+    }
+}
+
 #[test]
 fn run_wait_mode_reports_terminal_success_with_exit_zero() {
     let sandbox = Sandbox::new("wait", SUCCESS_BODY);

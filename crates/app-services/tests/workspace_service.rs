@@ -243,18 +243,26 @@ fn crash_partial_mutation_fails_closed_without_blind_replay() {
     let (_, _, exec) = seed_execution(&env, "P-1", "T-1", "E-1");
     let base = resolved_base(&env);
 
-    // Allocate, then simulate a partial Git mutation: the managed branch
-    // exists at the base but the worktree was never registered (a fan-in
-    // that can happen if the process died mid-`worktree add`).
+    // Allocate, then simulate a genuinely ambiguous partial Git mutation:
+    // the managed branch exists at an unexpected commit while the worktree
+    // was never registered. Exact-base branch-only state is recoverable by
+    // TASK-0057; drift must still fail closed.
     let (ws, branch) = {
         let mut service = env.workspace_service();
         let lease = service
             .allocate_workspace(&request(&env, &exec, "repo-local:runlith"))
             .unwrap();
-        // Derive the managed branch exactly as the service does and plant it
-        // (partial Git fan: the branch written, the worktree never created).
-        let short = format!("agent/{}", exec.as_str());
-        git(&env.repo, &["branch", &short, &base]);
+        git(
+            &env.repo,
+            &["commit", "-q", "--allow-empty", "-m", "unexpected-tip"],
+        );
+        let unexpected = git(&env.repo, &["rev-parse", "HEAD"]);
+        assert_ne!(unexpected, base);
+        git(&env.repo, &["reset", "-q", "--hard", &base]);
+        // Plant the lease's own recorded branch at the unexpected commit;
+        // the primary checkout remains at the recorded base.
+        let short = lease.branch().short_name().to_owned();
+        git(&env.repo, &["branch", &short, &unexpected]);
         (lease.id().clone(), format!("refs/heads/{short}"))
     };
 
@@ -645,11 +653,18 @@ fn h4_collision_pair_allocates_independent_workspaces() {
     );
     assert_eq!(
         ensured_slash.lease.branch().as_str(),
-        "refs/heads/agent/E%2FS"
+        "refs/heads/agent/e2-%45%2f%53"
     );
     assert_eq!(
         ensured_mimic.lease.branch().as_str(),
-        "refs/heads/agent/E-2FS"
+        "refs/heads/agent/e2-%45-2%46%53"
+    );
+    // TASK-0053: the pair is additionally distinct after ASCII case
+    // folding (the B-CF dimension the old format failed).
+    assert_ne!(
+        ensured_slash.lease.branch().as_str().to_ascii_lowercase(),
+        ensured_mimic.lease.branch().as_str().to_ascii_lowercase(),
+        "the H4 pair must stay distinct under case folding"
     );
     assert_ne!(
         ensured_slash.lease.worktree_ref(),
