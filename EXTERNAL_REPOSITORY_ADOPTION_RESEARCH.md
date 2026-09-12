@@ -8784,3 +8784,100 @@ safer, more continuous, more verifiable, and easier to manage together.
 ```
 
 Current G5/TASK-0051 remains unchanged.
+
+
+## 30. r/AI_Agents community research — production agent lessons (2026-09-12)
+
+**Source type:** external community discussion, primarily
+`https://www.reddit.com/r/AI_Agents/`. This evidence is lower-authority than
+primary specifications, repository tests or measured project benchmarks. Posts
+contained self-promotion and unverified claims, so adoption is limited to ideas
+that recur across independent discussions, fit known distributed-systems /
+security failure modes, and strengthen existing Runlith boundaries. No Reddit
+code is copied and no community project becomes a dependency.
+
+### Adopt into roadmap
+
+| Priority | Finding | Runlith decision | Gate / boundary |
+|---|---|---|---|
+| P0 | Intended/tool-call action is not proof of actual outcome | Add `AgentClaim -> EvidenceRequirement -> ObservedEffect -> ClaimVerification`; self-authored claims cannot prove completion | G8 |
+| P0 | Crash between remote side effect and local completion creates unknown outcome | Add `PREPARED -> INTENT_RECORDED -> EXECUTING -> CONFIRMED|FAILED|AMBIGUOUS`; `AMBIGUOUS -> RECONCILE` before retry | G8 + G11 |
+| P0 | Conversation/approval UX can accidentally turn discussion into mutation authority | Add `EXPLAIN / PROPOSE / EXECUTE`; immutable `ActionProposal`; approval bound to proposal hash | G6 follow-up + G7 |
+| P0/P1 | Broad OAuth/credential access exceeds task need | Add task-scoped `CapabilityLease` over Policy/Secrets boundaries; log canonical DENY attempts | G6 follow-up |
+| P1 | Human escalation often has no durable path back into the workflow | Add `HandoffPacket + ResumeToken` and `RESUME|REPLAN|TAKEOVER|ABORT` | G7 + G9 |
+| P1 | Always-on multi-agent orchestration duplicates context and coordination cost | Add Adaptive Collaboration Topology: multi-agent for ambiguity/critique, one worker for bounded execution, independent review by risk | G7 |
+| P1 | Anonymous retrieved chunks lack freshness/authority/permission semantics | Add Context Provenance Envelope with source/time/type/sensitivity/permission/supersession metadata | G9 |
+| P1 | Large intertwined harnesses can postpone real dogfooding indefinitely | Add Detachment Test + Dogfood Gate as roadmap/product invariant | Cross-cutting |
+| P2 | Entity aliasing can benefit from relationship-aware retrieval | Keep Entity Graph conditional and evidence-triggered; never core-by-default | G9/G10 |
+| KEEP | Token reduction can fail to reduce final bill or verified delivery effort | Keep existing Verified Delivery Cost unchanged; treat discussion as supporting evidence | Efficiency architecture |
+
+### Observed effect vs claim
+
+A tool-call transcript proves that a request was emitted, not that the intended
+external state exists. The useful distinction is between **intent evidence** and
+**observed effect evidence**. Runtime-owned process exit status, filesystem/Git
+read-back, remote provider IDs/state and independently captured artifacts are
+examples of effect evidence. This finding strengthens the already accepted rule
+that agents cannot approve their own completion.
+
+### Side-effect ambiguity and reconciliation
+
+The high-value failure case is a process crash after an external side effect
+succeeds but before local completion is persisted. Treating that state as a
+normal failure can duplicate email, API, deployment or other non-idempotent
+actions. Durable intent plus an explicit `AMBIGUOUS` state allows recovery to
+read back external state and either confirm success or prove a retry is safe.
+This is compatible with the v1 relational-state + journal architecture and does
+not justify pulling full Event Sourcing into v1.
+
+### Proposal-bound approval and capability leases
+
+`EXPLAIN`, `PROPOSE` and `EXECUTE` make mutation authority machine-visible. A
+proposal hash prevents a materially changed operation from reusing stale human
+approval. Capability leases then limit what the authorized execution can do by
+task/principal/resource/operation/time. This extends rather than replaces the
+existing Policy Engine, TASK-0062 exact-bound approval and TASK-0063 Secrets
+Broker work.
+
+### Handoff and collaboration topology
+
+A human handoff is incomplete if it only moves work from agent to human. The
+response must return to the same durable workflow with explicit ownership and
+continuation semantics. Likewise, multiple agents are most valuable before
+decision convergence or during independent review; bounded execution should
+default to one worker when parallelism/disagreement adds no measurable value.
+
+### Context provenance and conditional graph
+
+Context retrieval should answer not only "what text is similar?" but also "what
+is current, authoritative, permitted, sensitive and superseded?" A provenance
+envelope handles that without forcing a graph database into core. Graph-assisted
+entity resolution stays conditional for alias/relationship-heavy cases.
+
+### Detachment/Dogfood Gate
+
+The strongest negative evidence was an overbuilt agent harness whose subsystems
+were too coupled to yield a small, useful dogfoodable product. Runlith therefore
+adds the roadmap guardrail:
+
+> Every major capability must produce independent dogfood value before the next
+> dependent capability is required.
+
+Detachment test: if the rest of Runlith disappeared, the capability should still
+be useful and verifiable within its own contract. This protects sequencing from
+architecture bloat without weakening required security, durability or
+verification work.
+
+### Verified Delivery Cost — supporting evidence only
+
+Community discussion about terminal/output compression described large token
+reductions without equivalent final cost reduction. That is consistent with our
+existing decision to optimize verified delivery rather than isolated token/LOC
+metrics. **No change is made to Verified Delivery Cost.**
+
+### Adoption boundary
+
+These findings are now reflected in the Architecture Source of Truth and
+`planning/roadmap.yaml`. They do not resequence the active G6 queue, create a
+new implementation task, change current completion claims, make Event Sourcing
+a v1 requirement, or promote an Entity Graph to a core dependency.

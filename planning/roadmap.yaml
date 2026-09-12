@@ -59,6 +59,13 @@ gates:
     status: in_progress
     objective: Policy Engine, approvals, Secret Broker, audit, runner
       security levels.
+    research_backed_followups:
+      - Explicit EXPLAIN / PROPOSE / EXECUTE execution modes with immutable
+        ActionProposal and approval bound to the exact proposal hash.
+      - Task-scoped Capability Leases with principal/scope/TTL binding and
+        canonical DENY-attempt audit evidence.
+    note: These follow-ups do not resequence TASK-0065 through TASK-0068 or
+      expand their accepted implementation scope.
     scope_ref:
       - docs/architecture/adr/ADR-0013-policy-engine-os-isolation.md
       - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
@@ -69,12 +76,25 @@ gates:
     status: planned
     objective: Planner/Worker/Reviewer with typed messages, versioned plan
       revisions, PlannerPort, atomicity proposals, recursion guardrails.
+    planned_capabilities:
+      - Bidirectional Human Handoff with HandoffPacket, ResumeToken and explicit
+        RESUME / REPLAN / TAKEOVER / ABORT continuation decisions.
+      - >-
+        Adaptive Collaboration Topology: multi-perspective work for ambiguity
+        and independent review; one bounded worker for converged execution.
+      - ActionProposal lifecycle integration for proposed mutations before
+        execution authority is consumed.
     scope_ref: AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
 
   - id: G8
     name: Verification
     status: planned
     objective: Tests/review/security/acceptance pipeline.
+    planned_capabilities:
+      - Observed Effect / Claim Verification contract separating AgentClaim,
+        EvidenceRequirement, ObservedEffect and ClaimVerification.
+      - Side-Effect Execution Protocol with durable intent, AMBIGUOUS recovery
+        and RECONCILE before any retry whose external outcome is uncertain.
     scope_ref: AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
 
   - id: G9
@@ -82,6 +102,11 @@ gates:
     status: planned
     objective: Retrieval, token budget, context plans, epochs, checkpoints,
       history search.
+    planned_capabilities:
+      - Context Provenance Envelope carrying source/time/type/sensitivity,
+        permission scope, confidence and supersession metadata.
+      - Conditional Entity Graph only when entity ambiguity or relationship-heavy
+        retrieval measurably justifies graph-assisted resolution.
     scope_ref:
       - docs/architecture/adr/ADR-0010-context-derived-state.md
       - docs/architecture/adr/ADR-0011-provider-independent-context-continuity.md
@@ -109,3 +134,24 @@ gates:
     status: planned
     objective: Account, billing, encrypted sync, teams, org policies.
     scope_ref: AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
+
+
+roadmap_guardrails:
+  - id: DOGFOOD_DETACHMENT
+    priority: P1
+    rule: Every major capability must produce independently useful, verifiable
+      dogfood value before the next dependent capability is required.
+    test: If the rest of Runlith were removed, the capability should still be
+      useful and testable within its stated boundary.
+  - id: VERIFIED_DELIVERY_COST
+    decision: unchanged
+    note: Community evidence about token compression supports the existing
+      multi-objective Verified Delivery Cost model; no formula change.
+  - id: EVENT_SOURCING
+    decision: future_only
+    note: Full Event Sourcing remains outside v1; side-effect recovery uses
+      durable intent/journal/reconciliation contracts instead.
+  - id: ENTITY_GRAPH
+    decision: conditional
+    note: Graph support is an optional retrieval tool, never a core runtime
+      dependency by default.
