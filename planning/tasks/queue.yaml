@@ -936,12 +936,23 @@ items:
     exit_criteria_summary: Identical canonical inputs produce identical
       decisions; hard policy cannot be weakened by lower layers; unknown or
       unsupported security requirements fail closed; contract tests green.
+    outcome: Deterministic provider-neutral Policy Engine core implemented in
+      crates/policy. Explicit BuiltInHard -> UserManaged -> Workspace ->
+      Repository -> RequestSession precedence, restrictive DENY >
+      REQUIRE_APPROVAL > ALLOW composition, typed filesystem/exact-scope
+      matching, parent/request authority bounds, fail-closed default deny,
+      stable rule/reason evidence and insertion-order-independent SHA-256
+      policy fingerprint are executable. Multi-capability requests are
+      authorization-atomic; approval-gated authority remains unavailable before
+      approval. G5 remains CLOSED; G6 remains IN_PROGRESS.
     depends_on:
       - TASK-0060
     blocked_by: []
     references:
       - docs/security/POLICY_CONTRACT.md
       - crates/policy/src/lib.rs
+      - crates/policy/src/engine.rs
+      - docs/development/G6_POLICY_ENGINE_CORE.md
 
   - id: TASK-0062
     gate: G6

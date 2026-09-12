@@ -113,8 +113,11 @@ Unresolved by accepted architecture; listed, not decided:
 
 G6 authorization semantics, capability monotonicity, approval binding and
 security-audit authority are no longer open design items; ADR-0026 and
-`POLICY_CONTRACT.md` define their foundation. Their persistence/enforcement
-implementations remain open by the G6 task sequence.
+`POLICY_CONTRACT.md` define their foundation. TASK-0061 implements the
+deterministic layered Policy Engine core, typed restrictive precedence,
+fail-closed default behavior and policy fingerprinting. Durable approval,
+Secrets Broker, OS isolation, H7 provider-environment isolation and Security
+Audit persistence/enforcement remain open by the G6 task sequence.
 
 ## 7. Accepted and deferred risks
 

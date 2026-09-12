@@ -8,6 +8,10 @@ use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
+mod engine;
+
+pub use engine::{CompiledPolicy, PolicyEngine, PolicyLayer, PolicyRule, PolicyRuleEvidence};
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CapabilityKind {
     FilesystemRead,
@@ -409,6 +413,8 @@ pub struct PolicyDecision {
     request: PolicyRequest,
     effective: EffectiveCapabilities,
     approval: Option<ApprovalRequirement>,
+    policy_fingerprint: Option<String>,
+    rule_evidence: Vec<PolicyRuleEvidence>,
 }
 
 impl PolicyDecision {
@@ -426,6 +432,8 @@ impl PolicyDecision {
             request,
             effective,
             approval: None,
+            policy_fingerprint: None,
+            rule_evidence: Vec::new(),
         })
     }
 
@@ -441,6 +449,8 @@ impl PolicyDecision {
             request,
             effective: EffectiveCapabilities::none(),
             approval: None,
+            policy_fingerprint: None,
+            rule_evidence: Vec::new(),
         })
     }
 
@@ -460,6 +470,8 @@ impl PolicyDecision {
             request,
             effective: EffectiveCapabilities::none(),
             approval: Some(approval),
+            policy_fingerprint: None,
+            rule_evidence: Vec::new(),
         })
     }
 
@@ -512,6 +524,14 @@ impl PolicyDecision {
     pub fn approval(&self) -> Option<&ApprovalRequirement> {
         self.approval.as_ref()
     }
+
+    pub fn policy_fingerprint(&self) -> Option<&str> {
+        self.policy_fingerprint.as_deref()
+    }
+
+    pub fn rule_evidence(&self) -> &[PolicyRuleEvidence] {
+        &self.rule_evidence
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -543,6 +563,7 @@ pub struct SecurityAuditRecord {
 pub enum PolicyContractError {
     UnknownCapability(String),
     MalformedScope { field: &'static str, value: String },
+    DuplicateRuleId(String),
     AuthorityExpansion(Capability),
     EffectiveAuthorityOutsideRequest(Capability),
     ApprovalScopeMismatch,

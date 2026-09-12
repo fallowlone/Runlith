@@ -127,6 +127,68 @@ forbidden by a stronger layer. Future organization policy can be inserted as a
 strong managed layer without changing the capability algebra. Repository
 content is untrusted and can never grant itself authority.
 
+TASK-0061 makes this precedence executable with ordered `PolicyLayer` values:
+
+```text
+BuiltInHard
+  -> UserManaged
+  -> Workspace
+  -> Repository
+  -> RequestSession
+```
+
+`BuiltInHard` and `UserManaged` are the positive authorization roots in the
+current local policy model. `Workspace`, `Repository` and `RequestSession`
+rules are restriction-only: they may add `DENY` or `REQUIRE_APPROVAL`, and an
+`ALLOW` in one of those layers is never sufficient to create authority. This
+makes repository/session self-grant structurally impossible while retaining
+their rule provenance for explanation/audit.
+
+No matching positive authorization fails closed as `DENY` with stable
+`policy.default_deny` / `no_authorizing_rule` provenance. Policy compilation
+rejects duplicate rule identities; unknown capability names and malformed
+typed scopes are rejected by the capability contract instead of being silently
+ignored.
+
+Rule matching is scope-aware. An `ALLOW` rule must contain the complete
+requested capability. `DENY` and `REQUIRE_APPROVAL` apply on typed scope
+overlap so a narrow restriction cannot be bypassed by requesting a broader
+filesystem root. Filesystem overlap requires the same workspace and path
+component containment; `src/api` therefore does not match `src/api2`. Initial
+non-filesystem `ScopeId` resources remain exact-match only.
+
+One `PolicyRequest` is authorization-atomic. Multiple requested capabilities
+are evaluated individually and composed with `DENY > REQUIRE_APPROVAL >
+ALLOW`, but a mixed result does not expose partial authority: any denial denies
+the whole request; otherwise any approval requirement withholds the whole
+request until approval. Callers that need independently executable partial
+authority must issue separate policy requests.
+
+Parent authority is checked before rule evaluation through the typed
+`EffectiveCapabilities::narrow` contract. Therefore an engine result can never
+make a child capability wider than the request or the parent authority.
+
+## Policy compilation and fingerprint
+
+`CompiledPolicy` is the canonical in-memory TASK-0061 policy form. Source
+loading/parsing remains outside the engine. Compilation validates stable rule
+identity, canonicalizes rule order independently of insertion order and
+computes a versioned SHA-256 fingerprint over layer, rule identity, reason,
+effect and typed capability scope. Secret capability entries contain only
+opaque secret identity; no secret value enters the fingerprint.
+
+The same canonical policy produces the same fingerprint. A relevant rule,
+effect, layer or scope change changes it. `PolicyDecision` retains the
+fingerprint plus structured matching-rule evidence for later Security Audit
+persistence.
+
+For `REQUIRE_APPROVAL`, TASK-0061 creates the existing exact-bound
+`ApprovalRequirement`: the binding contains the exact `PolicyRequest`, current
+policy fingerprint and caller-supplied expiry, while `effective` remains empty.
+`effective_if_approved` is already bounded by both request and parent
+authority. Durable approval state, expiry/replay lifecycle and human decision
+enforcement remain TASK-0062.
+
 ## Enforcement points
 
 | Operation | Request | Decide | Enforce | Audit |
