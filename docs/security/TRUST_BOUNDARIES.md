@@ -141,6 +141,11 @@ an approved decision only by re-presenting the exact current canonical
   USER ACTION, never silent unsandboxed fallback.
 - Forbidden assumptions: "NativeRunner is a sandbox" (it is Trusted Host,
   honestly labeled); "the task is low-risk so isolation can slide".
+- TASK-0064 foundation: the runner boundary rechecks exact process authority,
+  requires backend evidence bound to the exact current isolation plan and
+  refuses insufficient/missing enforcement before the process operation. The
+  NativeRunner adapter reports zero sandbox axes; concrete OS/container
+  mechanisms remain backend-specific and are not claimed implemented here.
 - Evidence/audit: policy decisions, approvals and results in the Security
   Audit; tool execution receipts for provenance.
 - Refs: ADR-0008, ADR-0013; INV-005, INV-006, INV-007, INV-076, INV-077.
