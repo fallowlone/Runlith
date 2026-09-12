@@ -47,6 +47,21 @@ provider or UI configuration. Unknown capabilities, malformed scopes and
 unprovable security scope fail closed as policy-contract errors; ordinary
 runtime/internal failures remain separate from policy denial.
 
+TASK-0061 implementation clarification: the executable local layer order is
+`BuiltInHard -> UserManaged -> Workspace -> Repository -> RequestSession`.
+`BuiltInHard` and `UserManaged` are the current positive authorization roots;
+the weaker workspace/repository/request-session layers are restriction-only and
+cannot self-grant authority. Restrictive filesystem rules match typed scope
+overlap, so requesting a broader root cannot bypass a narrower deny/approval
+rule. Non-filesystem `ScopeId` resources remain exact-match.
+
+One `PolicyRequest` is authorization-atomic. Per-capability results compose as
+`DENY > REQUIRE_APPROVAL > ALLOW`; mixed requests expose no partial current
+authority. If independent partial execution is desired, the operation owner
+issues separate requests. Policy compilation is insertion-order independent and
+binds decisions/approvals to a deterministic versioned SHA-256 policy
+fingerprint plus stable rule/reason provenance.
+
 Policy evaluation and enforcement are separate responsibilities. An
 authorization preflight is not an enforcement boundary. The component that
 performs a privileged filesystem/process/Git/network/secret/tool operation
