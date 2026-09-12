@@ -48,7 +48,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agent_runtime::{AttemptOutcome, ExecutionId};
 use app_services::{
-    ExecutionEntry, ManagedWorkspaceRoot, OrchestrationIds, OrchestrationService, WorkspaceRequest,
+    ExecutionEntry, G6Authorization, G6SecurityService, ManagedWorkspaceRoot, OrchestrationIds,
+    OrchestrationService, PrivilegedOperation, ProcessSecuritySpec, WorkspaceRequest,
     WorkspaceService,
 };
 use evaluation::{EvaluationPort, EvaluationRequest, EvaluationResult, EvaluationVerdict};
@@ -62,6 +63,12 @@ use scheduler::OrchestrationOutcome;
 use task_domain::{TaskId, TaskState};
 use workspace::{GitPort, RepositoryRef, Revision, WorkspaceFailure, WorkspaceStore};
 
+use policy::{
+    Capability, CompiledPolicy, EffectiveCapabilities, FileScope, PolicyLayer, PolicyOutcome,
+    PolicyRequest, PolicyRule, RequestOrigin, RequestedCapabilities, ScopeId,
+};
+use runner::IsolationRequirements;
+
 /// Wall-clock bound for one production provider execution. Matches the
 /// adapter default: the daemon does not invent its own timeout policy.
 pub const PROVIDER_TIMEOUT: Duration = Duration::from_secs(300);
@@ -69,6 +76,8 @@ pub const PROVIDER_TIMEOUT: Duration = Duration::from_secs(300);
 /// Capture-finalization grace after natural provider exit. Matches the
 /// adapter default; see `provider-claude` process supervision.
 pub const CAPTURE_GRACE: Duration = Duration::from_secs(5);
+
+const PROVIDER_LAUNCH_REQUESTER: &str = "agent-runtime";
 
 /// Bound for server-local path inputs on the wire (repository paths).
 const MAX_PATH_LEN: usize = 4096;
@@ -260,6 +269,161 @@ impl ExecutionComposition {
 /// Shared handle type for the serve loop.
 pub type ExecutionHandle = Arc<ExecutionComposition>;
 
+/// Production G6 wrapper around the replaceable provider executor. It owns no
+/// provider behavior: its only job is to re-present trusted product state to
+/// Policy, enforce exact launch authority through Runner immediately around
+/// the spawn boundary, and persist product-authored Security Audit evidence.
+struct SecuredClaudeExecutor {
+    inner: provider_claude::ClaudeExecutor,
+    db_path: PathBuf,
+    launch: Result<ProviderLaunchSecurity, String>,
+}
+
+struct ProviderLaunchSecurity {
+    request: PolicyRequest,
+    parent: EffectiveCapabilities,
+    policy: CompiledPolicy,
+    workspace: String,
+    executable: ScopeId,
+}
+
+impl scheduler::ExecutionPort for SecuredClaudeExecutor {
+    fn provider_ref(&self) -> agent_runtime::ProviderRef {
+        self.inner.provider_ref()
+    }
+
+    fn execute(
+        &self,
+        work: &scheduler::WorkItem,
+    ) -> Result<scheduler::WorkEvidence, scheduler::ExecutionProblem> {
+        let launch =
+            self.launch
+                .as_ref()
+                .map_err(|detail| scheduler::ExecutionProblem::Failed {
+                    detail: format!("G6 provider launch setup refused: {detail}"),
+                })?;
+        let mut security = G6SecurityService::open(&self.db_path, app_services::SystemClock)
+            .map_err(security_execution_problem)?;
+        let authorization = security
+            .authorize(&launch.request, &launch.parent, &launch.policy, u64::MAX)
+            .map_err(security_execution_problem)?;
+        let effective = match authorization {
+            G6Authorization::Authorized { effective, .. } => effective,
+            G6Authorization::ApprovalRequired { .. } => {
+                return Err(scheduler::ExecutionProblem::Failed {
+                    detail: "G6 approval required before provider launch".to_owned(),
+                });
+            }
+            G6Authorization::Denied { .. } => {
+                return Err(scheduler::ExecutionProblem::Failed {
+                    detail: "G6 policy denied provider launch".to_owned(),
+                });
+            }
+        };
+        let operation = PrivilegedOperation::from_policy_request(&launch.request);
+        let spec = ProcessSecuritySpec::new(
+            launch.workspace.clone(),
+            launch.executable.clone(),
+            IsolationRequirements::trusted_host(),
+            provider_claude::CLAUDE_PROVIDER_REF,
+        );
+        security
+            .enforce_process_operation(
+                &operation,
+                &runner_native::NativeRunner,
+                &effective,
+                &spec,
+                || self.inner.execute(work),
+            )
+            .map_err(security_execution_problem)?
+    }
+}
+
+fn security_execution_problem(error: app_services::G6SecurityError) -> scheduler::ExecutionProblem {
+    scheduler::ExecutionProblem::Failed {
+        detail: format!("G6 security boundary refused provider launch: {error}"),
+    }
+}
+
+fn secure_provider_executor(
+    db_path: &Path,
+    task: &task_domain::Task,
+    lease: &workspace::WorkspaceLease,
+    work: &scheduler::WorkItem,
+    inner: provider_claude::ClaudeExecutor,
+    executable: &std::ffi::OsStr,
+) -> SecuredClaudeExecutor {
+    let launch = build_provider_launch_security(task, lease, work, executable);
+    SecuredClaudeExecutor {
+        inner,
+        db_path: db_path.to_path_buf(),
+        launch,
+    }
+}
+
+fn build_provider_launch_security(
+    task: &task_domain::Task,
+    lease: &workspace::WorkspaceLease,
+    work: &scheduler::WorkItem,
+    executable: &std::ffi::OsStr,
+) -> Result<ProviderLaunchSecurity, String> {
+    let workspace = lease.id().as_str().to_owned();
+    let executable = ScopeId::new(executable.to_string_lossy().into_owned())
+        .map_err(|error| format!("provider launch executable scope: {error}"))?;
+    let capabilities = vec![
+        Capability::FilesystemRead(
+            FileScope::new(&workspace, ".")
+                .map_err(|error| format!("provider launch read scope: {error}"))?,
+        ),
+        Capability::FilesystemWrite(
+            FileScope::new(&workspace, ".")
+                .map_err(|error| format!("provider launch write scope: {error}"))?,
+        ),
+        Capability::ProcessExecute(executable.clone()),
+    ];
+    let requested = RequestedCapabilities::new(capabilities.clone());
+    let request = PolicyRequest::new(
+        format!(
+            "provider.launch:{}:{}",
+            work.execution_id.as_str(),
+            work.attempt_id.as_str()
+        ),
+        PROVIDER_LAUNCH_REQUESTER,
+        RequestOrigin::new(
+            task.id().as_str(),
+            Some(work.execution_id.to_string()),
+            Some(work.attempt_id.to_string()),
+        )
+        .map_err(|error| format!("provider launch origin: {error}"))?,
+        requested,
+    )
+    .map_err(|error| format!("provider launch request: {error}"))?;
+    let rules = capabilities
+        .iter()
+        .enumerate()
+        .map(|(index, capability)| {
+            PolicyRule::new(
+                format!("builtin.provider-launch.{index}"),
+                "trusted_local_provider_launch",
+                PolicyLayer::BuiltInHard,
+                PolicyOutcome::Allow,
+                capability.clone(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("provider launch policy: {error}"))?;
+    let policy = CompiledPolicy::compile(rules)
+        .map_err(|error| format!("provider launch policy: {error}"))?;
+
+    Ok(ProviderLaunchSecurity {
+        request,
+        parent: EffectiveCapabilities::new(capabilities),
+        policy,
+        workspace,
+        executable,
+    })
+}
+
 /// A committed background run: the daemon entry is durable, the provider
 /// half still has to execute. Spawned detached by the serve loop. Carries
 /// the owner token won at claim time so the terminal path retires exactly
@@ -429,6 +593,8 @@ fn run_background_inner(
             .map_err(|error| format!("open workspace service: {error}"))?;
     let tracker = composition.tracker.clone();
     let executable = composition.provider_executable.clone();
+    let db_path = composition.db_path.clone();
+    let security_work = work.clone();
     let cancel = cancel.clone();
     let environment_base = provider_environment_base(&composition.db_path)?;
     orchestration
@@ -450,7 +616,8 @@ fn run_background_inner(
                     .expect("constant provider timeout is non-zero")
                     .with_capture_grace(CAPTURE_GRACE)
                     .expect("constant capture grace is non-zero");
-                provider_claude::ClaudeExecutor::bind(
+                let launch_executable = config.executable().to_owned();
+                let executor = provider_claude::ClaudeExecutor::bind(
                     config,
                     prompt,
                     lease.worktree_ref().to_owned(),
@@ -458,7 +625,15 @@ fn run_background_inner(
                 )
                 .expect("lease-bound prompt and workdir are non-blank")
                 .with_tracker(tracker)
-                .with_cancel_flag(cancel)
+                .with_cancel_flag(cancel);
+                secure_provider_executor(
+                    &db_path,
+                    task,
+                    lease,
+                    &security_work,
+                    executor,
+                    &launch_executable,
+                )
             },
             &PendingEvaluator,
         )
@@ -1680,6 +1855,48 @@ mod tests {
             error.detail().contains("no automated verifier"),
             "got {:?}",
             error.detail()
+        );
+    }
+
+    #[test]
+    fn provider_launch_emits_g6_security_audit() {
+        let sandbox = Sandbox::named("g6-security-audit");
+        seed_ready(&sandbox.db, "P-1", "T-1");
+        let fixture = fixture_script(
+            &sandbox.dir,
+            "success.sh",
+            "printf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"security keeper finished\",\"session_id\":\"ffffffff-ffff-ffff-ffff-ffffffffffff\"}'; exit 0\n",
+        );
+        let composition = sandbox.composition(Some(fixture));
+        let (response, job) = run_via_dispatch(&composition, run_request("T-1", &sandbox.repo));
+        let run = run_payload(&response);
+
+        run_background(job.expect("accepted run yields a background job"));
+
+        let store = storage_sqlite::SqliteStore::open(&sandbox.db).expect("open store");
+        let audit = store
+            .list_security_audit_ordered()
+            .expect("security audit must be readable");
+        assert!(
+            audit.iter().any(|record| {
+                record.fact.event == storage_sqlite::SecurityAuditEvent::PolicyDecision
+                    && record.fact.execution_id.as_deref() == Some(run.execution_id.as_str())
+            }),
+            "production provider launch must record the canonical policy decision"
+        );
+        assert!(
+            audit.iter().any(|record| {
+                record.fact.event == storage_sqlite::SecurityAuditEvent::IsolationEnforcement
+                    && record.fact.execution_id.as_deref() == Some(run.execution_id.as_str())
+            }),
+            "production provider launch must record runner enforcement"
+        );
+        assert!(
+            audit.iter().any(|record| {
+                record.fact.event == storage_sqlite::SecurityAuditEvent::ProviderInvocation
+                    && record.fact.execution_id.as_deref() == Some(run.execution_id.as_str())
+            }),
+            "production provider launch must record provider invocation"
         );
     }
 

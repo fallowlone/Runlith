@@ -5,7 +5,8 @@
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
-use crate::{SqliteStore, StorageError, StorageResult};
+use crate::audit_store::append_security_audit_in_transaction;
+use crate::{NewSecurityAuditRecord, SqliteStore, StorageError, StorageResult};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApprovalState {
@@ -83,6 +84,22 @@ impl SqliteStore {
     /// Inserts a pending approval. Re-registering the identical binding is
     /// idempotent; reusing an id for a different binding fails closed.
     pub fn create_approval(&mut self, record: &NewApprovalRecord) -> StorageResult<ApprovalRecord> {
+        self.create_approval_inner(record, None)
+    }
+
+    pub fn create_approval_with_audit(
+        &mut self,
+        record: &NewApprovalRecord,
+        audit: &NewSecurityAuditRecord,
+    ) -> StorageResult<ApprovalRecord> {
+        self.create_approval_inner(record, Some(audit))
+    }
+
+    fn create_approval_inner(
+        &mut self,
+        record: &NewApprovalRecord,
+        audit: Option<&NewSecurityAuditRecord>,
+    ) -> StorageResult<ApprovalRecord> {
         if let Some(existing) = self.get_approval(&record.request_id)? {
             return if existing.binding_fingerprint == record.binding_fingerprint {
                 Ok(existing)
@@ -128,6 +145,9 @@ impl SqliteStore {
             "effective",
             &record.effective,
         )?;
+        if let Some(audit) = audit {
+            append_security_audit_in_transaction(&transaction, audit)?;
+        }
         transaction.commit()?;
         self.get_approval(&record.request_id)?.ok_or_else(|| {
             StorageError::Corrupt(format!(
@@ -149,6 +169,28 @@ impl SqliteStore {
         decision: ApprovalState,
         approver: &str,
         now_ms: u64,
+    ) -> StorageResult<ApprovalRecord> {
+        self.decide_approval_inner(request_id, decision, approver, now_ms, None)
+    }
+
+    pub fn decide_approval_with_audit(
+        &mut self,
+        request_id: &str,
+        decision: ApprovalState,
+        approver: &str,
+        now_ms: u64,
+        audit: &NewSecurityAuditRecord,
+    ) -> StorageResult<ApprovalRecord> {
+        self.decide_approval_inner(request_id, decision, approver, now_ms, Some(audit))
+    }
+
+    fn decide_approval_inner(
+        &mut self,
+        request_id: &str,
+        decision: ApprovalState,
+        approver: &str,
+        now_ms: u64,
+        audit: Option<&NewSecurityAuditRecord>,
     ) -> StorageResult<ApprovalRecord> {
         if !matches!(decision, ApprovalState::Approved | ApprovalState::Denied) {
             return Err(StorageError::ConstraintViolation(
@@ -189,6 +231,9 @@ impl SqliteStore {
                 "approval {request_id} changed concurrently"
             )));
         }
+        if let Some(audit) = audit {
+            append_security_audit_in_transaction(&transaction, audit)?;
+        }
         transaction.commit()?;
         self.get_approval(request_id)?.ok_or_else(|| {
             StorageError::Corrupt(format!("approval {request_id} vanished after decision"))
@@ -203,6 +248,26 @@ impl SqliteStore {
         request_id: &str,
         binding_fingerprint: &str,
         now_ms: u64,
+    ) -> StorageResult<ApprovalRecord> {
+        self.consume_approval_inner(request_id, binding_fingerprint, now_ms, None)
+    }
+
+    pub fn consume_approval_with_audit(
+        &mut self,
+        request_id: &str,
+        binding_fingerprint: &str,
+        now_ms: u64,
+        audit: &NewSecurityAuditRecord,
+    ) -> StorageResult<ApprovalRecord> {
+        self.consume_approval_inner(request_id, binding_fingerprint, now_ms, Some(audit))
+    }
+
+    fn consume_approval_inner(
+        &mut self,
+        request_id: &str,
+        binding_fingerprint: &str,
+        now_ms: u64,
+        audit: Option<&NewSecurityAuditRecord>,
     ) -> StorageResult<ApprovalRecord> {
         let now = to_sql_millis(now_ms, "consumed_at_ms")?;
         let transaction = self
@@ -237,6 +302,9 @@ impl SqliteStore {
             return Err(StorageError::ConstraintViolation(format!(
                 "approval {request_id} changed concurrently"
             )));
+        }
+        if let Some(audit) = audit {
+            append_security_audit_in_transaction(&transaction, audit)?;
         }
         transaction.commit()?;
         current.state = ApprovalState::Consumed;

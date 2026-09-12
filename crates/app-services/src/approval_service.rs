@@ -10,6 +10,10 @@ use policy::{
     ApprovalResolution, Capability, EffectiveCapabilities, HumanDecision, PolicyContractError,
     PolicyDecision, PolicyOutcome,
 };
+use security_audit::{
+    AuditCapability, NewSecurityAuditRecord, SecurityAuditAuthor, SecurityAuditEvent,
+    SecurityAuditOutcome, SecurityAuditSubject, SecurityAuditSubjectKind,
+};
 use storage_sqlite::{
     ApprovalCapabilityRecord, ApprovalRecord, ApprovalState, NewApprovalRecord, SqliteStore,
     StorageError,
@@ -71,7 +75,13 @@ impl<C: Clock> ApprovalService<C> {
                 .map(capability_record)
                 .collect::<Result<_, _>>()?,
         };
-        Ok(self.store.create_approval(&record)?)
+        let audit = approval_audit(
+            ApprovalAuditSource::from_new(&record),
+            SecurityAuditEvent::ApprovalRequested,
+            SecurityAuditOutcome::ApprovalRequired,
+            self.clock.now_millis(),
+        )?;
+        Ok(self.store.create_approval_with_audit(&record, &audit)?)
     }
 
     /// Records one human resolution. Binding and authority are immutable;
@@ -86,9 +96,22 @@ impl<C: Clock> ApprovalService<C> {
             HumanDecision::Approve => ApprovalState::Approved,
             HumanDecision::Deny => ApprovalState::Denied,
         };
+        let current = self.store.get_approval(request_id)?.ok_or_else(|| {
+            StorageError::NotFound(format!("approval {request_id} does not exist"))
+        })?;
+        let now = self.clock.now_millis();
+        let audit = approval_audit(
+            ApprovalAuditSource::from_record(&current),
+            SecurityAuditEvent::ApprovalDecided,
+            match decision {
+                HumanDecision::Approve => SecurityAuditOutcome::Approved,
+                HumanDecision::Deny => SecurityAuditOutcome::Denied,
+            },
+            now,
+        )?;
         Ok(self
             .store
-            .decide_approval(request_id, state, approver, self.clock.now_millis())?)
+            .decide_approval_with_audit(request_id, state, approver, now, &audit)?)
     }
 
     /// Returns effective authority only after the currently evaluated policy
@@ -151,10 +174,97 @@ impl<C: Clock> ApprovalService<C> {
             decided_at_ms,
         )?;
         let effective = decision.apply_approval(&resolution, now)?;
-        self.store
-            .consume_approval(requirement.request_id(), &fingerprint, now)?;
+        let audit = approval_audit(
+            ApprovalAuditSource::from_record(&current),
+            SecurityAuditEvent::ApprovalDecided,
+            SecurityAuditOutcome::Consumed,
+            now,
+        )?;
+        self.store.consume_approval_with_audit(
+            requirement.request_id(),
+            &fingerprint,
+            now,
+            &audit,
+        )?;
         Ok(effective)
     }
+}
+
+struct ApprovalAuditSource<'a> {
+    operation_id: &'a str,
+    task_id: &'a str,
+    execution_id: &'a Option<String>,
+    attempt_id: &'a Option<String>,
+    request_id: &'a str,
+    policy_fingerprint: &'a str,
+    capabilities: &'a [ApprovalCapabilityRecord],
+}
+
+impl<'a> ApprovalAuditSource<'a> {
+    fn from_new(record: &'a NewApprovalRecord) -> Self {
+        Self {
+            operation_id: &record.operation_id,
+            task_id: &record.task_id,
+            execution_id: &record.execution_id,
+            attempt_id: &record.attempt_id,
+            request_id: &record.request_id,
+            policy_fingerprint: &record.policy_fingerprint,
+            capabilities: &record.effective,
+        }
+    }
+
+    fn from_record(record: &'a ApprovalRecord) -> Self {
+        Self {
+            operation_id: &record.operation_id,
+            task_id: &record.task_id,
+            execution_id: &record.execution_id,
+            attempt_id: &record.attempt_id,
+            request_id: &record.request_id,
+            policy_fingerprint: &record.policy_fingerprint,
+            capabilities: &record.effective,
+        }
+    }
+}
+
+fn approval_audit(
+    source: ApprovalAuditSource<'_>,
+    event: SecurityAuditEvent,
+    outcome: SecurityAuditOutcome,
+    occurred_at_ms: u64,
+) -> ServiceResult<NewSecurityAuditRecord> {
+    let capabilities = source
+        .capabilities
+        .iter()
+        .map(|capability| {
+            AuditCapability::parse(
+                &capability.kind,
+                capability.workspace.clone(),
+                capability.scope.clone(),
+            )
+            .map_err(|error| StorageError::Corrupt(error.to_string()).into())
+        })
+        .collect::<ServiceResult<Vec<_>>>()?;
+    Ok(NewSecurityAuditRecord {
+        event,
+        author: SecurityAuditAuthor::ApprovalService,
+        outcome: Some(outcome),
+        occurred_at_ms,
+        correlation_id: source.operation_id.to_owned(),
+        causation_id: None,
+        operation_id: Some(source.operation_id.to_owned()),
+        task_id: Some(source.task_id.to_owned()),
+        execution_id: source.execution_id.clone(),
+        attempt_id: source.attempt_id.clone(),
+        subject: Some(SecurityAuditSubject {
+            kind: SecurityAuditSubjectKind::Approval,
+            id: source.request_id.to_owned(),
+        }),
+        policy_fingerprint: Some(source.policy_fingerprint.to_owned()),
+        rule_id: None,
+        reason_code: None,
+        approval_request_id: Some(source.request_id.to_owned()),
+        capabilities,
+    })
 }
 
 fn capability_record(

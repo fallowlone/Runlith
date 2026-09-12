@@ -252,6 +252,16 @@ where
             .map_err(SecretBrokerError::Metadata)
     }
 
+    /// Resolves one opaque binding for trusted integration boundaries such as
+    /// Security Audit. The returned value contains references/target identity
+    /// only; secret material remains in the backend.
+    pub fn binding(&self, id: &SecretBindingId) -> Result<SecretBinding, SecretBrokerError> {
+        self.metadata
+            .get_binding(id)
+            .map_err(SecretBrokerError::Metadata)?
+            .ok_or(SecretBrokerError::Metadata(SecretMetadataError::NotFound))
+    }
+
     pub fn release(
         &self,
         binding_id: &SecretBindingId,
