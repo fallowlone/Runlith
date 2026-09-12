@@ -11,4 +11,8 @@ path = "src/lib.rs"
 task-domain = { path = "../../crates/task" }
 agent-runtime = { path = "../../crates/agent-runtime" }
 workspace = { path = "../../crates/workspace" }
+secrets = { path = "../../crates/secrets" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+
+[dev-dependencies]
+policy = { path = "../../crates/policy" }

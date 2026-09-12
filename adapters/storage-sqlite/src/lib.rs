@@ -8,9 +8,10 @@
 //! through `restore`, so stored content can never bypass validation.
 //!
 //! Persisted current state only — projects, tasks, dependency edges,
-//! list metadata, executions, attempt rows, schema version — plus the
-//! single append-only Event Journal. No application mutation service,
-//! no scheduler/provider/session concepts.
+//! list metadata, executions, attempt rows, opaque secret refs/bindings,
+//! schema version — plus the single append-only Event Journal. Secret values
+//! never enter this adapter. No application mutation service and no
+//! scheduler/provider/session concepts.
 
 mod approval_store;
 mod entry_store;
@@ -18,6 +19,7 @@ mod error;
 mod event;
 mod migration;
 mod runtime_store;
+mod secret_store;
 mod task_store;
 mod workspace_store;
 

@@ -8,7 +8,7 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0062
+completed_through: TASK-0063
 current_gate: G6
 gate_status: IN_PROGRESS
 
@@ -1000,6 +1000,11 @@ items:
     blocked_by: []
     references:
       - docs/security/POLICY_CONTRACT.md
+      - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
+      - docs/development/G6_SECRETS_BROKER.md
+      - crates/secrets/src/lib.rs
+      - adapters/keychain-native/src/lib.rs
+      - adapters/storage-sqlite/migrations/0009_secret_refs.sql
 
   - id: TASK-0064
     gate: G6

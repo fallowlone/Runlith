@@ -257,8 +257,11 @@ it actually enforces; filesystem restriction never implies network isolation.
 execution/tool
   -> secret capability request
   -> Policy
+  -> EffectiveCapabilities
   -> Secrets Broker
-  -> scoped delivery at execution boundary
+  -> exact SecretRef + exact Execution|Tool binding
+  -> local native credential backend
+  -> trusted scoped delivery at execution/tool boundary
   -> Security Audit
 ```
 
@@ -268,8 +271,18 @@ bindings only. Values do not enter SQLite domain state, Event Journal, generic
 domain events, ordinary logs, frontend state, prompts or model context. Broad
 environment inheritance is not an accepted delivery mechanism.
 
+TASK-0063 broker release consumes only already-computed effective authority.
+It requires exact `SecretAccess(ref)` plus the exact bound delivery target
+before any backend read. A stored approval decision is not a bearer credential;
+the operation owner must first pass the TASK-0062 authorization boundary and
+obtain current effective capabilities. Secret bytes are borrowed only through a
+trusted delivery callback and the broker clears its temporary mutable buffer
+after the delivery attempt. The native local backend has no file or cloud
+fallback.
+
 Provider-native login credentials remain provider owned; AI Engineering OS
-does not scrape them.
+does not scrape them. Provider-native login or permission state is never
+canonical secret-access authority.
 
 ## Security Audit boundary
 
