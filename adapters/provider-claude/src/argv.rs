@@ -16,7 +16,7 @@ use crate::config::ClaudeConfig;
 
 /// Builds the full argument vector for one provider execution.
 ///
-/// Layout: `-p --output-format json [--permission-mode M] [--resume S]
+/// Layout: `-p --safe-mode --output-format json [--permission-mode M] [--resume S]
 /// <prompt>`. The prompt is always the final positional value and is
 /// never split, interpolated, or shell-escaped — argv carries it whole.
 /// Only flags probed against the installed CLI are ever emitted (see
@@ -26,6 +26,7 @@ use crate::config::ClaudeConfig;
 pub fn build_argv(config: &ClaudeConfig, prompt: &str) -> Vec<OsString> {
     let mut argv = vec![
         OsString::from("-p"),
+        OsString::from("--safe-mode"),
         OsString::from("--output-format"),
         OsString::from("json"),
     ];
@@ -54,8 +55,9 @@ mod tests {
     fn minimal_argv_is_print_plus_json_plus_prompt() {
         let argv = build_argv(&config(), "do the thing");
         assert_eq!(argv[0], OsString::from("-p"));
-        assert_eq!(argv[1], OsString::from("--output-format"));
-        assert_eq!(argv[2], OsString::from("json"));
+        assert_eq!(argv[1], OsString::from("--safe-mode"));
+        assert_eq!(argv[2], OsString::from("--output-format"));
+        assert_eq!(argv[3], OsString::from("json"));
         assert_eq!(argv.last().unwrap(), &OsString::from("do the thing"));
     }
 
@@ -72,7 +74,7 @@ mod tests {
             1,
             "prompt must appear exactly once, whole"
         );
-        assert_eq!(argv.len(), 4, "no extra argv elements may appear");
+        assert_eq!(argv.len(), 5, "no extra argv elements may appear");
     }
 
     #[test]
@@ -95,6 +97,7 @@ mod tests {
             texts,
             [
                 "-p",
+                "--safe-mode",
                 "--output-format",
                 "json",
                 "--permission-mode",

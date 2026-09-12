@@ -430,6 +430,7 @@ fn run_background_inner(
     let tracker = composition.tracker.clone();
     let executable = composition.provider_executable.clone();
     let cancel = cancel.clone();
+    let environment_base = provider_environment_base(&composition.db_path)?;
     orchestration
         .continue_workspace_cycle(
             &mut workspace,
@@ -453,6 +454,7 @@ fn run_background_inner(
                     config,
                     prompt,
                     lease.worktree_ref().to_owned(),
+                    environment_base,
                 )
                 .expect("lease-bound prompt and workdir are non-blank")
                 .with_tracker(tracker)
@@ -1082,6 +1084,22 @@ fn ensure_managed_root(db_path: &Path) -> Result<ManagedWorkspaceRoot, String> {
         .map_err(|error| format!("execution workspace root unavailable: {error}"))?;
     ManagedWorkspaceRoot::new(&root)
         .map_err(|error| format!("execution workspace root unusable: {error}"))
+}
+
+/// Provider-writable runtime state lives beside other application-owned
+/// execution state, never under the managed Git worktree. The Claude adapter
+/// adds the durable worktree leaf below this base so restart/resume reuses the
+/// same environment without re-deriving historical workspace identity.
+fn provider_environment_base(db_path: &Path) -> Result<PathBuf, String> {
+    let parent = db_path.parent().ok_or_else(|| {
+        format!(
+            "provider environment unavailable: database path {} has no parent",
+            db_path.display()
+        )
+    })?;
+    Ok(parent
+        .join("provider-environments")
+        .join(provider_claude::CLAUDE_PROVIDER_REF))
 }
 
 fn not_runnable_error(task_id: &TaskId, outcome: OrchestrationOutcome) -> ExecutionCoreResponse {

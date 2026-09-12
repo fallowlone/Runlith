@@ -36,6 +36,8 @@ pub struct ClaudeCapabilities {
     pub session_control: bool,
     /// Permission-mode selection (`--permission-mode`).
     pub permission_modes: bool,
+    /// Provider-native safe mode (`--safe-mode`).
+    pub safe_mode: bool,
     /// Execution inside a caller-bound working directory. Always true:
     /// cwd binding is adapter-enforced (`current_dir`), not CLI-advertised.
     pub workspace_execution: bool,
@@ -63,6 +65,7 @@ impl ClaudeCapabilities {
             session_resume: false,
             session_control: false,
             permission_modes: false,
+            safe_mode: false,
             workspace_execution: true,
             cancellation: true,
             usage_reporting: false,
@@ -93,6 +96,7 @@ pub fn probe_capabilities(executable: &OsStr, version: Option<CliVersion>) -> Cl
         session_resume: help.contains("--resume"),
         session_control: help.contains("--session-id"),
         permission_modes: help.contains("--permission-mode"),
+        safe_mode: help.contains("--safe-mode"),
         workspace_execution: true,
         cancellation: true,
         usage_reporting: structured_json,
@@ -146,8 +150,13 @@ fn probe_help(executable: &OsStr) -> Option<String> {
 /// contract test below: capability discovery must cover every flag the
 /// adapter can pass, so no flag is ever emitted unproven.
 #[cfg(test)]
-pub(crate) const EMITTED_FLAGS: &[&str] =
-    &["-p", "--output-format", "--permission-mode", "--resume"];
+pub(crate) const EMITTED_FLAGS: &[&str] = &[
+    "-p",
+    "--safe-mode",
+    "--output-format",
+    "--permission-mode",
+    "--resume",
+];
 
 #[cfg(test)]
 mod tests {
@@ -159,6 +168,7 @@ mod tests {
         // struct (and the help probe) to account for it.
         let covered = [
             ("-p", "non_interactive"),
+            ("--safe-mode", "safe_mode"),
             ("--output-format", "structured_json"),
             ("--permission-mode", "permission_modes"),
             ("--resume", "session_resume"),
@@ -178,6 +188,7 @@ mod tests {
         assert!(!caps.structured_json);
         assert!(!caps.streaming);
         assert!(!caps.session_resume);
+        assert!(!caps.safe_mode);
         assert!(!caps.usage_reporting);
         // Adapter-implemented mechanics survive: they need no CLI.
         assert!(caps.workspace_execution);
@@ -200,6 +211,7 @@ mod tests {
             "installed CLI must support json output"
         );
         assert!(caps.session_resume, "installed CLI must support --resume");
+        assert!(caps.safe_mode, "installed CLI must support --safe-mode");
     }
 
     #[test]
