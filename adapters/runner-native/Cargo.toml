@@ -1,0 +1,10 @@
+[package]
+name = "runner-native"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+runner = { path = "../../crates/runner" }
+
+[dev-dependencies]
+policy = { path = "../../crates/policy" }

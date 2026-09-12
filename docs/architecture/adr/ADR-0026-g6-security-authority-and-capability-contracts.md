@@ -111,6 +111,21 @@ the canonical approval service has produced effective authority. Provider
 native login state remains provider owned and cannot grant or widen canonical
 authority.
 
+TASK-0064 implementation clarification: `crates/runner` owns the
+provider-neutral capability-to-isolation enforcement contract. An
+`IsolationPlan` is compiled from already-computed `EffectiveCapabilities`, an
+exact launch executable and non-authorizing isolation requirements. The exact
+`ProcessExecute` capability is rechecked at the operation boundary; filesystem
+capabilities targeting another managed workspace are rejected. Backend
+enforcement reports are bound to the exact current plan and backend identity,
+and filesystem/network/process restrictions remain independent. A missing or
+insufficient backend fails closed before the privileged process operation can
+run. `adapters/runner-native` reports zero sandbox axes and therefore satisfies
+only explicit trusted-host execution. No concrete macOS/Linux/Windows sandbox
+or container backend is selected by TASK-0064; provider HOME/XDG/state/scratch
+isolation remains TASK-0065 and final production-path G6 wiring remains
+TASK-0067.
+
 Security Audit remains separate from Event Journal, operational logging and
 model-visible execution receipts. Product-controlled code records canonical
 security decisions and privileged-action evidence; provider/model metadata is
@@ -126,6 +141,8 @@ context only and cannot author authoritative audit facts.
 - Approval replay outside the exact request/scope/policy binding is rejected.
 - OS-specific isolation remains behind Runner/Sandbox adapters consuming
   canonical effective capabilities.
+- Required runner isolation cannot silently downgrade to NativeRunner; backend
+  reports must match the exact current plan and prove every required axis.
 - Local execution requires no cloud control plane, account or telemetry.
 - Secret release has no separate approval or provider-authority mechanism; it
   consumes canonical effective capability already decided by Policy/approval.

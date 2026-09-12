@@ -248,8 +248,36 @@ Platform adapters remain replaceable:
 - Windows: restricted token/Job Object/AppContainer-equivalent mechanisms as
   appropriate.
 
-TASK-0060 selects none of these backends. An adapter must advertise only what
-it actually enforces; filesystem restriction never implies network isolation.
+TASK-0060 selected none of these backends, and TASK-0064 deliberately still
+does not choose one because the concrete platform matrix remains open. An
+adapter must advertise only what it actually enforces; filesystem restriction
+never implies network isolation.
+
+TASK-0064 implements the bounded provider-neutral foundation in `crates/runner`:
+
+```text
+EffectiveCapabilities + exact process + IsolationRequirements
+  -> deterministic IsolationPlan
+  -> IsolationBackend
+  -> exact-plan EnforcementReport
+  -> verify required filesystem/network/process axes
+  -> privileged process operation
+```
+
+The exact `ProcessExecute` capability is checked immediately before backend
+enforcement. Filesystem capabilities must name the same managed workspace as
+the execution. Backend identity and the full plan are rechecked before the
+operation closure runs, so an enforcement report is not a reusable bearer
+grant and a stale/widened report cannot authorize another operation.
+
+`adapters/runner-native` declares `Trusted Host` semantics and reports no
+filesystem/network/process sandbox enforcement. It can satisfy only explicit
+trusted-host requirements. If any isolation axis is required, NativeRunner is
+insufficient and execution fails closed. TASK-0064 does not claim that current
+provider execution is OS-sandboxed and does not select a concrete platform
+backend; the platform matrix remains open. H7 provider HOME/XDG/state/scratch
+isolation remains TASK-0065 and final G6 production-path integration remains
+TASK-0067.
 
 ## Secrets Broker boundary
 

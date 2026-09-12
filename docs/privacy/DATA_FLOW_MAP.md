@@ -141,6 +141,9 @@ worker. Provider transfer ≠ our-cloud transfer, always.
 - **Persistence at destination:** values are not persisted by the
   application; OS store owns values, app owns refs/bindings. Broker-owned
   temporary mutable bytes are cleared after the trusted delivery attempt.
+- **Runner boundary:** TASK-0064 isolation plans contain capability scope and
+  enforcement requirements only, never secret values. Broad environment
+  construction/provider HOME/XDG handling remains TASK-0065.
 - **Observability requirement:** binding/decision audit without secret
   payloads (hashes/references only).
 - **Relevant PRIV/INV/ADR:** PRIV-006; INV-008, INV-099, INV-106;

@@ -92,6 +92,25 @@ this document; physical decomposition happens incrementally.
   Task/Events; execution receipts as provenance evidence.
 - Refs: ADR-0009; INV-004, INV-066, INV-072.
 
+### Runner / OS Isolation — G6 foundation
+
+- Purpose: execute privileged processes only after current effective authority
+  and required runtime restrictions are enforceable at the operation boundary.
+- Owns: provider-neutral isolation plans, replaceable backend enforcement
+  reports, honest filesystem/network/process enforcement capabilities.
+- Forbidden: deciding Policy ALLOW/DENY/REQUIRE_APPROVAL, treating provider
+  permission modes as authority, claiming NativeRunner is a sandbox, owning
+  Task completion or Git/workspace lifecycle.
+- Inbound: already-computed `EffectiveCapabilities`, exact process identity,
+  managed workspace identity, policy-derived isolation requirements.
+- Outbound: exact-plan enforcement result consumed adjacent to process launch;
+  missing/insufficient enforcement fails closed.
+- Authoritative state: none durable. TASK-0064 plans/reports are execution-time
+  security contracts; future Security Audit records authoritative security
+  evidence separately.
+- Refs: ADR-0013, ADR-0026; `docs/architecture/runners.md`; INV-076, INV-077,
+  INV-146…153.
+
 ### Workspace / Git — Early core (G4)
 
 - Purpose: isolated repository workspaces for autonomous execution.
@@ -300,6 +319,7 @@ compose adapters outside the domain (composition root only).
 | Usage measurement, route profile | Usage / Model Routing |
 | Tool/skill definition version | Tools / Skills |
 | Secret value | External OS store via Secrets Broker |
+| Runner isolation plan/report | none durable; execution-time derived security contract |
 
 Derived and never authoritative: UI views, ContextPlan packages, documentation
 projections, caches, routing scores, summaries (INV-070 — every derived copy
