@@ -12,6 +12,7 @@
 //! single append-only Event Journal. No application mutation service,
 //! no scheduler/provider/session concepts.
 
+mod approval_store;
 mod entry_store;
 mod error;
 mod event;
@@ -20,6 +21,9 @@ mod runtime_store;
 mod task_store;
 mod workspace_store;
 
+pub use approval_store::{
+    ApprovalCapabilityRecord, ApprovalRecord, ApprovalState, NewApprovalRecord,
+};
 pub use entry_store::{AdmittedExecutionEntry, ExecutionEntryAdmission, StrandedPreAttemptEntry};
 pub use error::{StorageError, StorageResult};
 pub use event::{

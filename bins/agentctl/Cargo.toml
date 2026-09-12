@@ -18,6 +18,8 @@ tokio = { version = "~1.51", features = ["macros", "rt", "net", "time"] }
 [dev-dependencies]
 agentd = { path = "../agentd" }
 agent-runtime = { path = "../../crates/agent-runtime" }
+app-services = { path = "../../crates/app-services" }
+policy = { path = "../../crates/policy" }
 workspace = { path = "../../crates/workspace" }
 bytes = "1"
 ipc-contracts = { path = "../../crates/ipc-contracts" }

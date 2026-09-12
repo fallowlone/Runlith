@@ -9,6 +9,7 @@
 //! capability (ADR-0022). Neither service decides scheduling, and neither
 //! grants Task completion outside the trusted evaluation path.
 
+mod approval_service;
 mod clock;
 mod error;
 mod managed_identity;
@@ -17,6 +18,7 @@ mod runtime_service;
 mod task_service;
 mod workspace_service;
 
+pub use approval_service::ApprovalService;
 pub use clock::{format_rfc3339, Clock, FixedClock, SystemClock};
 pub use error::{ServiceError, ServiceResult};
 pub use managed_identity::{

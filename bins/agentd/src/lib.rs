@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use app_services::TaskService;
+use app_services::{ApprovalService, SystemClock, TaskService};
 use bytes::BytesMut;
 #[cfg(unix)]
 use ipc_control::{ClientConfig, ClientSession};
@@ -34,6 +34,7 @@ use ipc_transport::{
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
+pub mod approval;
 pub mod data_dir;
 pub mod dispatch;
 pub mod execution;
@@ -183,7 +184,7 @@ impl DaemonConfig {
     /// Production default from TASK-0047 on.
     pub fn with_execution(path: impl Into<PathBuf>) -> Self {
         Self {
-            server_config: ServerConfig::g5_default(),
+            server_config: ServerConfig::g6_default(),
             database_path: Some(path.into()),
             provider_executable: None,
         }
@@ -203,6 +204,10 @@ impl DaemonConfig {
 /// per session (one in flight) while concurrent sessions serialize
 /// through the single SQLite connection.
 pub type BusinessHandle = Arc<tokio::sync::Mutex<TaskService>>;
+
+/// Shared trusted G6 approval service. It owns a separate short-lived SQLite
+/// connection over the same canonical database file as the other contexts.
+pub type ApprovalHandle = Arc<tokio::sync::Mutex<ApprovalService<SystemClock>>>;
 
 /// Terminal outcome of a daemon run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,6 +270,18 @@ fn open_execution(config: &DaemonConfig) -> Option<execution::ExecutionHandle> {
     })
 }
 
+fn open_approval_service(config: &DaemonConfig) -> Result<Option<ApprovalHandle>, DaemonError> {
+    let Some(path) = config.database_path.as_ref() else {
+        return Ok(None);
+    };
+    Ok(Some(Arc::new(tokio::sync::Mutex::new(
+        ApprovalService::open(path, SystemClock).map_err(|error| match error {
+            app_services::ServiceError::Storage(storage) => DaemonError::Storage(storage),
+            other => DaemonError::DataDir(format!("approval service startup failed: {other}")),
+        })?,
+    ))))
+}
+
 /// Local authentication policy (ADR-0020 §12, §13): the peer is allowed
 /// only when its OS identity is the same local principal as the daemon's.
 /// Shared by the Unix and Windows admission paths so exactly one policy
@@ -296,6 +313,7 @@ async fn serve_connection<S>(
     config: &ServerConfig,
     business: Option<BusinessHandle>,
     execution: Option<execution::ExecutionHandle>,
+    approval: Option<ApprovalHandle>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     prefetched: Option<BytesMut>,
 ) -> ConnectionOutcome
@@ -370,6 +388,18 @@ where
                     return ConnectionOutcome::Ended;
                 }
             }
+            Ok(ReadyRequest::Policy(request)) => {
+                let response = match &approval {
+                    Some(handle) => {
+                        let mut service = handle.lock().await;
+                        approval::dispatch(&mut service, request)
+                    }
+                    None => approval::unavailable(),
+                };
+                if session.respond_policy(response).await.is_err() {
+                    return ConnectionOutcome::Ended;
+                }
+            }
             Err(_) => return ConnectionOutcome::Ended,
         }
     }
@@ -392,6 +422,7 @@ async fn serve_streams<S>(
     config: &DaemonConfig,
     business: Option<BusinessHandle>,
     execution: Option<execution::ExecutionHandle>,
+    approval: Option<ApprovalHandle>,
 ) -> RunOutcome
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -424,6 +455,7 @@ where
                 let server_config = config.server_config.clone();
                 let business = business.clone();
                 let execution = execution.clone();
+                let approval = approval.clone();
                 joins.spawn(async move {
                     let _permit = permit;
                     serve_connection(
@@ -431,6 +463,7 @@ where
                         &server_config,
                         business,
                         execution,
+                        approval,
                         sender,
                         prefetched,
                     )
@@ -621,7 +654,15 @@ mod unix_daemon {
                 }
             }
         });
-        let outcome = serve_streams(accepted_rx, &config, business, open_execution(&config)).await;
+        let approval = open_approval_service(&config)?;
+        let outcome = serve_streams(
+            accepted_rx,
+            &config,
+            business,
+            open_execution(&config),
+            approval,
+        )
+        .await;
         if let Some(snapshot) = owned.as_ref() {
             let _ = remove_endpoint_if_unchanged(&endpoint.socket_path, snapshot);
         }
@@ -711,7 +752,15 @@ mod windows_daemon {
                 }
             }
         });
-        Ok(serve_streams(accepted_rx, &config, business, open_execution(&config)).await)
+        let approval = super::open_approval_service(&config)?;
+        Ok(serve_streams(
+            accepted_rx,
+            &config,
+            business,
+            open_execution(&config),
+            approval,
+        )
+        .await)
     }
 }
 

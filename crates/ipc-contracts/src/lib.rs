@@ -28,17 +28,21 @@ pub const IPC_PROTOCOL_VERSION_V1: u32 = 1;
 /// execution authority.
 pub const IPC_PROTOCOL_VERSION_V2: u32 = 2;
 
+/// G6 approval protocol version: adds the bounded `policy_core` envelope.
+pub const IPC_PROTOCOL_VERSION_V3: u32 = 3;
+
 /// Current IPC protocol version: the highest version this build speaks.
-pub const IPC_PROTOCOL_VERSION: u32 = IPC_PROTOCOL_VERSION_V2;
+pub const IPC_PROTOCOL_VERSION: u32 = IPC_PROTOCOL_VERSION_V3;
 
 /// Alias making "current" explicit at call sites.
-pub const IPC_PROTOCOL_VERSION_CURRENT: u32 = IPC_PROTOCOL_VERSION_V2;
+pub const IPC_PROTOCOL_VERSION_CURRENT: u32 = IPC_PROTOCOL_VERSION_V3;
 
 /// Every protocol version this build negotiates, oldest first.
-pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 3] = [
+pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 4] = [
     IPC_PROTOCOL_VERSION_V0,
     IPC_PROTOCOL_VERSION_V1,
     IPC_PROTOCOL_VERSION_V2,
+    IPC_PROTOCOL_VERSION_V3,
 ];
 
 /// Maximum length of a client-supplied human/request `reason` (block
@@ -78,7 +82,10 @@ pub fn is_supported_version(version: u32) -> bool {
 /// session stays bootstrap-only (handshake, ping, shutdown).
 #[must_use]
 pub fn supports_business_ipc(negotiated_version: u32) -> bool {
-    negotiated_version == IPC_PROTOCOL_VERSION_V1 || negotiated_version == IPC_PROTOCOL_VERSION_V2
+    matches!(
+        negotiated_version,
+        IPC_PROTOCOL_VERSION_V1 | IPC_PROTOCOL_VERSION_V2 | IPC_PROTOCOL_VERSION_V3
+    )
 }
 
 /// Reports whether a negotiated session version carries execution (G5
@@ -87,7 +94,14 @@ pub fn supports_business_ipc(negotiated_version: u32) -> bool {
 /// protocol — decoding is never authority.
 #[must_use]
 pub fn supports_execution_ipc(negotiated_version: u32) -> bool {
-    negotiated_version == IPC_PROTOCOL_VERSION_V2
+    negotiated_version == IPC_PROTOCOL_VERSION_V2 || negotiated_version == IPC_PROTOCOL_VERSION_V3
+}
+
+/// Reports whether a negotiated session carries G6 approval control-plane
+/// authority. Only protocol v3 does.
+#[must_use]
+pub fn supports_policy_ipc(negotiated_version: u32) -> bool {
+    negotiated_version == IPC_PROTOCOL_VERSION_V3
 }
 
 #[cfg(test)]
@@ -111,32 +125,40 @@ mod tests {
     }
 
     #[test]
-    fn protocol_v0_remains_supported_and_v2_is_current() {
+    fn historical_versions_remain_supported_and_v3_is_current() {
         assert_eq!(IPC_PROTOCOL_VERSION_V0, 0);
         assert_eq!(IPC_PROTOCOL_VERSION_V1, 1);
         assert_eq!(IPC_PROTOCOL_VERSION_V2, 2);
-        assert_eq!(IPC_PROTOCOL_VERSION, 2);
-        assert_eq!(IPC_PROTOCOL_VERSION_CURRENT, 2);
-        assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, [0, 1, 2]);
+        assert_eq!(IPC_PROTOCOL_VERSION_V3, 3);
+        assert_eq!(IPC_PROTOCOL_VERSION, 3);
+        assert_eq!(IPC_PROTOCOL_VERSION_CURRENT, 3);
+        assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, [0, 1, 2, 3]);
         assert!(is_supported_version(0));
         assert!(is_supported_version(1));
         assert!(is_supported_version(2));
-        assert!(!is_supported_version(3));
+        assert!(is_supported_version(3));
+        assert!(!is_supported_version(4));
         assert!(is_compatible(0));
         assert!(is_compatible(1));
         assert!(is_compatible(2));
+        assert!(is_compatible(3));
     }
 
     #[test]
-    fn v1_and_v2_carry_business_authority_v2_adds_execution() {
+    fn protocol_authority_is_cumulative_and_v3_adds_policy() {
         assert!(!supports_business_ipc(IPC_PROTOCOL_VERSION_V0));
         assert!(supports_business_ipc(IPC_PROTOCOL_VERSION_V1));
         assert!(supports_business_ipc(IPC_PROTOCOL_VERSION_V2));
+        assert!(supports_business_ipc(IPC_PROTOCOL_VERSION_V3));
         assert!(!supports_business_ipc(99));
         assert!(!supports_execution_ipc(IPC_PROTOCOL_VERSION_V0));
         assert!(!supports_execution_ipc(IPC_PROTOCOL_VERSION_V1));
         assert!(supports_execution_ipc(IPC_PROTOCOL_VERSION_V2));
+        assert!(supports_execution_ipc(IPC_PROTOCOL_VERSION_V3));
         assert!(!supports_execution_ipc(99));
+        assert!(!supports_policy_ipc(IPC_PROTOCOL_VERSION_V2));
+        assert!(supports_policy_ipc(IPC_PROTOCOL_VERSION_V3));
+        assert!(!supports_policy_ipc(99));
     }
 
     #[test]
@@ -533,6 +555,39 @@ mod contract_tests {
                 assert_ne!(error.code, BusinessErrorCode::Internal as i32);
             }
             other => panic!("expected error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn policy_core_envelope_uses_field_six_and_round_trips() {
+        use crate::proto::{
+            control_request, policy_core_request, ApprovalDecision, DecideApprovalRequest,
+            PolicyCoreRequest,
+        };
+
+        let request = ControlRequest {
+            payload: Some(control_request::Payload::PolicyCore(PolicyCoreRequest {
+                payload: Some(policy_core_request::Payload::DecideApproval(
+                    DecideApprovalRequest {
+                        request_id: "approval-1".to_owned(),
+                        decision: ApprovalDecision::Approve as i32,
+                    },
+                )),
+            })),
+        };
+        let bytes = request.encode_to_vec();
+        // Field 6, wire type LEN: (6 << 3) | 2 = 0x32.
+        assert_eq!(bytes[0], 0x32);
+        let decoded = ControlRequest::decode(bytes.as_slice()).expect("must decode");
+        match decoded.payload {
+            Some(control_request::Payload::PolicyCore(policy)) => match policy.payload {
+                Some(policy_core_request::Payload::DecideApproval(decide)) => {
+                    assert_eq!(decide.request_id, "approval-1");
+                    assert_eq!(decide.decision, ApprovalDecision::Approve as i32);
+                }
+                other => panic!("expected decide approval, got {other:?}"),
+            },
+            other => panic!("expected policy_core envelope, got {other:?}"),
         }
     }
 
