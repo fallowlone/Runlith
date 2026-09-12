@@ -124,8 +124,11 @@ independent isolation-axis reporting and fail-closed NativeRunner behavior.
 Concrete OS/container sandbox backends and the per-OS backend matrix remain
 open. H7 provider-environment worktree pollution is closed by TASK-0065;
 TASK-0066 supplies Security Audit persistence and TASK-0067 integrates the
-current G6 privileged boundaries plus adversarial verification. Independent
-G6 closure remains TASK-0068.
+current G6 privileged boundaries plus adversarial verification. TASK-0068's
+independent closure audit reports `G6_REMEDIATION_REQUIRED`: production
+provider execution still chooses Trusted Host NativeRunner with zero sandbox
+axes, so ADR-0013's mandatory runtime-isolation layer is not satisfied for G6
+closure. TASK-0069 owns B-ISO-1 remediation; TASK-0070 owns re-audit.
 
 ## 7. Accepted and deferred risks
 
