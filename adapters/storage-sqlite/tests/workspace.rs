@@ -752,7 +752,7 @@ fn v4_database_with_g2_g3_data_migrates_preserving_everything() {
             .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 10);
 
     // Every historical fact survives verbatim: seq, ids, types, versions,
     // scopes, outcomes, states, correlation/causation, timestamps,
@@ -883,7 +883,7 @@ fn v5_database_with_lease_migrates_to_v7_preserving_everything() {
             .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 10);
 
     // Execution with its still-open attempt survived.
     let execution = store

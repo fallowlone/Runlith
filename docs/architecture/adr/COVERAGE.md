@@ -21,7 +21,7 @@
 | Policy Engine + approvals | ACTIVE DECISION | G6 | ADR-0013 + ADR-0026 | deterministic engine implemented in TASK-0061; durable exact-bound human approval enforcement implemented in TASK-0062 |
 | Secrets Broker | ACTIVE DECISION | G6 | ADR-0026 + ADR-0013 / ADR-0014 | TASK-0063 implemented opaque refs/exact bindings, scoped release and native local credential backend; no plaintext application/Event Journal state |
 | Runner / OS isolation | ACTIVE DECISION | G6 | ADR-0013 + ADR-0026 | TASK-0064 implemented capability-to-runner plan/report contracts and fail-closed Trusted Host adapter; concrete OS/container backend matrix remains open |
-| Security Audit | ACTIVE BOUNDARY / DEFERRED PERSISTENCE | G6 | ADR-0026 + ADR-0006 / ADR-0013 | implement append-oriented persistence in TASK-0066; keep separate from Event Journal |
+| Security Audit | ACTIVE DECISION / PERSISTENCE IMPLEMENTED | G6 | ADR-0026 + ADR-0006 / ADR-0013 | TASK-0066 implemented typed append-oriented SQLite persistence, correlation reads and local tamper-evident hash chaining; production-path integration remains TASK-0067 |
 | Resource Engine | DEFERRED ARCHITECTURE TARGET | PRE-G9 | none yet | dedicated ADR before G9 retrieval work |
 | Adaptive Model Router | DEFERRED ARCHITECTURE TARGET | PRE_RELEVANT_GATE | none yet | dedicated ADR before first adaptive-routing implementation (no gate assigned yet) |
 | DeviceResourceManager | DEFERRED ARCHITECTURE TARGET | PRE_RELEVANT_GATE | none yet | dedicated ADR before first device-resource implementation |

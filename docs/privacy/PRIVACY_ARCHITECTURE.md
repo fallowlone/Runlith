@@ -197,6 +197,13 @@ Configuration
 Generated documentation / cache / projections
 ```
 
+TASK-0066 fixes the initial local Security Audit retention semantics: no
+automatic TTL, compaction or per-record deletion in v1. Audit remains part of
+app-owned local data until explicit whole-data deletion or a future
+privacy/retention migration defines narrower behavior. This does not change the
+independent retention contracts of transcripts, logs, Memory or provider-owned
+copies.
+
 ## 10. Inspectability and deletion
 
 PRIV-007: users can inspect locally stored app-owned data; no category may

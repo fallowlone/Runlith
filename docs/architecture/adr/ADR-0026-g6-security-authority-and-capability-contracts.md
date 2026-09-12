@@ -131,6 +131,18 @@ model-visible execution receipts. Product-controlled code records canonical
 security decisions and privileged-action evidence; provider/model metadata is
 context only and cannot author authoritative audit facts.
 
+TASK-0066 implementation clarification: `crates/security-audit` defines the
+provider-neutral typed audit vocabulary and validation, and SQLite schema v10
+owns a dedicated `security_audit` / `security_audit_capabilities` store. Records
+use stable `aud-<seq>` identities, deterministic structured fields and a
+SHA-256 predecessor chain with a persisted head. Normal update/delete is
+blocked by SQL triggers; ordered and correlation-scoped reads verify the chain
+before returning facts. The schema has no generic payload, secret value,
+provider text, environment dump or transcript field. Audit history never grants
+authority and is not Event Journal state. No automatic TTL/compaction,
+external signing service, remote/SIEM backend, or production-path action/audit
+wiring is added; the latter remains TASK-0067.
+
 ## Consequences
 
 - `crates/policy` is the small provider-neutral G6 contract owner.
