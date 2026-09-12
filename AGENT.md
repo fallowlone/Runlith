@@ -263,6 +263,56 @@ When a task touches repository files, imported documents, webpages, EPUB/PDF/HTM
 If resource structure is inferred rather than authoritative, expose that fact instead of presenting the inference as certain.
 
 
+
+## 16.1 External repository research boundary
+
+When studying an external repository, paper, article, product or implementation
+for AI Engineering OS:
+
+- adopt only **architecture, concepts, patterns, lessons and failure modes** that
+  survive independent evaluation;
+- treat bad ideas, design mistakes, security weaknesses, operational failures
+  and scalability problems as **negative evidence to learn from**, not patterns
+  to reproduce;
+- **never copy source code** from an external repository into this project;
+- **never add a reviewed external repository or its codebase as a dependency
+  merely to reuse its implementation**;
+- reimplement every adopted concept independently inside AI Engineering OS
+  contracts, invariants, tests, security boundaries and coding conventions;
+- do not let popularity, stars, benchmark claims or upstream architecture
+  override our own requirements;
+- if a future task genuinely needs a generic third-party library/package,
+  evaluate that dependency separately for necessity, license, maintenance,
+  security, supply-chain risk and replaceability. This exception does not permit
+  importing a reviewed competitor/project as an implementation shortcut.
+
+Default rule: **learn from external systems; do not inherit their code or license
+surface.**
+
+## 16.2 Product differentiation and prioritization guardrails
+
+When a task is motivated by a competitor, external product or feature comparison:
+
+- do not implement parity merely because another product has the feature;
+  identify the user/system outcome that makes it important for AI Engineering OS;
+- for competitor-inspired capabilities, target at least one explicit meaningful
+  improvement over the reference (the **1% improvement principle**) such as
+  reliability, verification, safety, continuity, provider neutrality, efficiency,
+  UX, privacy or auditability;
+- the 1% principle does **not** authorize scope creep: the improvement target
+  must be inside the approved task/spec or proposed as a follow-up;
+- use Pareto prioritization at roadmap/planning level: concentrate
+  disproportionate effort on the small set of capabilities that drive the
+  largest share of user value, reliability and differentiation;
+- never use Pareto reasoning to bypass required correctness, security,
+  persistence, recovery, migration or verification work;
+- prefer a smaller number of deeply differentiated workflows over a broad
+  surface of shallow competitor parity.
+
+Before proposing a major capability, be able to state why a user would choose
+AI Engineering OS instead of using Claude Code, Codex, OpenCode or another
+provider harness directly.
+
 ## 17. Task decomposition and planning boundaries
 
 An implementation agent is **not** allowed to silently turn its assigned atomic task into an open-ended project.
@@ -318,7 +368,58 @@ When implementing model selection, provider support, local inference, GPU/resour
 - preserve a reason/provenance trail for model-route decisions when the task changes routing behavior.
 
 If a task proposes a new global scoring formula, cache-reuse rule, resource-management policy or failover semantic, treat it as architecture-sensitive and require an ADR/proposal rather than silently embedding the policy in a provider adapter.
-\n\n## 20. Runtime evidence, canonical state and architecture fitness\n\nWhen implementing runtime, tool, memory, sandbox, persistence or extension-point changes:\n\n### Canonical state\n\nBefore adding a persistent field, cache, parallel lookup table, duplicated config value or runtime snapshot, identify the **single canonical owner** of that fact.\n\n- derived views must be rebuildable;\n- caches must have explicit invalidation semantics;\n- snapshots must carry source revision/hash when correctness depends on freshness;\n- do not introduce two independently mutable sources for the same policy/task/provider/memory fact.\n\nIf canonical ownership is unclear, stop and propose an architecture clarification instead of guessing.\n\n### Tool protocol and evidence\n\n- preserve correlated tool-call/tool-result integrity during trimming, compaction and rollover;\n- large tool outputs should become bounded summaries plus artifact/reference IDs rather than repeated raw history;\n- never fabricate, synthesize or modify runtime execution receipts as if they were real tool evidence;\n- a valid tool receipt means the trusted runtime emitted evidence for an execution; it does **not** mean the action was authorized, correct, safe or sufficient for task completion;\n- Policy Engine remains the authority before privileged execution; independent Evaluation remains the authority for verification.\n\n### Deterministic procedures before unnecessary agentic planning\n\nIf a workflow is already known, repeatable and mechanically expressible, prefer a deterministic/versioned Procedure/Workflow contract over asking an LLM to rediscover the sequence on every run.\n\nAgentic planning is for ambiguity and discovery, not for replacing deterministic state machines.\n\n### Isolation must fail closed\n\nIf the task/security profile requires an isolation level and the required backend is unavailable, return a blocker/error. Do not silently fall back to unsandboxed native execution.\n\nNever claim that a sandbox enforces network isolation when the selected backend only constrains filesystem access.\n\n### Architecture fitness\n\nKeep hand-written Rust components reviewable and replaceable:\n\n- one bounded responsibility per crate/module;\n- do not import concrete adapters into domain crates;\n- avoid giant central configuration/schema modules when composition or generation is possible;\n- a source file around 800+ LOC is a review signal; around 1500+ LOC requires decomposition or a documented reviewed exception (generated code excluded);\n- broad cross-context changes require explicit integration contracts/ADR rather than convenience imports;\n- keep the root agent instructions compact; use the architecture map and task references for progressive disclosure.\n\n### Performance claims\n\nDo not report startup time, RAM, binary-size or throughput claims from intuition or a debug build. Record the exact command, release/features, platform/hardware and measurement method. Marketing-facing numbers must be reproducible.\n
+
+
+## 20. Runtime evidence, canonical state and architecture fitness
+
+When implementing runtime, tool, memory, sandbox, persistence or extension-point changes:
+
+### Canonical state
+
+Before adding a persistent field, cache, parallel lookup table, duplicated config value or runtime snapshot, identify the **single canonical owner** of that fact.
+
+- derived views must be rebuildable;
+- caches must have explicit invalidation semantics;
+- snapshots must carry source revision/hash when correctness depends on freshness;
+- do not introduce two independently mutable sources for the same policy/task/provider/memory fact.
+
+If canonical ownership is unclear, stop and propose an architecture clarification instead of guessing.
+
+### Tool protocol and evidence
+
+- preserve correlated tool-call/tool-result integrity during trimming, compaction and rollover;
+- large tool outputs should become bounded summaries plus artifact/reference IDs rather than repeated raw history;
+- never fabricate, synthesize or modify runtime execution receipts as if they were real tool evidence;
+- a valid tool receipt means the trusted runtime emitted evidence for an execution; it does **not** mean the action was authorized, correct, safe or sufficient for task completion;
+- Policy Engine remains the authority before privileged execution; independent Evaluation remains the authority for verification.
+
+### Deterministic procedures before unnecessary agentic planning
+
+If a workflow is already known, repeatable and mechanically expressible, prefer a deterministic/versioned Procedure/Workflow contract over asking an LLM to rediscover the sequence on every run.
+
+Agentic planning is for ambiguity and discovery, not for replacing deterministic state machines.
+
+### Isolation must fail closed
+
+If the task/security profile requires an isolation level and the required backend is unavailable, return a blocker/error. Do not silently fall back to unsandboxed native execution.
+
+Never claim that a sandbox enforces network isolation when the selected backend only constrains filesystem access.
+
+### Architecture fitness
+
+Keep hand-written Rust components reviewable and replaceable:
+
+- one bounded responsibility per crate/module;
+- do not import concrete adapters into domain crates;
+- avoid giant central configuration/schema modules when composition or generation is possible;
+- a source file around 800+ LOC is a review signal; around 1500+ LOC requires decomposition or a documented reviewed exception (generated code excluded);
+- broad cross-context changes require explicit integration contracts/ADR rather than convenience imports;
+- keep the root agent instructions compact; use the architecture map and task references for progressive disclosure.
+
+### Performance claims
+
+Do not report startup time, RAM, binary-size or throughput claims from intuition or a debug build. Record the exact command, release/features, platform/hardware and measurement method. Marketing-facing numbers must be reproducible.
+
 ## 21. Multi-provider workflows, councils, roles and gate evidence
 
 When a task touches provider orchestration, multi-model review, workflow templates, roles/personas, cost preflight, retries or quality/security gates:

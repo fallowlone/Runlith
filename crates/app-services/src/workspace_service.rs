@@ -37,9 +37,8 @@ use agent_runtime::ExecutionId;
 use storage_sqlite::{SqliteStore, StorageError};
 use task_domain::{ProjectId, TaskId};
 use workspace::{
-    BranchRef, DiffEvidence, GitPort, LeaseLifecycle, RepositoryRef, WorkspaceEventKind,
-    WorkspaceFailure, WorkspaceId, WorkspaceJournalEvidence, WorkspaceLease, WorkspaceStore,
-    WorktreeStatus,
+    DiffEvidence, GitPort, LeaseLifecycle, RepositoryRef, WorkspaceEventKind, WorkspaceFailure,
+    WorkspaceId, WorkspaceJournalEvidence, WorkspaceLease, WorkspaceStore, WorktreeStatus,
 };
 
 use crate::clock::{format_rfc3339, Clock, SystemClock};
@@ -70,71 +69,9 @@ fn domain_failure(error: workspace::WorkspaceError) -> WorkspaceFailure {
     }
 }
 
-/// Budget for the readable form of a managed slug. Escaped identities at
-/// or below this length stay human-readable; longer ones use the digest
-/// form, which is longer than any readable form by construction, so the
-/// two ranges can never overlap.
-const MAX_READABLE_SLUG: usize = 64;
-
-/// Injective, filesystem-safe slug body for one validated identity
-/// (TASK-0051, G5 H4 — replaces the old `-XX` scheme whose raw `-`
-/// passthrough made `E/S` and `E-2FS` derive the same branch).
-///
-/// `%`-escaping over the exact input bytes: ASCII alphanumerics plus
-/// `-`/`_` pass through, `%` becomes `%%`, every other byte becomes
-/// `%XX` uppercase hex. The output never contains `/`, never forms
-/// `.`/`..`, and is a single safe path component / ref segment. Decoding
-/// is deterministic (`%%` → `%`, `%XX` → byte, otherwise literal), so
-/// distinct inputs always produce distinct readable outputs.
-///
-/// Inputs whose escaped form exceeds [`MAX_READABLE_SLUG`] use the digest
-/// form `h<sha256-lowerhex>-`: the SHA-256 of the exact input bytes
-/// (no Unicode normalization — managed identity follows `ExecutionId`
-/// exact-equality semantics), rendered lowercase with a trailing `-`.
-/// Length alone separates the ranges (66 > 64), and distinct inputs share
-/// a digest only up to SHA-256 collision resistance. Total managed ref
-/// length stays far below Git/filesystem component limits.
-fn slug_body(raw: &str) -> String {
-    let mut escaped = String::with_capacity(raw.len());
-    for byte in raw.bytes() {
-        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
-            escaped.push(byte as char);
-        } else if byte == b'%' {
-            escaped.push_str("%%");
-        } else {
-            escaped.push('%');
-            escaped.push_str(&format!("{byte:02X}"));
-        }
-    }
-    if escaped.len() <= MAX_READABLE_SLUG {
-        return escaped;
-    }
-    format!("h{}-", sha256_hex(raw.as_bytes()))
-}
-
-/// SHA-256 rendered as 64 lowercase hex characters (TASK-0051 managed
-/// branch digests). Small pure-Rust `sha2` dependency, already the
-/// standard choice — no hand-rolled crypto.
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::Digest as _;
-    let digest = sha2::Sha256::digest(bytes);
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
-}
-
-/// Derives the managed branch for one execution (`refs/heads/agent/<slug>`,
-/// ADR-0023: the branch-safe slug comes from the owner ExecutionId and the
-/// exact ref is recorded durably). Deterministic, so reopen and
-/// reconciliation derive the same branch without new input. Injective
-/// across the whole valid `ExecutionId` domain (TASK-0051 H4): distinct
-/// execution identities never share a managed branch.
-pub fn branch_for_execution(owner: &ExecutionId) -> Result<BranchRef, WorkspaceFailure> {
-    BranchRef::new(format!("refs/heads/agent/{}", slug_body(owner.as_str())))
-        .map_err(domain_failure)
-}
+use crate::managed_identity::{
+    classify_persisted_identity, managed_slug, PersistedManagedIdentityFormat,
+};
 
 /// Application-owned managed workspace root: the path-ownership boundary
 /// TASK-0041 deliberately left out. Every managed worktree lives at
@@ -185,12 +122,14 @@ impl ManagedWorkspaceRoot {
         &self.root
     }
 
-    /// Derives `<root>/ws-<slug>` for one workspace id and proves
+    /// Derives `<root>/ws-<v2-slug>` for one workspace id and proves
     /// containment. Fails closed on any escape (unreachable by
-    /// construction — the slug holds no separators — but checked, not
-    /// assumed).
+    /// construction — the v2 slug holds no separators — but checked, not
+    /// assumed). New allocations only: persisted leases of any version are
+    /// validated by [`WorkspaceService::validate_managed_path`], never
+    /// rederived here.
     pub fn join_workspace(&self, id: &WorkspaceId) -> Result<PathBuf, WorkspaceFailure> {
-        let target = self.root.join(format!("ws-{}", slug_body(id.as_str())));
+        let target = self.root.join(format!("ws-{}", managed_slug(id.as_str())));
         if target.strip_prefix(&self.root).is_err() {
             return Err(WorkspaceFailure::StorageFailure {
                 detail: format!(
@@ -235,6 +174,9 @@ pub enum EnsureOutcome {
     /// recovery). Exactly-once `workspace.created` preserved by the
     /// guarded transition.
     RecognizedGitState,
+    /// A provably-owned branch-only crash strand was continued using the
+    /// existing managed branch, then finalized exactly once.
+    RecoveredBranchOnly,
     /// A `Ready` lease with healthy Git state already existed: no Git
     /// mutation, no event, no state write.
     AlreadyReady,
@@ -284,6 +226,41 @@ pub struct WorkspaceService<G: GitPort, C: Clock = SystemClock> {
 }
 
 impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
+    fn classify_lease_identity(
+        &self,
+        lease: &WorkspaceLease,
+    ) -> Result<PersistedManagedIdentityFormat, WorkspaceFailure> {
+        let format = classify_persisted_identity(
+            self.root.path(),
+            lease.owner(),
+            lease.id(),
+            lease.branch(),
+            lease.worktree_ref(),
+        )?;
+        match self.store.find_identity_reservation_branch(lease.owner())? {
+            Some(reserved) if reserved != lease.branch().as_str() => {
+                Err(WorkspaceFailure::OwnershipMismatch {
+                    detail: format!(
+                        "lease {} branch {} disagrees with durable reservation {}; refusing",
+                        lease.id().as_str(),
+                        lease.branch().as_str(),
+                        reserved
+                    ),
+                })
+            }
+            Some(_) => Ok(format),
+            None if format == PersistedManagedIdentityFormat::CurrentV2 => {
+                Err(WorkspaceFailure::OwnershipMismatch {
+                    detail: format!(
+                        "current-v2 lease {} has no durable managed-identity reservation; refusing",
+                        lease.id().as_str()
+                    ),
+                })
+            }
+            None => Ok(format),
+        }
+    }
+
     /// Opens (creating/migrating) the database at `path` with an explicit
     /// Git backend and managed root.
     pub fn open(
@@ -730,20 +707,44 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
     }
 
     /// Re-validates managed-path containment before any destructive action.
-    /// The persisted worktree reference is not permission by itself: the
-    /// derived `<root>/ws-<slug>` must equal it, and a live path must
-    /// canonicalize inside the managed root. Traversal or symlink escape
-    /// fails closed.
+    /// The persisted worktree reference is not permission by itself, and it
+    /// is never rederived as authority: current-v2 leases are proven from
+    /// the complete persisted branch/path pair plus durable reservation and
+    /// must equal the rederived `<root>/ws-<v2-slug>`; pre-v2 leases keep their persisted reference
+    /// byte-for-byte (TASK-0053 §13 — old branches/paths are historical
+    /// artifacts, never renamed) and prove containment only. A live path
+    /// must additionally canonicalize inside the managed root. Traversal or
+    /// symlink escape fails closed on either path.
     fn validate_managed_path(&self, lease: &WorkspaceLease) -> Result<PathBuf, WorkspaceFailure> {
-        let expected = self.root.join_workspace(lease.id())?;
-        if expected.to_string_lossy().as_ref() != lease.worktree_ref() {
-            return Err(WorkspaceFailure::OwnershipMismatch {
-                detail: format!(
-                    "lease {} worktree reference disagrees with the managed root; refusing",
-                    lease.id().as_str()
-                ),
-            });
+        let mismatch = || WorkspaceFailure::OwnershipMismatch {
+            detail: format!(
+                "lease {} worktree reference disagrees with the managed root; refusing",
+                lease.id().as_str()
+            ),
+        };
+        // Basename discipline holds for every version: the persisted
+        // reference must name a direct `ws-…` child of the managed root —
+        // never a traversal, never an absolute escape.
+        let file_name = Path::new(lease.worktree_ref())
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(mismatch)?;
+        if !file_name.starts_with("ws-") {
+            return Err(mismatch());
         }
+        let expected = match self.classify_lease_identity(lease)? {
+            PersistedManagedIdentityFormat::CurrentV2 => self.root.join_workspace(lease.id())?,
+            PersistedManagedIdentityFormat::Legacy => {
+                // Compatibility path: the persisted reference must still spell
+                // a direct child of this root (lexical), or containment below
+                // proves nothing.
+                let persisted = PathBuf::from(lease.worktree_ref());
+                if persisted.parent() != Some(self.root.path()) {
+                    return Err(mismatch());
+                }
+                persisted
+            }
+        };
         let path = PathBuf::from(lease.worktree_ref());
         if path.symlink_metadata().is_ok() {
             let canonical =
@@ -996,7 +997,7 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
             LEASE_ID_COUNTER.fetch_add(1, Ordering::SeqCst)
         ))
         .map_err(domain_failure)?;
-        let branch = branch_for_execution(&request.execution_id)?;
+        let branch = crate::managed_identity::branch_for_execution(&request.execution_id)?;
         let target = self.root.join_workspace(&id)?;
         if target.symlink_metadata().is_ok() {
             return Err(WorkspaceFailure::WorktreeCollision {
@@ -1060,22 +1061,34 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
                 ),
             });
         }
-        let target = self.root.join_workspace(lease.id())?;
-        if target.to_string_lossy().as_ref() != lease.worktree_ref() {
-            return Err(WorkspaceFailure::StorageFailure {
-                detail: format!(
-                    "managed root changed under lease {}; refusing",
-                    lease.id().as_str()
-                ),
-            });
-        }
-        let target_text = target
-            .to_str()
-            .ok_or_else(|| WorkspaceFailure::StorageFailure {
-                detail: "derived workspace target is not UTF-8".to_owned(),
-            })?;
+        // Root-stability gate: the persisted worktree reference must still
+        // resolve under this root. Current-v2 leases rederive exactly; pre-v2
+        // leases (persisted byte-for-byte per §13) prove the lexical child
+        // relationship instead of being rederived under the new scheme.
+        let target_text = match self.classify_lease_identity(lease)? {
+            PersistedManagedIdentityFormat::CurrentV2 => self
+                .root
+                .join_workspace(lease.id())?
+                .to_str()
+                .ok_or_else(|| WorkspaceFailure::StorageFailure {
+                    detail: "derived workspace target is not UTF-8".to_owned(),
+                })?
+                .to_owned(),
+            PersistedManagedIdentityFormat::Legacy => {
+                let persisted = PathBuf::from(lease.worktree_ref());
+                if persisted.parent() != Some(self.root.path()) {
+                    return Err(WorkspaceFailure::StorageFailure {
+                        detail: format!(
+                            "managed root changed under lease {}; refusing",
+                            lease.id().as_str()
+                        ),
+                    });
+                }
+                lease.worktree_ref().to_owned()
+            }
+        };
         self.git
-            .create_worktree(lease, repository_path, target_text)?;
+            .create_worktree(lease, repository_path, &target_text)?;
         Ok(())
     }
 
@@ -1153,33 +1166,7 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         lease: WorkspaceLease,
         request: &WorkspaceRequest,
     ) -> Result<EnsuredWorkspace, WorkspaceFailure> {
-        // Request/lease agreement: the same execution must ask for the
-        // same repository and base it already owns. Anything else is an
-        // ownership conflict, never a silent rebind.
-        if request.repository_ref != *lease.repository() {
-            return Err(WorkspaceFailure::OwnershipMismatch {
-                detail: format!(
-                    "execution {} requests unexpected repository {}; lease owns {}",
-                    request.execution_id.as_str(),
-                    request.repository_ref.as_str(),
-                    lease.repository().as_str()
-                ),
-            });
-        }
-        let requested_base = self
-            .git
-            .resolve_revision(&request.repository_path, &request.base_revision)?;
-        if requested_base != *lease.base_revision() {
-            return Err(WorkspaceFailure::OwnershipMismatch {
-                detail: format!(
-                    "execution {} requests base {} but lease {} is based at {}; bases are immutable",
-                    request.execution_id.as_str(),
-                    requested_base.as_str(),
-                    lease.id().as_str(),
-                    lease.base_revision().as_str()
-                ),
-            });
-        }
+        self.validate_request_against_lease(&lease, request)?;
         match lease.lifecycle() {
             LeaseLifecycle::Allocated => {
                 if self
@@ -1194,6 +1181,8 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
                         lease: ready,
                         outcome: EnsureOutcome::RecognizedGitState,
                     })
+                } else if let Some(recovered) = self.recover_branch_only(&lease, request)? {
+                    Ok(recovered)
                 } else if !self.side_effects_present(&lease, &request.repository_path) {
                     // Crash-A shape: intent only, Git untouched. Resume.
                     self.materialize_allocated(&lease, &request.repository_path)?;
@@ -1305,6 +1294,271 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         }
     }
 
+    /// Read-only resume preflight for deterministic workspace state. This
+    /// catches known conflicts before a live-run claim/acceptance; the
+    /// background path still re-runs every proof before mutation, so this is
+    /// never a TOCTOU correctness boundary.
+    pub fn validate_resume_workspace(
+        &self,
+        request: &WorkspaceRequest,
+    ) -> Result<(), WorkspaceFailure> {
+        let Some(lease) = self
+            .store
+            .get_workspace_for_execution(&request.execution_id)?
+        else {
+            return Ok(());
+        };
+        self.validate_request_against_lease(&lease, request)?;
+        match lease.lifecycle() {
+            LeaseLifecycle::Allocated => {
+                if self
+                    .verify_git_consistent(&lease, &request.repository_path)
+                    .is_ok()
+                    || self.prove_branch_only_recovery(&lease, request)?
+                    || !self.side_effects_present(&lease, &request.repository_path)
+                {
+                    Ok(())
+                } else {
+                    Err(WorkspaceFailure::CheckoutFailed {
+                        detail: format!(
+                            "lease {} has ambiguous partial Git state; refusing resume before acceptance",
+                            lease.id().as_str()
+                        ),
+                    })
+                }
+            }
+            LeaseLifecycle::Ready => {
+                if !self
+                    .store
+                    .has_workspace_event(lease.id(), WorkspaceEventKind::Created)?
+                {
+                    return Err(WorkspaceFailure::StorageFailure {
+                        detail: format!(
+                            "lease {} is Ready without workspace.created evidence",
+                            lease.id().as_str()
+                        ),
+                    });
+                }
+                self.verify_git_consistent(&lease, &request.repository_path)
+            }
+            LeaseLifecycle::CleanupPending => Err(WorkspaceFailure::StorageFailure {
+                detail: format!(
+                    "lease {} is CleanupPending; resume workspace recovery is unavailable",
+                    lease.id().as_str()
+                ),
+            }),
+            LeaseLifecycle::Removed => Err(WorkspaceFailure::StorageFailure {
+                detail: format!(
+                    "lease {} is Removed; resume workspace recovery is unavailable",
+                    lease.id().as_str()
+                ),
+            }),
+        }
+    }
+
+    fn validate_request_against_lease(
+        &self,
+        lease: &WorkspaceLease,
+        request: &WorkspaceRequest,
+    ) -> Result<(), WorkspaceFailure> {
+        if request.repository_ref != *lease.repository() {
+            return Err(WorkspaceFailure::OwnershipMismatch {
+                detail: format!(
+                    "execution {} requests unexpected repository {}; lease owns {}",
+                    request.execution_id.as_str(),
+                    request.repository_ref.as_str(),
+                    lease.repository().as_str()
+                ),
+            });
+        }
+        let requested_base = self
+            .git
+            .resolve_revision(&request.repository_path, &request.base_revision)?;
+        if requested_base != *lease.base_revision() {
+            return Err(WorkspaceFailure::OwnershipMismatch {
+                detail: format!(
+                    "execution {} requests base {} but lease {} is based at {}; bases are immutable",
+                    request.execution_id.as_str(),
+                    requested_base.as_str(),
+                    lease.id().as_str(),
+                    lease.base_revision().as_str()
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Proves the narrow TASK-0057 branch-only crash shape without mutation.
+    /// `Ok(false)` means no current v2 managed branch exists and the normal
+    /// Crash-A/Crash-C classifier must decide. Once a v2 branch exists, every
+    /// proof is mandatory and mismatches fail closed.
+    fn prove_branch_only_recovery(
+        &self,
+        lease: &WorkspaceLease,
+        request: &WorkspaceRequest,
+    ) -> Result<bool, WorkspaceFailure> {
+        if self.classify_lease_identity(lease)? == PersistedManagedIdentityFormat::Legacy {
+            return Ok(false);
+        }
+        if !self
+            .git
+            .branch_exists(&request.repository_path, lease.branch())?
+        {
+            return Ok(false);
+        }
+
+        if lease.owner() != &request.execution_id {
+            return Err(WorkspaceFailure::OwnershipMismatch {
+                detail: format!(
+                    "lease {} is owned by execution {}, not {}",
+                    lease.id().as_str(),
+                    lease.owner().as_str(),
+                    request.execution_id.as_str()
+                ),
+            });
+        }
+        let expected_branch = crate::managed_identity::branch_for_execution(lease.owner())?;
+        if &expected_branch != lease.branch() {
+            return Err(WorkspaceFailure::OwnershipMismatch {
+                detail: format!(
+                    "lease {} persisted branch is not the v2 branch owned by execution {}; refusing recovery",
+                    lease.id().as_str(),
+                    lease.owner().as_str()
+                ),
+            });
+        }
+        match self
+            .store
+            .find_identity_reservation_owner(lease.branch().as_str())?
+        {
+            Some(owner) if owner == *lease.owner() => {}
+            Some(owner) => {
+                return Err(WorkspaceFailure::OwnershipMismatch {
+                    detail: format!(
+                        "managed branch {} is reserved by execution {}, not {}",
+                        lease.branch().as_str(),
+                        owner.as_str(),
+                        lease.owner().as_str()
+                    ),
+                });
+            }
+            None => {
+                return Err(WorkspaceFailure::OwnershipMismatch {
+                    detail: format!(
+                        "managed branch {} has no durable identity reservation; refusing recovery",
+                        lease.branch().as_str()
+                    ),
+                });
+            }
+        }
+        match self
+            .store
+            .find_lease_owner_in_repository(lease.repository().as_str(), lease.branch().as_str())?
+        {
+            Some(owner) if owner == *lease.owner() => {}
+            _ => {
+                return Err(WorkspaceFailure::OwnershipMismatch {
+                    detail: format!(
+                        "lease {} cannot prove exclusive branch ownership",
+                        lease.id().as_str()
+                    ),
+                });
+            }
+        }
+        match self
+            .store
+            .find_lease_owner_by_worktree_ref(lease.worktree_ref())?
+        {
+            Some(owner) if owner == *lease.owner() => {}
+            _ => {
+                return Err(WorkspaceFailure::OwnershipMismatch {
+                    detail: format!(
+                        "lease {} cannot prove exclusive worktree-path ownership",
+                        lease.id().as_str()
+                    ),
+                });
+            }
+        }
+
+        self.validate_history_binding(lease, &request.repository_path)?;
+        let branch_tip = self
+            .git
+            .resolve_revision(&request.repository_path, lease.branch().as_str())?;
+        if branch_tip != *lease.base_revision() {
+            return Err(WorkspaceFailure::CheckoutFailed {
+                detail: format!(
+                    "lease {} managed branch points at {}, expected exact recorded base {}; refusing branch-only recovery",
+                    lease.id().as_str(),
+                    branch_tip.as_str(),
+                    lease.base_revision().as_str()
+                ),
+            });
+        }
+
+        let target = self.validate_managed_path(lease)?;
+        match std::fs::symlink_metadata(&target) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(WorkspaceFailure::WorktreeCollision {
+                    detail: format!(
+                        "lease {} branch-only recovery requires an absent target path; {} already exists",
+                        lease.id().as_str(),
+                        target.display()
+                    ),
+                });
+            }
+            Err(error) => {
+                return Err(WorkspaceFailure::StorageFailure {
+                    detail: format!(
+                        "cannot inspect workspace target {} for lease {}: {error}",
+                        target.display(),
+                        lease.id().as_str()
+                    ),
+                });
+            }
+        }
+        if self
+            .git
+            .is_registered_worktree(&request.repository_path, lease.worktree_ref())?
+        {
+            return Err(WorkspaceFailure::OwnershipMismatch {
+                detail: format!(
+                    "lease {} target path is already registered; branch-only recovery does not guess ownership",
+                    lease.id().as_str()
+                ),
+            });
+        }
+        if let Some(holder) = self
+            .git
+            .worktree_for_branch(&request.repository_path, lease.branch())?
+        {
+            return Err(WorkspaceFailure::OwnershipMismatch {
+                detail: format!(
+                    "lease {} managed branch is already registered at {holder}; refusing duplicate materialization",
+                    lease.id().as_str()
+                ),
+            });
+        }
+        Ok(true)
+    }
+
+    fn recover_branch_only(
+        &mut self,
+        lease: &WorkspaceLease,
+        request: &WorkspaceRequest,
+    ) -> Result<Option<EnsuredWorkspace>, WorkspaceFailure> {
+        if !self.prove_branch_only_recovery(lease, request)? {
+            return Ok(None);
+        }
+        self.git
+            .attach_worktree(lease, &request.repository_path, lease.worktree_ref())?;
+        let ready = self.finalize_ready(lease.id(), &request.repository_path)?;
+        Ok(Some(EnsuredWorkspace {
+            lease: ready,
+            outcome: EnsureOutcome::RecoveredBranchOnly,
+        }))
+    }
+
     /// Conservative side-effect probe for the crash-A vs crash-C decision:
     /// only "branch absent AND target absent" counts as untouched. Backend
     /// errors and unusable states count as present (fail-closed direction).
@@ -1354,6 +1608,7 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::managed_identity::{branch_for_execution, managed_slug};
 
     #[test]
     fn slugs_are_single_components_without_traversal() {
@@ -1371,32 +1626,41 @@ mod tests {
             "percent%sign",
             "mix-2F-escape",
         ] {
-            let body = slug_body(raw);
+            let body = managed_slug(raw);
             assert!(!body.is_empty(), "slug for {raw:?} must not be empty");
             assert!(!body.contains('/'), "slug for {raw:?} must not separate");
             assert!(!body.contains('\\'), "slug for {raw:?} must not separate");
             assert!(!body.contains(' '), "slug for {raw:?} must not space");
             assert_ne!(body, ".", "slug for {raw:?} must not be dot");
             assert_ne!(body, "..", "slug for {raw:?} must not be dotdot");
+            assert_eq!(
+                body.to_ascii_lowercase(),
+                body,
+                "slug for {raw:?} must already be casefold-stable"
+            );
         }
-        // Short identities stay readable and injective.
-        assert_eq!(slug_body("E-1"), "E-1");
-        assert_eq!(slug_body("E-9"), "E-9");
-        assert_eq!(slug_body("ws-123"), "ws-123");
-        assert_ne!(slug_body("a/b"), slug_body("a-b"));
-        assert_ne!(slug_body("a/b"), slug_body("a_b"));
-        // Long identities stay bounded and deterministic (TASK-0051: the
-        // digest form is 66 chars — longer than any readable form, which
-        // is exactly what keeps the two ranges disjoint).
+        // Short identities stay readable: lowercase passes through under
+        // the version prefix, uppercase is encoded (TASK-0053 v2).
+        assert_eq!(managed_slug("e-1"), "e2-e-1");
+        assert_eq!(managed_slug("e-9"), "e2-e-9");
+        assert_eq!(managed_slug("E-1"), "e2-%45-1");
+        assert_eq!(managed_slug("ws-123"), "e2-ws-123");
+        assert_ne!(managed_slug("a/b"), managed_slug("a-b"));
+        assert_ne!(managed_slug("a/b"), managed_slug("a_b"));
+        // Long identities stay bounded and deterministic (TASK-0053: the
+        // digest form is `h2-` + 64 hex = 67 chars; readable forms carry
+        // the disjoint `e2-` prefix, so the ranges never overlap).
         let long = "x".repeat(300);
-        let hashed = slug_body(&long);
+        let hashed = managed_slug(&long);
         assert!(hashed.len() <= 80, "digest slug must stay bounded");
-        assert_eq!(hashed, slug_body(&long));
-        assert!(hashed.starts_with('h') && hashed.ends_with('-'));
+        assert_eq!(hashed, managed_slug(&long));
+        assert!(hashed.starts_with("h2-"));
+        assert_eq!(hashed.len(), 67);
     }
 
-    /// TASK-0051 H4 keeper (unit level): the exact production pair that
-    /// wedged the second task must derive distinct managed branches.
+    /// TASK-0051 H4 keeper (unit level, TASK-0053 v2 expectations): the
+    /// exact production pair that wedged the second task must derive
+    /// distinct managed branches.
     #[test]
     fn known_h4_collision_pair_is_resolved() {
         let slash = ExecutionId::new("E/S").unwrap();
@@ -1407,8 +1671,8 @@ mod tests {
             first, second,
             "E/S and E-2FS must never share a managed branch"
         );
-        assert_eq!(first.as_str(), "refs/heads/agent/E%2FS");
-        assert_eq!(second.as_str(), "refs/heads/agent/E-2FS");
+        assert_eq!(first.as_str(), "refs/heads/agent/e2-%45%2f%53");
+        assert_eq!(second.as_str(), "refs/heads/agent/e2-%45-2%46%53");
     }
 
     /// TASK-0051 H4 keeper (unit level): adversarial families around the
@@ -1499,9 +1763,9 @@ mod tests {
         let mut long_a = "z".repeat(200);
         let mut long_b = "z".repeat(200);
         long_b.replace_range(100..101, "y");
-        assert_ne!(slug_body(&long_a), slug_body(&long_b));
+        assert_ne!(managed_slug(&long_a), managed_slug(&long_b));
         long_a.push('q');
-        assert_ne!(slug_body(&long_a), slug_body(&long_b));
+        assert_ne!(managed_slug(&long_a), managed_slug(&long_b));
     }
 
     /// Managed identity follows `ExecutionId` exact-equality semantics:
@@ -1525,13 +1789,13 @@ mod tests {
         let first = branch_for_execution(&owner).unwrap();
         let second = branch_for_execution(&owner).unwrap();
         assert_eq!(first, second);
-        assert_eq!(first.as_str(), "refs/heads/agent/E-9");
+        assert_eq!(first.as_str(), "refs/heads/agent/e2-%45-9");
         let hostile = ExecutionId::new("../../x").unwrap();
         let derived = branch_for_execution(&hostile).unwrap();
         assert!(derived.as_str().starts_with("refs/heads/agent/"));
         // The slug after the fixed `agent/` prefix is a single component:
-        // traversal and separators are encoded away, and the full short name
-        // never leads with a dash (it always leads with `agent/`).
+        // traversal and separators are encoded away, and the slug always
+        // leads with the version prefix (`e2-`/`h2-`), never a dash or dot.
         let slug = derived.short_name().strip_prefix("agent/").unwrap();
         assert!(!slug.contains('/'));
         assert!(!slug.contains(".."));
@@ -1544,7 +1808,7 @@ mod tests {
         let id = WorkspaceId::new("ws-1").unwrap();
         let target = root.join_workspace(&id).unwrap();
         assert!(target.strip_prefix(root.path()).is_ok());
-        assert!(target.ends_with("ws-ws-1"));
+        assert!(target.ends_with("ws-e2-ws-1"));
 
         assert!(ManagedWorkspaceRoot::new("relative/path").is_err());
         assert!(ManagedWorkspaceRoot::new("/nonexistent-root-for-task0042").is_err());

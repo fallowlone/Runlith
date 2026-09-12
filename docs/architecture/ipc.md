@@ -467,11 +467,14 @@ attempt_id, outcome, provider_ref, detail }`, outcome one of
 `OPEN/SUCCEEDED/FAILED/TIMED_OUT/CANCELLED`); `CancelExecution {
 execution_id }` with `CancelExecutionResponse { execution_id,
 cancel_requested, run_state, detail }` (`run_state` one of
-`LIVE_SIGNALLED/ALREADY_CONCLUDED/NO_LIVE_RUN`, not-found context in
-`detail`). Responses reuse the v1 `BusinessError` taxonomy plus one
-additive code `PROVIDER_UNAVAILABLE = 10` (execution surface only; old
-clients never observe it on task_core paths); success variants stay
-fields 1–3 with `error = 4`.
+`LIVE_SIGNALLED/ALREADY_CONCLUDED/NO_LIVE_RUN/AWAITING_RESUME`,
+not-found context in `detail`; `AWAITING_RESUME` names a committed entry
+with zero attempts and points at the resume invocation — cancel never
+claims such a strand already concluded). Responses reuse the v1
+`BusinessError` taxonomy plus one additive code
+`PROVIDER_UNAVAILABLE = 10` (execution surface only; old clients never
+observe it on task_core paths); success variants stay fields 1–3 plus
+`resume = 5` with `error = 4`.
 
 Business semantics and compatibility rules (what Protobuf alone cannot
 express):
@@ -493,6 +496,33 @@ express):
   conflict. A client
   disconnect never redefines the outcome; `status` re-observes it;
   `cancel` targets the durable execution identity (never a PID).
+- `run` validates workspace inputs before admission (TASK-0054): a
+  repository path that is not a working repository, or a base revision
+  that does not resolve to a commit, refuses with `INVALID_ARGUMENT`
+  and zero mutation (read-only Git preflight — diagnostic, not a
+  concurrency boundary). Deterministic failures never strand a Task
+  `RUNNING` in the background.
+- `resume` recovers an admitted-but-not-attempted execution (TASK-0054,
+  decided in ADR-0025): `ResumeExecution { execution_id,
+  repository_path, repository_ref?, base_revision? }` with
+  `ResumeExecutionResponse { task_id, execution_id, attempt_id,
+  task_state }`. It re-drives the SAME execution with its reserved
+  attempt on a detached background (the same half `run` uses): no Task
+  transition, no new execution, no fresh attempt identity. `status` on a
+  strand reads `RUNNING` with `live=false` and zero attempts — honest
+  and recoverable, never silently successful. Refusals are typed
+  (`NOT_FOUND` for a missing execution, `INVALID_TRANSITION` outside
+  the pre-attempt posture — including executions that already record
+  attempts, whose recovery stays G11 work — `INVALID_ARGUMENT` for
+  unusable workspace inputs, `CONFLICT` when this daemon already has a
+  live owner for the execution — the loser spawns nothing and disturbs
+  no registry entry, TASK-0056) with no mutation. For TASK-0057's
+  lease-backed branch-only crash class, resume also performs a read-only
+  workspace-state proof before the live-owner claim: a provably owned
+  exact-base branch may continue in the background, while an already
+  deterministically ambiguous branch/path/ownership state returns the
+  existing `CONFLICT`/`CORRUPT_STATE` taxonomy synchronously and spawns
+  nothing. The background repeats the authoritative proof before mutation.
 - Identity fields left blank are minted server-side
   (`E-<millis>-<counter>` / `A-<millis>-<counter>`); supplied
   identities are validated as bounded identifiers and refused with

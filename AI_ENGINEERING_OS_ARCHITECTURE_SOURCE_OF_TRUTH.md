@@ -50,6 +50,67 @@ Human gate
 Ship
 ```
 
+
+## 0.1 Product differentiation and leverage principles
+
+AI Engineering OS must have a crisp answer to **why it exists as a product** and why a user should choose it instead of using Claude Code, Codex, OpenCode, Gemini or another single-provider coding harness directly.
+
+The target distinction is structural, not marketing-only:
+
+```text
+Provider harnesses (Claude Code / Codex / OpenCode / etc.)
+→ strong execution environments for one provider or one interaction model
+
+AI Engineering OS
+→ durable provider-neutral control plane over those executors
+   with Task/Execution/Attempt semantics, policy, isolation, verification,
+   continuity, cross-provider handoff, memory, orchestration, attention management,
+   background routines and later team/enterprise governance.
+```
+
+A feature that can be obtained by simply opening another coding-agent terminal is not, by itself, sufficient product differentiation. The product must continuously increase the value of **coordination, reliability, continuity, verification, safety, and outcome management** around replaceable executors.
+
+### 1% improvement principle
+
+When we adopt an idea already demonstrated by a competitor or adjacent product, we should not target feature parity alone. The adopted capability must improve at least one meaningful dimension in a way that is explicit and, where practical, measurable, while not regressing critical dimensions. Relevant dimensions include:
+
+- reliability;
+- correctness / verification quality;
+- provider neutrality;
+- safety / isolation;
+- recovery and continuity;
+- latency;
+- resource or token efficiency;
+- usability / human attention cost;
+- observability / auditability;
+- configurability;
+- privacy;
+- team governance.
+
+"1% better" is a **minimum improvement mindset**, not a license for arbitrary scope growth or cosmetic changes. The improvement must matter to the user or system outcome. If parity is necessary as groundwork, record the follow-up differentiation target explicitly.
+
+### Pareto / high-leverage prioritization
+
+Use the Pareto principle as a prioritization heuristic: a minority of capabilities often creates a majority of product value. We therefore deliberately concentrate disproportionate effort on the highest-leverage work — the approximate **20% of problems/capabilities that can drive roughly 80% of user value, reliability, differentiation or business value**.
+
+This is not a rigid mathematical law and must never be used to skip mandatory correctness, security, data-integrity, migration, recovery or verification work. A small safety-critical task may have little visible UX value but still be non-negotiable.
+
+Practical prioritization rule:
+
+```text
+1. Protect correctness / security / durable state first.
+2. Identify the highest-leverage user and product bottlenecks.
+3. Spend the majority of discretionary engineering effort there.
+4. Prefer deep excellence in differentiating workflows over broad shallow parity.
+5. Defer low-leverage polish and speculative feature breadth until the core advantage is clear.
+```
+
+The resulting product question should always be answerable in one sentence:
+
+> **What important job can AI Engineering OS perform more reliably, continuously or efficiently than using individual coding-agent products separately?**
+
+If the team cannot answer that clearly for a proposed feature set, the product strategy is drifting and should be re-evaluated before adding more surface area.
+
 ---
 
 # 1. Финальные решения после проверки всей переписки
@@ -5101,7 +5162,287 @@ INV-066 Stateful failover creates a new/recovered execution attempt; side effect
 INV-067 Routing decisions are explainable/replayable through versioned RoutePlan inputs, policy and profile references.
 INV-068 Verified repository-specific outcomes may inform future routing, but model self-report or self-judging never grants completion authority.
 ```
-\n\n---\n\n## ZeroClaw-derived runtime hardening and extension architecture\n\n**Reviewed:** 2026-09-09  \n**Reference:** `zeroclaw-labs/zeroclaw`  \n**Decision:** **ADAPT / STUDY deeply; do not adopt as a runtime dependency.**\n\nZeroClaw is valuable to this project because it is a large Rust agent runtime that has already encountered many of the exact concerns our local `agentd` will face: provider abstraction, tool execution, memory/history boundaries, sandboxing, background service operation, context trimming, deterministic procedures, and AI-assisted development of a large Rust workspace.\n\nThe most useful lesson is not its product surface. It is the set of runtime contracts and failure modes that appear once an agent host becomes long-lived and extensible.\n\n### 1. Keep extension contracts in a deliberately small API layer\n\nZeroClaw exposes stable traits for model providers, channels, tools, memory and lower-level runtime surfaces. We adopt the principle, but our core contract surface must remain smaller and aligned with our bounded contexts.\n\nTarget shape:\n\n```text\ncrates/contracts / crates/api\n        |\n        +-- AgentProviderPort\n        +-- RunnerPort\n        +-- ToolPort\n        +-- MemoryPort\n        +-- ResourceParserPort\n        +-- BrowserAutomationPort\n        +-- ModelRouterPort\n        +-- SandboxPort\n        +-- ObserverPort\n\nConcrete adapters\n        |\n        +-- Claude\n        +-- Codex\n        +-- OpenCode\n        +-- NativeRunner\n        +-- ContainerRunner\n        +-- SQLite\n        +-- ...\n```\n\nThe public contract crate may define capability and message types, but it must not become a dumping ground for application state or provider-specific configuration. Factories/registries compose adapters outside the domain.\n\n### 2. Single Source of Truth is an enforced architecture rule\n\nBefore introducing a field, cache, lookup table or duplicated configuration value, the implementing task must name the canonical owner of that fact.\n\nDerived copies must be one of:\n\n- ephemeral materialized views;\n- explicitly invalidatable caches;\n- immutable snapshots with source revision/hash;\n- generated projections that can be rebuilt.\n\nDo not keep parallel mutable representations of the same policy, task state, provider capability, route decision or memory fact.\n\n### 3. Architecture Map for agents and humans\n\n`AGENT.md` stays small and always-loadable. A separate architecture map routes a coding agent to only the documentation relevant to its change.\n\nPlanned file:\n\n```text\ndocs/architecture/MAP.md\n```\n\nIt maps change surfaces such as:\n\n```text\nnew provider      -> provider contracts + capability model + provider ADRs\ncontext change    -> Context Engine + continuity + privacy rules\nnew runner        -> Runner/Sandbox contracts + threat model\nmemory change     -> Memory lifecycle + provenance + forgetting rules\ntask state change -> Task state machine + Event Journal + migration rules\nUI design change  -> PRODUCT.md + DESIGN.md + design-system contracts\n```\n\nThis is progressive disclosure for contributors: bootstrap instructions point to a routing map, not to the entire architecture corpus.\n\n### 4. Tool-call / tool-result protocol integrity\n\nHistory trimming, context compaction, memory promotion and context rollover must preserve protocol validity. A tool call and its corresponding tool result form a correlated unit for provider-visible history unless the provider protocol explicitly supports another representation.\n\nThe Context Engine must never produce:\n\n```text\ntool_call(id=42)\n... result removed ...\n```\n\nor a dangling result with no call.\n\nLarge tool payloads may be offloaded to content-addressed artifacts, but the retained context envelope keeps:\n\n- tool call id;\n- tool name;\n- status;\n- bounded summary;\n- artifact/reference id;\n- provenance;\n- integrity metadata.\n\n### 5. Tool Execution Receipts\n\nA model can claim that a command/tool ran when it did not. The runtime therefore needs independently verifiable execution evidence.\n\nWe adopt a two-layer design.\n\n#### Layer A — live/session receipt\n\nAfter a successful tool action, the trusted runtime emits a compact authenticated receipt into the provider-visible result envelope. The model cannot mint a new valid receipt.\n\nPossible shape:\n\n```text\nToolExecutionReceipt\n- receipt_id\n- tool_call_id\n- tool_name\n- canonical_args_hash\n- result_hash\n- timestamp\n- session_scope\n- mac/signature\n```\n\nA per-session secret/HMAC is sufficient for detecting fabrication within the active execution. The secret is never placed in model context or logs.\n\n#### Layer B — durable audit evidence\n\nFor security-relevant actions, a separate durable audit record is written transactionally with the Event Journal/Audit subsystem. It may use a per-device signing key held by the OS credential store so evidence can survive session rollover and can later be verified against a device identity.\n\nThe durable record stores hashes/references rather than unnecessarily duplicating secret/sensitive tool payloads.\n\n**Important semantics:**\n\n```text\nreceipt == runtime evidence that the call/result occurred\nreceipt != authorization\nreceipt != correctness\nreceipt != safety approval\nreceipt != task completion\n```\n\nPolicy Engine authorization happens before execution. Evaluation happens after relevant work. Receipts only attest to execution provenance.\n\n### 6. Separate memory, history, files, logs and usage ledgers\n\nThese are different persistence domains and must never be conflated:\n\n```text\nSession History  -> provider/conversation continuity\nMemory           -> selected durable learned knowledge\nFiles/Artifacts  -> external or generated content\nEvent Journal    -> durable application state transitions/evidence\nSecurity Audit   -> privileged/security decisions and actions\nOperational Logs -> diagnostics\nUsage Ledger     -> tokens/cost/quota/runtime measurements\n```\n\nReading a file does not make the file memory. Logging a tool result does not make it authoritative task state. A session summary does not become long-term knowledge until Memory policy explicitly promotes it.\n\n### 7. Deterministic Procedure Engine complements the adaptive Planner\n\nNot every repeated workflow should be planned by an LLM each time. Predictable procedures should run as deterministic, versioned workflows with explicit triggers, steps, approval gates and resumable state.\n\nAdd a future `ProcedureEngine` / `WorkflowEngine` boundary:\n\n```text\nEvent/Trigger\n    -> Procedure Definition\n    -> deterministic step\n    -> policy/approval gate\n    -> durable step checkpoint\n    -> next step\n```\n\nUse the adaptive Planner when work is ambiguous or decomposition must be discovered. Use deterministic procedures when the workflow is known.\n\nExamples:\n\n- release checklist;\n- nightly repository health scan;\n- dependency update workflow;\n- generate documentation after verified source change;\n- run security review after auth-related task;\n- re-profile a local model after hardware/runtime change.\n\nProcedure runs must be restartable and idempotency-aware.\n\n### 8. Sandbox backend selection is a security decision, not convenience fallback\n\nPlatform-specific isolation remains replaceable behind `SandboxPort` / `RunnerPort`. Candidate implementations may include OS-native sandboxing, containers and later VMs.\n\nA required isolation profile must **fail closed** if its backend is unavailable. It may not silently degrade to unsandboxed native execution.\n\nExample:\n\n```text\nTask requires: ContainerOrBetter\nDocker unavailable\n    -> BLOCKED / REQUIRE USER ACTION\n    != NativeRunner fallback\n```\n\nNetwork policy is a separate capability from filesystem isolation. A sandbox backend that only restricts files must not be represented as enforcing network isolation.\n\n### 9. Incremental persistence for background runtimes\n\n`agentd` must durably commit important state throughout execution. A graceful process shutdown must not be the only moment at which state is persisted.\n\nExpected failure semantics:\n\n- already committed task/event/memory state survives a hard process kill;\n- an in-flight atomic transaction may be retried/reconciled;\n- a task never becomes `COMPLETED` merely because a session exited cleanly;\n- recovery uses durable execution/checkpoint/worktree state.\n\n### 10. Runtime performance must be reproducible, but codebase complexity is a separate metric\n\nZeroClaw markets a very small release binary and low startup/RAM footprint, but its published comparison is project-reported and some values are normalized estimates. The current repository has also grown into a very large multi-crate Rust codebase. Therefore we take two lessons simultaneously:\n\n1. Maintain automated startup/RSS/binary-size benchmarks for `agentd`.\n2. Do not use runtime efficiency as an excuse for architecture/codebase bloat.\n\nOur benchmark suite should record:\n\n- binary size by feature set;\n- cold startup time;\n- idle RSS;\n- RSS per active session;\n- process spawn latency;\n- IPC round-trip latency;\n- SQLite/event commit latency;\n- context compilation latency;\n- sustained multi-agent resource profile.\n\nMarketing may only quote reproducible measurements with platform/build/methodology metadata.\n\n### 11. Architecture fitness budgets for Rust modules/crates\n\nThe project must actively detect architectural growth. Suggested default guardrails (generated code excluded):\n\n- one bounded responsibility per crate;\n- no concrete adapter imports into domain crates;\n- architecture dependency checks in CI using `cargo metadata` or an equivalent custom checker;\n- source file > ~800 LOC triggers a review warning;\n- source file > ~1500 LOC requires a split or documented architecture exception/ADR;\n- giant schema/config modules should be generated or decomposed instead of manually maintained monoliths;\n- a feature that crosses multiple bounded contexts requires an explicit integration contract rather than direct internal imports.\n\nLOC limits are maintainability signals, not correctness proofs. The dependency graph and ownership boundaries remain authoritative.\n\n### 12. New invariants from ZeroClaw review\n\n```text\nINV-069 Stable extension contracts live in a deliberately small provider-neutral API/contracts layer.\nINV-070 Every persistent fact has one canonical owner; caches, snapshots and projections are explicitly derived.\nINV-071 Context pruning/compaction preserves provider-valid tool-call/tool-result correlation and provenance.\nINV-072 Successful privileged/tool executions can emit runtime-authenticated receipts; a receipt proves execution provenance, not authorization or correctness.\nINV-073 Durable security/audit evidence is separate from model-visible session receipt mechanics.\nINV-074 Known repeatable workflows prefer a deterministic Procedure Engine over repeated LLM planning.\nINV-075 Procedure executions are versioned, checkpointed, resumable and idempotency-aware, with Policy/approval gates.\nINV-076 Required isolation fails closed; sandbox backend unavailability may not silently downgrade to unsandboxed execution.\nINV-077 Platform-specific sandbox implementations stay behind replaceable Runner/Sandbox contracts and declare the capabilities they actually enforce.\nINV-078 Long-running agentd state is persisted incrementally; graceful shutdown is never the sole durability mechanism.\nINV-079 AGENT.md remains a compact bootstrap contract; an Architecture Map provides progressive-disclosure routing to detailed source-of-truth docs.\nINV-080 Runtime performance claims require reproducible benchmark methodology and hardware/build provenance.\nINV-081 Rust crate/module growth is monitored by architecture fitness checks; oversized components require decomposition or an explicit reviewed exception.\nINV-082 Adding/replacing a provider, tool, runner, memory backend or channel/integration must not require modifying unrelated domain business logic.\n```\n\n### Priority\n\n- **P0:** extension-contract discipline, canonical state ownership, protocol-valid tool result handling, fail-closed isolation.\n- **P1:** tool execution receipts, architecture-map workflow, architecture fitness checks.\n- **P2:** deterministic Procedure Engine and durable signed audit receipts beyond the initial Event Journal implementation.\n
+
+
+---
+
+## ZeroClaw-derived runtime hardening and extension architecture
+
+**Reviewed:** 2026-09-09  
+**Reference:** `zeroclaw-labs/zeroclaw`  
+**Decision:** **ADAPT / STUDY deeply; do not adopt as a runtime dependency.**
+
+ZeroClaw is valuable to this project because it is a large Rust agent runtime that has already encountered many of the exact concerns our local `agentd` will face: provider abstraction, tool execution, memory/history boundaries, sandboxing, background service operation, context trimming, deterministic procedures, and AI-assisted development of a large Rust workspace.
+
+The most useful lesson is not its product surface. It is the set of runtime contracts and failure modes that appear once an agent host becomes long-lived and extensible.
+
+### 1. Keep extension contracts in a deliberately small API layer
+
+ZeroClaw exposes stable traits for model providers, channels, tools, memory and lower-level runtime surfaces. We adopt the principle, but our core contract surface must remain smaller and aligned with our bounded contexts.
+
+Target shape:
+
+```text
+crates/contracts / crates/api
+        |
+        +-- AgentProviderPort
+        +-- RunnerPort
+        +-- ToolPort
+        +-- MemoryPort
+        +-- ResourceParserPort
+        +-- BrowserAutomationPort
+        +-- ModelRouterPort
+        +-- SandboxPort
+        +-- ObserverPort
+
+Concrete adapters
+        |
+        +-- Claude
+        +-- Codex
+        +-- OpenCode
+        +-- NativeRunner
+        +-- ContainerRunner
+        +-- SQLite
+        +-- ...
+```
+
+The public contract crate may define capability and message types, but it must not become a dumping ground for application state or provider-specific configuration. Factories/registries compose adapters outside the domain.
+
+### 2. Single Source of Truth is an enforced architecture rule
+
+Before introducing a field, cache, lookup table or duplicated configuration value, the implementing task must name the canonical owner of that fact.
+
+Derived copies must be one of:
+
+- ephemeral materialized views;
+- explicitly invalidatable caches;
+- immutable snapshots with source revision/hash;
+- generated projections that can be rebuilt.
+
+Do not keep parallel mutable representations of the same policy, task state, provider capability, route decision or memory fact.
+
+### 3. Architecture Map for agents and humans
+
+`AGENT.md` stays small and always-loadable. A separate architecture map routes a coding agent to only the documentation relevant to its change.
+
+Planned file:
+
+```text
+docs/architecture/MAP.md
+```
+
+It maps change surfaces such as:
+
+```text
+new provider      -> provider contracts + capability model + provider ADRs
+context change    -> Context Engine + continuity + privacy rules
+new runner        -> Runner/Sandbox contracts + threat model
+memory change     -> Memory lifecycle + provenance + forgetting rules
+task state change -> Task state machine + Event Journal + migration rules
+UI design change  -> PRODUCT.md + DESIGN.md + design-system contracts
+```
+
+This is progressive disclosure for contributors: bootstrap instructions point to a routing map, not to the entire architecture corpus.
+
+### 4. Tool-call / tool-result protocol integrity
+
+History trimming, context compaction, memory promotion and context rollover must preserve protocol validity. A tool call and its corresponding tool result form a correlated unit for provider-visible history unless the provider protocol explicitly supports another representation.
+
+The Context Engine must never produce:
+
+```text
+tool_call(id=42)
+... result removed ...
+```
+
+or a dangling result with no call.
+
+Large tool payloads may be offloaded to content-addressed artifacts, but the retained context envelope keeps:
+
+- tool call id;
+- tool name;
+- status;
+- bounded summary;
+- artifact/reference id;
+- provenance;
+- integrity metadata.
+
+### 5. Tool Execution Receipts
+
+A model can claim that a command/tool ran when it did not. The runtime therefore needs independently verifiable execution evidence.
+
+We adopt a two-layer design.
+
+#### Layer A — live/session receipt
+
+After a successful tool action, the trusted runtime emits a compact authenticated receipt into the provider-visible result envelope. The model cannot mint a new valid receipt.
+
+Possible shape:
+
+```text
+ToolExecutionReceipt
+- receipt_id
+- tool_call_id
+- tool_name
+- canonical_args_hash
+- result_hash
+- timestamp
+- session_scope
+- mac/signature
+```
+
+A per-session secret/HMAC is sufficient for detecting fabrication within the active execution. The secret is never placed in model context or logs.
+
+#### Layer B — durable audit evidence
+
+For security-relevant actions, a separate durable audit record is written transactionally with the Event Journal/Audit subsystem. It may use a per-device signing key held by the OS credential store so evidence can survive session rollover and can later be verified against a device identity.
+
+The durable record stores hashes/references rather than unnecessarily duplicating secret/sensitive tool payloads.
+
+**Important semantics:**
+
+```text
+receipt == runtime evidence that the call/result occurred
+receipt != authorization
+receipt != correctness
+receipt != safety approval
+receipt != task completion
+```
+
+Policy Engine authorization happens before execution. Evaluation happens after relevant work. Receipts only attest to execution provenance.
+
+### 6. Separate memory, history, files, logs and usage ledgers
+
+These are different persistence domains and must never be conflated:
+
+```text
+Session History  -> provider/conversation continuity
+Memory           -> selected durable learned knowledge
+Files/Artifacts  -> external or generated content
+Event Journal    -> durable application state transitions/evidence
+Security Audit   -> privileged/security decisions and actions
+Operational Logs -> diagnostics
+Usage Ledger     -> tokens/cost/quota/runtime measurements
+```
+
+Reading a file does not make the file memory. Logging a tool result does not make it authoritative task state. A session summary does not become long-term knowledge until Memory policy explicitly promotes it.
+
+### 7. Deterministic Procedure Engine complements the adaptive Planner
+
+Not every repeated workflow should be planned by an LLM each time. Predictable procedures should run as deterministic, versioned workflows with explicit triggers, steps, approval gates and resumable state.
+
+Add a future `ProcedureEngine` / `WorkflowEngine` boundary:
+
+```text
+Event/Trigger
+    -> Procedure Definition
+    -> deterministic step
+    -> policy/approval gate
+    -> durable step checkpoint
+    -> next step
+```
+
+Use the adaptive Planner when work is ambiguous or decomposition must be discovered. Use deterministic procedures when the workflow is known.
+
+Examples:
+
+- release checklist;
+- nightly repository health scan;
+- dependency update workflow;
+- generate documentation after verified source change;
+- run security review after auth-related task;
+- re-profile a local model after hardware/runtime change.
+
+Procedure runs must be restartable and idempotency-aware.
+
+### 8. Sandbox backend selection is a security decision, not convenience fallback
+
+Platform-specific isolation remains replaceable behind `SandboxPort` / `RunnerPort`. Candidate implementations may include OS-native sandboxing, containers and later VMs.
+
+A required isolation profile must **fail closed** if its backend is unavailable. It may not silently degrade to unsandboxed native execution.
+
+Example:
+
+```text
+Task requires: ContainerOrBetter
+Docker unavailable
+    -> BLOCKED / REQUIRE USER ACTION
+    != NativeRunner fallback
+```
+
+Network policy is a separate capability from filesystem isolation. A sandbox backend that only restricts files must not be represented as enforcing network isolation.
+
+### 9. Incremental persistence for background runtimes
+
+`agentd` must durably commit important state throughout execution. A graceful process shutdown must not be the only moment at which state is persisted.
+
+Expected failure semantics:
+
+- already committed task/event/memory state survives a hard process kill;
+- an in-flight atomic transaction may be retried/reconciled;
+- a task never becomes `COMPLETED` merely because a session exited cleanly;
+- recovery uses durable execution/checkpoint/worktree state.
+
+### 10. Runtime performance must be reproducible, but codebase complexity is a separate metric
+
+ZeroClaw markets a very small release binary and low startup/RAM footprint, but its published comparison is project-reported and some values are normalized estimates. The current repository has also grown into a very large multi-crate Rust codebase. Therefore we take two lessons simultaneously:
+
+1. Maintain automated startup/RSS/binary-size benchmarks for `agentd`.
+2. Do not use runtime efficiency as an excuse for architecture/codebase bloat.
+
+Our benchmark suite should record:
+
+- binary size by feature set;
+- cold startup time;
+- idle RSS;
+- RSS per active session;
+- process spawn latency;
+- IPC round-trip latency;
+- SQLite/event commit latency;
+- context compilation latency;
+- sustained multi-agent resource profile.
+
+Marketing may only quote reproducible measurements with platform/build/methodology metadata.
+
+### 11. Architecture fitness budgets for Rust modules/crates
+
+The project must actively detect architectural growth. Suggested default guardrails (generated code excluded):
+
+- one bounded responsibility per crate;
+- no concrete adapter imports into domain crates;
+- architecture dependency checks in CI using `cargo metadata` or an equivalent custom checker;
+- source file > ~800 LOC triggers a review warning;
+- source file > ~1500 LOC requires a split or documented architecture exception/ADR;
+- giant schema/config modules should be generated or decomposed instead of manually maintained monoliths;
+- a feature that crosses multiple bounded contexts requires an explicit integration contract rather than direct internal imports.
+
+LOC limits are maintainability signals, not correctness proofs. The dependency graph and ownership boundaries remain authoritative.
+
+### 12. New invariants from ZeroClaw review
+
+```text
+INV-069 Stable extension contracts live in a deliberately small provider-neutral API/contracts layer.
+INV-070 Every persistent fact has one canonical owner; caches, snapshots and projections are explicitly derived.
+INV-071 Context pruning/compaction preserves provider-valid tool-call/tool-result correlation and provenance.
+INV-072 Successful privileged/tool executions can emit runtime-authenticated receipts; a receipt proves execution provenance, not authorization or correctness.
+INV-073 Durable security/audit evidence is separate from model-visible session receipt mechanics.
+INV-074 Known repeatable workflows prefer a deterministic Procedure Engine over repeated LLM planning.
+INV-075 Procedure executions are versioned, checkpointed, resumable and idempotency-aware, with Policy/approval gates.
+INV-076 Required isolation fails closed; sandbox backend unavailability may not silently downgrade to unsandboxed execution.
+INV-077 Platform-specific sandbox implementations stay behind replaceable Runner/Sandbox contracts and declare the capabilities they actually enforce.
+INV-078 Long-running agentd state is persisted incrementally; graceful shutdown is never the sole durability mechanism.
+INV-079 AGENT.md remains a compact bootstrap contract; an Architecture Map provides progressive-disclosure routing to detailed source-of-truth docs.
+INV-080 Runtime performance claims require reproducible benchmark methodology and hardware/build provenance.
+INV-081 Rust crate/module growth is monitored by architecture fitness checks; oversized components require decomposition or an explicit reviewed exception.
+INV-082 Adding/replacing a provider, tool, runner, memory backend or channel/integration must not require modifying unrelated domain business logic.
+```
+
+### Priority
+
+- **P0:** extension-contract discipline, canonical state ownership, protocol-valid tool result handling, fail-closed isolation.
+- **P1:** tool execution receipts, architecture-map workflow, architecture fitness checks.
+- **P2:** deterministic Procedure Engine and durable signed audit receipts beyond the initial Event Journal implementation.
+
 ---
 
 ## Multi-Provider Councils, Workflow Gates and Dispatch Preflight
@@ -6551,3 +6892,313 @@ INV-144 High-impact security findings preserve human-review capability and expli
 - **P0:** Security Finding/Evidence model, typed Rules of Engagement, target binding, Security Runner safety boundary, proven-vs-analytical status separation.
 - **P1:** reconciliation/deduplication, resumable security procedures, browser/tool receipts, SARIF adapter, release gate policy.
 - **P2:** source-informed attack-path graph, multi-provider security councils, automated remediation + targeted re-verification, enterprise continuous AppSec integrations.
+
+
+---
+
+# External architecture adoption note — Tessra (`NitrusAphalion/tessra`) — 2026-09-11
+
+Tessra was reviewed as an external reference for agent-era version control. **Decision: adopt concepts selectively; do not replace Git/worktrees or add Tessra as a dependency in v1.**
+
+Architectural additions/reinforcements for later gates:
+
+- **G6:** scoped/delegable capabilities must obey `child authority ⊆ parent authority`; future principal revocation should reconcile sessions, capabilities, claims, unlanded work, workspaces and unconfirmed learned state.
+- **G7:** consider advisory `WorkClaim` objects and dependency-graph-informed partitioning as coordination hints; claims do not replace worktree isolation or become hard locks.
+- **G8:** represent delivery standards as typed verification policy/data. Builder self-claims never satisfy their own completion gate. Verification evidence is tied to subject/toolchain/config fingerprints and produced by authorized independent principals/runners/humans. Human approval is durable evidence bound to the exact subject/risk.
+- **G8/G11:** keep blocking gates separate from reactive hooks/routines. Hooks may produce evidence but cannot silently redefine the transition policy.
+- **G9:** Context Compiler should support explicit token/byte budgets and assemble provenance-bearing packs from exact code, dependencies/dependents, relevant tests, architecture constraints, memories, active claims/conflicts and prior evidence. Semantic/code indexes remain rebuildable derived projections; Git/repository state remains authority.
+- **G10:** Memory records should support provenance, anchor fingerprints, confidence, trust/lifecycle (`proposed`, `confirmed`, `contradicted`, `stale`, `superseded`, `retired`), supersession and optional expiry. Changes to anchored code mark memory stale rather than silently keeping it authoritative.
+- **Cross-cutting:** externally retryable mutations should expose explicit idempotency semantics. Idempotency does not replace transactional invariants.
+- **Future Delivery Reconciler/Landing Manager:** local landing and remote publication are separate resumable steps. A remote push failure yields durable publish-pending/failed state and safe retry rather than fake cross-system atomicity.
+- **Future research only:** stable semantic code-unit identity, unit-level merge/conflict prediction and rename-aware reconciliation may be investigated as merge-assist/code-intelligence features. They are not a v1 VCS substrate.
+
+New architecture principle:
+
+```text
+Agent claim is not evidence.
+Evidence is not policy.
+Policy gates transitions.
+Hooks react to transitions.
+Indexes are derived.
+Repository/durable domain state stays authoritative.
+```
+
+Current gate is unchanged: G5 / TASK-0051 remains in scope; none of the Tessra concepts above are to be implemented opportunistically during G5.
+
+---
+
+# External architecture adoption note — Anthropic Claude Code — 2026-09-11
+
+Claude Code was reviewed through its public repository and official documentation. Its public repository is **not an open-source implementation source**: Anthropic's `LICENSE.md` is all-rights-reserved under Anthropic commercial terms. Per project policy, we adopt only independently reimplemented architectural/product ideas; no code or repository dependency is adopted.
+
+Architectural additions/reinforcements for later gates:
+
+- **Cross-cutting:** provider session/transcript/memory/compaction/checkpoint state is compatibility/runtime state, never canonical Task/Execution/Attempt/Memory truth.
+- **Interfaces:** CLI/Tauri/IDE/Web/Mobile/CI/MCP remain thin surfaces over one orchestration/domain engine. No surface reimplements workflow semantics.
+- **G6:** distinguish user-facing `InteractionMode` from authoritative `PolicyRule`/`CapabilityGrant`; lower-precedence project/user/session settings may not weaken organization-managed hard policy. Sandboxing scopes filesystem, network, process and credential authority; prompt prose is not isolation.
+- **G7:** manager/worker/team patterns map to RoleProfile + durable Task Graph + bounded delegation. Generated dynamic workflows may instantiate bounded work through canonical orchestration APIs but never become a second authority. A stronger-model advisor is a bounded escalation role selected by risk/capability/cost/capacity, not a hard-coded vendor pair.
+- **G8:** provider-local gather→act→verify loops are useful execution behavior but do not grant Task completion authority. Hooks may produce evidence; only Verification Policy/Gates decide transitions.
+- **G9:** Context Compiler uses progressive disclosure and deferred tool/schema loading. Child/subagent contexts are isolated and return bounded summaries plus evidence refs; summaries remain untrusted derived data. Provider compaction is optimization only. Cross-surface/session continuity is subordinate to provider-neutral `ContinuationCheckpoint` semantics.
+- **G10:** provider-native memories/CLAUDE.md-like files are compatibility inputs/views; canonical memory remains typed, provenance-bearing, stale/supersession-aware and independently retrievable.
+- **G11:** scheduled/event-driven routines are durable/auditable `RoutineDefinition`/`RoutineRun` workflows with explicit capability, budgets, evidence and escalation, not merely prompts on timers.
+- **G12:** remote workers require explicit worker/session identity, scoped credentials, controlled egress, lifecycle/health state and no ambient organization secrets.
+- **G13:** enterprise governance may include centrally managed policy, connector/MCP allow/deny, provider gateways, spend/quota controls, audit/analytics and remote-worker fleet management.
+- **Marketplace:** plugin packages should declare requested capabilities, components, schemas, dependencies and provenance; organization policy may allow/deny plugins/publishers/capabilities. Resolved plugin versions need a durable install/lock ledger and rollback path.
+- **Recovery:** provider/file checkpoints, Git revert, Task recovery and external-side-effect reconciliation are distinct recovery layers; no provider checkpoint implies global rollback.
+
+Additional architecture principle:
+
+```text
+Provider harness state is useful evidence/runtime state.
+It is never the provider-neutral source of truth.
+
+Interaction modes shape UX.
+Policy shapes authority.
+
+Hooks react.
+Verification gates decide.
+```
+
+Current gate is unchanged: G5 / TASK-0051 remains in scope; none of these Claude Code-derived ideas are to be implemented opportunistically during G5.
+
+---
+
+# External architecture adoption note — OpenAI Codex — 2026-09-11
+
+OpenAI Codex was reviewed as both a first-class future provider harness and an architecture reference. Repository license is Apache-2.0, but project policy remains stricter: **we adopt only independently reimplemented ideas/failure lessons, never source code or repository dependencies because of this review.**
+
+## Product-positioning decision
+
+AI Engineering OS must not become “another Codex”. The durable product boundary is:
+
+```text
+Codex / Claude Code / OpenCode / Gemini / future harnesses
+                          ↓
+                  interchangeable executors
+                          ↓
+                   AI Engineering OS
+                          ↓
+Task Graph + Policy + Context + Verification + Recovery + Human Attention
+```
+
+Canonical statement:
+
+> A provider harness answers how one agent performs coding work. AI Engineering OS answers how engineering work remains durable, secure, verifiable and continuous across multiple interchangeable agent providers.
+
+## Architecture additions / reinforcements
+
+- **Control plane / execution plane:** orchestration/domain state and process/filesystem/remote-worker execution are separate contracts. Execution components never own Task lifecycle authority.
+- **Protocol negotiation:** clients/workers/providers negotiate protocol version and capabilities; security-critical unsupported requirements fail closed rather than silently degrading.
+- **Generated contracts:** canonical backend protocol types may generate TypeScript/JSON-schema artifacts, backed by checked-in snapshots and compatibility tests.
+- **Deterministic Runner path:** deterministic Git/test/lint/filesystem/verification actions bypass LLM turns when reasoning is not required.
+- **CapabilityDelta:** privilege escalation requests ask for the smallest additional filesystem/network/process/secret scope, with reason, duration, risk, approval principal and durable audit evidence.
+- **Approval binding:** approval/authorization is bound to action + Task intent + policy version fingerprints and is re-evaluated after material context change.
+- **Reviewer routing:** policy can require a minimum reviewer class (`AUTO_REVIEWER`, `HUMAN`, etc.). Auto-review is advisory/authorized automation and never overrides hard deny or a human-required rule.
+- **Policy-as-data:** policy is typed, versioned, explainable and testable before activation. Structured action semantics are preferred over shell-prefix-only rules.
+- **Config provenance:** effective settings/policies expose origin and version. Hard organization policy is not ordinary preference merging and cannot be weakened downstream.
+- **ProviderCapabilitySnapshot:** Router validates model availability, reasoning levels, modalities, tools, capacity/quota and policy before provider launch when knowable. Impossible combinations fail fast.
+- **Remote workers:** G12 worker protocol uses authenticated worker identity, workspace/Attempt lease, URI/resource references, scoped secrets/network, heartbeat, version negotiation and durable reconnect/reconciliation.
+- **Fail closed:** if a required sandbox/network/secret/worker security control cannot prove enforcement, execution does not silently proceed in a weaker mode.
+- **Daemon lifecycle:** lifecycle mutations are idempotent/serialized. Updates/restarts should enter drain/checkpoint/reconcile flow rather than casually interrupt active work.
+- **Provider session capabilities:** resume/fork/ephemeral/background-terminal features are adapter capabilities, not domain Task semantics.
+- **Structured AgentOutput:** output schemas improve machine handling but do not constitute evidence; verification-changing claims reference durable evidence.
+- **Minimal blocking:** HumanDecisionRequest blocks only the smallest dependent scope; unrelated Tasks/Executions continue.
+- **Scoped repository guidance:** hierarchical project guidance may exist but remains below organization/system policy, current Execution Envelope, invariants and accepted ADRs.
+
+## New candidate concepts
+
+```text
+ProtocolCapabilities
+ProviderCapabilitySnapshot
+CapabilityDelta
+ApprovalGrant
+ReviewerClass
+DeterministicRunner
+WorkerLease
+```
+
+Exact naming is provisional and must be resolved in the owning gate/ADR.
+
+## Failure lessons incorporated
+
+- Provider capability catalogs and actual launch validation must agree; unsupported model/effort combinations should be rejected before durable entry/launch when knowable.
+- UI/hook surfaces need the effective approval route, not merely a generic “permission requested” event.
+- Security approval paths must not deadlock behind unbounded/noncritical persistence work.
+- Provider `turn completed`/session events are not equivalent to canonical durable completion.
+- Long-running local/remote agent servers require supervision, heartbeat, terminal-state reconciliation and orphan recovery.
+
+## 1% improvement policy applied
+
+Whenever a Codex concept is adopted, AI Engineering OS must improve at least one meaningful dimension. Examples:
+
+```text
+Codex worktree
+→ provider-neutral durable WorkspaceLease + recovery
+
+Codex thread resume/fork
+→ provider-neutral ContinuationCheckpoint + cross-provider handoff
+
+Codex auto-review
+→ policy-bounded reviewer routing + human-required classes
+
+Codex execpolicy
+→ typed semantic policy + provenance + versioning + executable policy tests
+
+Codex daemon restart/update
+→ drain + checkpoint + reconcile
+```
+
+## Pareto priority from this review
+
+Highest-leverage work for future gates:
+
+1. control/execution plane split;
+2. least-privilege capability/policy model;
+3. versioned/generated protocol contracts;
+4. provider capability preflight;
+5. worker/daemon supervision and recovery;
+6. context-bound approvals/reviewer routing;
+7. deterministic no-LLM execution when possible.
+
+Provider-specific TUI/editor parity is low priority unless later evidence shows it materially improves the product's core user outcome.
+
+## Gate placement
+
+- G6: CapabilityDelta, policy-as-data, reviewer routing, ApprovalGrant, fail-closed security.
+- G7: deterministic-vs-reasoning work selection, minimal human blocking, provider session capability use.
+- G8: output/evidence separation and approval evidence semantics.
+- G9: provider resume/fork mapped into provider-neutral continuity.
+- G11: daemon supervision, draining, upgrades/reconciliation.
+- G12: remote WorkerLease/protocol/resource references.
+- G13: layered organization policy/config provenance and enterprise governance.
+- Cross-cutting: protocol schema generation/versioning and ProviderCapabilitySnapshot.
+
+Current gate remains G5 / TASK-0051. No Codex-derived future feature is to be implemented opportunistically inside the current remediation.
+
+
+---
+
+# External architecture adoption note — Scape / Senior Engineer Loop reference — 2026-09-11
+
+Scape and the associated senior-engineer loop material were reviewed as a
+product/orchestration reference. **Decision: adopt the durable workflow concepts
+independently; do not copy implementation code or make Scape a dependency.**
+
+The strongest concepts fit existing future gates rather than current G5 work:
+
+- **Mission model:** represent durable orchestration intent as structured data,
+  not one giant manager prompt. Preserve the separation
+  `RoleProfile (WHO) + Mission (WHAT) + Procedure/Routine (HOW) + Policy (MUST/MUST NOT)`.
+- **Routine / Pulse Engine:** scheduled, event-driven or condition-triggered
+  orchestration wakeups become durable `RoutineDefinition` / `RoutineRun`
+  objects with idempotency, cooldowns, budgets, evidence and escalation.
+- **Playbook Engine:** approved executable procedures are versioned first-class
+  objects with input/output schemas, capability requirements, SecretRefs,
+  timeout/retry policy, filesystem/network scope and verification requirements.
+  An agent may execute an approved locked version without automatically gaining
+  authority to edit that version.
+- **Workflow hierarchy:** preserve the conceptual ladder
+  `Tool → Playbook → Procedure → Routine`; each layer adds composition and policy
+  rather than duplicating lower-level execution mechanics.
+- **Capability profiles:** read-only investigator/reviewer roles should be
+  enforced by capability/policy boundaries, not merely described in prompts.
+- **Soft rule vs hard policy:** guidance such as “search the repo before
+  inventing infrastructure” is a behavioral rule; constraints such as
+  “merge requires verification” belong to enforceable policy/gates.
+- **Human Decision Queue:** blocked questions become structured
+  `HumanDecisionRequest` records with task/risk/options/recommendation/blocking
+  scope rather than scattered chat messages. Related decisions may be batched.
+- **Review Gates:** plan review, code review, security review and human QA are
+  explicit evidence-producing stages. Human QA should normally follow machine
+  verification/review rather than become the first error detector.
+- **Typed agent messaging:** `AgentMessage` is durable, typed, provenance-bearing
+  and untrusted by default. Messages can carry information/requests/results but
+  do not directly mutate canonical Task state.
+- **Cross-provider handoff:** a `ContinuationCheckpoint`/`ExecutionHandoff`
+  captures durable provider-neutral state so Claude → Codex → Gemini handoff does
+  not depend on copying a chat transcript.
+- **Provider capacity:** quota/availability/degraded state becomes Router input,
+  enabling future quota-aware handoff without changing Task semantics.
+- **Session projection:** session/fleet UI is a projection, not authority. The
+  primary UI should answer: what is running, blocked, changed, needs attention,
+  costs resources, and failed verification.
+- **Internal Task Graph remains authority:** external GitHub/Linear/Jira/Slack
+  sources are ingress adapters/projections, never competing task authorities.
+- **Learning/promotion pipeline:** reusable findings may be promoted into
+  Memory/Skills/Procedures/Rules/Docs only with provenance, validation and the
+  correct authority boundary.
+- **Watchdog:** stuck/looping/silent/context-drift detection belongs to durable
+  background reconciliation, not ad-hoc prompt loops.
+
+Gate placement remains:
+
+```text
+G6  Policy / capability profiles / read-only investigator
+G7  RoleProfile / Mission / orchestration / Human Decision Queue / WorkClaims
+G8  Review + Verification Gates
+G9  AgentMessage / ContinuationCheckpoint / cross-provider handoff
+G10 Memory + learning/promotion + versioned procedures
+G11 Routine/Pulse Engine + Watchdogs
+Future Router: ProviderCapacity / quota-aware switching
+```
+
+Current principle:
+
+```text
+Human Intent
+→ Durable Task Graph
+→ Policy
+→ Planner / Orchestrator
+→ Provider-neutral Executors
+→ Isolated Workspaces
+→ Evidence
+→ Independent Verification
+→ Human Attention Queue
+```
+
+The control plane must remain deterministic and auditable around inherently
+non-deterministic model behavior.
+
+
+---
+
+# External architecture adoption note — Observer reference — 2026-09-11
+
+Observer was reviewed primarily for local-first/privacy/product architecture and
+cheap-local-agent patterns. **Decision: adopt selected concepts independently;
+Observer is not a dependency and its implementation is not copied.**
+
+Architecture lessons to retain:
+
+- **Local-first is an architecture boundary, not only a pricing choice:** source
+  code, Task state, Event Journal, secrets and telemetry remain local by default.
+  Hosted/team functionality is explicit and optional.
+- **Evidence Sources → Context Materialization → Model/Agent → Typed Tools → Policy
+  → Runtime:** models remain replaceable reasoning components between typed input
+  evidence and typed capabilities.
+- **Capability Registry:** filesystem, Git, tests, build, network, secrets,
+  process, workspace and review actions should be explicit capabilities consumed
+  by Policy, Playbooks, audit and marketplace metadata.
+- **MicroAgent:** future narrow repeated background workers use bounded context,
+  bounded capabilities, explicit triggers and small/local/cheap models for
+  classification, log triage, workspace health, documentation drift, stale-task
+  detection or quota monitoring.
+- **Cheap watcher → strong reasoner escalation:** frequent inexpensive checks
+  produce evidence packets and invoke frontier/costly agents only after
+  threshold/deduplication policy says escalation is worthwhile.
+- **LocalInferenceProvider:** a generic local inference adapter may serve utility
+  models through OpenAI-compatible/local endpoints, but coding-agent harnesses
+  retain richer provider adapters and must not be collapsed into a lowest-common
+  denominator API.
+- **MCP is an ingress/control surface, not authority:** MCP/UI/CLI/API all map into
+  canonical commands and domain state.
+- **Context Disclosure Preview:** future privacy UX should explain what material
+  will leave the machine, why, to which provider and for which Task before
+  sensitive external inference.
+- **Release trust:** reproducible builds, signed releases, SBOM/provenance and
+  attestations are future distribution/security goals for the desktop product.
+
+Local models are supporting infrastructure, not a mandatory hardware
+requirement. Subscription-backed Claude/Codex/Gemini-style providers remain
+first-class high-capability workers; small local models are optional background
+or routing helpers.

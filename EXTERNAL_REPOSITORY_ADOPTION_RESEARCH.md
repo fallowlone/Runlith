@@ -2,7 +2,21 @@
 
 > **Snapshot:** 2026-09-10  
 > **Purpose:** evaluate external repositories/papers supplied during the project and decide what should influence AI Engineering OS.  
-> **Rule:** default mode is independent adoption/transformation of ideas and failure lessons, not copying code or adding dependencies. License/privacy details are secondary unless a concrete implementation, dependency, protocol/format copy, or redistribution decision makes them material. Popularity is not an architecture argument.
+> **Rule:** external repositories are research material only. We adopt independently evaluated **architecture, concepts, patterns, and lessons**; we use mistakes, failures, insecure designs, and bad ideas only as negative evidence. We **never copy source code** from reviewed repositories and **never add a reviewed repository/codebase as a dependency to reuse its implementation**. Any useful concept is reimplemented independently under AI Engineering OS contracts, invariants, tests, security boundaries, and coding conventions. A genuinely necessary generic third-party library must be evaluated separately for license, maintenance, security, supply-chain risk, necessity, and replaceability. Popularity is not an architecture argument.
+
+## External-research doctrine
+
+For every external repository review:
+
+1. Extract architecture, interfaces, invariants, product ideas, operational lessons, and failure modes.
+2. Keep only ideas that improve AI Engineering OS after independent evaluation.
+3. Record weak designs and failures as things to avoid, not things to reproduce.
+4. Do not copy code, patches, implementation fragments, or project-specific internals.
+5. Do not vendor, fork, or depend on the reviewed project as an implementation shortcut.
+6. Reimplement selected ideas independently so the resulting design is native to AI Engineering OS.
+7. Evaluate any unrelated generic third-party dependency separately; external-repo research is never itself justification to add that dependency.
+
+This rule exists both to preserve architectural independence and to minimize license/IP/supply-chain exposure.
 
 ## Executive decision
 
@@ -1577,7 +1591,121 @@ Routing sequence:
 ## Priority
 
 **P1/P2 boundary.** The abstract routing contracts should exist early so provider selection never leaks into domain logic. Advanced learning/profiling/VRAM optimization can be implemented after the basic provider/runtime pipeline works reliably.
-\n\n---\n\n## ZeroClaw (`zeroclaw-labs/zeroclaw`)\n\n**Reviewed:** 2026-09-09  \n**Verdict:** **ADAPT / STUDY DEEPLY**  \n**Direct runtime dependency:** **No**  \n**License:** dual MIT OR Apache-2.0 in the current upstream repository.\n\n### Current project reality\n\nThe social post understates the current popularity: public GitHub analytics in September 2026 report roughly **32.6–32.7k stars** and ~4.9k forks. The current upstream is no longer a tiny weekend codebase: GitHub shows thousands of commits and a large Rust workspace with many crates.\n\nThe famous footprint/startup comparison is useful as a direction but should not be treated as independent scientific evidence. The published benchmark is project-reported, some comparison values are normalized for edge hardware, and current builds/feature sets may differ. Reproduce measurements locally before using them for architectural or marketing decisions.\n\n### What is genuinely valuable for our project\n\n#### 1. Trait-driven extension points\n\nZeroClaw keeps providers, channels, tools, memory and runtime-adjacent capabilities behind public Rust traits. This strongly validates our Ports & Adapters decision.\n\n**Adopt principle:** keep a small provider-neutral contracts/API crate and wire concrete implementations through factories/registries outside the domain.\n\n#### 2. Compact AGENTS bootstrap + architecture routing map\n\nZeroClaw's root `AGENTS.md` deliberately stays compact and points agents to an architecture map for task-specific reading.\n\n**Adopt:** our `AGENT.md` remains the always-loaded contract; add `docs/architecture/MAP.md` for progressive disclosure.\n\n#### 3. Explicit Single Source of Truth rule\n\nTheir contributor guidance requires naming the canonical source before adding state/caches/config duplication.\n\n**Adopt strongly:** every persistent fact in our architecture must have one bounded-context owner. Other forms are derived views/snapshots/caches with invalidation/provenance.\n\n#### 4. History trimming keeps tool protocol valid\n\nZeroClaw explicitly documents that trimming is lossy but must preserve tool-call/tool-result pairing and payload provenance.\n\n**Adopt:** our Context Engine cannot prune individual sides of a correlated tool exchange. Large results become bounded summaries + artifact references, not dangling protocol objects.\n\n#### 5. Tool execution receipts\n\nZeroClaw implements HMAC-SHA256 receipts for successful tool results so the model cannot forge a new valid claim that a tool executed. This addresses an important distinction between model narration and runtime evidence.\n\n**Adopt and extend:**\n\n- live per-session authenticated receipt for provider-visible tool results;\n- durable audit evidence in our Event Journal/Security Audit for security-relevant actions;\n- never treat a receipt as authorization, correctness or completion evidence by itself.\n\nThe current ZeroClaw history also shows why implementation truth must outrank documentation: an upstream issue documented a period where receipt docs described wiring as shipped while production call sites still passed `None`. Our Architecture/Documentation Engine must therefore tie generated claims to executable/testable evidence where possible.\n\n#### 6. Risk profiles and sandbox backend separation\n\nZeroClaw separates agent risk profiles from OS sandbox implementations and documents backend-specific capability differences (filesystem vs network, etc.).\n\n**Adopt:** policy/risk semantics are domain-level; Landlock/Seatbelt/container/VM details live behind sandbox adapters. Required isolation fails closed.\n\n#### 7. Deterministic SOP engine\n\nZeroClaw has deterministic Standard Operating Procedures with triggers, approval gates, durable run state and resumability.\n\n**Adopt concept:** our adaptive Planner is not the answer for every workflow. Introduce a future deterministic `ProcedureEngine` for known repeatable sequences.\n\n#### 8. Separation of history, memory, files, logs and usage\n\nZeroClaw's documentation is unusually explicit that file content is not automatically memory, logs are diagnostics rather than source-of-truth memory, and tool results require intentional promotion if they should persist.\n\n**Adopt strongly:** preserve separate ownership/lifecycles for session history, long-term memory, artifacts/files, Event Journal, Security Audit, operational logs and usage ledgers.\n\n#### 9. Incremental daemon persistence\n\nThe daemon writes conversation/memory state incrementally rather than relying on a shutdown flush.\n\n**Adopt:** hard-kill recovery is a first-class test case for `agentd`.\n\n### Important warning: runtime efficiency != maintainable architecture\n\nA closed RFC in the ZeroClaw repository criticized the project's growth to a very large Rust codebase, citing roughly 1,076 Rust files / ~776k lines at that point and several extremely large modules. The maintainers did not rewrite it in Python, but the criticism is architecturally useful.\n\n**Our response:**\n\n- CI dependency-boundary tests;\n- narrow crates;\n- generated code separated from hand-written domain code;\n- soft/hard module size review budgets;\n- no speculative abstractions or giant central configuration modules;\n- every cross-context integration through an explicit contract.\n\n### Reject / do not copy blindly\n\n1. **Self-reported marketing benchmark as fact.** Reproduce performance on our own build/hardware.\n2. **Silent sandbox fallback to `none`.** For our required security profiles, missing isolation must block execution instead of weakening it.\n3. **Putting all personal-assistant/channel/hardware capabilities into the coding-core.** Our product remains focused; channels/peripherals are optional integrations, not core domain.\n4. **A giant Rust workspace as an acceptable cost of extensibility.** Replaceability is useful only if the implementation remains navigable.\n5. **In-band receipts as the whole audit system.** We additionally need durable Event Journal/Security Audit evidence.\n\n### Architectural changes accepted\n\n- add Tool Execution Receipt design;\n- add future deterministic Procedure Engine;\n- add `docs/architecture/MAP.md`;\n- strengthen canonical state ownership;\n- strengthen tool-call/tool-result pruning rules;\n- require fail-closed isolation;\n- add Rust architecture fitness and resource benchmarks;\n- add invariants INV-069 through INV-082.\n\n### Priority\n\n**High.** ZeroClaw is one of the most relevant repositories reviewed so far because its implementation domain overlaps directly with our Rust local agent runtime. We should study specific subsystems during implementation, but reproduce the ideas behind our own contracts rather than importing the runtime wholesale.\n
+
+
+---
+
+## ZeroClaw (`zeroclaw-labs/zeroclaw`)
+
+**Reviewed:** 2026-09-09  
+**Verdict:** **ADAPT / STUDY DEEPLY**  
+**Direct runtime dependency:** **No**  
+**License:** dual MIT OR Apache-2.0 in the current upstream repository.
+
+### Current project reality
+
+The social post understates the current popularity: public GitHub analytics in September 2026 report roughly **32.6–32.7k stars** and ~4.9k forks. The current upstream is no longer a tiny weekend codebase: GitHub shows thousands of commits and a large Rust workspace with many crates.
+
+The famous footprint/startup comparison is useful as a direction but should not be treated as independent scientific evidence. The published benchmark is project-reported, some comparison values are normalized for edge hardware, and current builds/feature sets may differ. Reproduce measurements locally before using them for architectural or marketing decisions.
+
+### What is genuinely valuable for our project
+
+#### 1. Trait-driven extension points
+
+ZeroClaw keeps providers, channels, tools, memory and runtime-adjacent capabilities behind public Rust traits. This strongly validates our Ports & Adapters decision.
+
+**Adopt principle:** keep a small provider-neutral contracts/API crate and wire concrete implementations through factories/registries outside the domain.
+
+#### 2. Compact AGENTS bootstrap + architecture routing map
+
+ZeroClaw's root `AGENTS.md` deliberately stays compact and points agents to an architecture map for task-specific reading.
+
+**Adopt:** our `AGENT.md` remains the always-loaded contract; add `docs/architecture/MAP.md` for progressive disclosure.
+
+#### 3. Explicit Single Source of Truth rule
+
+Their contributor guidance requires naming the canonical source before adding state/caches/config duplication.
+
+**Adopt strongly:** every persistent fact in our architecture must have one bounded-context owner. Other forms are derived views/snapshots/caches with invalidation/provenance.
+
+#### 4. History trimming keeps tool protocol valid
+
+ZeroClaw explicitly documents that trimming is lossy but must preserve tool-call/tool-result pairing and payload provenance.
+
+**Adopt:** our Context Engine cannot prune individual sides of a correlated tool exchange. Large results become bounded summaries + artifact references, not dangling protocol objects.
+
+#### 5. Tool execution receipts
+
+ZeroClaw implements HMAC-SHA256 receipts for successful tool results so the model cannot forge a new valid claim that a tool executed. This addresses an important distinction between model narration and runtime evidence.
+
+**Adopt and extend:**
+
+- live per-session authenticated receipt for provider-visible tool results;
+- durable audit evidence in our Event Journal/Security Audit for security-relevant actions;
+- never treat a receipt as authorization, correctness or completion evidence by itself.
+
+The current ZeroClaw history also shows why implementation truth must outrank documentation: an upstream issue documented a period where receipt docs described wiring as shipped while production call sites still passed `None`. Our Architecture/Documentation Engine must therefore tie generated claims to executable/testable evidence where possible.
+
+#### 6. Risk profiles and sandbox backend separation
+
+ZeroClaw separates agent risk profiles from OS sandbox implementations and documents backend-specific capability differences (filesystem vs network, etc.).
+
+**Adopt:** policy/risk semantics are domain-level; Landlock/Seatbelt/container/VM details live behind sandbox adapters. Required isolation fails closed.
+
+#### 7. Deterministic SOP engine
+
+ZeroClaw has deterministic Standard Operating Procedures with triggers, approval gates, durable run state and resumability.
+
+**Adopt concept:** our adaptive Planner is not the answer for every workflow. Introduce a future deterministic `ProcedureEngine` for known repeatable sequences.
+
+#### 8. Separation of history, memory, files, logs and usage
+
+ZeroClaw's documentation is unusually explicit that file content is not automatically memory, logs are diagnostics rather than source-of-truth memory, and tool results require intentional promotion if they should persist.
+
+**Adopt strongly:** preserve separate ownership/lifecycles for session history, long-term memory, artifacts/files, Event Journal, Security Audit, operational logs and usage ledgers.
+
+#### 9. Incremental daemon persistence
+
+The daemon writes conversation/memory state incrementally rather than relying on a shutdown flush.
+
+**Adopt:** hard-kill recovery is a first-class test case for `agentd`.
+
+### Important warning: runtime efficiency != maintainable architecture
+
+A closed RFC in the ZeroClaw repository criticized the project's growth to a very large Rust codebase, citing roughly 1,076 Rust files / ~776k lines at that point and several extremely large modules. The maintainers did not rewrite it in Python, but the criticism is architecturally useful.
+
+**Our response:**
+
+- CI dependency-boundary tests;
+- narrow crates;
+- generated code separated from hand-written domain code;
+- soft/hard module size review budgets;
+- no speculative abstractions or giant central configuration modules;
+- every cross-context integration through an explicit contract.
+
+### Reject / do not copy blindly
+
+1. **Self-reported marketing benchmark as fact.** Reproduce performance on our own build/hardware.
+2. **Silent sandbox fallback to `none`.** For our required security profiles, missing isolation must block execution instead of weakening it.
+3. **Putting all personal-assistant/channel/hardware capabilities into the coding-core.** Our product remains focused; channels/peripherals are optional integrations, not core domain.
+4. **A giant Rust workspace as an acceptable cost of extensibility.** Replaceability is useful only if the implementation remains navigable.
+5. **In-band receipts as the whole audit system.** We additionally need durable Event Journal/Security Audit evidence.
+
+### Architectural changes accepted
+
+- add Tool Execution Receipt design;
+- add future deterministic Procedure Engine;
+- add `docs/architecture/MAP.md`;
+- strengthen canonical state ownership;
+- strengthen tool-call/tool-result pruning rules;
+- require fail-closed isolation;
+- add Rust architecture fitness and resource benchmarks;
+- add invariants INV-069 through INV-082.
+
+### Priority
+
+**High.** ZeroClaw is one of the most relevant repositories reviewed so far because its implementation domain overlaps directly with our Rust local agent runtime. We should study specific subsystems during implementation, but reproduce the ideas behind our own contracts rather than importing the runtime wholesale.
+
 ---
 
 ## Claude Octopus (`nyldn/claude-octopus`)
@@ -4215,3 +4343,4444 @@ Measure the verified outcome, not the vanity metric.
 
 The words are explanatory; production behavior must be represented by typed contracts, evidence, routing and measurement rather than one giant system prompt.
 
+
+
+---
+
+# External review — `NitrusAphalion/tessra` (2026-09-11)
+
+Repository: https://github.com/NitrusAphalion/tessra  
+Related Reddit discussion: “Tessra - Git for Agents” (`r/coolgithubprojects`)  
+License: MIT.
+
+## Verdict
+
+**Very high conceptual relevance; no direct dependency/adoption.** Tessra tackles agent concurrency one layer below AI Engineering OS by redesigning version control around semantic code units, proof-bearing landings, scoped capabilities, memory and an operation log. We keep Git/worktree isolation as the v1 substrate and independently adapt the best control-plane ideas.
+
+## Adopt / adapt
+
+1. **Verification standards as data** — typed clauses over deterministic evidence, independent reviews, human approvals and risk.
+2. **No self-verification authority** — an author's/agent's own claim can be recorded but never satisfies its delivery gate.
+3. **Evidence fingerprints + safe reuse** — cache verification by exact subject/toolchain/config/environment-relevant fingerprints.
+4. **Budgeted context packs** — target scope + code graph + tests + memories + active claims + provenance under explicit budget.
+5. **Typed memory lifecycle** — provenance, anchors, trust, confidence, staleness, supersession, expiry; auto-captured memories start proposed/untrusted.
+6. **Advisory work claims** — expose overlapping scope/intent early without hard locking.
+7. **Dependency-aware partitioning** — use structural graph information as a scheduler/planner hint, never Task authority.
+8. **Mutation idempotency** — explicit replay keys/contracts for retryable commands.
+9. **Gates vs hooks** — gates block; hooks react. Hooks can create evidence/tasks/notifications/agent runs but do not become hidden policy.
+10. **Capability delegation monotonicity** — delegated child authority cannot exceed the parent's scope/budget.
+11. **Principal-wide revocation** — future revoke semantics cover sessions, processes, capabilities, claims, workspaces, unlanded work and unconfirmed memories.
+12. **Multi-altitude recovery** — distinguish op undo, delivered-change revert, and agent/principal revoke.
+13. **Delivery reconciliation** — Git/local landing and remote push are a resumable saga, not falsely atomic. Reddit author explicitly describes export/push as idempotent rather than atomic, with remote failure leaving local progress durable and retryable.
+14. **Derived semantic indexes** — canonical code/repository state remains authority; Tree-sitter/code graph is rebuildable projection.
+
+## Research only / do not adopt into v1
+
+- replacing Git with a custom VCS;
+- unit-level semantic merge as canonical storage;
+- signed/chained op DAG as our primary persistence model;
+- Tessra's exact standards DSL;
+- Tessra verifier isolation model (our target should be stronger);
+- Tessra as a runtime dependency.
+
+## Important implementation caveats in Tessra itself
+
+The repository is explicitly pre-release. Documented limitations include single-machine operation, unbuilt hub/sync, verifier processes without container isolation, incomplete Git round-trip, semantic grammars limited to Rust/Python/JS/TS, and macOS/Linux paths not yet exercised. Performance/concurrency figures are project-reported and should not be treated as independent benchmarks.
+
+## Useful failure lesson from Reddit
+
+The author states that `export --format git --branch main --push origin` is **idempotent, not atomic**: local commits/mapping/ref updates can complete before a push fails; retry reuses persisted revision→commit mappings and retries the remote step. This is a good reference for our future Delivery Reconciler: persist each completed local fact, represent publish failure honestly, and retry the external side effect rather than attempting unsafe pseudo-rollback.
+
+## License note
+
+Tessra uses MIT. That is compatible with its adoption goal, but conflicts with AI Engineering OS's current anti-clone/anti-resale requirement for the commercial core. Study ideas independently; do not copy its license strategy.
+
+## Placement
+
+- G6: capability delegation, principal revocation, verifier isolation
+- G7: WorkClaim + dependency-informed partitioning
+- G8: standards/evidence/approval gates
+- G9: budgeted context packs + derived code intelligence
+- G10: typed memory lifecycle/staleness/trust
+- G11: hooks/routines/watchdogs
+- Future Delivery Reconciler: idempotent landing/publish saga
+- Research: semantic unit merge
+
+Detailed analysis is preserved in the merged research appendices below.
+
+**Current G5/TASK-0051 scope unchanged.**
+
+---
+
+# External review — `anthropics/claude-code` (2026-09-11)
+
+Repository: https://github.com/anthropics/claude-code  
+Official docs: https://code.claude.com/docs/en/overview  
+License posture: Anthropic copyright / all rights reserved; use subject to Anthropic commercial terms.
+
+## Verdict
+
+**Very high architectural/product relevance; zero code/dependency adoption.** Claude Code is both a real provider used by AI Engineering OS and a mature reference for agent harness design. The public repo is not an open-source core implementation, so conclusions are based on public repository material and official product documentation. We independently reimplement concepts only.
+
+## Adopt / adapt
+
+1. **Provider harness loop** — gather context → act → verify, while keeping Task completion authority outside the provider.
+2. **One engine, multiple thin surfaces** — terminal/desktop/IDE/web/mobile/CI/MCP are adapters/projections rather than separate workflow implementations.
+3. **Progressive disclosure** — metadata-first skills/tools, full schemas/docs only on demand; use explicit context/privacy budgets.
+4. **Subagent context isolation** — bounded delegated objective, isolated tool trace, bounded summary + evidence refs back to parent.
+5. **Dynamic fan-out** — many bounded workers + independent cross-checking, but generated workflows operate through canonical Task/Policy APIs.
+6. **Agent-team coordination** — manager/worker roles, durable shared work state and messaging; map to RoleProfile + Task Graph + typed AgentMessage rather than provider-specific session state.
+7. **Cross-session messaging** — useful as information transport; messages never directly mutate canonical Task state.
+8. **Cross-surface continuity** — useful UX, but canonical continuity is repository/evidence/domain-state based and provider-neutral.
+9. **Multi-layer recovery** — provider/file checkpoint, Git revert, Task recovery and remote side-effect reconciliation are distinct mechanisms.
+10. **Interaction mode vs hard policy** — Plan/Manual/Auto-like UX modes are separate from enforced allow/deny/capability rules.
+11. **Managed policy precedence** — organization restrictions cannot be weakened by project/user/session preferences.
+12. **Sandbox scope** — filesystem + network + process + credentials; security does not rely on prompt instructions.
+13. **Advisor/escalation role** — invoke a stronger/independent model for difficult decisions through risk/capability/cost/capacity routing.
+14. **Compaction is optimization only** — never persistence or handoff authority.
+15. **Hooks vs gates** — hooks react/validate/produce evidence; policy/verification gates decide transitions.
+16. **Durable routines** — scheduled/event-triggered work should have explicit triggers, capabilities, budgets, evidence and audit history.
+17. **Plugin package + marketplace** — manifest, capability declaration, dependency constraints, provenance, organization allow/deny, resolved install ledger/rollback.
+18. **Deferred tool contracts** — cheap discovery descriptors first; full schemas only when selected.
+19. **Enterprise provider gateway** — central credentials, model allowlists, spend/quota policy and audit, while preserving local/BYO-provider paths where possible.
+20. **Remote-worker identity** — explicit session/worker identity, scoped credentials, controlled egress and lifecycle/health metadata.
+
+## Already present / reinforced
+
+- worktree isolation;
+- provider adapters;
+- thin Tauri UI;
+- progressive/lazy context loading;
+- provider compaction not persistence;
+- Task != Execution != Attempt != Session;
+- provider-specific compatibility files are not canonical project truth;
+- Policy Engine + OS isolation direction;
+- future plugin marketplace;
+- future background routines and Remote Worker.
+
+## Do not adopt
+
+- Claude Code repository code or plugin/example implementation code;
+- provider transcript/session JSONL as project authority;
+- Claude-native memory as canonical Memory Engine;
+- provider-specific permission-mode strings in domain semantics;
+- raw cross-session text as authoritative command/state mutation;
+- generated workflow scripts as independent orchestration authority;
+- session-centric UI as the primary product object;
+- Claude-specific agent-team/task/message types in provider-neutral core;
+- any assumption that provider checkpointing can undo external API/database/deployment effects.
+
+## License / IP lesson
+
+The repository's all-rights-reserved posture is a useful reminder that public GitHub visibility does not imply open-source reuse rights. It strongly reinforces AI Engineering OS policy: analyze behavior/architecture, independently implement concepts, and never copy external repository code or make research repositories runtime dependencies merely because source/assets are visible.
+
+## Placement
+
+- G6: policy hierarchy, capability profiles, sandbox boundaries
+- G7: manager/worker orchestration, bounded dynamic workflows, advisor role
+- G8: independent verification / hook-vs-gate separation
+- G9: progressive disclosure, deferred tools, isolated child contexts, continuation
+- G10: canonical typed memory remains independent from provider-native memory
+- G11: durable routines/background automation
+- G12: remote worker identity/scoped credentials
+- G13: managed policy, gateways, spend/audit/team governance
+- Marketplace: plugin manifests, permissions, dependencies, provenance/install ledger
+
+Detailed analysis is preserved in the merged research appendices below.
+
+**Current G5/TASK-0051 scope unchanged.**
+
+---
+
+# External review — `openai/codex` (2026-09-11)
+
+Repository: https://github.com/openai/codex  
+License: Apache-2.0.  
+Decision: **very high conceptual relevance; no code/dependency adoption from this review.**
+
+## Strategic verdict
+
+Codex should be treated as a first-class provider harness/executor and a high-quality architectural reference, not as the product model AI Engineering OS should clone. AI Engineering OS exists one layer above it: durable provider-neutral orchestration, policy, context, verification, continuity, memory, recovery, delivery reconciliation and human-attention management.
+
+## Adopt / adapt
+
+1. **Control plane vs execution plane** — app/server-like orchestration and exec-server-like process/filesystem execution are separate responsibilities.
+2. **Async command/event protocol** — accepted command identity + streaming events + terminal outcome; our durable domain/Event Journal remains authority.
+3. **Capability negotiation** — clients/workers/providers explicitly declare supported protocol/features; unsupported required capabilities fail closed.
+4. **Generated protocol schemas** — canonical Rust contracts generate TS/JSON schemas with compatibility tests and versioned snapshots.
+5. **Deterministic command path** — Git/test/lint/filesystem/verification utilities should not require an LLM turn when deterministic execution is sufficient.
+6. **Fine-grained permission elevation** — request minimal filesystem/network/secret/process capability deltas instead of broad sandbox escape.
+7. **Context-bound approvals** — approval grants are bound to exact action/intent/policy fingerprints and invalidated when material context changes.
+8. **Auto-review as advisor** — an independent reviewer can reduce human interruptions, but hard policy remains authoritative and policy may require a human reviewer for sensitive classes.
+9. **Testable policy-as-data** — versioned rules, explanations, load-time examples/tests, deterministic conflict semantics; expand beyond command-prefix matching to structured action semantics.
+10. **Layered config provenance** — effective values expose which layer/policy produced them and use stable versions for conflict handling; hard policy remains distinct from preference merging.
+11. **Model capability preflight** — provider/model/reasoning/modality/tool/quota compatibility is validated before launch when knowable.
+12. **Remote execution protocol** — future workers use authenticated identities, leases, URI/resource references, scoped credentials, heartbeat and reconciliation.
+13. **Fail-closed security controls** — required sandbox/network/secret/worker controls cannot silently degrade if enforcement metadata is missing.
+14. **Serialized idempotent daemon lifecycle** — start/stop/restart/update commands are race-safe; our improvement adds drain/checkpoint/reconcile before disruptive upgrades.
+15. **Provider session capabilities** — resume/fork/ephemeral/background process are adapter capabilities, never Task semantics.
+16. **Structured output schema** — useful for AgentOutput, but schema validity is not evidence; correctness-changing claims require evidence refs.
+17. **Tool/app capability metadata** — useful for approval defaults but treated as publisher claims subject to organization policy and runtime enforcement.
+18. **Scoped human blocking** — a decision blocks only the minimal Task/Execution/Attempt scope that depends on it; unrelated work continues.
+19. **Hierarchical project guidance** — useful with deterministic scope/precedence, but remains subordinate to system/org policy, Execution Envelope, invariants and ADRs.
+
+## Negative/failure lessons
+
+Public issues provide useful design warnings:
+
+- a model/reasoning combination may be accepted despite catalog incompatibility and then fail/hang → preflight must fail fast;
+- approval auto-review routing can obscure whether a human is actually required → policy needs explicit minimum reviewer and UIs need effective routing state;
+- auto-review can be blocked by unrelated persistence bottlenecks → security/approval control paths need bounded persistence and watchdogs;
+- a successful turn event is not sufficient if durable session materialization failed → canonical durability acknowledgement must precede authoritative completion;
+- long-lived app-server processes can die mid-turn → worker/daemon supervision, heartbeats and orphan reconciliation are required.
+
+## 1% improvement requirement
+
+Every adopted Codex idea must be improved in at least one meaningful dimension:
+
+- provider neutrality;
+- durability/recovery;
+- security/least privilege;
+- verification/evidence;
+- human-attention efficiency;
+- observability/explainability;
+- cross-provider continuity.
+
+Examples: worktrees become durable provider-neutral workspace leases; auto-review becomes policy-bounded reviewer routing; thread resume becomes cross-provider ContinuationCheckpoint; daemon update becomes work-aware drain/checkpoint/reconcile.
+
+## Pareto priority
+
+Highest-leverage 20% from this review:
+
+1. control/execution-plane split;
+2. fine-grained capability/policy architecture;
+3. typed/versioned protocol + generated schemas;
+4. provider capability preflight;
+5. remote worker/daemon supervision;
+6. context-bound approvals/reviewer routing;
+7. deterministic non-LLM execution path.
+
+Do not spend equivalent effort cloning Codex TUI/editor/model-picker conveniences; they do not define our product differentiation.
+
+Detailed analysis is preserved in the merged research appendices below.
+
+**Current G5/TASK-0051 scope unchanged.**
+
+
+---
+
+# Merged detailed research appendices — 2026-09-11
+
+> These appendices preserve the detailed notes that previously lived in
+> standalone staging/review files. They are **research evidence, not independent
+> architecture authority**. Current decisions are the adoption summaries above,
+> `PROJECT_CHARTER.md`, accepted ADRs, invariants and the Architecture Source of
+> Truth. Historical gate/task references inside an appendix are informational
+> snapshots and do not override current project status.
+
+
+## Appendix A — Scape / Senior Engineer Loop detailed research
+
+> Status: staging document for later merge into the project Architecture Source of Truth, roadmap, ADRs, and external-research notes.
+>
+> Purpose: capture all useful product, orchestration, UX, continuity, security, and workflow ideas extracted from the Reddit post “Senior Engineer Loop Orchestrator — Sample Setup” and the accompanying screenshots.
+>
+> Important: this document does **not** change the current gate or TASK-0051 scope. G5 must still be completed first.
+
+## 1. High-level takeaway
+
+The referenced setup is useful because it demonstrates a real-world multi-agent engineering workflow that already contains several elements close to the direction of AI Engineering OS:
+
+- persistent manager/orchestrator sessions;
+- durable internal tickets;
+- child coding/review sessions;
+- Git worktrees;
+- periodic manager wakeups / heartbeat;
+- reusable playbooks;
+- structured human questions;
+- model selection by task complexity;
+- automated plan/code review gates;
+- secrets stored outside normal prompt text;
+- session status, model, cost, and progress projections;
+- read-only investigation agents;
+- explicit “laws & permissions”;
+- reusable engineering toolkit operations.
+
+The important design conclusion for AI Engineering OS is not to copy this setup directly, but to convert the useful ideas into **provider-neutral, durable, enforceable system primitives**.
+
+AI Engineering OS should remain:
+
+```text
+Human Intent
+    ↓
+Durable Task Graph
+    ↓
+Policy / Constraints
+    ↓
+Planner / Orchestrator
+    ↓
+Provider-neutral Executors
+    ↓
+Isolated Workspaces
+    ↓
+Evidence
+    ↓
+Independent Verification
+    ↓
+Human Attention Queue
+```
+
+The product should optimize for managing **work, outcomes, risk, and attention**, not terminal windows or provider conversations.
+
+---
+
+# 2. Mission model
+
+The screenshots show a manager object such as “Lloyd's Mission” with:
+
+- heartbeat;
+- maximum children;
+- expertise;
+- current mission;
+- recurring actions;
+- settings.
+
+This should become a first-class machine-readable concept rather than a giant prompt.
+
+Proposed concept:
+
+```text
+MissionSpec
+├── role_profile
+├── objective
+├── responsibilities
+├── cadence
+├── max_parallel_children
+├── routines[]
+├── escalation_policy
+├── review_policy
+└── resource_policy
+```
+
+Important distinction:
+
+```text
+RoleProfile
+───────────
+WHO
+
+Mission
+───────
+WHAT
+
+Procedure / Routine
+───────────────────
+HOW
+
+Policy
+──────
+MUST / MUST NOT
+```
+
+Example:
+
+```text
+RoleProfile:
+  Senior Backend Engineer
+
+Mission:
+  Implement TASK-0192
+
+Procedure:
+  TDD workflow
+
+Policy:
+  cannot merge
+  cannot read secrets
+  network disabled
+  requires independent review
+```
+
+This separation prevents persona, workflow, and security rules from being mixed into one opaque prompt.
+
+Likely gate:
+- G7 for RoleProfile / Mission / delegation
+- G10 for learned or promoted procedural knowledge
+
+---
+
+# 3. Routine / Pulse Engine
+
+The manager in the reference periodically wakes up and performs recurring checks such as:
+
+- inspect bug reports;
+- inspect backlog;
+- inspect recent PRs;
+- inspect documentation drift;
+- inspect logs;
+- dispatch investigation agents;
+- record the result of each pulse.
+
+AI Engineering OS should generalize this beyond a simple heartbeat.
+
+Proposed trigger model:
+
+```text
+Routine Engine
+    │
+    ├── Time trigger
+    │     cron / interval
+    │
+    ├── Event trigger
+    │     Task completed
+    │     PR created
+    │     test failed
+    │     provider quota exhausted
+    │     new issue
+    │
+    ├── External trigger
+    │     GitHub
+    │     Jira
+    │     Linear
+    │     Slack
+    │
+    └── Condition trigger
+          error rate
+          stale task
+          blocked agent
+          quota threshold
+```
+
+Example:
+
+```text
+Routine: Repository Health
+
+Trigger:
+  every 2h
+  OR after merge
+
+Steps:
+  inspect failed tests
+  inspect warnings
+  inspect TODO/FIXME growth
+  check documentation drift
+  check dependencies
+  create findings
+
+On finding:
+  create Task
+  OR request investigation
+  OR ask human
+```
+
+A heartbeat should therefore be only one trigger type.
+
+Likely gate:
+- G11 Background Daemon / Routines / Watchdogs
+
+---
+
+# 4. Playbook Engine
+
+The screenshots show a “Playbook” with:
+
+- named inputs;
+- defaults;
+- descriptions;
+- secrets;
+- variable syntax;
+- executable steps;
+- outputs;
+- next-step flow;
+- locked/read-only mode.
+
+This is a strong candidate for a first-class AI Engineering OS primitive.
+
+Proposed:
+
+```text
+PlaybookDefinition
+──────────────────
+id
+version
+
+inputs schema
+secret references
+required capabilities
+
+steps[]
+outputs schema
+
+retry policy
+timeout policy
+
+allowed filesystem scope
+allowed network scope
+
+verification requirements
+
+immutable / locked version
+```
+
+Conceptual hierarchy:
+
+```text
+Tool
+→ atomic primitive
+
+Playbook
+→ sequence of tools
+
+Procedure
+→ conditional workflow
+
+Routine
+→ scheduled/event-driven procedure
+```
+
+Examples:
+
+```text
+Tool:
+  git.create_worktree
+
+Tool:
+  tests.run
+
+Playbook:
+  prepare_release
+
+Routine:
+  weekly_release_health
+```
+
+Playbooks should eventually support the marketplace/plugin strategy.
+
+Likely gates:
+- G6 for permissions, secrets, execution safety
+- G10 for learning/promotion of reusable procedures
+- G11 for scheduled/event execution
+
+---
+
+# 5. Immutable / approved playbooks
+
+A particularly useful idea from the screenshots is a locked playbook that can still be executed but cannot be edited by the current agent.
+
+AI Engineering OS should support versioned immutable procedures:
+
+```text
+Playbook v7
+SIGNED / APPROVED
+LOCKED
+
+Agent:
+✓ execute
+✗ edit
+```
+
+If an agent wants to improve it:
+
+```text
+Playbook v7
+    ↓
+proposed v8
+    ↓
+review
+    ↓
+approval
+    ↓
+v8 becomes active
+```
+
+This prevents a single agent from simultaneously:
+
+1. changing the rules;
+2. executing the changed rules;
+3. declaring the result valid.
+
+This aligns with separation-of-authority principles.
+
+---
+
+# 6. Capability profiles and read-only investigators
+
+The reference workflow uses read-only investigation agents before assigning implementation work.
+
+AI Engineering OS should support capability-scoped execution profiles.
+
+Example:
+
+```text
+INVESTIGATOR
+  repo.read        ✓
+  logs.read        ✓
+  tests.read       ✓
+  git.diff         ✓
+
+  files.write      ✗
+  git.commit       ✗
+  process.kill     ✗
+  network.write    ✗
+  secrets.read     ✗
+```
+
+Preferred flow:
+
+```text
+Investigation
+    ↓
+Evidence
+    ↓
+Root-cause hypothesis
+    ↓
+Task created
+    ↓
+Implementation Agent
+```
+
+Important principle:
+
+> “Do not modify anything” should not exist only as a prompt instruction when the system can enforce the restriction technically.
+
+Likely gate:
+- G6 Security / Policy Engine / OS isolation
+
+---
+
+# 7. Soft rules vs hard policy
+
+The reference system contains many “Laws & Permissions” as text instructions.
+
+Some of those are useful as soft procedural guidance, but security-critical and authority-critical rules in AI Engineering OS should be enforced by software.
+
+Example soft rule:
+
+```text
+Before creating new infrastructure,
+search the repository for an existing solution.
+```
+
+Example hard policy:
+
+```text
+MERGE:
+  requires:
+    verification == PASSED
+    independent_review == PASSED
+
+SECRET_READ:
+  requires:
+    explicit capability
+
+DELETE_WORKTREE:
+  requires:
+    owner_is_live == false
+```
+
+The system should distinguish:
+
+```text
+Instruction / Procedure
+→ agent should follow
+
+Policy
+→ system enforces
+```
+
+Likely gate:
+- G6 Security
+
+---
+
+# 8. Human Decision Queue
+
+The reference workflow batches structured questions to the human and includes a recommended option.
+
+AI Engineering OS should make human attention a first-class system object.
+
+Proposed:
+
+```text
+HumanDecisionRequest
+────────────────────
+task
+reason
+risk
+
+question
+options[]
+recommended_option
+recommendation_reason
+
+blocking: true / false
+
+related_decisions[]
+
+requested_by
+created_at
+```
+
+Primary UI should expose something like:
+
+```text
+Needs your attention — 3
+
+TASK-164
+Architecture choice
+Recommended: Option B
+
+TASK-171
+Allow network access?
+Recommended: Deny
+
+TASK-180
+Merge verified change?
+Recommended: Approve
+```
+
+This should integrate with:
+
+- Human Steering / Takeover;
+- Human Attention Metrics;
+- approval flows;
+- review gates;
+- escalation.
+
+Likely gates:
+- G7 / G8
+
+---
+
+# 9. Verification and Review Gates
+
+The reference workflow follows a chain similar to:
+
+```text
+Brainstorm
+    ↓
+Plan
+    ↓
+Independent Plan Review
+    ↓
+Implementation
+    ↓
+Independent Code Review
+    ↓
+Additional Review
+    ↓
+Human QA
+```
+
+AI Engineering OS should make this provider-neutral and risk-aware.
+
+Proposed:
+
+```text
+Implementation
+    ↓
+Verification Policy
+    │
+    ├── tests
+    ├── lint
+    ├── architecture review
+    ├── security review
+    ├── adversarial model review
+    └── human review
+```
+
+Risk-aware example:
+
+```text
+Risk LOW
+→ tests only
+
+Risk MEDIUM
+→ tests + independent review
+
+Risk HIGH
+→ tests
+  + independent-provider review
+  + human approval
+```
+
+A specific provider such as Codex must not be hardcoded as “the reviewer”.
+
+Likely gate:
+- G8 Verification
+
+---
+
+# 10. Typed durable agent messaging
+
+The reference setup supports inter-agent communication. AI Engineering OS should implement a stricter, typed, durable form.
+
+Proposed:
+
+```text
+AgentMessage
+──────────────────────────
+message_id
+task_id
+execution_id
+attempt_id
+
+sender
+recipient / role
+
+kind:
+  INFORMATION
+  REQUEST
+  REVIEW_REQUEST
+  BLOCKER
+  RESULT
+  HANDOFF
+  DECISION_REQUEST
+
+trust:
+  UNTRUSTED_AGENT
+  SYSTEM_GENERATED
+  HUMAN
+  VERIFIED_ARTIFACT
+
+artifact_refs[]
+workspace_ref
+evidence_refs[]
+
+body
+
+requires_reply
+reply_to
+created_at
+```
+
+Critical rule:
+
+```text
+Agent message
+    ↓
+information only
+
+Task mutation
+    ↓
+canonical command
+    ↓
+Policy / State Machine
+```
+
+An agent message must never directly mutate authoritative Task state.
+
+Agent-originated text should default to an untrusted trust level to reduce prompt-injection risk between agents.
+
+Likely gate:
+- G9 Context / Continuity
+
+---
+
+# 11. Cross-Provider Execution Continuity / Model Handoff Protocol
+
+This should become a central future feature.
+
+Goal:
+
+```text
+Claude / Provider A
+       ↓
+quota exhausted / failure / manual switch
+       ↓
+safe checkpoint
+       ↓
+durable Handoff Packet
+       ↓
+Codex / Gemini / Provider B
+       ↓
+continue same engineering work
+```
+
+The system must not depend on the previous provider's chat history.
+
+Source of truth should be durable system state.
+
+Suggested handoff contents:
+
+```text
+Task
+Execution
+Attempt
+
+WorkspaceLease
+repository path
+worktree path
+
+base commit
+current HEAD
+
+git status
+git diff
+staged diff
+
+changed / added / deleted files
+
+commands already executed
+tests already executed
+test results
+
+completed acceptance criteria
+remaining acceptance criteria
+
+known failures
+open problems
+blocked actions
+
+relevant ADRs / invariants
+
+generated artifacts
+
+previous provider/model
+handoff reason
+```
+
+Optional human-readable summary:
+
+```text
+What I was trying to accomplish
+What I changed
+What currently works
+What is still broken
+What I would do next
+Things the next agent must not redo
+```
+
+Potential entity names:
+
+```text
+ContinuationCheckpoint
+ExecutionHandoff
+```
+
+Possible relationship:
+
+```text
+Task
+ └─ Execution
+      ├─ Attempt #1 — Claude
+      ├─ Handoff checkpoint
+      └─ Attempt #2 — Codex
+```
+
+Exact Execution-vs-Attempt semantics should be decided later against the final domain model.
+
+---
+
+# 12. Safe checkpoint procedure
+
+Before provider handoff, the system should attempt:
+
+```text
+1. stop assigning new actions to the current agent
+2. wait for or safely cancel the current command
+3. save stdout/stderr/result
+4. capture git status
+5. capture diff
+6. capture current HEAD
+7. persist test evidence
+8. persist unfinished actions/blockers
+9. create Handoff Packet
+10. launch replacement provider
+```
+
+If the previous model is already unavailable due to quota/failure, the system should still reconstruct most state from:
+
+```text
+repository + worktree
+Task database
+Execution / Attempt state
+Event Journal
+Git state
+test evidence
+tool history
+artifacts
+```
+
+Previous-model prose should be supplemental, not authoritative.
+
+---
+
+# 13. Handoff modes
+
+Suggested modes:
+
+```text
+MANUAL_HANDOFF
+user explicitly selects another provider
+
+LIMIT_HANDOFF
+quota / rate limit exhausted
+
+FAILURE_HANDOFF
+provider unavailable or current execution cannot continue
+```
+
+Potential later behavior:
+
+```text
+Claude quota exhausted
+    ↓
+ContinuationCheckpoint
+    ↓
+Model Router
+    ↓
+Codex capacity available
+    ↓
+continue work
+```
+
+Likely gate:
+- G9 Continuity
+- later Model Router / Subscription Capacity Manager
+
+---
+
+# 14. Provider Capacity state
+
+The UI screenshots show model/session usage indicators.
+
+AI Engineering OS should eventually model provider availability/capacity explicitly, without making it part of Task semantics.
+
+Possible state:
+
+```text
+ProviderCapacity
+────────────────
+provider
+model
+availability
+
+quota_remaining
+quota_confidence
+rate_limit_state
+
+degraded
+unavailable
+handoff_recommended
+
+observed_at
+provenance
+```
+
+This can feed the future router.
+
+Important:
+
+```text
+Task semantics
+X→ provider quota
+
+Router / orchestration
+→ observes provider capacity
+```
+
+---
+
+# 15. Model Router
+
+The reference hardcodes model choice by complexity. AI Engineering OS should generalize it.
+
+Task profile:
+
+```text
+TaskProfile
+────────────
+complexity: HIGH
+architecture_risk: HIGH
+context_size: LARGE
+tool_use: HEAVY
+latency_priority: LOW
+cost_priority: MEDIUM
+```
+
+Router considers:
+
+```text
+available providers
+current quota
+model capabilities
+historical performance
+task requirements
+subscription availability
+cost / latency constraints
+```
+
+Then selects:
+
+```text
+Claude
+Codex
+Gemini
+Kimi
+...
+```
+
+Do not hardcode:
+
+```text
+if complex → Claude X
+```
+
+The router should eventually integrate with handoff and capacity state.
+
+---
+
+# 16. Session Projection, not Session Authority
+
+The reference UI is session-centric and shows:
+
+- active/idle/generating;
+- model;
+- cost;
+- branch;
+- context/usage;
+- child sessions.
+
+These are useful projections, but AI Engineering OS should keep **Task / Outcome / Risk / Attention / Verification** as the main product objects.
+
+Preferred UI:
+
+```text
+TASK-0182
+Fix authentication race
+
+Status: VERIFYING
+Progress: 82%
+
+Executions:
+  Attempt 1 — Claude — failed
+  Attempt 2 — Codex — succeeded
+
+Verification:
+  tests ✓
+  architecture review ✓
+  security review waiting
+
+Capacity:
+  Claude 18%
+  Codex 72%
+```
+
+Sessions should be a drill-down technical projection.
+
+Proposed concept:
+
+```text
+SessionProjection
+```
+
+It must not become authoritative state.
+
+---
+
+# 17. Main attention-oriented UI
+
+Possible future dashboard:
+
+```text
+AI Engineering OS
+────────────────────────────────────────────
+
+NEEDS ATTENTION                         3
+
+TASK-0138
+Authentication refactor
+Claude / Attempt 3
+⚠ Review found 2 blockers
+
+TASK-0141
+SQLite migration
+Codex
+⚠ Waiting for decision
+
+TASK-0147
+Frontend forms
+Gemini
+⚠ Provider quota exhausted
+   Handoff ready → Codex
+
+
+ACTIVE                                 7
+
+TASK-0142   Claude   coding       68%
+TASK-0143   Codex    testing      82%
+TASK-0144   Gemini   reviewing    34%
+
+BACKGROUND ROUTINES
+
+Repo health         ✓  8 min ago
+Dependency audit    ✓  2 h ago
+Documentation drift ⚠ 3 findings
+```
+
+Design principle:
+
+> The user manages outcomes and attention, not agent chat windows.
+
+---
+
+# 18. Internal Task Graph remains authority
+
+The reference setup has an Internal Tickets database with multiple projections:
+
+```text
+Table
+Kanban
+Gantt
+List
+```
+
+AI Engineering OS should preserve its existing stronger architectural direction:
+
+```text
+External ingress
+GitHub / Linear / Jira / Slack
+        ↓
+Internal Task Graph
+        ↓
+single authority
+```
+
+External systems are Work Ingress Adapters.
+
+Kanban/Table/Gantt/List are projections over internal authoritative state.
+
+Avoid parallel mutable authorities such as:
+
+```text
+GitHub Issue state
++ Linear state
++ internal ticket state
++ chat state
+```
+
+without reconciliation.
+
+---
+
+# 19. Toolkit as reusable operations
+
+The reference UI exposes reusable operations such as:
+
+- Worktree;
+- bump version;
+- release notes;
+- release RC;
+- build package;
+- open project;
+- conversion report.
+
+AI Engineering OS should represent reusable operations through the Tool / Playbook / Procedure hierarchy.
+
+This is also a natural foundation for a future plugin marketplace.
+
+Marketplace candidates already envisioned:
+
+```text
+prompt improvement
+context optimization
+review
+security checks
+documentation
+commit / PR preparation
+requirements refinement
+tests
+repository-readiness rules
+integrations
+release procedures
+```
+
+---
+
+# 20. Learning / Promotion Pipeline integration
+
+Repeated successful execution patterns should eventually be promotable:
+
+```text
+successful ad-hoc action
+    ↓
+candidate procedure
+    ↓
+review/evidence
+    ↓
+approved Playbook
+    ↓
+Routine / Skill / Rule
+```
+
+Potential promotion destinations:
+
+```text
+Memory
+Skills
+Procedures
+Rules
+Docs
+Playbooks
+```
+
+The agent must not autonomously promote a one-off behavior into policy without review/evidence.
+
+---
+
+# 21. Watchdog / stuck-agent detection
+
+A long-running orchestrator needs explicit health monitoring.
+
+Future watchdog signals:
+
+```text
+Task stale
+Attempt no progress
+agent repeatedly executes same action
+agent silent
+context drift
+provider quota near exhaustion
+child session orphaned
+workspace owner inconsistent
+test loop without progress
+```
+
+Potential outcomes:
+
+```text
+notify manager
+request human attention
+cancel attempt
+create diagnostic Task
+create handoff checkpoint
+switch provider
+```
+
+Likely gate:
+- G11
+
+---
+
+# 22. Routine audit trail
+
+Every pulse/routine should produce durable evidence.
+
+Proposed:
+
+```text
+RoutineRun
+──────────
+routine_id
+version
+trigger
+started_at
+finished_at
+
+inputs
+steps_executed
+findings[]
+actions_requested[]
+tasks_created[]
+errors[]
+
+evidence_refs[]
+```
+
+This prevents background agents from becoming invisible autonomous behavior.
+
+---
+
+# 23. Resource policies
+
+The screenshots show limits such as “max children”.
+
+AI Engineering OS should generalize this into resource/workspace policies.
+
+Possible:
+
+```text
+max_parallel_children
+max_active_attempts
+max_expensive_models
+max_worktrees
+max_disk_usage
+max_runtime
+max_provider_spend
+max_networked_tasks
+```
+
+These belong to orchestration/resource management, not prompt prose.
+
+---
+
+# 24. Explicit review-before-build rule
+
+One useful operational pattern is:
+
+```text
+non-trivial feature
+    ↓
+implementation plan
+    ↓
+independent review
+    ↓
+plan revision
+    ↓
+implementation
+```
+
+This should be configurable per risk class rather than universal.
+
+Possible policy:
+
+```text
+trivial:
+  no plan review
+
+medium:
+  plan required
+
+high-risk:
+  plan + independent plan review
+
+security/concurrency/storage:
+  plan + independent review + explicit verification strategy
+```
+
+---
+
+# 25. Search-before-build rule
+
+The screenshot includes a useful procedural law:
+
+> Before building new infrastructure, search the repository for an existing solution and re-read relevant project instructions when reaching for a tool.
+
+This is a good **soft procedure**, not a security policy.
+
+Possible reusable procedure:
+
+```text
+RepositoryReuseCheck
+────────────────────
+search existing implementation
+search relevant ADRs
+search current tools/playbooks
+search existing test harness
+record why reuse is or is not possible
+```
+
+This helps avoid duplicate infrastructure.
+
+---
+
+# 26. Human QA should be late-stage
+
+The reference workflow keeps automated review before human QA.
+
+This aligns with Human Attention Metrics.
+
+Preferred:
+
+```text
+implementation
+    ↓
+automated tests
+    ↓
+independent review
+    ↓
+security/architecture checks
+    ↓
+only unresolved or final decision
+    ↓
+human
+```
+
+Humans should receive distilled decisions/findings rather than raw agent chatter whenever possible.
+
+---
+
+# 27. Provider-neutral review roles
+
+Do not encode:
+
+```text
+Codex = reviewer
+Claude = builder
+```
+
+Instead define:
+
+```text
+Role:
+  BUILDER
+  REVIEWER
+  INVESTIGATOR
+  VERIFIER
+  MANAGER
+```
+
+Then assign providers/models dynamically.
+
+Example:
+
+```text
+RoleProfile: REVIEWER
+
+requirements:
+  independent provider from builder
+  high reasoning capability
+  repo read
+  no merge authority
+```
+
+---
+
+# 28. Trust labels for inter-agent content
+
+Any agent-originated artifact or message should carry provenance/trust.
+
+Possible:
+
+```text
+UNTRUSTED_AGENT_TEXT
+PROVIDER_REPORTED
+SYSTEM_OBSERVED
+HUMAN_PROVIDED
+VERIFIED_EVIDENCE
+```
+
+This can later influence:
+
+- whether content may trigger actions;
+- whether it can be promoted to memory;
+- whether it requires verification;
+- whether it may be shown as authoritative.
+
+---
+
+# 29. Provenance for learned information
+
+The future Memory Engine and Procedure promotion system should preserve provenance:
+
+```text
+learned claim
+source Task
+source Attempt
+provider
+evidence
+review status
+promotion date
+superseded_by
+```
+
+This prevents agent-generated guesses from silently becoming permanent rules.
+
+---
+
+# 30. Architectural placement by gate
+
+Suggested mapping:
+
+```text
+G6 — Security
+  Policy Engine
+  Capability Profiles
+  Read-only Investigator enforcement
+  Secrets Broker
+  Tool / Playbook permission enforcement
+  hard policy vs soft instruction
+
+G7 — Multi-agent DAG / Delegation
+  RoleProfile
+  MissionSpec
+  delegation
+  HumanDecisionRequest
+  resource limits
+  manager / child relationships
+
+G8 — Verification
+  ReviewGate
+  plan review
+  code review
+  adversarial review
+  risk-aware verification policy
+  human QA gate
+
+G9 — Context + Continuity
+  AgentMessage
+  ContinuationCheckpoint
+  ExecutionHandoff
+  Cross-Provider Handoff
+  bounded continuation context
+  context reconstruction
+
+G10 — Memory / Learning
+  Learning / Promotion Pipeline
+  Procedure promotion
+  Playbook promotion
+  memory provenance
+
+G11 — Background Daemon
+  Routine Engine
+  Pulse Engine
+  Watchdog
+  RoutineRun
+  scheduled/event-driven background work
+
+Future Router
+  ProviderCapacity
+  model selection
+  quota-aware handoff
+  provider failover
+```
+
+---
+
+# 31. Explicit non-goal for current G5 work
+
+None of the ideas in this document should modify:
+
+```text
+TASK-0051
+G5 atomic entry
+managed workspace identity remediation
+```
+
+Current sequence remains:
+
+```text
+TASK-0051
+→ fix G5 entry atomicity / branch identity
+
+TASK-0052
+→ independent G5 closure re-audit
+
+only after G5_CLOSED
+→ begin G6 architecture prerequisites
+```
+
+Do not let future product ideas destabilize the current gate.
+
+---
+
+# 32. Product differentiation
+
+A useful framing after reviewing the reference system:
+
+```text
+Other orchestrator:
+Agent manages agents.
+
+AI Engineering OS:
+Deterministic control plane manages nondeterministic agents.
+```
+
+Potential differentiators:
+
+- provider neutrality;
+- durable Task / Execution / Attempt semantics;
+- strict separation of Task state from provider conversations;
+- isolated workspaces;
+- independent completion authority;
+- typed agent messaging;
+- cross-provider continuation;
+- policy-enforced capabilities;
+- immutable reviewed playbooks;
+- evidence-driven verification;
+- human attention queue;
+- internal Task Graph authority;
+- provider capacity / quota awareness;
+- future multi-provider handoff;
+- local-first privacy.
+
+---
+
+# 33. Future first-class concepts to preserve
+
+The following should be retained as named architecture candidates:
+
+```text
+MissionSpec
+RoleProfile
+RoutineDefinition
+RoutineRun
+PlaybookDefinition
+CapabilityProfile
+PolicyRule
+HumanDecisionRequest
+ReviewGate
+AgentMessage
+ContinuationCheckpoint
+ExecutionHandoff
+ProviderCapacity
+SessionProjection
+```
+
+These names are provisional and may change during their gate-level architecture work.
+
+The concepts are more important than the exact names.
+
+---
+
+# 34. Priority of ideas
+
+## High priority
+
+```text
+Cross-Provider Handoff Protocol
+Typed Agent Messaging
+Policy / Capability separation
+Playbook Engine
+Human Decision Queue
+Review Gates
+Routine / Pulse Engine
+```
+
+## Medium priority
+
+```text
+MissionSpec
+Provider Capacity
+Session Projection
+Watchdog
+Resource Policies
+Toolkit abstraction
+```
+
+## Later / marketplace-oriented
+
+```text
+playbook marketplace
+community procedures
+specialized review plugins
+release workflows
+external integration packs
+```
+
+---
+
+# 35. Core principles extracted from the reference
+
+1. Persistent engineering work must live outside model conversations.
+2. A manager agent needs durable tasks, not just child chats.
+3. Background routines need explicit triggers and audit trails.
+4. Repeated workflows should become versioned procedures/playbooks.
+5. Security-critical rules must be enforced by the system, not merely written in prompts.
+6. Agent-to-agent messages are information, not authority.
+7. Human attention should be batched, structured, and risk-driven.
+8. Review should be independent from implementation where risk justifies it.
+9. Provider/model choice should be dynamic and quota-aware.
+10. A provider limit must not destroy engineering continuity.
+11. Session UI is useful, but Task / Outcome / Verification remain primary.
+12. External ticket systems should feed the internal Task Graph, not replace it.
+13. Durable evidence is more important than conversational memory.
+14. The system should support changing the model without changing the Task.
+15. AI Engineering OS should orchestrate providers through enforceable contracts rather than prompt conventions.
+
+---
+
+# 36. Merge plan later
+
+When the project is ready to merge these ideas into canonical documentation, review this staging file and distribute content into:
+
+```text
+AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
+EXTERNAL_REPOSITORY_ADOPTION_RESEARCH.md
+docs/architecture/*
+docs/architecture/adr/*
+planning/roadmap.yaml
+```
+
+Only update `AGENT.md` if these ideas eventually become current agent-operating rules.
+
+Do not move future architecture into `AGENT.md` prematurely.
+
+
+## Appendix B — Observer detailed research
+
+> Source context: Reddit post about Observer AI reaching ~2k users, its move from MIT to AGPLv3, local-first product strategy, possible VC/enterprise path, and the Observer repository architecture.
+>
+> Status: staging notes for later merge. This file does not change the current G5 scope or roadmap ordering.
+
+## 1. Why this article matters
+
+The Observer article is less about coding-agent orchestration and more about three strategic areas that are highly relevant to AI Engineering OS:
+
+1. local-first product architecture;
+2. sustainable open-source business model;
+3. separating cheap/local continuous agents from more capable higher-cost orchestration models.
+
+Observer is a privacy-first local AI product that monitors screen/camera/audio inputs and triggers actions. Its current public architecture is summarized as:
+
+```text
+Sensors → Models → Tools
+```
+
+The important transferable lesson is to keep the model as one replaceable reasoning component between typed inputs and typed capabilities.
+
+## 2. Local-first as product strategy, not just infrastructure
+
+Observer emphasizes that local inference can remain fully local while optional convenience services can be paid or hosted.
+
+For AI Engineering OS this supports:
+
+```text
+Core local-first control plane
+  - Task Graph
+  - agentd
+  - workspaces
+  - local execution
+  - provider adapters
+  - local state
+  - local verification
+
+Optional commercial services
+  - remote workers
+  - team synchronization
+  - hosted dashboards
+  - enterprise governance
+  - managed integrations
+  - cloud artifact storage
+  - organization policy packs
+```
+
+Principle:
+
+> The open/local core should remain useful by itself; monetization should come from convenience, collaboration, governance, hosting, scale, and enterprise functionality rather than deliberately crippling local execution.
+
+## 3. Potential business-model principle
+
+Observer's author describes a line similar to:
+
+```text
+If it costs me nothing to provide, keep the equivalent local/self-hosted path free.
+```
+
+For AI Engineering OS this could become a product philosophy rather than a contractual promise:
+
+```text
+Self-hosted/local capabilities
+→ generous/open core
+
+Capabilities with ongoing vendor cost
+→ paid service is reasonable
+
+Enterprise capabilities
+→ paid governance/operations layer
+```
+
+Do not encode this as a permanent pricing commitment until product economics are known.
+
+## 4. Open-source core + paid convenience
+
+Possible future commercial split:
+
+```text
+Free / Open Core
+----------------
+local agentd
+agentctl
+Task Graph
+local provider adapters
+worktree isolation
+local SQLite state
+local verification primitives
+manual multi-provider operation
+local Playbooks
+basic local UI
+
+Paid / Commercial
+-----------------
+team collaboration
+hosted synchronization
+remote workers
+managed cloud execution
+enterprise SSO
+RBAC / organization policy
+audit retention
+central fleet management
+managed integrations
+enterprise support
+hosted observability
+compliance features
+```
+
+This should be evaluated later against the final license.
+
+## 5. Licensing lesson
+
+Observer moved from MIT to AGPLv3 due to concern about proprietary/parasitic forks.
+
+This is strategically relevant to AI Engineering OS, but license selection should be treated as a separate product/legal decision rather than copied automatically.
+
+Candidate directions to evaluate later:
+
+```text
+Apache-2.0 / MIT
+→ maximum adoption and commercial friendliness
+→ weaker protection against closed hosted forks
+
+AGPLv3
+→ strong copyleft including modified network-interactive deployments
+→ may discourage some enterprise adopters/integrators
+
+Dual licensing
+→ open-source license + commercial license
+→ requires clean copyright ownership/contributor agreements
+
+Open-core
+→ permissive or copyleft core
+→ separate proprietary enterprise modules/services
+```
+
+Important legal/operational consideration:
+if external contributors own copyright in their contributions, later relicensing can become difficult without appropriate rights or contributor agreements.
+
+Before opening the project broadly to contributors, decide whether the project needs:
+- Developer Certificate of Origin (DCO);
+- Contributor License Agreement (CLA);
+- assignment of copyright;
+- or no relicensing strategy at all.
+
+This requires actual legal review before implementation.
+
+## 6. Separate code license from product moat
+
+AI Engineering OS should not assume that source-code secrecy is the primary moat.
+
+Possible moat:
+
+```text
+architecture quality
+provider-neutral execution contracts
+safe orchestration
+verification quality
+integrations
+plugin/playbook ecosystem
+enterprise governance
+user experience
+reliability
+historical execution intelligence
+team workflows
+support/trust
+```
+
+Open-sourcing a large portion of the system can still be compatible with a commercial company.
+
+## 7. Two-tier model architecture
+
+Observer later describes a useful pattern:
+
+```text
+Large capable model
+→ configures / builds / orchestrates
+
+Small cheap/local model
+→ runs repetitive monitoring loop
+```
+
+AI Engineering OS can adapt this concept:
+
+```text
+High-capability model
+---------------------
+architecture
+planning
+debugging
+review
+difficult implementation
+handoff synthesis
+
+Small/local/cheap model
+-----------------------
+classification
+log triage
+heartbeat checks
+repo-health scanning
+simple routing
+summarization
+routine monitoring
+watchdog classification
+```
+
+This can substantially reduce provider usage.
+
+Do not use a frontier model for every background pulse.
+
+## 8. Model cost should be matched to cognitive difficulty
+
+Future Router should consider:
+
+```text
+task complexity
+risk
+context requirement
+latency requirement
+tool-use requirement
+historical success
+provider quota
+local hardware
+cost
+```
+
+Then choose the cheapest model that satisfies the quality/risk requirement.
+
+This aligns with the project's future Verified Delivery Cost principle:
+optimize total cost of obtaining a verified correct result, not raw token cost.
+
+## 9. Sensors → Models → Tools as an architecture pattern
+
+Observer exposes a simple architecture:
+
+```text
+Sensors
+→ Model
+→ Tools
+```
+
+For AI Engineering OS the analogous pattern is:
+
+```text
+Evidence Sources
+→ Context Materialization
+→ Model / Agent
+→ Typed Tool Contracts
+→ Policy
+→ Runtime
+```
+
+Possible evidence sources:
+
+```text
+repository
+Task state
+git diff
+tests
+logs
+build output
+issues
+PRs
+documentation
+runtime events
+user input
+```
+
+The model should never access all host capabilities directly.
+
+## 10. Typed capability registry
+
+Observer makes sensors and tools explicit.
+
+AI Engineering OS should similarly maintain explicit capabilities:
+
+```text
+repo.read
+repo.search
+file.read
+file.write
+git.diff
+git.commit
+tests.run
+build.run
+network.read
+network.write
+secret.use
+process.spawn
+workspace.create
+review.submit
+```
+
+This feeds:
+- Policy Engine;
+- CapabilityProfile;
+- Playbooks;
+- auditing;
+- future marketplace metadata.
+
+## 11. Local micro-agents
+
+Observer's lightweight repeated agents suggest a useful future concept:
+
+```text
+MicroAgent
+```
+
+A MicroAgent is not a full autonomous coding agent.
+
+It performs a narrow repeated task with:
+- bounded context;
+- bounded capabilities;
+- small/local model;
+- low execution cost;
+- explicit trigger;
+- typed result.
+
+Examples for AI Engineering OS:
+
+```text
+test-failure classifier
+log anomaly detector
+dependency-change watcher
+documentation drift checker
+stale-task detector
+provider-quota watcher
+workspace-health checker
+review finding deduplicator
+```
+
+Likely G11 / future optimization layer.
+
+## 12. MCP as configuration/control surface
+
+Observer later uses MCP to let a capable model configure micro-agents from natural language.
+
+Potential lesson for AI Engineering OS:
+
+```text
+Natural-language intent
+→ orchestration/control protocol
+→ typed durable configuration
+```
+
+But do not let MCP become internal authority.
+
+Preferred:
+
+```text
+MCP / UI / CLI / API
+→ ingress adapter
+→ canonical commands
+→ Task/Policy/runtime state
+```
+
+MCP should be one control interface, not the system of record.
+
+## 13. OpenAI-compatible endpoint lesson
+
+Observer supports OpenAI-compatible local endpoints, allowing Ollama/llama.cpp/vLLM-style backends.
+
+AI Engineering OS should preserve provider adapters rather than standardize core semantics around one API.
+
+However, a generic OpenAI-compatible inference adapter may eventually be useful for local supporting models:
+
+```text
+LocalInferenceProvider
+→ OpenAI-compatible endpoint
+```
+
+This is different from coding-agent providers such as Claude Code/Codex CLI, which have richer runtime/session/tool semantics.
+
+Do not collapse both into one abstraction unless their behavioral contracts genuinely match.
+
+## 14. Privacy boundary
+
+Observer's strongest product story is local privacy.
+
+AI Engineering OS can make privacy more explicit:
+
+```text
+default:
+  source code stays local
+  Task state stays local
+  Event Journal stays local
+  secrets stay local
+  telemetry off
+
+provider-required transmission:
+  only context explicitly materialized for that provider
+```
+
+Future Context Engine should be able to explain:
+
+```text
+Which files/data will leave the machine?
+Why?
+To which provider?
+For which Task?
+```
+
+Potential future UI:
+
+```text
+Context Disclosure Preview
+```
+
+before high-risk provider execution.
+
+## 15. Hosted convenience must be explicit
+
+If AI Engineering OS later offers cloud/team features, local and hosted paths should be clearly separated.
+
+Example:
+
+```text
+Local mode
+→ no account required
+
+Team/Cloud mode
+→ explicit sign-in
+→ explicit sync
+→ explicit remote execution
+```
+
+Avoid silently converting a local-first product into cloud-dependent software.
+
+## 16. FOSS foundation / code signing lesson
+
+Observer later became a SignPath Foundation project.
+
+Possible future lesson for AI Engineering OS:
+distribution trust matters for desktop software.
+
+Eventually consider:
+
+```text
+reproducible builds
+signed releases
+SBOM
+artifact provenance
+release attestations
+code signing
+automated release verification
+```
+
+This is relevant closer to packaging/distribution, not current G5.
+
+## 17. Community as product research
+
+Observer's development appears strongly driven by community feedback.
+
+AI Engineering OS could use:
+
+```text
+public roadmap
+structured feature requests
+anonymous/opt-in feedback
+plugin requests
+workflow sharing
+playbook sharing
+```
+
+But product architecture must not be driven only by popularity.
+Security and durable-state invariants remain non-negotiable.
+
+## 18. AGPL caution
+
+AGPL is not simply “MIT but safer.”
+
+If AI Engineering OS chose AGPL:
+- downstream modified network-interactive versions may have source-offer obligations;
+- some companies may reject AGPL dependencies/projects;
+- proprietary hosted forks become harder;
+- dual licensing may be possible if copyright ownership remains controlled.
+
+This is a business/legal strategy decision.
+
+Do not choose AGPL merely out of fear of forks.
+
+Evaluate:
+- desired ecosystem;
+- enterprise procurement friction;
+- marketplace/plugin compatibility;
+- contributor strategy;
+- VC/business model;
+- possible dual licensing.
+
+## 19. Contribution-rights strategy
+
+Before many external contributions arrive, explicitly decide whether future relicensing is important.
+
+If yes, establish contribution policy early.
+
+Possible options:
+
+```text
+DCO
+CLA
+copyright assignment
+project-owned copyright
+no planned relicensing
+```
+
+This should be reviewed by qualified counsel if the project becomes commercial.
+
+## 20. Product moat vs fork risk
+
+Fork protection alone should not drive architecture.
+
+A strong fork can copy code but cannot trivially copy:
+
+```text
+brand/trademark
+community
+release trust
+hosted infrastructure
+enterprise integrations
+support
+plugin ecosystem
+distribution channels
+operational expertise
+verified workflow data
+customer relationships
+```
+
+Therefore licensing should balance adoption and protection rather than trying to prevent all competition.
+
+## 21. Enterprise monetization candidates
+
+If AI Engineering OS develops commercially, plausible enterprise value is:
+
+```text
+organization policy engine
+central audit / compliance
+SSO / SCIM
+RBAC
+team Task Graph
+remote worker fleet
+managed secrets integration
+central provider controls
+cost/quota governance
+verified artifact retention
+approval workflows
+GitHub/Jira/Linear/Slack integrations
+support / SLA
+on-prem deployment management
+```
+
+These are more defensible than charging merely for running an agent.
+
+## 22. Potential free/community edition
+
+Possible future positioning:
+
+```text
+AI Engineering OS Community
+----------------------------
+local-first
+single developer
+self-hosted
+bring-your-own provider subscriptions
+local adapters
+local task state
+local worktrees
+local verification
+community playbooks/plugins
+```
+
+This aligns well with the user's preference for subscription-based provider access instead of requiring API billing.
+
+## 23. Potential commercial edition/service
+
+Possible:
+
+```text
+AI Engineering OS Team / Enterprise
+-----------------------------------
+multi-user
+shared project control plane
+organization policies
+remote workers
+central auditing
+central provider governance
+team approvals
+managed connectors
+cloud sync
+support
+```
+
+Do not finalize names/pricing yet.
+
+## 24. Architecture idea: cheap watcher + expensive reasoner
+
+Useful concrete pattern:
+
+```text
+Watchdog
+  small/local model
+  checks cheap signals frequently
+        ↓ interesting event
+Escalation
+        ↓
+Reasoning Agent
+  strong provider/model
+```
+
+Examples:
+
+```text
+small model:
+  classify logs every 5 minutes
+
+strong model:
+  only invoked when anomaly confidence > threshold
+```
+
+This can dramatically reduce expensive provider usage.
+
+## 25. Evidence-before-escalation
+
+Micro-agents should not create expensive tasks from vague suspicion alone.
+
+Preferred:
+
+```text
+cheap monitor
+→ finding
+→ evidence packet
+→ threshold / deduplication
+→ Task or investigation
+```
+
+This integrates with Repository Readiness Engine, Routine Engine, and Human Attention Metrics.
+
+## 26. Local inference is supporting infrastructure, not mandatory core
+
+AI Engineering OS should support local models where useful without requiring users to own large GPUs.
+
+The core product should still work with subscription-backed providers.
+
+Possible hierarchy:
+
+```text
+subscription coding providers
+→ primary high-capability workers
+
+small local models
+→ optional background/supporting workers
+```
+
+This matches the current project direction.
+
+## 27. Useful items to retain
+
+Named future concepts strengthened by this article:
+
+```text
+MicroAgent
+LocalInferenceProvider
+ContextDisclosurePreview
+ProviderCapacity
+Routine/Watchdog Engine
+Evidence Packet
+Capability Registry
+Community Edition
+Team/Enterprise Layer
+Contribution Rights Strategy
+Release Provenance
+```
+
+## 28. What NOT to copy
+
+Do not directly adopt:
+- screen monitoring as a project goal;
+- arbitrary model output string matching as core authority;
+- untyped JavaScript agent actions;
+- one generic inference API for all coding-agent providers;
+- licensing based purely on fear of forks;
+- cloud service dependence for basic use;
+- unrestricted cross-agent memory mutation.
+
+## 29. Relevance score
+
+For AI Engineering OS:
+
+```text
+Technical orchestration ideas: 7/10
+Local-first/privacy strategy: 9/10
+Business/open-source strategy: 9/10
+Direct code/architecture reuse: low
+Conceptual reuse: high
+```
+
+The strongest value is strategic rather than implementation-level.
+
+## 30. Current-gate impact
+
+No change to TASK-0051 or G5.
+
+Keep current sequence:
+
+```text
+TASK-0051
+→ G5 entry-atomicity remediation
+
+TASK-0052
+→ G5 closure re-re-audit
+
+after G5_CLOSED
+→ G6 architecture/security work
+```
+
+Observer-derived ideas should remain staged for later architecture/product work.
+
+
+## Appendix C — Tessra detailed research
+
+> Reviewed: 2026-09-11
+> Repository: `NitrusAphalion/tessra`
+> Reddit discussion: “Tessra - Git for Agents” in r/coolgithubprojects
+> Decision mode: adopt/adapt concepts independently; do not add Tessra as a dependency and do not replace Git/worktree architecture in v1.
+> Current gate impact: none. G5 / TASK-0051 remains unchanged.
+
+## Executive decision
+
+Tessra is one of the most relevant external projects reviewed for AI Engineering OS because it attacks the same structural problem from a different layer: instead of orchestrating agents around Git, it redesigns version control around concurrent agents, proof-bearing changes, scoped capabilities, memory, and semantic units.
+
+The strongest value is conceptual. We should **not** replace Git with Tessra, embed its VCS, or adopt its signed-op DAG wholesale. We should adopt/adapt several design principles into our existing control-plane architecture:
+
+1. machine-readable verification standards and signed evidence;
+2. independent evidence authority — an agent's own claim cannot satisfy its delivery gate;
+3. typed, scoped memory with provenance, trust, staleness, supersession, and expiry;
+4. budgeted context packs assembled from code + dependencies + tests + memory + active claims;
+5. advisory work claims and dependency-aware task partitioning;
+6. idempotency keys / replay-safe mutation contracts;
+7. separation of blocking gates from reactive hooks/routines;
+8. revocation as a whole-principal containment operation;
+9. multi-altitude recovery: undo operation, revert delivered change, revoke agent;
+10. local landing and remote publication as separate resumable reconciliation steps;
+11. semantic code-unit identity and merge as a future research track, not a v1 VCS replacement;
+12. semantic/structural indexes remain derived; canonical repository/blob state remains authoritative.
+
+## What Tessra actually does
+
+Tessra positions itself as “version control for the era of AI.” It can run beside Git, but maintains its own object store, operation log, workspaces, semantic units, standards, attestations, memories, capabilities, and daemon. It exposes a compact agent surface over CLI/MCP.
+
+Important documented concepts:
+
+- semantic merge at function/type/import-unit granularity for supported languages;
+- stable unit identity across edits/renames;
+- agent claims over paths/units as advisory coordination signals;
+- planner partitions work by dependency edges;
+- verification in a scratch copy with stripped environment;
+- attestations cached by content/toolchain;
+- standards expressed as data, including risk-gated human approval and distinct-model judges;
+- bounded context reads and explicit token budgets;
+- typed repository memory with provenance/trust/staleness;
+- hooks reacting to events, distinct from standards that block landing;
+- scoped/delegable capabilities;
+- idempotency key on mutations;
+- revocation that contains an agent across sessions/workspaces/claims/unlanded work;
+- Git import/export bridge;
+- local daemon and no mandatory server/account.
+
+The repository is pre-release. Its documentation states that multi-machine sync is not built, verifiers are not container-isolated, only several languages get semantic merge, Git round-tripping is incomplete, and macOS/Linux paths are not yet exercised. Treat performance and concurrency claims as project claims, not independent benchmarks.
+
+## A. Verification standards as data — ADOPT
+
+Tessra's strongest idea is that “what counts as acceptable” is durable data, not prompt prose.
+
+Conceptual AI Engineering OS form:
+
+```text
+VerificationPolicy
+  clauses[]
+    require TestEvidence(pass)
+    require ChangedCodeCovered
+    forbid TestWeakening
+    require IndependentReview when risk >= HIGH
+    require HumanApproval when risk >= CRITICAL
+    require DistinctProviderJudges(2) when policy says so
+```
+
+Do not copy Tessra's exact DSL prematurely. First define typed domain contracts; a textual DSL can be a later projection/editor format.
+
+Placement: G8 Verification, supported by G6 Policy.
+
+## B. Agent self-claims never satisfy their own delivery gate — ADOPT STRONGLY
+
+Tessra explicitly stores an agent's own attestation but does not let it satisfy the standard.
+
+This reinforces an existing AI Engineering OS principle:
+
+```text
+Builder output != verification evidence
+Agent says “tests pass” != tests passed
+Agent says “done” != Task completed
+```
+
+Evidence that can satisfy a gate must come from an authorized evidence producer such as:
+
+- deterministic verifier runner;
+- CI principal;
+- independent reviewer/provider;
+- human approval;
+- trusted observer with provenance.
+
+Placement: G8.
+
+## C. Evidence attestations + content/toolchain caching — ADOPT/ADAPT
+
+Useful concept:
+
+```text
+VerificationEvidence
+  subject_fingerprint
+  verifier_kind
+  toolchain_fingerprint
+  command/config fingerprint
+  result
+  producer principal
+  provenance
+  timestamp
+  signature/hash/receipt
+```
+
+A cache hit is allowed only when the relevant fingerprints match. Do not blindly reuse “tests passed” across changed code/toolchain/environment.
+
+Cryptographic signing can be staged: provenance + immutable evidence first; signing where it adds security value later.
+
+## D. Advisory WorkClaim — ADOPT FOR G7
+
+Tessra does not use claims as hard locks. If another agent overlaps, it reports who, why, and that a merge/conflict may follow.
+
+AI Engineering OS should consider a future `WorkClaim`:
+
+```text
+WorkClaim
+  task_id
+  execution_id
+  attempt_id
+  scope: path | code_unit | resource
+  intent
+  owner
+  created_at
+  expiry
+```
+
+Use it to improve planning and context, not as an authority that can deadlock development.
+
+Worktree isolation remains the execution safety mechanism. Claims solve coordination/awareness, not filesystem isolation.
+
+## E. Dependency-aware partitioning — ADOPT/ADAPT
+
+Tessra's planner groups code units by dependency edges before handing work to parallel agents.
+
+This aligns with G7 durable DAG + bounded JIT decomposition. Add a future partitioning heuristic:
+
+```text
+Task Graph
++ Code Dependency Graph
++ Active Claims
++ Risk/ownership boundaries
+→ candidate parallel partitions
+```
+
+The Task Graph remains authority. Code-graph partitioning is advice/optimization.
+
+## F. Semantic code-unit identity / unit-level merge — RESEARCH, DO NOT PUT IN V1
+
+This is Tessra's most novel and most invasive idea.
+
+Potential benefits:
+
+- two agents modifying different functions in one file need not conflict;
+- rename-aware reconciliation;
+- code-unit blame/history;
+- dependency-aware merge and context;
+- conflict objects can carry both intents instead of presenting raw line conflicts.
+
+But replacing Git's line/file merge semantics inside our product would add a second VCS substrate, language parser coverage, identity stability problems, formatting/regeneration questions, and long-tail language risk.
+
+Decision:
+
+```text
+v1: Git + worktree isolation remains canonical
+future: Semantic Change Graph / Merge Assist research track
+```
+
+Possible later use without replacing Git:
+
+- pre-merge conflict prediction;
+- semantic overlap detection;
+- suggested three-way resolution;
+- function/type-level ownership/claims;
+- review grouping by logical unit;
+- impact-aware landing order.
+
+## G. Context packs with explicit budgets — ADOPT STRONGLY FOR G9
+
+Tessra's context request asks: “what do I need to know to change X, in N tokens?” and assembles code, dependencies, dependents, tests, memories, claims, and recent authorship.
+
+AI Engineering OS version:
+
+```text
+ContextRequest
+  task/execution
+  target scope
+  token/byte budget
+  provider/model constraints
+  purpose
+
+ContextPack
+  exact code
+  structural neighbors
+  dependencies/dependents
+  relevant tests
+  architecture constraints
+  scoped memories
+  active claims/conflicts
+  prior evidence
+  provenance for every section
+  omitted/recovery handles
+  budget accounting
+```
+
+This directly strengthens G9 Context Compiler.
+
+## H. Typed memory with trust + staleness anchors — ADOPT STRONGLY FOR G10
+
+Tessra memory objects include kind, scope, provenance, content anchor, confidence, trust, supersession and expiry. When anchored code changes, memory becomes stale rather than silently remaining “true.”
+
+AI Engineering OS should preserve its semantic/episodic/procedural/decision model but add these lifecycle properties:
+
+```text
+MemoryRecord
+  type
+  scope
+  body / structured payload
+  provenance
+  anchor_fingerprint
+  confidence
+  trust_state
+  lifecycle: proposed | confirmed | contradicted | stale | superseded | retired
+  supersedes
+  expiry
+```
+
+Important adoption:
+
+- auto-extracted memory enters `proposed`, not authoritative;
+- global/convention memory needs stronger capability/approval than task-local memory;
+- revoking an agent should quarantine/retire its unconfirmed learned memories;
+- stale memory remains visible with warning until confirmed/superseded/retired;
+- generated `AGENT.md`/provider instructions can be projections, not the source of truth.
+
+This strongly complements the Learning/Promotion Pipeline.
+
+## I. State-rich, agent-friendly responses — ADOPT/ADAPT
+
+Tessra responses include result + current state + suggested next actions + budget usage, while errors expose a typed code and remediation.
+
+Future AI Engineering OS action response pattern:
+
+```text
+ActionResult
+  outcome
+  durable_state_ref / state summary
+  evidence refs
+  conflicts / unmet gates
+  next_admissible_actions[]
+  budget/resource usage
+  retryability
+  typed error/remediation if failed
+```
+
+Do not make the LLM reconstruct state from prose after every tool call.
+
+## J. Idempotency keys on mutations — ADOPT
+
+Every externally retryable mutation should eventually have an explicit replay/idempotency contract.
+
+Examples:
+
+- create execution;
+- create attempt;
+- request verification;
+- create decision request;
+- publish/land result;
+- dispatch hook/routine action;
+- remote synchronization.
+
+This does not replace transactional invariants. Idempotency handles retry/replay; atomic transactions handle admission/state consistency.
+
+## K. Gates block; hooks react — ADOPT STRONGLY
+
+Excellent separation:
+
+```text
+Verification/Policy Gate
+→ determines whether transition is allowed
+
+Event Hook / Routine
+→ reacts after/beside an event
+→ cannot silently redefine the gate
+```
+
+A hook may produce evidence that a gate later consumes, but a reactive automation should not become hidden policy authority.
+
+This should connect G8 Verification with the future G11 Routine/Pulse Engine.
+
+## L. Human approvals as typed evidence — ADOPT
+
+Human approval should be a durable `HumanDecision`/approval receipt tied to exact subject/risk/revision rather than “user said yes somewhere in chat.”
+
+Important fields:
+
+```text
+subject
+policy/gate
+risk factors
+question/options
+human principal
+answer
+note
+provenance
+signature/session authentication as appropriate
+```
+
+## M. Scoped/delegable capabilities — ADOPT CONCEPT, IMPLEMENT THROUGH OUR G6 MODEL
+
+Tessra allows a planner to receive a delegable capability and issue narrower capabilities to children; every child capability must remain contained within the parent's authority.
+
+AI Engineering OS should adopt capability monotonicity:
+
+```text
+child authority ⊆ parent delegated authority
+```
+
+No agent may expand its own path/tool/network/secret/action scope through delegation.
+
+This belongs in G6/G7.
+
+## N. Whole-agent revocation — ADOPT FOR G6/G11
+
+`cancel process` is not enough once agents can own workspaces, claims, pending approvals, memory proposals, and background routines.
+
+Future `RevokePrincipal/Agent` should reconcile:
+
+- active provider sessions;
+- processes;
+- pending mutations;
+- work claims;
+- leases/workspaces;
+- unlanded proposals;
+- delegated capabilities;
+- scheduled child work;
+- unconfirmed memory proposed by that principal.
+
+Revocation should be auditable and idempotent.
+
+## O. Multi-altitude recovery — ADOPT
+
+Useful distinction:
+
+```text
+undo operation
+revert delivered change
+revoke agent/principal
+```
+
+AI Engineering OS already has recovery/reconciliation goals; this gives a clean UX taxonomy.
+
+Do not promise perfect rollback for irreversible external effects. The recovery layer must distinguish reversible internal state from compensating actions.
+
+## P. Git publish is resumable reconciliation, not an atomic illusion — ADOPT FAILURE LESSON
+
+The Reddit discussion contains a useful author explanation: Tessra's Git export/push is idempotent rather than atomic. Local commits/ref updates can succeed while remote push fails; retry uses persisted revision→commit mappings and retries publication.
+
+AI Engineering OS should explicitly model future landing/publishing as a saga:
+
+```text
+Verified change
+→ local landing prepared
+→ durable mapping recorded
+→ branch/ref reconciled
+→ remote publish attempted
+→ publish receipt recorded
+```
+
+If remote publish fails, do not roll back already-canonical local facts merely to simulate atomicity. Persist a `PUBLISH_PENDING/FAILED` state and retry safely.
+
+This belongs in the future Delivery Reconciler / Landing Manager.
+
+## Q. Structural/semantic index is derived — ADOPT
+
+Tessra states that blobs are source of truth while semantic index is derived/cached.
+
+AI Engineering OS should preserve the same principle for G9 Code Intelligence:
+
+```text
+Repository/Git state = authority
+Code graph / semantic index = rebuildable derived projection
+```
+
+A broken/stale index must degrade retrieval quality, not corrupt repository truth.
+
+## R. Continuous anomaly score/throttle/revoke — ADAPT LATER
+
+Interesting but not v1-critical. Signals could include:
+
+- repeated policy refusals;
+- repeated destructive attempts;
+- scope violations;
+- looping actions;
+- unexplained workspace churn;
+- suspicious secret/network requests.
+
+Escalation:
+
+```text
+observe
+→ warn
+→ throttle
+→ require approval
+→ revoke
+```
+
+Do not let an opaque model-based anomaly score become authority. Security-critical escalation needs explainable signals/policy.
+
+## S. Verification scratch environment — ADOPT, BUT STRONGER THAN TESSRA
+
+Tessra runs verification in a scratch copy with stripped environment, but its own docs say it is not container-isolated.
+
+AI Engineering OS should retain stronger G6/G8 direction:
+
+- clean materialized verification workspace;
+- minimal environment;
+- no secrets by default;
+- bounded network/process access;
+- stronger OS/container/sandbox isolation where policy requires it.
+
+## T. Do not adopt Tessra as our VCS/dependency
+
+Reasons:
+
+- AI Engineering OS already chose Git worktree isolation;
+- Tessra is pre-release;
+- semantic merge supports only a subset of languages;
+- multi-machine sync is unbuilt;
+- Git round-trip is incomplete;
+- verification isolation is weaker than our intended security boundary;
+- adopting a second VCS would dramatically increase core complexity;
+- our product's primary value is the agent control plane, not replacing Git.
+
+Use Tessra as a research/reference implementation only.
+
+## U. License note
+
+Tessra is MIT licensed. That makes it easy to study/reuse legally subject to MIT terms, but our project's current business goal is specifically to prevent commercial cloning/repackaging of the core. Therefore Tessra's MIT licensing choice should **not** be copied for AI Engineering OS core.
+
+## V. Priority mapping
+
+### P0 / strong future adoption
+
+- verification standards as typed data;
+- independent evidence authority;
+- content/toolchain-bound verification evidence;
+- context packs with explicit budgets/provenance;
+- memory anchors/trust/staleness/supersession;
+- gate vs hook separation;
+- idempotent retryable mutations;
+- capability delegation monotonicity;
+- principal-wide revocation semantics.
+
+### P1
+
+- advisory WorkClaim;
+- dependency-aware code partitioning;
+- state-rich action responses;
+- human approvals as evidence;
+- Delivery Reconciler publish saga;
+- multi-altitude recovery UX.
+
+### Research / later
+
+- semantic unit identity;
+- unit-level merge;
+- semantic conflict tasks;
+- continuous anomaly scoring;
+- signed/chained operation DAG as a replication mechanism.
+
+## W. Gate placement
+
+```text
+G6 Security
+  scoped/delegable capabilities
+  principal revocation
+  verifier isolation
+  trusted evidence producers
+  anomaly containment (later)
+
+G7 Multi-agent orchestration
+  WorkClaim
+  dependency-aware partitioning
+  budgeted child assignments
+
+G8 Verification
+  VerificationPolicy / clauses
+  evidence attestations
+  human approvals
+  independent provider judges
+  content/toolchain cache rules
+
+G9 Context + Continuity
+  budgeted ContextPack
+  code-unit/dependency retrieval
+  active-claim/conflict context
+  derived semantic index
+
+G10 Memory
+  typed scoped memory
+  provenance/trust/confidence
+  anchor-based staleness
+  proposed→confirmed promotion
+
+G11 Background daemon
+  reactive hooks/routines
+  anomaly/watchdog reactions
+  durable hook outcomes
+
+Future Delivery Reconciler / Landing Manager
+  idempotent local landing
+  remote publish reconciliation
+  retry receipts
+
+Future research
+  semantic merge / code-unit identity
+```
+
+## X. Effect on current work
+
+None.
+
+```text
+G5 remains IN PROGRESS
+TASK-0051 remains the current task
+TASK-0052 remains the closure re-re-audit
+```
+
+Do not pull semantic merge, Tessra VCS objects, standards DSL, or memory implementation into G5.
+
+
+## Appendix D — Anthropic Claude Code detailed research
+
+> Date: 2026-09-11
+> Source: `anthropics/claude-code` public repository plus Anthropic's official Claude Code documentation.
+> Review mode: architecture/ideas/failure lessons only. No code copying and no dependency adoption.
+> Current gate impact: none. G5 / TASK-0051 remains unchanged.
+
+## 1. Source boundary and license
+
+The public GitHub repository is not a normal open-source dump of Claude Code's core implementation. Its `LICENSE.md` states that Anthropic retains all rights and use is subject to Anthropic's Commercial Terms. The repository mainly exposes documentation-adjacent assets, examples, plugin material, settings samples and project metadata; therefore this review treats the public repository and official docs as a product/architecture reference, not as reusable implementation source.
+
+Decision:
+
+```text
+Study behavior, contracts, UX, extension boundaries and failure lessons.
+Do not copy code.
+Do not vendor code.
+Do not add claude-code repository code as a dependency.
+Do not infer hidden internal architecture beyond public evidence.
+```
+
+## 2. Overall relevance
+
+Claude Code is unusually relevant because it is both:
+
+1. a real provider AI Engineering OS already integrates through the Claude Code CLI; and
+2. a mature example of an agent harness with sessions, tools, permissions, sandboxing, worktrees, plugins, skills, hooks, subagents, teams, routines, remote execution and enterprise policy.
+
+The useful lesson is not to clone Claude Code. AI Engineering OS operates one layer above provider-specific harnesses. The main design target is to preserve provider-neutral Task/Execution/Attempt semantics while adopting mature control-plane patterns that remain valid across Claude, Codex, Gemini and future executors.
+
+## 3. Agentic loop: gather → act → verify
+
+Claude Code documents its loop as repeated context gathering, action and verification. This is a useful baseline, but AI Engineering OS should separate these concerns into durable orchestration/evidence semantics rather than leaving completion to a single provider session.
+
+Adopt as a planning/execution mental model:
+
+```text
+Gather evidence
+    ↓
+Act
+    ↓
+Verify
+    ↓
+Re-plan or finish
+```
+
+AI Engineering OS difference:
+
+```text
+provider agent loop
+    !=
+Task completion authority
+```
+
+The provider may perform local verification; G8 remains the authoritative independent delivery verification layer.
+
+## 4. Stable engine, multiple surfaces
+
+Claude Code exposes a similar agent engine through terminal, IDE, desktop, web, mobile/remote control and CI integrations.
+
+Adopt the architectural principle:
+
+```text
+Core orchestration/domain semantics
+            ↓
+CLI | Tauri | IDE | Web | Mobile | CI | MCP
+```
+
+Interfaces are projections/adapters. They may not implement a second copy of Task, policy, retry, verification or provider lifecycle semantics.
+
+This strongly reinforces the existing AI Engineering OS thin-Tauri / agentd design.
+
+## 5. Context extensions as separate mechanisms
+
+Claude Code clearly separates persistent instructions, skills, subagents, hooks, MCP and plugins. Each enters the agent loop at a different point.
+
+Useful conceptual separation for AI Engineering OS:
+
+```text
+Policy / project instructions
+Reusable Skill / Procedure
+Isolated Subagent / worker
+External Tool / Connector
+Lifecycle Hook / Routine
+Packaging / Marketplace unit
+```
+
+Do not collapse these into one generic "prompt extension" abstraction.
+
+## 6. Progressive disclosure
+
+Claude Code skills expose concise metadata first and load full content only when relevant. MCP tool definitions are also deferred/on-demand so inactive tools do not consume full context.
+
+Adopt/reinforce for G9:
+
+```text
+L0 discovery metadata
+    ↓ relevant
+L1 compact contract/summary
+    ↓ needed
+L2 full procedure/docs/examples/evidence
+```
+
+The Context Compiler should resolve context lazily and under explicit token/privacy budgets. Tool registries should expose cheap discovery metadata without injecting every tool schema/instruction into every prompt.
+
+This reinforces existing OpenViking/Context Hub decisions.
+
+## 7. Subagent context isolation
+
+Claude Code subagents run in their own context; their detailed tool traces stay out of the parent context and the parent receives a result summary.
+
+Adopt the isolation principle, with a stronger trust model:
+
+```text
+Parent Task context
+     ↓ delegated bounded objective
+Child isolated context
+     ↓ result + evidence refs
+Parent receives bounded summary
+```
+
+But child summaries remain untrusted derived data. Correctness-critical claims must resolve to underlying evidence.
+
+## 8. Dynamic workflows / fan-out + verification
+
+Claude Code supports dynamic workflows where many subagents can be launched from a generated script, including codebase-wide audits and cross-checking findings.
+
+Useful future G7/G8 pattern:
+
+```text
+Planner
+  ↓ bounded decomposition
+workers[]
+  ↓ findings
+independent verifier[]
+  ↓ reconciler
+verified result
+```
+
+Important adaptation: generated workflow code is never the authoritative workflow definition. The AI Engineering OS Task Graph, policy, budgets and evidence contracts remain authoritative. Generated orchestration may propose/instantiate bounded child work through canonical APIs.
+
+## 9. Agent teams and shared coordination
+
+Claude Code's agent-team model provides a lead, multiple agent sessions, shared work/task coordination and inter-agent messaging.
+
+Adopt concepts, not provider semantics:
+
+- manager/lead as a role, not Task authority;
+- shared durable Task Graph rather than chat-owned task state;
+- typed agent messages;
+- explicit delegation scope;
+- attention/escalation status visible centrally;
+- provider sessions remain execution details.
+
+This reinforces the planned RoleProfile, WorkClaim, AgentMessage and HumanDecisionRequest concepts.
+
+## 10. Cross-session messaging
+
+Claude Code supports sending messages between sessions, including sessions on other machines/web surfaces.
+
+For AI Engineering OS this supports the future typed messaging design, but raw text must not become authority.
+
+Preferred contract:
+
+```text
+AgentMessage
+  sender
+  recipient/role
+  kind
+  trust/provenance
+  task/execution/attempt refs
+  evidence/artifact refs
+  body
+  reply_to
+```
+
+A message can inform decisions; it cannot mutate canonical Task state directly.
+
+## 11. Cross-surface/session continuity
+
+Claude Code distinguishes resume, fork, moving sessions between local/web/desktop, and remote control.
+
+Useful idea for G9/G12:
+
+```text
+Execution continuity
+    independent of UI surface
+```
+
+However AI Engineering OS should go further: continuity must be provider-neutral and repository/evidence-based, not dependent on one provider transcript. `ContinuationCheckpoint` remains the stronger target abstraction.
+
+## 12. Checkpoints and Git are different recovery layers
+
+Claude Code checkpoints snapshot file edits independently of Git and can rewind session-local file changes, while remote/API effects cannot be rewound the same way.
+
+Adopt the multi-layer recovery principle:
+
+```text
+conversation/action undo
+workspace/file checkpoint
+Git commit/revert
+Task/Execution recovery
+external side-effect reconciliation
+```
+
+Do not pretend these layers provide one universal rollback transaction.
+
+This reinforces the Delivery Reconciler and saga approach learned from Tessra.
+
+## 13. Permission mode vs permission rules
+
+Claude Code distinguishes user-facing modes (manual/plan/accept-edits/auto) from specific allow/deny policy rules and organization-managed settings.
+
+Adopt the separation:
+
+```text
+InteractionMode
+  UX/default approval posture
+
+PolicyRule
+  authoritative allow/deny constraints
+
+CapabilityGrant
+  scoped runtime authority
+```
+
+A convenient UX mode must never weaken managed/organization policy.
+
+## 14. Managed policy precedence
+
+Claude Code supports centrally managed settings/policies as a higher-precedence administrative layer.
+
+Strong future enterprise pattern:
+
+```text
+Organization hard policy
+       ↓ cannot be weakened by
+Workspace policy
+       ↓
+Project defaults
+       ↓
+User preferences
+       ↓
+Session choice
+```
+
+Exact precedence should be specified by our own ADR; the key invariant is that lower-trust/lower-authority layers cannot expand beyond higher-level restrictions.
+
+## 15. Sandboxing as filesystem + network control
+
+Claude Code publicly documents sandboxed command execution with filesystem and network restrictions, plus organization controls for allowed domains/sockets and unsandboxed commands.
+
+Adopt/reinforce G6 target:
+
+```text
+ToolRequest
+   ↓
+Policy Engine
+   ↓
+Capability binding
+   ↓
+OS sandbox / worker isolation
+   ├── filesystem scope
+   ├── network scope
+   ├── process scope
+   └── credential scope
+```
+
+Prompt instructions are not a sandbox.
+
+## 16. Plan/read-only mode as capability profile
+
+Claude Code Plan mode lets the model explore and propose without editing source files.
+
+AI Engineering OS should represent this as capabilities, not provider-specific mode strings:
+
+```text
+INVESTIGATOR / PLANNER
+  repo.read      ✓
+  search         ✓
+  diagnostics    ✓
+  file.write     ✗
+  git.commit     ✗
+  network.write  ✗ unless granted
+```
+
+This reinforces the read-only investigator concept from the Scape review.
+
+## 17. Advisor / stronger-model escalation
+
+Claude Code has an advisor mechanism where the main model can consult a stronger model at difficult decision points.
+
+Useful adaptation for future Model Router:
+
+```text
+Primary executor
+    ↓ hard/high-risk decision
+Advisor request
+    ↓ independent bounded answer
+Primary/reconciler continues
+```
+
+Do not hard-code one model pair. Escalation should be capability/risk/cost/capacity driven and preserve provenance.
+
+Potential uses:
+- architecture decision;
+- concurrency/storage change;
+- security-sensitive change;
+- ambiguous failure diagnosis;
+- review disagreement.
+
+## 18. Memory: useful UX, insufficient as authority
+
+Claude Code supports project instructions and auto memory across sessions. The docs also explicitly acknowledge context compaction and the need to put durable rules outside transient conversation history.
+
+Adopt the lesson:
+
+```text
+conversation != durable project truth
+```
+
+But AI Engineering OS should keep its stronger typed-memory target from Tessra/OpenViking:
+
+- provenance;
+- trust;
+- lifecycle;
+- code anchors;
+- stale/superseded status;
+- promotion/review policy;
+- bounded retrieval.
+
+Provider-native memory is an optimization/compatibility source, never canonical Memory Engine state.
+
+## 19. Compaction is an optimization, not continuity
+
+Claude Code automatically clears older tool outputs and summarizes conversation as context fills. It warns that earlier detailed instructions can be lost.
+
+This directly reinforces existing AI Engineering OS invariants:
+
+```text
+provider compaction
+= context optimization
+≠ persistence
+≠ Task state
+≠ handoff protocol
+```
+
+Cross-provider continuity must reconstruct from durable domain state/evidence.
+
+## 20. Worktrees for parallel isolation
+
+Claude Code uses worktrees for parallel sessions and exposes worktree-aware session management.
+
+Already adopted in AI Engineering OS. No architectural change.
+
+Important distinction remains:
+
+```text
+worktree = write isolation
+WorkClaim = coordination awareness
+Task Graph = work authority
+```
+
+## 21. Hooks as lifecycle reactions
+
+Claude Code hooks react to events such as tool use, session lifecycle and other events; plugins may register them automatically.
+
+Adopt/reinforce:
+
+```text
+Hook/Event reaction
+    can notify, validate, produce evidence, enqueue work
+
+Hook
+    != authoritative policy by itself
+```
+
+This aligns with the Tessra-derived rule: policy gates transitions; hooks react to transitions.
+
+## 22. Routines / scheduled automation
+
+Claude Code supports scheduled/event-triggered routines for repetitive work.
+
+Adopt/reinforce G11 Routine Engine:
+
+```text
+RoutineDefinition
+  trigger
+  inputs
+  procedure/playbook
+  capability profile
+  budgets
+  output/evidence contract
+  escalation policy
+```
+
+Routine execution should be durable/auditable and not merely a prompt scheduled at a timestamp.
+
+## 23. Plugin packaging and marketplace
+
+Claude Code plugins package skills, agents, hooks and MCP servers; marketplaces distribute them.
+
+Very relevant to the future AI Engineering OS marketplace.
+
+Suggested AI Engineering OS package boundary:
+
+```text
+PluginPackage
+  manifest
+  capabilities requested
+  skills/procedures
+  hooks/routines
+  connector/tool adapters
+  schemas
+  version/dependencies
+  publisher identity
+  signatures/provenance
+```
+
+Security improvement over a simple folder bundle:
+- explicit requested permissions;
+- install-time review;
+- runtime policy enforcement;
+- dependency pinning;
+- provenance/signatures;
+- organization allow/deny controls.
+
+## 24. Marketplace dependency constraints
+
+Claude Code supports plugin dependency/version constraints and organization recommendation/marketplace controls.
+
+Adopt the need for:
+
+- semver/version constraints;
+- immutable resolved install graph;
+- lock/ledger of installed plugin versions;
+- reproducible organization plugin sets;
+- deny/allow policy by publisher/plugin/capability;
+- rollback to prior plugin version.
+
+This connects to Agency Agents' install-ledger lesson.
+
+## 25. MCP as connector surface, not domain authority
+
+Claude Code uses MCP to connect external tools/services.
+
+AI Engineering OS should continue to treat MCP as one adapter protocol:
+
+```text
+MCP
+UI
+CLI
+Webhook
+Native connector
+   ↓
+canonical tool/ingress contracts
+```
+
+MCP types must not leak into Task, Memory, Policy or Verification domain semantics.
+
+## 26. Tool discovery / deferred schemas
+
+Claude Code defers MCP tool definitions and loads them on demand.
+
+This suggests a useful future `ToolCatalog` split:
+
+```text
+ToolDescriptor
+  cheap metadata for routing/discovery
+
+ToolContract
+  full schema/security/cost metadata loaded when selected
+```
+
+Benefits:
+- lower context cost;
+- faster discovery;
+- easier marketplace scaling;
+- smaller prompt-injection surface from unused tools.
+
+## 27. Agent view / attention-first operations
+
+Claude Code has an agent view for managing multiple sessions and highlighting which sessions need input.
+
+This supports our UI principle but should be elevated from session-centric to Task-centric:
+
+```text
+Needs Attention
+Blocked
+Running
+Verifying
+Ready to Land
+Routines
+Provider Capacity
+```
+
+Session details remain drill-down projections.
+
+## 28. Enterprise governance as a real monetizable layer
+
+Claude Code's public docs include managed settings, centralized MCP allow/deny, gateways, spend controls, analytics, SSO-adjacent enterprise deployment, self-hosted environments and network configuration.
+
+This validates the AI Engineering OS monetization hypothesis:
+
+```text
+Local individual core
+    +
+Team shared control plane
+    +
+Enterprise governance / policy / audit / remote worker management
+```
+
+The strongest enterprise value is governance and operations, not simply charging for another agent invocation.
+
+## 29. Gateway pattern
+
+Claude Code documents gateway deployment for centralized credentials, model access, spend limits and telemetry.
+
+Future AI Engineering OS enterprise pattern:
+
+```text
+Developer / Remote Worker
+        ↓
+Organization Provider Gateway
+        ├── identity
+        ├── credential brokering
+        ├── model allowlist
+        ├── spend/quota policy
+        ├── audit/telemetry
+        └── upstream providers
+```
+
+But BYO subscription/local CLI paths must remain possible for the individual/local-first product where supported.
+
+## 30. Self-hosted remote workers
+
+Claude Code supports self-hosted execution environments and per-session identity verification.
+
+Relevant to G12 Remote Worker:
+
+- explicit worker identity;
+- short-lived/session-scoped credentials;
+- controlled egress;
+- lifecycle hooks;
+- health/metrics;
+- workload routing;
+- no ambient organization secrets.
+
+Do not copy their transport or JWT format; adopt the identity/lifecycle principles.
+
+## 31. What Claude Code does not solve for us
+
+Claude Code remains a provider-specific harness. AI Engineering OS still needs higher-level semantics for:
+
+- provider-neutral Task/Execution/Attempt;
+- cross-provider handoff;
+- durable Task Graph;
+- independent completion authority;
+- multi-provider routing/capacity;
+- provider-neutral evidence;
+- cross-provider memory;
+- Delivery Reconciler;
+- business/team governance independent of Anthropic.
+
+Therefore Claude Code should remain an executor/provider adapter, not the orchestration source of truth.
+
+## 32. Failure lessons / things not to adopt as authority
+
+1. Provider transcript/session files are not canonical project state.
+2. Provider-native memory is not canonical durable memory.
+3. Provider compaction is not persistence.
+4. Provider checkpoints cannot roll back external side effects.
+5. Plain-text inter-agent messages are not Task commands.
+6. Hooks are not policy unless explicitly validated through policy contracts.
+7. A provider-specific permission mode must not become domain semantics.
+8. Generated dynamic workflow scripts must remain bounded proposals/executors under the Task Graph.
+9. Session-centric UI should not displace Task/outcome/verification UX.
+10. A single provider's team/agent model must not leak into provider-neutral orchestration types.
+
+## 33. Placement by gate
+
+```text
+G6 Security
+  Policy hierarchy
+  capability profiles
+  interaction mode vs hard policy
+  sandbox filesystem/network/process/credential controls
+  organization-managed policy
+
+G7 Multi-agent orchestration
+  manager/worker role patterns
+  bounded dynamic fan-out
+  shared durable coordination
+  advisor/escalation role
+
+G8 Verification
+  verify phase as independent gate
+  cross-checking / independent review
+  hook-generated evidence without hook-as-policy
+
+G9 Context + Continuity
+  progressive disclosure
+  deferred tool contracts
+  isolated child contexts
+  cross-session/provider-neutral continuation packs
+  compaction as optimization only
+
+G10 Memory
+  provider memory as compatibility input only
+  typed canonical Memory Engine remains ours
+
+G11 Background daemon
+  routines
+  event/schedule triggers
+  durable/auditable background automation
+
+G12 Remote Worker
+  self-hosted worker identity/lifecycle
+  scoped session credentials
+  controlled egress
+
+G13 Team/Enterprise
+  managed policy
+  gateways
+  spend controls
+  centralized connectors
+  analytics/audit
+
+Marketplace
+  plugin package manifest
+  dependency constraints
+  publisher/provenance/security policy
+```
+
+## 34. Priority adoption list
+
+### P0 — reinforce/encode in future architecture
+
+- provider sessions remain execution detail, never Task truth;
+- progressive context/tool disclosure;
+- interaction mode separate from enforced policy;
+- hard organization policy cannot be weakened downstream;
+- sandbox scopes filesystem + network + process + credentials;
+- provider compaction/checkpoints are not persistence/global rollback;
+- hooks react, policy gates;
+- plugin manifests declare capabilities and provenance;
+- remote workers require explicit identity and scoped credentials.
+
+### P1 — future high-value capabilities
+
+- advisor/escalation role;
+- agent-team coordination mapped to typed Task Graph + AgentMessage;
+- ToolCatalog metadata/full-contract split;
+- marketplace dependency lock/ledger;
+- provider gateway controls;
+- session/agent attention projection.
+
+### P2 — product/UX refinements
+
+- cross-surface continuity UX;
+- status-line style context/cost/capacity telemetry;
+- routine templates;
+- organization recommended plugin sets.
+
+## 35. Final decision
+
+Claude Code is one of the most useful product references for AI Engineering OS, but it is not an implementation source and should not define our domain model.
+
+Best synthesis:
+
+```text
+Claude Code teaches us how to build a strong provider harness.
+AI Engineering OS must remain the durable, provider-neutral control plane above it.
+```
+
+Current G5/TASK-0051 scope is unchanged.
+
+
+## Appendix E — OpenAI Codex detailed research
+
+> Repository: https://github.com/openai/codex
+> Review date: 2026-09-11
+> Upstream license: Apache-2.0
+> Adoption policy: architecture/ideas/failure lessons only. **No source code is copied, vendored, or adopted as a dependency because of this review.** Any useful concept is independently reimplemented against AI Engineering OS contracts, invariants, tests, and security boundaries.
+> Current gate impact: none. G5 / TASK-0051 remains unchanged.
+
+## 1. Executive verdict
+
+OpenAI Codex is one of the highest-value references for AI Engineering OS because it exposes a mature local coding-agent harness, machine-readable app-server protocol, remote execution path, sandbox/approval architecture, daemon lifecycle, worktree support, model capability catalog, plugins/apps/skills, and multi-agent feature work.
+
+The strategic conclusion is deliberately **not** “build a better Codex.”
+
+```text
+Codex / Claude Code / OpenCode / Gemini CLI
+                ↓
+        provider harnesses
+                ↓
+        AI Engineering OS
+                ↓
+ durable Task Graph + Policy + Context + Verification + Recovery
+```
+
+The clearest product positioning is:
+
+> **Codex is a worker. AI Engineering OS is the durable provider-neutral control plane that decides what work exists, who should do it, with what authority/context, how the result is verified, how failures recover, and when a human actually needs to intervene.**
+
+A user should choose AI Engineering OS even when they already like Codex because the product adds multi-provider continuity, durable task/execution state, policy, isolated workspaces, independent verification, cross-provider handoff, memory, human-attention management, delivery reconciliation, and organization governance.
+
+## 2. What Codex currently demonstrates
+
+Public repository/docs expose several mature subsystems:
+
+- Rust-based local CLI and application server;
+- machine-readable `app-server` with versioned request/response/notification protocol;
+- explicit initialize/capability handshake;
+- thread/turn/item lifecycle with asynchronous streaming notifications;
+- standalone sandboxed command execution outside an LLM turn;
+- separate `exec-server` for process/filesystem execution and remote environments;
+- daemon lifecycle for background app-server instances;
+- sandbox + approval architecture;
+- preview `execpolicy` policy engine;
+- layered configuration with source/provenance metadata and per-layer fingerprints;
+- model catalog including supported capabilities/reasoning options;
+- worktree-backed isolated sessions;
+- apps/plugins/skills/MCP surfaces;
+- automated approval review by a separate reviewer/subagent;
+- remote control and mobile/desktop-oriented server flows.
+
+Latest public release information also shows experimental worktree creation for new/forked sessions, shared background app-server behavior on Windows, inline answers while work continues, and tighter preservation/invalidation of authorization context around automatic approval review.
+
+## 3. Highest-value idea: separate control protocol from execution protocol
+
+Codex has a high-level app-server for threads/turns/events and a separate exec-server for subprocess/filesystem operations, including remote execution.
+
+AI Engineering OS should preserve and sharpen this separation:
+
+```text
+Control Plane
+-------------
+Task
+Execution
+Attempt
+Planner
+Scheduler
+Policy
+Verification
+Human decisions
+
+      ↓ typed commands / leases
+
+Execution Plane
+---------------
+process spawn
+PTY
+filesystem
+sandbox
+network
+workspace
+remote worker
+```
+
+### Our ≥1% improvement
+
+Codex's split is primarily harness-oriented. Ours should be **domain- and provider-neutral**:
+
+- execution plane never owns Task lifecycle;
+- provider adapters never mutate Task state;
+- all long-lived work has Task/Execution/Attempt identity;
+- remote execution uses leases and durable reconciliation;
+- execution capabilities are scoped and auditable;
+- every command/result can be correlated back to durable work/evidence.
+
+Likely placement: G6, G11, G12.
+
+## 4. Async Submission/Event queues → durable event envelopes
+
+Codex protocol uses asynchronous submission/event communication and streams started/completed/delta notifications for work items.
+
+Useful principle:
+
+```text
+Command submission
+      ↓
+accepted identity
+      ↓
+async progress/events
+      ↓
+terminal outcome
+```
+
+### Our ≥1% improvement
+
+For AI Engineering OS, event transport must not be the source of truth by itself. Use explicit envelopes such as:
+
+```text
+EventEnvelope
+  event_id
+  task_id
+  execution_id
+  attempt_id
+  correlation_id
+  causation_id
+  sequence
+  producer
+  occurred_at
+  payload
+```
+
+and maintain durable facts in canonical storage/Event Journal. Reconnect/replay must reconstruct projections without trusting a live provider stream.
+
+Likely placement: cross-cutting / G11-G12.
+
+## 5. Protocol capability negotiation
+
+Codex clients initialize with client metadata and negotiated capabilities. Experimental APIs can be opt-in and notifications can vary by client capability.
+
+This is valuable for our Tauri/CLI/IDE/remote-worker ecosystem.
+
+Proposed concept:
+
+```text
+ProtocolHello
+  protocol_version
+  client_type
+  supported_features[]
+  supported_event_versions[]
+  security_capabilities[]
+```
+
+### Our ≥1% improvement
+
+- unsupported required capabilities fail closed before work starts;
+- feature negotiation is separate from product entitlement;
+- protocol compatibility has contract tests and a migration matrix;
+- no silent semantic fallback for security-sensitive features.
+
+## 6. Generated schemas from canonical protocol types
+
+Codex generates JSON Schema / TypeScript protocol surfaces from canonical Rust types.
+
+This is a strong pattern for AI Engineering OS's Rust backend + TypeScript UI.
+
+### Adopt independently
+
+```text
+canonical protocol types
+        ↓
+ schema generation
+        ↓
+ Rust / TS contract artifacts
+        ↓
+ compatibility tests
+```
+
+### Our ≥1% improvement
+
+Add:
+
+- checked-in protocol snapshots;
+- breaking-change detection;
+- golden compatibility tests;
+- versioned deprecation windows;
+- provider-neutral/domain-neutral boundaries;
+- fuzz/property tests for serialization where risk warrants it.
+
+This can reduce frontend/backend drift substantially.
+
+## 7. Deterministic commands should not require an LLM turn
+
+Codex app-server can run a standalone sandboxed command without creating a conversational thread/turn.
+
+This is a very high-leverage pattern for us.
+
+AI Engineering OS should not invoke a model for operations that are already deterministic:
+
+```text
+git status
+cargo test
+formatting
+lint
+file metadata
+workspace cleanup
+verification commands
+repository probes
+```
+
+should run through typed deterministic runners whenever reasoning is not needed.
+
+### Why this matters
+
+It directly improves:
+
+- latency;
+- cost;
+- reproducibility;
+- testability;
+- security;
+- reliability.
+
+This is a Pareto/high-leverage feature: model avoidance on deterministic work can generate more value than many UI features.
+
+## 8. Fine-grained permission elevation instead of full sandbox escape
+
+Codex explicitly prefers requesting additional filesystem/network permissions while staying inside a sandbox rather than escalating directly to unrestricted execution.
+
+This should become a major G6 principle.
+
+```text
+Current CapabilityGrant
+        ↓
+CapabilityDelta request
+        ↓
+Policy evaluation
+        ↓
+approve once / approve scoped / deny
+        ↓
+short-lived expanded sandbox
+```
+
+Potential capability deltas:
+
+```text
+filesystem.read += /path
+filesystem.write += /path
+network.connect += domain
+secret.use += credential_ref
+process.exec += executable class
+```
+
+### Our ≥1% improvement
+
+Capability elevation should include:
+
+- exact action/scope;
+- reason;
+- risk class;
+- expiry/duration;
+- one-action/session/workspace applicability;
+- approval principal;
+- context/intent fingerprint;
+- durable audit evidence;
+- automatic invalidation when the relevant Task intent or requested action changes.
+
+Never equate `Auto Mode` with greater authority.
+
+## 9. Authorization must be bound to context and invalidated when context changes
+
+Recent Codex release notes explicitly improve automatic approval reviews by preserving authorization context across compaction and rejecting approvals invalidated by new user instructions/answers.
+
+This is a highly valuable security idea.
+
+AI Engineering OS should model approval evidence roughly as:
+
+```text
+ApprovalGrant
+  subject
+  action_fingerprint
+  task_intent_fingerprint
+  policy_version
+  risk
+  approver
+  scope
+  expires_at
+```
+
+If material context changes, the grant must be re-evaluated.
+
+### Our ≥1% improvement
+
+Do this as a durable, provider-neutral policy primitive instead of relying on provider conversation context.
+
+This fits both G6 permissions and G8 human/verification approval.
+
+## 10. Auto-review of approval requests — useful, but only as an advisor
+
+Codex can route approval decisions to an automatic reviewer/subagent. This reduces unnecessary human interruptions.
+
+We should adopt the *concept* as:
+
+```text
+Permission request
+      ↓
+hard Policy Engine
+      ↓
+if policy allows delegation:
+      ApprovalAdvisor
+      ↓
+allow / deny / escalate-to-human recommendation
+```
+
+### Critical improvement learned from Codex issues
+
+Public issues show ambiguity where a rule can require `prompt`, yet routing may globally send prompts to auto-review rather than force a human reviewer. For AI Engineering OS, **the policy rule itself must be able to constrain the minimum reviewer class**.
+
+Example:
+
+```text
+PolicyRule:
+  action: git.push
+  decision: REQUIRE_APPROVAL
+  minimum_reviewer: HUMAN
+```
+
+while a lower-risk rule may allow:
+
+```text
+minimum_reviewer: AUTO_REVIEWER
+```
+
+Hard policy always wins; an LLM reviewer never overrides an absolute deny.
+
+## 11. Testable policy-as-data
+
+Codex `execpolicy` has declarative allow/prompt/forbidden rules, human-readable justification, example `match`/`not_match` cases validated at load time, and strictest-matching decision semantics.
+
+This is a strong reference for G6.
+
+### Adopt independently
+
+AI Engineering OS policy objects should be:
+
+- typed;
+- versioned;
+- testable before activation;
+- explainable;
+- provenance-bearing;
+- deterministic when hard policy is evaluated.
+
+### Our ≥1% improvement
+
+Do not stop at command-prefix matching. Evaluate structured action semantics:
+
+```text
+Action
+  type
+  executable
+  argv
+  filesystem_scope
+  network_targets
+  secret_refs
+  workspace
+  task
+  side_effect_class
+```
+
+and allow policy tests to cover expected allow/deny/reviewer outcomes.
+
+Potential invariant:
+
+> Conflicting hard policies resolve monotonically toward the more restrictive result unless an explicit higher-authority policy version states otherwise.
+
+## 12. Layered config with per-key origin metadata
+
+Codex has a canonical layered config loader that can expose effective config, the source/origin of individual keys, and per-layer versions/fingerprints used for concurrency/conflict handling.
+
+This is excellent for future enterprise UX.
+
+AI Engineering OS should expose not merely:
+
+```text
+network = false
+```
+
+but:
+
+```text
+network = false
+source = Organization Security Policy
+policy_id = ORG-POLICY-17
+version = 8
+cannot_override = true
+```
+
+### Our ≥1% improvement
+
+Strictly separate:
+
+```text
+Hard Policy
+Soft Policy / defaults
+User preference
+Session preference
+```
+
+so ordinary config merging can never accidentally weaken security authority.
+
+## 13. Model catalog → fail-fast router preflight
+
+Codex exposes available models and capability metadata such as reasoning options/modalities. A public issue shows a failure mode where app-server could accept a model/reasoning combination cataloged as unsupported and then hang without useful events.
+
+This is an important negative lesson.
+
+AI Engineering OS router must preflight:
+
+```text
+provider available?
+model available?
+requested reasoning supported?
+required modalities supported?
+tools supported?
+context capacity sufficient?
+quota/capacity sufficient?
+policy allows provider?
+```
+
+before Task entry/provider launch when these facts are knowable.
+
+### Our ≥1% improvement
+
+Use a typed `ProviderCapabilitySnapshot` with freshness/provenance and reject impossible combinations before mutating unrelated Task lifecycle state.
+
+This directly reinforces the atomic-entry mindset of TASK-0051 without changing its scope.
+
+## 14. Remote exec-server → future Worker Protocol
+
+Codex exec-server supports remote registration/rendezvous and remote filesystem/process RPCs. It also avoids sending machine-local absolute paths in remote mode by requiring URI-style references.
+
+Good lesson for G12:
+
+```text
+Control Plane
+   ↓
+RemoteWorker lease
+   ↓
+Environment identity
+   ↓
+URI/resource references
+   ↓
+process/filesystem RPC
+```
+
+### Our ≥1% improvement
+
+Future remote workers should additionally have:
+
+- authenticated worker identity;
+- explicit repository/workspace lease;
+- heartbeats/health;
+- capability attestation;
+- version compatibility;
+- scoped secrets;
+- network policy;
+- durable attempt ownership;
+- reconnect/reconciliation;
+- no ambient organization credentials;
+- provider-neutral execution contracts.
+
+## 15. Fail-closed managed networking
+
+Codex exec protocol includes explicit managed-network enforcement state and indicates the executor should fail closed if enforcement is required but necessary details are absent.
+
+Adopt this exact principle conceptually:
+
+> When a security control is required but cannot be proved active, the execution does not start in a weaker mode.
+
+This should apply to:
+
+- network proxy/policy;
+- sandboxing;
+- secret broker bindings;
+- workspace scope;
+- remote worker identity;
+- required verification isolation.
+
+## 16. Daemon lifecycle: idempotent + serialized
+
+Codex daemon lifecycle includes idempotent start and serialization of mutating lifecycle commands.
+
+Useful for our G11 daemon.
+
+### Our ≥1% improvement
+
+Codex documentation notes an updater-triggered restart may interrupt active or queued work. AI Engineering OS should prefer a work-aware lifecycle:
+
+```text
+UPDATE_AVAILABLE
+    ↓
+DRAINING
+    ↓
+checkpoint/cancel safely
+    ↓
+no owned active Attempt
+    ↓
+update
+    ↓
+restart
+    ↓
+reconcile/resume
+```
+
+Emergency security updates can use a stricter policy, but interruption must remain visible and recoverable.
+
+## 17. Thread/fork/resume/ephemeral patterns are useful — but not canonical
+
+Codex supports fresh, resumed, forked and ephemeral threads.
+
+Provider session branching is useful, but for us:
+
+```text
+provider thread
+≠ Task
+≠ Execution
+≠ Attempt
+```
+
+Potential adapter capabilities:
+
+```text
+supports_resume
+supports_fork
+supports_ephemeral_session
+supports_background_process
+```
+
+The scheduler may exploit them, but durable project state remains provider-neutral.
+
+## 18. Structured output schema
+
+Codex app-server lets a caller constrain a turn's final assistant message with JSON Schema.
+
+Strong idea for provider adapters:
+
+```text
+AgentOutputSchema
+```
+
+### Our ≥1% improvement
+
+A schema-valid result is still only an assertion. It must carry evidence references for claims that affect verification or Task transitions.
+
+```text
+{
+  "status": "implemented",
+  "evidenceRefs": [...],
+  "testEvidenceRefs": [...]
+}
+```
+
+No JSON schema can replace verification authority.
+
+## 19. Read-only hints and tool approval metadata
+
+Codex connected apps can use tool metadata such as read-only hints to influence default approval behavior.
+
+Useful marketplace concept, but the metadata must be treated as publisher claims.
+
+### Our ≥1% improvement
+
+Plugin/tool manifest metadata is not automatically trusted. Installation/organization policy can verify/override declared capabilities, and observed behavior can generate security findings if a supposedly read-only tool attempts mutation.
+
+## 20. Worktrees validate our G4 direction
+
+Codex latest release adds experimental isolated worktrees for new/forked sessions.
+
+This is strong market validation for our existing decision, but **not** a new implementation requirement: AI Engineering OS already treats worktree isolation as a core durable invariant rather than an optional experimental session feature.
+
+This is one of the clearest “1%+ better” differentiators:
+
+```text
+Codex:
+worktree = provider session feature
+
+AI Engineering OS:
+workspace/worktree = provider-neutral execution isolation + lease + cleanup + recovery contract
+```
+
+## 21. Human questions need not freeze unrelated work
+
+Latest Codex release supports answering questions inline while Codex continues working.
+
+This strengthens our Human Decision Queue design:
+
+```text
+HumanDecisionRequest
+  blocking_scope:
+    TASK
+    EXECUTION
+    ATTEMPT
+    GLOBAL
+```
+
+A question should block only the smallest work scope that genuinely depends on it. Unrelated work continues.
+
+### Our ≥1% improvement
+
+Batch compatible decisions, include recommendation/evidence, and track attention latency while preserving precise blocking scope.
+
+## 22. Hierarchical repository instructions are useful, but must stay subordinate
+
+Codex supports scoped AGENTS.md rules with deterministic directory precedence.
+
+AI Engineering OS can support scoped project guidance, but repository text cannot become the ultimate security/architecture authority.
+
+Possible future hierarchy:
+
+```text
+System / Organization hard policy
+Task / Execution Envelope
+Architecture invariants + accepted ADRs
+Project policy
+Scoped repository guidance
+Provider compatibility instructions
+```
+
+External/untrusted repository content never gains authority simply because it looks like an instruction file.
+
+## 23. What NOT to adopt
+
+Do not copy/adopt as architecture authority:
+
+- Codex thread/turn state as our Task model;
+- provider conversation history as durable project truth;
+- provider-specific approval enums in domain logic;
+- prefix-only command policy as the final policy model;
+- automatic reviewer as a substitute for hard policy or mandatory human approval;
+- vendor-specific model catalog semantics in core Task state;
+- provider-native worktree state as the workspace authority;
+- updater behavior that can silently interrupt work without durable reconciliation;
+- raw repository code or the repository as a dependency merely because it is Apache-2.0.
+
+## 24. Negative lessons from public issues
+
+Several public issues are useful specifically as things to design against:
+
+1. **Unsupported model+effort accepted then no useful progress** → capability preflight must be authoritative and fail fast.
+2. **Approval routing ambiguity with auto-review** → policy must specify minimum/required reviewer and expose effective routing to UI/hooks.
+3. **Auto-review blocked behind unrelated/unbounded persistence flush** → approval/control-path persistence must be bounded and avoid deadlocking security decisions behind noncritical storage.
+4. **Completed turn without durable rollout materialization in reported cases** → completion event cannot be considered durable until required canonical persistence commit is acknowledged.
+5. **Silent app-server exit mid-turn reports** → daemon/worker supervision requires heartbeat, terminal reconciliation, and explicit orphaned-attempt recovery.
+
+These are architecture lessons, not evidence that Codex is broadly unreliable.
+
+## 25. Pareto prioritization — the 20% from Codex that matters most
+
+Do **not** spend equal effort cloning every Codex feature.
+
+Highest-leverage concepts for AI Engineering OS:
+
+```text
+P0 / top 20%
+1. Control-plane vs execution-plane separation
+2. Fine-grained capability elevation + hard policy
+3. Typed/versioned async protocol with generated schemas
+4. Provider capability preflight / fail-fast routing
+5. Durable remote worker/daemon supervision and reconciliation
+6. Context-bound approvals + reviewer routing
+7. Deterministic command execution without unnecessary LLM calls
+```
+
+Lower-priority parity work:
+
+```text
+terminal editing modes
+provider-specific TUI polish
+model picker parity
+vendor-specific thread UX
+CLI convenience commands
+```
+
+Those may matter eventually, but they do not define why AI Engineering OS exists.
+
+## 26. 1% Improvement matrix
+
+| Codex concept | AI Engineering OS improvement target |
+|---|---|
+| app-server + exec-server | provider-neutral durable control/execution planes tied to Task/Execution/Attempt |
+| approval prompts | typed capability deltas + expiry + context fingerprint + reviewer class |
+| auto-review | hard policy first; policy can require human review for sensitive actions |
+| execpolicy | structured semantic action policy, versioned/testable/provenance-bearing |
+| model catalog | preflight router that rejects unsupported combinations before lifecycle mutation |
+| worktrees | durable workspace lease/isolation/recovery contract across all providers |
+| daemon lifecycle | work-aware drain/checkpoint/reconcile upgrades |
+| thread resume/fork | provider-neutral ContinuationCheckpoint + cross-provider handoff |
+| output schema | typed result + evidence links + independent verification |
+| config layers | hard-policy vs preference separation + visible provenance for every effective control |
+| connected tool metadata | declared capabilities are verified/overridable, not trusted blindly |
+| inline human questions | blocking scope minimized + batch decisions + attention metrics |
+| remote exec | authenticated leased workers + scoped credentials + durable reconciliation |
+
+## 27. Product differentiation: why AI Engineering OS exists even if Codex is excellent
+
+### Codex answers
+
+> “How can this OpenAI coding agent work effectively on my code?”
+
+### AI Engineering OS answers
+
+> “How do I reliably run an AI engineering organization across Codex, Claude, Gemini, OpenCode and future agents, preserve state when any one provider fails, enforce policy, verify results independently, and only involve humans where their attention has highest value?”
+
+The product should make these advantages obvious in the first-run experience:
+
+```text
+One durable task
+  → can use multiple providers
+  → survives provider/session restart
+  → isolated workspace
+  → explicit policy
+  → evidence-backed verification
+  → safe handoff
+  → human attention only when necessary
+  → delivery/landing reconciliation
+```
+
+We should not compete with Codex on “better terminal chat.” We should make Codex more valuable by managing it as one high-quality executor inside a broader system.
+
+## 28. Gate placement
+
+- **G6 Security:** capability deltas, policy-as-data, reviewer routing, context-bound approvals, fail-closed controls.
+- **G7 Orchestration:** provider session capability model, scoped human-decision blocking, deterministic vs reasoning work classification.
+- **G8 Verification:** structured output + evidence refs, independent approval/review semantics.
+- **G9 Context/Continuity:** provider session resume/fork as adapter capability; provider-neutral checkpoints remain authority.
+- **G11 Background daemon:** serialized lifecycle, supervision, drain/update/reconcile.
+- **G12 Remote Worker:** control/execution protocol split, worker identity, URI resources, sandbox/network contracts.
+- **G13 Enterprise:** layered managed policy/config provenance, organization-enforced reviewer/plugin/tool policy.
+- **Cross-cutting:** generated schema contracts, protocol versioning, capability negotiation, deterministic command execution.
+
+## 29. Final decision
+
+**Adopt concepts aggressively, implementation independently.** Codex validates several of our existing decisions and provides high-value refinements around protocol design, permission escalation, policy testing, remote execution, daemon lifecycle, and capability negotiation.
+
+The most important strategic lesson is:
+
+```text
+Do not build “another Codex”.
+Build the control plane that makes Codex + every other strong coding agent
+safer, more continuous, more verifiable, and easier to manage together.
+```
+
+Current G5/TASK-0051 remains unchanged.

@@ -348,6 +348,7 @@ where
                 let response = match job {
                     Some(job) => {
                         let id = job.work_execution_id();
+                        let owner = job.owner_token();
                         match std::thread::Builder::new()
                             .name(format!("exec-background-{id}"))
                             .spawn(move || execution::run_background(job))
@@ -356,7 +357,9 @@ where
                             Err(_) => match &execution {
                                 // A job exists only when composition is
                                 // present; the fallback keeps totality.
-                                Some(composition) => execution::abort_start(composition, &id),
+                                Some(composition) => {
+                                    execution::abort_start(composition, &id, owner)
+                                }
                                 None => response,
                             },
                         }
@@ -382,7 +385,8 @@ where
 /// Background provider runs are detached threads, not tracked tasks:
 /// wind-down aborts connection tasks promptly while in-flight provider
 /// children are orphaned with their attempts left open (documented G5
-/// posture; recovery is G11 work).
+/// posture; post-attempt orphan recovery is G11 work). Pre-attempt
+/// strands are reported at startup for explicit resume (TASK-0054).
 async fn serve_streams<S>(
     mut accepted: tokio::sync::mpsc::Receiver<(S, Option<BytesMut>)>,
     config: &DaemonConfig,
@@ -582,6 +586,12 @@ mod unix_daemon {
             Acquisition::LiveDaemon => return Err(DaemonError::AlreadyRunning),
         };
         let business = open_business_service(&config)?;
+        // Startup reconciliation surface (TASK-0054, G5 B-RS): report
+        // stranded pre-attempt entries for explicit operator resume.
+        // Read-only and best-effort — never a boot gate.
+        if let Some(db) = config.database_path.as_ref() {
+            execution::log_pre_attempt_strands(db);
+        }
         // Daemon principal once, from the OS — never from configuration.
         let daemon = daemon_identity().map_err(DaemonError::from)?;
         // Snapshot the node we own so shutdown cleanup removes only it.
@@ -660,6 +670,12 @@ mod windows_daemon {
             Err(other) => return Err(other.into()),
         };
         let business = super::open_business_service(&config)?;
+        // Startup reconciliation surface (TASK-0054, G5 B-RS): report
+        // stranded pre-attempt entries for explicit operator resume.
+        // Read-only and best-effort — never a boot gate.
+        if let Some(db) = config.database_path.as_ref() {
+            super::execution::log_pre_attempt_strands(db);
+        }
         // Daemon principal once, from the OS — never from configuration.
         let daemon = daemon_identity().map_err(DaemonError::from)?;
         let (accepted_tx, accepted_rx) = tokio::sync::mpsc::channel::<(

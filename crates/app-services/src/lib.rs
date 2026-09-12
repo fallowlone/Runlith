@@ -11,6 +11,7 @@
 
 mod clock;
 mod error;
+mod managed_identity;
 mod orchestration_service;
 mod runtime_service;
 mod task_service;
@@ -18,12 +19,19 @@ mod workspace_service;
 
 pub use clock::{format_rfc3339, Clock, FixedClock, SystemClock};
 pub use error::{ServiceError, ServiceResult};
-pub use orchestration_service::{ExecutionEntry, OrchestrationIds, OrchestrationService};
+pub use managed_identity::{
+    branch_for_execution, decode_readable_slug, is_ascii_casefold_stable, is_canonical_v2_slug,
+    is_windows_reserved_basename, managed_slug, MANAGED_DIGEST_PREFIX, MANAGED_READABLE_PREFIX,
+    WINDOWS_RESERVED_BASENAMES,
+};
+pub use orchestration_service::{
+    ExecutionEntry, OrchestrationIds, OrchestrationService, PreAttemptResumePlan,
+};
 pub use runtime_service::{AppliedExecution, PlannedExecution, RuntimeService};
 pub use task_service::{AppliedTransition, PlannedTransition, TaskService};
 pub use workspace_service::{
-    branch_for_execution, CleanedWorkspace, CleanupOutcome, EnsureOutcome, EnsuredWorkspace,
-    ManagedWorkspaceRoot, WorkspaceRequest, WorkspaceService,
+    CleanedWorkspace, CleanupOutcome, EnsureOutcome, EnsuredWorkspace, ManagedWorkspaceRoot,
+    WorkspaceRequest, WorkspaceService,
 };
 
 // Orchestration contract re-exports: these types are the public vocabulary

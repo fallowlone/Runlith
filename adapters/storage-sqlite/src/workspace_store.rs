@@ -111,12 +111,17 @@ impl crate::task_store::SqliteStore {
     }
 
     /// Returns the owning execution of any lease recording `branch`, if
-    /// any. Read-only fail-fast helper for the execution-entry boundary
-    /// (TASK-0051, G5 §32): with injective managed-branch derivation two
-    /// distinct executions never share a branch, so a hit owned by another
-    /// execution refuses entry before the first mutation. Not a
+    /// any — compared case-fold-insensitively. Read-only fail-fast helper
+    /// for the execution-entry boundary (TASK-0053, G5 B-CF): with
+    /// case-fold-safe v2 derivation two distinct executions never share a
+    /// folded branch, so a hit owned by another execution refuses entry
+    /// before the first mutation. The explicit ASCII fold (`COLLATE NOCASE`
+    /// is ASCII-only, matching the ASCII-only managed alphabet) also lets
+    /// historical mixed-case leases participate in detection. Not a
     /// correctness boundary by itself — Git state can still change
-    /// afterwards; that stays a recoverable saga concern.
+    /// afterwards; that stays a recoverable saga concern. The atomic
+    /// admission transaction re-checks inside its own transaction, which
+    /// is the correctness boundary under concurrency.
     pub fn find_lease_owner_by_branch(
         &self,
         branch: &str,
@@ -124,7 +129,7 @@ impl crate::task_store::SqliteStore {
         let owner: Option<String> = self
             .connection()
             .query_row(
-                "SELECT execution_id FROM workspace_leases WHERE branch_ref = ?1",
+                "SELECT execution_id FROM workspace_leases WHERE branch_ref = ?1 COLLATE NOCASE",
                 params![branch],
                 |row| row.get(0),
             )
@@ -137,6 +142,194 @@ impl crate::task_store::SqliteStore {
                 })
             })
             .transpose()
+    }
+
+    /// Returns the owning execution of any lease in `repository` recording
+    /// a case-fold-equal branch, if any. Repository-scoped companion to
+    /// [`Self::find_lease_owner_by_branch`] for the lease-allocation
+    /// boundary: a direct allocation (bypassing admission) must never
+    /// attach a second execution to one managed branch of one repository.
+    pub fn find_lease_owner_in_repository(
+        &self,
+        repository: &str,
+        branch: &str,
+    ) -> Result<Option<ExecutionId>, WorkspaceFailure> {
+        let owner: Option<String> = self
+            .connection()
+            .query_row(
+                "SELECT execution_id FROM workspace_leases
+                 WHERE repository_ref = ?1 AND branch_ref = ?2 COLLATE NOCASE",
+                params![repository, branch],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_failure)?;
+        owner
+            .map(|raw| {
+                ExecutionId::new(raw).map_err(|error| WorkspaceFailure::StorageFailure {
+                    detail: format!("stored lease owner is not a valid execution id: {error}"),
+                })
+            })
+            .transpose()
+    }
+
+    /// Returns the sole lease owner claiming `worktree_ref`. Duplicate
+    /// claims are corruption and fail closed rather than picking one row.
+    pub fn find_lease_owner_by_worktree_ref(
+        &self,
+        worktree_ref: &str,
+    ) -> Result<Option<ExecutionId>, WorkspaceFailure> {
+        let mut statement = self
+            .connection()
+            .prepare("SELECT execution_id FROM workspace_leases WHERE worktree_ref = ?1 LIMIT 2")
+            .map_err(storage_failure)?;
+        let mut rows = statement
+            .query(params![worktree_ref])
+            .map_err(storage_failure)?;
+        let Some(first) = rows.next().map_err(storage_failure)? else {
+            return Ok(None);
+        };
+        let owner: String = first.get(0).map_err(storage_failure)?;
+        if rows.next().map_err(storage_failure)?.is_some() {
+            return Err(WorkspaceFailure::StorageFailure {
+                detail: format!(
+                    "multiple workspace leases claim worktree reference {worktree_ref}"
+                ),
+            });
+        }
+        ExecutionId::new(owner)
+            .map(Some)
+            .map_err(|error| WorkspaceFailure::StorageFailure {
+                detail: format!("stored lease owner is not a valid execution id: {error}"),
+            })
+    }
+
+    /// Returns the owning execution of one managed-identity reservation,
+    /// if any. Read-only helper for entry preflight diagnostics and tests;
+    /// the atomic admission transaction is the correctness boundary.
+    pub fn find_identity_reservation_owner(
+        &self,
+        branch: &str,
+    ) -> Result<Option<ExecutionId>, WorkspaceFailure> {
+        let owner: Option<String> = self
+            .connection()
+            .query_row(
+                "SELECT execution_id FROM managed_identity_reservations WHERE branch_ref = ?1",
+                params![branch],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_failure)?;
+        owner
+            .map(|raw| {
+                ExecutionId::new(raw).map_err(|error| WorkspaceFailure::StorageFailure {
+                    detail: format!(
+                        "stored reservation owner is not a valid execution id: {error}"
+                    ),
+                })
+            })
+            .transpose()
+    }
+
+    /// Returns the reserved branch for one execution, if any.
+    /// Read-only helper for same-execution idempotency checks.
+    pub fn find_identity_reservation_branch(
+        &self,
+        execution: &ExecutionId,
+    ) -> Result<Option<String>, WorkspaceFailure> {
+        self.connection()
+            .query_row(
+                "SELECT branch_ref FROM managed_identity_reservations WHERE execution_id = ?1",
+                params![execution.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_failure)
+    }
+
+    /// Claims the managed branch for one execution (`origin`: `admission`
+    /// or `lease`; the CHECK constraint freezes the vocabulary).
+    /// Idempotent for the owning execution; a branch reserved by another
+    /// execution refuses as typed [`WorkspaceFailure::BranchCollision`];
+    /// an execution attempting a second, different branch refuses as a
+    /// storage inconsistency (one execution owns at most one lease).
+    /// The single INSERT plus the PRIMARY KEY / UNIQUE backstops is the
+    /// concurrency guard: concurrent claimants serialize on the
+    /// constraints, and every loser fails closed even after passing the
+    /// read-before-write checks above.
+    pub fn claim_managed_branch(
+        &mut self,
+        branch: &str,
+        execution: &ExecutionId,
+        origin: &str,
+    ) -> Result<(), WorkspaceFailure> {
+        match workspace::BranchRef::new(branch) {
+            Ok(parsed) if parsed.is_managed() => {}
+            _ => {
+                return Err(WorkspaceFailure::StorageFailure {
+                    detail: "managed branch claim requires a well-formed managed branch".to_owned(),
+                });
+            }
+        }
+        if let Some(owner) = self.find_identity_reservation_owner(branch)? {
+            if owner == *execution {
+                return Ok(());
+            }
+            return Err(WorkspaceFailure::BranchCollision {
+                detail: format!(
+                    "managed branch {branch} is already reserved by execution {owner}; \
+                     refusing reuse"
+                ),
+            });
+        }
+        if let Some(held) = self.find_identity_reservation_branch(execution)? {
+            // Sequential detection: this execution already holds a
+            // reservation (normally the admission claim for its derived
+            // branch). A different branch here is an internal
+            // inconsistency, never a second valid claim.
+            if held != branch {
+                return Err(WorkspaceFailure::StorageFailure {
+                    detail: format!(
+                        "execution {} already holds managed reservation {held}; \
+                         refusing second reservation {branch}",
+                        execution.as_str(),
+                    ),
+                });
+            }
+            return Ok(());
+        }
+        self.connection()
+            .execute(
+                "INSERT INTO managed_identity_reservations (branch_ref, execution_id, origin)
+                 VALUES (?1, ?2, ?3)",
+                params![branch, execution.as_str(), origin],
+            )
+            .map_err(|error| match &error {
+                rusqlite::Error::SqliteFailure(failure, _)
+                    if failure.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    // Residual race: a concurrent claimant committed
+                    // between the checks above and this insert. Re-read
+                    // for an honest owner-naming message; still
+                    // fail-closed when the winner is unreadable.
+                    match self.find_identity_reservation_owner(branch) {
+                        Ok(Some(owner)) => WorkspaceFailure::BranchCollision {
+                            detail: format!(
+                                "managed branch {branch} is already reserved by execution {owner}; \
+                                 refusing reuse"
+                            ),
+                        },
+                        _ => WorkspaceFailure::BranchCollision {
+                            detail: format!(
+                                "managed branch {branch} conflicts with an existing reservation; \
+                                 refusing reuse"
+                            ),
+                        },
+                    }
+                }
+                _ => storage_failure(crate::error::map_constraint(error, "claim managed branch")),
+            })?;
+        Ok(())
     }
 
     /// Translates service-minted workspace evidence into a journal fact.
@@ -256,6 +449,31 @@ impl WorkspaceStore for crate::task_store::SqliteStore {
                     lease.id()
                 ),
             });
+        }
+        // Managed-identity backstop (TASK-0053 B-CF): claim the lease
+        // branch for its owner before inserting. Admission-path leases
+        // already own their reservation (verified, idempotent); direct
+        // allocation paths register here, so a second execution can never
+        // attach to one managed branch — concurrently or otherwise. A
+        // same-repository folded conflict against existing leases refuses
+        // with the same typed collision (explicit ASCII fold for
+        // historical mixed-case rows; v2 namespaces are disjoint from
+        // them by construction, so this is defense in depth).
+        self.claim_managed_branch(lease.branch().as_str(), lease.owner(), "lease")?;
+        if let Some(owner) = self
+            .find_lease_owner_in_repository(lease.repository().as_str(), lease.branch().as_str())?
+        {
+            if owner != *lease.owner() {
+                return Err(WorkspaceFailure::BranchCollision {
+                    detail: format!(
+                        "managed branch {} is already owned by execution {} in repository {}; \
+                         refusing reuse",
+                        lease.branch().as_str(),
+                        owner.as_str(),
+                        lease.repository().as_str()
+                    ),
+                });
+            }
         }
         let snapshot = lease.snapshot();
         self.connection()
