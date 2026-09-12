@@ -975,6 +975,35 @@ Mount:
 
 Для high-risk/untrusted repositories и enterprise hardening позже.
 
+## G6 implementation foundation (TASK-0064)
+
+TASK-0064 materializes a provider-neutral Runner/OS-isolation enforcement
+foundation without choosing a concrete OS sandbox or container runtime:
+
+```text
+already-computed EffectiveCapabilities
+  + exact ProcessExecute target
+  + non-authorizing IsolationRequirements
+  -> deterministic IsolationPlan
+  -> replaceable IsolationBackend
+  -> exact-plan EnforcementReport
+  -> verify filesystem / network / process axes
+  -> privileged process operation
+```
+
+`crates/runner` owns these contracts. Exact process authority is rechecked at
+the operation boundary; cross-workspace filesystem scope, stale/widened backend
+reports and insufficient/unavailable isolation fail closed before execution.
+`adapters/runner-native` is explicitly `Trusted Host` and reports zero sandbox
+axes, so it cannot satisfy a task that requires filesystem, network or process
+isolation.
+
+TASK-0064 does not select Docker/Podman, Seatbelt, Linux namespace/seccomp/
+cgroup mechanisms, Windows restricted-token/Job Object/AppContainer mechanisms
+or any equivalent. The concrete platform backend matrix remains open.
+Provider HOME/XDG/state/scratch isolation and H7 remain TASK-0065; integrated
+production-path G6 wiring remains TASK-0067.
+
 ---
 
 # 18. Workspace / Git

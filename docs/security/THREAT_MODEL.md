@@ -118,9 +118,12 @@ deterministic layered Policy Engine core, typed restrictive precedence,
 fail-closed default behavior and policy fingerprinting. TASK-0062 implements
 durable exact-bound approval state, human approve/deny resolution, expiry and
 single-use replay enforcement plus the minimal local control plane. Secrets
-Broker, OS isolation, H7 provider-environment isolation, Security Audit
-persistence and final privileged-operation integration remain open by the G6
-task sequence.
+Broker is implemented by TASK-0063. TASK-0064 implements the
+capability-to-runner enforcement contract, exact process-authority recheck,
+independent isolation-axis reporting and fail-closed NativeRunner behavior.
+Concrete OS/container sandbox backends and the per-OS backend matrix remain
+open; H7 provider-environment isolation, Security Audit persistence and final
+privileged-operation integration remain owned by later G6 tasks.
 
 ## 7. Accepted and deferred risks
 

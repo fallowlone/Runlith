@@ -132,6 +132,10 @@ trusted execution boundary
 Release also requires the exact bound execution/tool target; provider-native
 login state cannot grant access. Secret bytes are borrowed only at the trusted
 delivery boundary and never become ordinary application state or a prompt.
+TASK-0064 runner isolation plans likewise contain no secret payload: they carry
+only canonical capability scope and required enforcement axes. Provider
+environment construction and HOME/XDG/state/scratch isolation remain
+TASK-0065 rather than broadening this data flow.
 Provider-owned session copies (e.g. a provider retaining
 transcript data on its side of an external execution) follow that
 provider's execution path and terms — outside our application's control and
