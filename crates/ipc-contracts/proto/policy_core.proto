@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+package ai_engineering_os.ipc;
+
+// Minimal G6 approval control plane (protocol v3). The client can observe an
+// already-created canonical approval request and record a human decision. It
+// cannot create approvals, change scope/policy/expiry, or consume authority.
+import "task_core.proto";
+
+enum ApprovalDecision {
+  APPROVAL_DECISION_UNSPECIFIED = 0;
+  APPROVE = 1;
+  DENY = 2;
+}
+
+message ApprovalCapabilityDto {
+  string kind = 1;
+  optional string workspace = 2;
+  string scope = 3;
+}
+
+message ApprovalDto {
+  string request_id = 1;
+  string operation_id = 2;
+  string requester = 3;
+  string task_id = 4;
+  optional string execution_id = 5;
+  optional string attempt_id = 6;
+  string policy_fingerprint = 7;
+  uint64 expires_at_ms = 8;
+  string state = 9;
+  optional string approver = 10;
+  optional uint64 decided_at_ms = 11;
+  optional uint64 consumed_at_ms = 12;
+  repeated ApprovalCapabilityDto requested = 13;
+  repeated ApprovalCapabilityDto effective = 14;
+}
+
+message GetApprovalRequest {
+  string request_id = 1;
+}
+
+message DecideApprovalRequest {
+  string request_id = 1;
+  ApprovalDecision decision = 2;
+}
+
+message PolicyCoreRequest {
+  oneof payload {
+    GetApprovalRequest get_approval = 1;
+    DecideApprovalRequest decide_approval = 2;
+  }
+}
+
+message GetApprovalResponse {
+  ApprovalDto approval = 1;
+}
+
+message DecideApprovalResponse {
+  ApprovalDto approval = 1;
+}
+
+message PolicyCoreResponse {
+  oneof payload {
+    GetApprovalResponse get_approval = 1;
+    DecideApprovalResponse decide_approval = 2;
+    BusinessError error = 3;
+  }
+}

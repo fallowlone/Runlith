@@ -42,6 +42,13 @@ policy preflight or provider-native permission prompt does not itself enforce
 the operation. Security Audit records canonical product decisions/results at
 the trusted boundaries; provider text is contextual evidence only.
 
+TASK-0062 adds a bounded protocol-v3 approval surface at the authenticated
+local `agentd` boundary. It can read an existing pending approval and record a
+human approve/deny decision. It cannot mint an approval requirement, change
+request/scope/policy/expiry, or consume authority. The operation owner consumes
+an approved decision only by re-presenting the exact current canonical
+`REQUIRE_APPROVAL` binding.
+
 ## TB1 — WebView → Tauri Host
 
 - From: application WebView (React UI). To: thin Tauri host.

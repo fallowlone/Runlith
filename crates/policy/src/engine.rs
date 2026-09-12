@@ -470,3 +470,27 @@ fn approval_request_id(
     push_field(&mut hasher, &expires_at_ms.to_be_bytes());
     Ok(format!("approval-{:x}", hasher.finalize()))
 }
+
+pub(crate) fn approval_requirement_fingerprint(
+    requirement: &ApprovalRequirement,
+) -> Result<String, PolicyContractError> {
+    let mut hasher = Sha256::new();
+    push_field(&mut hasher, b"approval-binding-v1");
+    push_field(&mut hasher, requirement.request_id.as_bytes());
+    push_field(
+        &mut hasher,
+        &canonical_request_bytes(&requirement.binding.request)?,
+    );
+    push_field(
+        &mut hasher,
+        requirement.binding.policy_fingerprint.as_bytes(),
+    );
+    push_field(
+        &mut hasher,
+        &requirement.binding.expires_at_ms.to_be_bytes(),
+    );
+    for capability in requirement.effective_if_approved.as_slice() {
+        push_field(&mut hasher, &canonical_capability_bytes(capability)?);
+    }
+    Ok(format!("approval-binding-sha256:{:x}", hasher.finalize()))
+}

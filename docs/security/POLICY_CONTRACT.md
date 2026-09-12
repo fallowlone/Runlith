@@ -107,8 +107,21 @@ binding is unexpired. A grant for `workspace/src/api` cannot authorize
 fingerprint or origin requires re-evaluation/new approval. `DENY` has no
 approval conversion path.
 
-Cryptographic approval tokens and persistent approval storage are deferred to
-TASK-0062.
+TASK-0062 materializes this lifecycle as durable local approval state. The
+stored record retains the exact request/origin metadata, policy fingerprint,
+expiry, requested authority, effective-if-approved authority and a stable
+exact-binding fingerprint. Human resolution can only approve or deny an
+already-created canonical `REQUIRE_APPROVAL` request; the control plane cannot
+create an approval requirement, alter its binding or consume authority.
+
+An approved row is not a bearer grant. The operation owner must re-present the
+current canonical `REQUIRE_APPROVAL` decision before authority becomes usable.
+The trusted approval service recomputes the exact binding, rejects stale or
+widened bindings, expiry, denial and prior consumption, then atomically consumes
+the approval exactly once. Restart does not erase a decision or make replay
+valid. The current local control plane records approver provenance inside the
+authenticated daemon boundary rather than accepting arbitrary provenance text
+from the CLI.
 
 ## Policy sources
 
@@ -186,8 +199,10 @@ For `REQUIRE_APPROVAL`, TASK-0061 creates the existing exact-bound
 `ApprovalRequirement`: the binding contains the exact `PolicyRequest`, current
 policy fingerprint and caller-supplied expiry, while `effective` remains empty.
 `effective_if_approved` is already bounded by both request and parent
-authority. Durable approval state, expiry/replay lifecycle and human decision
-enforcement remain TASK-0062.
+authority. TASK-0062 persists that requirement, records one human resolution
+and makes approval authorization single-use. Persistence and IPC never become
+independent authorization roots: only an exact current `REQUIRE_APPROVAL`
+decision can register or consume approval authority.
 
 ## Enforcement points
 

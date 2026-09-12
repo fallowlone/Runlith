@@ -8,11 +8,12 @@ package ai_engineering_os.ipc;
 // bounded `task_core.proto` contract; it is valid only on sessions that
 // negotiated protocol version 1 or newer. G5 (TASK-0047): the v2
 // execution envelope `execution_core = 5` carries the bounded
-// `execution_core.proto` contract; it is valid only on sessions that
-// negotiated protocol version 2. Field numbers 1-4 are frozen history
+// `execution_core.proto` contract. G6 adds `policy_core = 6` for approval
+// observation and human decisions on protocol v3. Field numbers 1-5 are frozen history
 // and are never renumbered.
 import "task_core.proto";
 import "execution_core.proto";
+import "policy_core.proto";
 
 // A single inbound control message from a local client to agentd.
 message ControlRequest {
@@ -26,6 +27,8 @@ message ControlRequest {
     // G5 execution request. Valid only on protocol-v2 sessions; older
     // sessions reject it as unsupported for the negotiated protocol.
     ExecutionCoreRequest execution_core = 5;
+    // G6 approval control-plane request. Valid only on protocol-v3 sessions.
+    PolicyCoreRequest policy_core = 6;
   }
 }
 
@@ -39,6 +42,8 @@ message ControlResponse {
     TaskCoreResponse task_core = 4;
     // G5 execution response. Valid only on protocol-v2 sessions.
     ExecutionCoreResponse execution_core = 5;
+    // G6 approval control-plane response. Valid only on protocol-v3 sessions.
+    PolicyCoreResponse policy_core = 6;
   }
 }
 

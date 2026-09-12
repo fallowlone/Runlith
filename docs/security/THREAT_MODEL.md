@@ -69,7 +69,7 @@ is one of: `Mitigated by architecture` (control exists in accepted design),
 | THR-017 | Routing / execution | Stateful provider failover replays side effects | New/recovered attempt per failover; no transparent replay | Adapter bug replaying effects | Partially mitigated | INV-066 |
 | THR-018 | Policy / delegation | Confused deputy uses a more-privileged parent/runtime to perform an operation outside the requester's authority | Typed requested/effective capabilities; child authority subset; operation-bound enforcement | Incorrect scope modeling | Partially mitigated | ADR-0026; INV-147, INV-153 |
 | THR-019 | Policy / child execution | Child agent/process gains a new capability or widens filesystem/network/secret scope | Monotonic capability narrowing; widening is a typed refusal | Future runner implementation defect | Partially mitigated | ADR-0026; INV-147 |
-| THR-020 | Approval | Stale approval is replayed for another operation, policy revision or wider path/resource | Approval binds exact request/scope/provenance/policy fingerprint/expiry | Persistent approval-store bugs | Partially mitigated | ADR-0026; INV-150 |
+| THR-020 | Approval | Stale approval is replayed for another operation, policy revision or wider path/resource | TASK-0062 durable approval state binds exact request/scope/provenance/policy fingerprint/expiry and is single-use; operation owner must re-present the current exact REQUIRE_APPROVAL binding | Integration defect at a future privileged-operation enforcement point | Partially mitigated | ADR-0026; INV-150; TASK-0062 |
 | THR-021 | Filesystem | Path traversal or symlink/race escapes a managed workspace | Typed relative scope rejects traversal; future enforcement canonicalizes/revalidates adjacent to operation | OS/filesystem TOCTOU | Open | ADR-0026; INV-149, INV-153 |
 | THR-022 | Repository/process | Malicious Git hook, test/build script or project executable escalates from repository code to ambient host authority | Repository remains untrusted; process capability + runner isolation + controlled environment | Backend escape or over-broad process scope | Open | ADR-0013, ADR-0026; INV-013, INV-146 |
 | THR-023 | Provider process / credentials | Provider subprocess inherits HOME/XDG/environment secrets or writes provider state into the managed worktree (H7) | Sanitized provider environment; scoped HOME/XDG/state/scratch outside worktree; filesystem policy | Provider behavior/version changes | Open | ADR-0026; G5 final audit H7; TASK-0065 |
@@ -115,9 +115,12 @@ G6 authorization semantics, capability monotonicity, approval binding and
 security-audit authority are no longer open design items; ADR-0026 and
 `POLICY_CONTRACT.md` define their foundation. TASK-0061 implements the
 deterministic layered Policy Engine core, typed restrictive precedence,
-fail-closed default behavior and policy fingerprinting. Durable approval,
-Secrets Broker, OS isolation, H7 provider-environment isolation and Security
-Audit persistence/enforcement remain open by the G6 task sequence.
+fail-closed default behavior and policy fingerprinting. TASK-0062 implements
+durable exact-bound approval state, human approve/deny resolution, expiry and
+single-use replay enforcement plus the minimal local control plane. Secrets
+Broker, OS isolation, H7 provider-environment isolation, Security Audit
+persistence and final privileged-operation integration remain open by the G6
+task sequence.
 
 ## 7. Accepted and deferred risks
 

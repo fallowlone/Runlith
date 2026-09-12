@@ -26,7 +26,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::error::{ControlError, ControlResult};
 use crate::negotiation::{
     default_client_build_version, evaluate_handshake, rejection_for, validate_business_allowed,
-    validate_execution_allowed, ServerConfig,
+    validate_execution_allowed, validate_policy_allowed, ServerConfig,
 };
 
 /// Deadline for a full client/server handshake exchange.
@@ -68,6 +68,8 @@ pub enum ReadyRequest {
     /// Decoded G5 execution request on a version-2 session. The version
     /// gate already passed; nothing has executed.
     Execution(ipc_contracts::proto::ExecutionCoreRequest),
+    /// Decoded G6 approval control-plane request on a version-3 session.
+    Policy(ipc_contracts::proto::PolicyCoreRequest),
 }
 
 /// Client-side handshake outcome.
@@ -154,6 +156,22 @@ impl ClientConfig {
             requested_capabilities: Vec::new(),
         }
     }
+
+    /// G6 approval-capable client profile. Offers every historical version
+    /// and requires callers to check `policy_allowed` before use.
+    pub fn policy_default(client_kind: impl Into<String>) -> Self {
+        Self {
+            supported_versions: vec![
+                ipc_contracts::IPC_PROTOCOL_VERSION_V0,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V1,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V2,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V3,
+            ],
+            client_kind: client_kind.into(),
+            client_build_version: default_client_build_version(),
+            requested_capabilities: Vec::new(),
+        }
+    }
 }
 
 /// Client side of the bootstrap control protocol.
@@ -216,6 +234,13 @@ where
     pub fn execution_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_execution_allowed)
+    }
+
+    /// Reports whether this session negotiated the G6 approval surface.
+    #[must_use]
+    pub fn policy_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_policy_allowed)
     }
 
     /// Unwraps into the framed transport for lifecycle-owned exchanges
@@ -386,6 +411,24 @@ where
         }
     }
 
+    /// Protocol framing only: sends one G6 approval control-plane response.
+    pub async fn respond_policy(
+        &mut self,
+        response: ipc_contracts::proto::PolicyCoreResponse,
+    ) -> ControlResult<()> {
+        self.require_ready()?;
+        let frame = bytes::Bytes::from(
+            ControlResponse {
+                payload: Some(control_response::Payload::PolicyCore(response)),
+            }
+            .encode_to_vec(),
+        );
+        match self.transport.write_frame(frame).await {
+            Ok(()) => Ok(()),
+            Err(error) => self.fail(error.into()),
+        }
+    }
+
     /// Sends the existing `ShutdownResponse` acknowledgement for a
     /// previously observed [`ReadyRequest::Shutdown`].
     ///
@@ -430,6 +473,13 @@ where
     pub fn execution_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_execution_allowed)
+    }
+
+    /// Reports whether this server session negotiated G6 approval authority.
+    #[must_use]
+    pub fn policy_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_policy_allowed)
     }
 
     /// Reads the first request (within [`HANDSHAKE_TIMEOUT`]), requires it
@@ -570,6 +620,15 @@ where
                     .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
                 match validate_execution_allowed(negotiated) {
                     Ok(()) => Ok(ReadyRequest::Execution(request)),
+                    Err(error) => self.fail(error),
+                }
+            }
+            Some(control_request::Payload::PolicyCore(request)) => {
+                let negotiated = self
+                    .negotiated_version
+                    .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
+                match validate_policy_allowed(negotiated) {
+                    Ok(()) => Ok(ReadyRequest::Policy(request)),
                     Err(error) => self.fail(error),
                 }
             }
