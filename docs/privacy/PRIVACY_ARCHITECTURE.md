@@ -122,12 +122,17 @@ secret, the path is:
 ```text
 secret reference
  ↓
+Policy / effective capability
+ ↓
 Secrets Broker
  ↓
 trusted execution boundary
 ```
 
-never a prompt. Provider-owned session copies (e.g. a provider retaining
+Release also requires the exact bound execution/tool target; provider-native
+login state cannot grant access. Secret bytes are borrowed only at the trusted
+delivery boundary and never become ordinary application state or a prompt.
+Provider-owned session copies (e.g. a provider retaining
 transcript data on its side of an external execution) follow that
 provider's execution path and terms — outside our application's control and
 never presented as ours (PRIV-004).

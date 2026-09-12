@@ -19,7 +19,7 @@
 | Planning / Orchestration | ACTIVE DECISION | PRE-G3 | ADR-0017 | none — covered |
 | Evaluation / Verification | ACTIVE DECISION | PRE-G3 | ADR-0018 | none — covered |
 | Policy Engine + approvals | ACTIVE DECISION | G6 | ADR-0013 + ADR-0026 | deterministic engine implemented in TASK-0061; durable exact-bound human approval enforcement implemented in TASK-0062 |
-| Secrets Broker | ACTIVE BOUNDARY / DEFERRED IMPLEMENTATION | G6 | ADR-0026 + ADR-0013 / ADR-0014 | implement credential backend/delivery in TASK-0063; no plaintext application state |
+| Secrets Broker | ACTIVE DECISION | G6 | ADR-0026 + ADR-0013 / ADR-0014 | TASK-0063 implemented opaque refs/exact bindings, scoped release and native local credential backend; no plaintext application/Event Journal state |
 | Security Audit | ACTIVE BOUNDARY / DEFERRED PERSISTENCE | G6 | ADR-0026 + ADR-0006 / ADR-0013 | implement append-oriented persistence in TASK-0066; keep separate from Event Journal |
 | Resource Engine | DEFERRED ARCHITECTURE TARGET | PRE-G9 | none yet | dedicated ADR before G9 retrieval work |
 | Adaptive Model Router | DEFERRED ARCHITECTURE TARGET | PRE_RELEVANT_GATE | none yet | dedicated ADR before first adaptive-routing implementation (no gate assigned yet) |

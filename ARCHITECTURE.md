@@ -217,12 +217,16 @@ this document; physical decomposition happens incrementally.
 - Forbidden: placing secrets in model context, ordinary logs, events or
   SQLite plaintext. Actual secrets live only in OS Keychain / Credential
   Manager / Secret Service.
-- Inbound: scoped credential requests from authorized runtime components.
-- Outbound: secret references/handles only — plaintext never crosses the
-  broker boundary into application state.
+- Inbound: exact secret refs/bindings plus already-computed effective
+  capabilities from authorized runtime components.
+- Outbound: borrowed plaintext only through the trusted `SecretDelivery`
+  execution/tool boundary; plaintext never becomes ordinary application
+  state.
 - Authoritative state: secret values live only in the external OS store; the
   context owns refs/bindings, never plaintext.
-- Refs: ADR-0013, ADR-0014, ADR-0026; implementation remains TASK-0063.
+- Refs: ADR-0013, ADR-0014, ADR-0026; provider-neutral broker, SQLite
+  ref/binding metadata and native local credential adapter implemented by
+  TASK-0063.
   INV-008, INV-099, INV-106, INV-151.
 
 ### Usage / Model Routing — Later core (gate unassigned)
