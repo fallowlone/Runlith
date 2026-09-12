@@ -95,6 +95,22 @@ authorized execution/tool boundary. Secret material never enters ordinary
 SQLite domain state, Event Journal payloads, logs, model context or approval
 explanations.
 
+TASK-0063 implementation clarification: `crates/secrets` owns the
+provider-neutral broker contracts. Durable application state stores only
+`SecretRef` plus exact `SecretBinding` metadata to an execution or tool target;
+SQLite schema v9 contains no secret-value/payload column and secret metadata
+operations append no Event Journal facts. The broker accepts only
+already-computed `EffectiveCapabilities`, verifies exact `SecretAccess(ref)`
+and the exact delivery target before reading the backend, then lends secret
+bytes only to a trusted `SecretDelivery` callback and clears its temporary
+mutable buffer after the delivery attempt. The local backend adapter uses the
+platform-native OS credential store (Apple Keychain, Windows Credential
+Manager, Linux Secret Service) with no file or cloud fallback. A durable
+TASK-0062 approval row is not bearer authority: release is possible only after
+the canonical approval service has produced effective authority. Provider
+native login state remains provider owned and cannot grant or widen canonical
+authority.
+
 Security Audit remains separate from Event Journal, operational logging and
 model-visible execution receipts. Product-controlled code records canonical
 security decisions and privileged-action evidence; provider/model metadata is
@@ -111,6 +127,8 @@ context only and cannot author authoritative audit facts.
 - OS-specific isolation remains behind Runner/Sandbox adapters consuming
   canonical effective capabilities.
 - Local execution requires no cloud control plane, account or telemetry.
+- Secret release has no separate approval or provider-authority mechanism; it
+  consumes canonical effective capability already decided by Policy/approval.
 - H7 (`data/sessions.db` written into managed worktrees by real Claude) is
   owned by TASK-0065 provider-environment isolation after the Policy and
   Runner authority foundations exist.
@@ -140,4 +158,8 @@ ADR-0013 without changing its two-layer security model.
 - `docs/architecture/runners.md`
 - `docs/architecture/providers.md`
 - `crates/policy`
+- `crates/secrets`
+- `adapters/keychain-native`
+- `adapters/storage-sqlite/migrations/0009_secret_refs.sql`
+- `docs/development/G6_SECRETS_BROKER.md`
 - `docs/development/G5_FINAL_CLOSURE_AUDIT.md` (H7)

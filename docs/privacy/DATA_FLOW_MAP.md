@@ -136,9 +136,11 @@ worker. Provider transfer ≠ our-cloud transfer, always.
 - **User action / feature causing flow:** execution of a tool requiring a
   scoped credential binding.
 - **Policy/consent expectation:** Policy Engine authorization; scoped
-  credential bindings; no ambient inheritance.
+  credential bindings; exact `SecretAccess(ref)` plus exact delivery target;
+  no ambient inheritance and no provider-native authority.
 - **Persistence at destination:** values are not persisted by the
-  application; OS store owns values, app owns refs.
+  application; OS store owns values, app owns refs/bindings. Broker-owned
+  temporary mutable bytes are cleared after the trusted delivery attempt.
 - **Observability requirement:** binding/decision audit without secret
   payloads (hashes/references only).
 - **Relevant PRIV/INV/ADR:** PRIV-006; INV-008, INV-099, INV-106;
