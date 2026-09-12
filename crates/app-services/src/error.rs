@@ -4,6 +4,7 @@
 use std::fmt;
 
 use agent_runtime::RuntimeError;
+use policy::PolicyContractError;
 use storage_sqlite::StorageError;
 use task_domain::DomainError;
 
@@ -15,6 +16,8 @@ pub enum ServiceError {
     Domain(DomainError),
     /// SQLite/consistency failure, including stale-write conflicts.
     Storage(StorageError),
+    /// Canonical Policy/Security contract refused the operation.
+    Policy(PolicyContractError),
 }
 
 impl fmt::Display for ServiceError {
@@ -22,6 +25,7 @@ impl fmt::Display for ServiceError {
         match self {
             Self::Domain(error) => write!(f, "task mutation rejected: {error}"),
             Self::Storage(error) => write!(f, "task mutation storage failure: {error}"),
+            Self::Policy(error) => write!(f, "policy enforcement failure: {error}"),
         }
     }
 }
@@ -31,6 +35,7 @@ impl std::error::Error for ServiceError {
         match self {
             Self::Domain(error) => Some(error),
             Self::Storage(error) => Some(error),
+            Self::Policy(error) => Some(error),
         }
     }
 }
@@ -44,6 +49,12 @@ impl From<DomainError> for ServiceError {
 impl From<StorageError> for ServiceError {
     fn from(error: StorageError) -> Self {
         Self::Storage(error)
+    }
+}
+
+impl From<PolicyContractError> for ServiceError {
+    fn from(error: PolicyContractError) -> Self {
+        Self::Policy(error)
     }
 }
 

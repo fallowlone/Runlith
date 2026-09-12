@@ -42,6 +42,22 @@ impl FromStr for CapabilityKind {
     }
 }
 
+impl CapabilityKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FilesystemRead => "filesystem.read",
+            Self::FilesystemWrite => "filesystem.write",
+            Self::ProcessExecute => "process.execute",
+            Self::NetworkAccess => "network.access",
+            Self::GitMutate => "git.mutate",
+            Self::SecretAccess => "secret.access",
+            Self::ToolInvoke => "tool.invoke",
+            Self::ExternalAction => "external.action",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct FileScope {
     workspace: String,
@@ -350,12 +366,28 @@ impl ApprovalRequirement {
     pub fn effective_if_approved(&self) -> &EffectiveCapabilities {
         &self.effective_if_approved
     }
+
+    /// Stable exact-binding identity used by durable approval state.
+    /// Secret capabilities contribute only their opaque reference id.
+    pub fn binding_fingerprint(&self) -> Result<String, PolicyContractError> {
+        engine::approval_requirement_fingerprint(self)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HumanDecision {
     Approve,
     Deny,
+}
+
+impl HumanDecision {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Approve => "approve",
+            Self::Deny => "deny",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -803,6 +835,42 @@ mod tests {
         let effective = decision.apply_approval(&resolution, 50).unwrap();
         assert!(effective.permits(&file_write("src/api/routes")));
         assert!(!effective.permits(&file_write("src/web")));
+    }
+
+    #[test]
+    fn approval_binding_fingerprint_is_exact_and_deterministic() {
+        let requested = request(vec![file_write("src/api")]);
+        let requirement = ApprovalRequirement::new(
+            "approval-1",
+            ApprovalBinding::new(requested.clone(), "policy-v1", 100).unwrap(),
+            EffectiveCapabilities::new(vec![file_write("src/api")]),
+        )
+        .unwrap();
+        assert_eq!(
+            requirement.binding_fingerprint().unwrap(),
+            requirement.clone().binding_fingerprint().unwrap()
+        );
+
+        let wider = ApprovalRequirement::new(
+            "approval-1",
+            ApprovalBinding::new(request(vec![file_write("src")]), "policy-v1", 100).unwrap(),
+            EffectiveCapabilities::new(vec![file_write("src")]),
+        )
+        .unwrap();
+        let revised_policy = ApprovalRequirement::new(
+            "approval-1",
+            ApprovalBinding::new(requested, "policy-v2", 100).unwrap(),
+            EffectiveCapabilities::new(vec![file_write("src/api")]),
+        )
+        .unwrap();
+        assert_ne!(
+            requirement.binding_fingerprint().unwrap(),
+            wider.binding_fingerprint().unwrap()
+        );
+        assert_ne!(
+            requirement.binding_fingerprint().unwrap(),
+            revised_policy.binding_fingerprint().unwrap()
+        );
     }
 
     #[test]

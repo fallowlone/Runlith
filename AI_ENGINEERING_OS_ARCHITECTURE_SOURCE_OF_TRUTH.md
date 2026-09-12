@@ -3753,6 +3753,14 @@ boundary. Runner security profiles, if exposed, compile to canonical
 capability/isolation requirements rather than becoming a second authority
 model. Detailed decision: ADR-0026 and `docs/security/POLICY_CONTRACT.md`.
 
+TASK-0061 materializes deterministic layered policy evaluation. TASK-0062
+materializes durable exact-bound approvals: the authenticated local control
+plane can observe an existing requirement and record human approve/deny, while
+only the operation owner may turn an approved row into effective authority by
+re-presenting the current matching `REQUIRE_APPROVAL` decision. Grants are
+restart-durable, expiry-bound and single-use; mismatch, denial and replay fail
+closed.
+
 ## G7 — Multi-agent DAG + bounded adaptive planning
 
 Planner/Worker/Reviewer + typed messages. Add versioned plan revisions, `PlannerPort`, atomicity/decomposition proposals and hard recursion/liveness guardrails. Dynamic planning remains feature-gated until it beats static planning in our own coding benchmarks.
