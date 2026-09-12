@@ -276,8 +276,10 @@ trusted-host requirements. If any isolation axis is required, NativeRunner is
 insufficient and execution fails closed. TASK-0064 does not claim that current
 provider execution is OS-sandboxed and does not select a concrete platform
 backend; the platform matrix remains open. TASK-0065 closes H7 provider
-environment pollution at the provider launch boundary; final G6 production-
-path integration remains TASK-0067.
+environment pollution at the provider launch boundary. TASK-0067 composes the
+current production provider launch through Policy evaluation and exact Runner
+enforcement immediately before provider execution. Explicit Trusted Host
+requirements remain the only requirements NativeRunner can satisfy.
 
 ## Secrets Broker boundary
 
@@ -341,8 +343,14 @@ Reads are ordered or correlation-scoped. No audit record is fed into model
 context or used as authorization. v1 has no automatic TTL, compaction or
 per-record deletion; audit persists with app-owned local data until explicit
 whole-data deletion or a future privacy/retention migration defines narrower
-semantics. Production-path atomic coupling of policy/approval/secret/runner/
-provider actions to these records remains TASK-0067 integration work.
+semantics. TASK-0067 adds trusted G6 integration: approval state changes and
+their audit append share one SQLite transaction; policy/Runner/provider
+records are emitted by product-controlled code at the current provider launch
+boundary; secret access records contain opaque `SecretRef` identity only while
+the broker separately enforces the exact delivery target before backend read.
+External process execution is not claimed atomic with SQLite: pre-invocation
+authorization/enforcement evidence is committed before the provider call and
+the product appends its observed outcome afterward.
 
 ## H7 provider environment isolation
 
@@ -383,8 +391,9 @@ but cannot become a dependency for securing local execution.
    provider state/home/scratch/environment outside managed worktrees.
 6. TASK-0066 — Security Audit Persistence: implemented append-oriented
    canonical audit storage and correlation, separate from Event Journal.
-7. TASK-0067 — G6 Integration and Adversarial Security Verification: wire the
-   G6 boundaries and run the security failure matrix without claiming closure.
+7. TASK-0067 — G6 Integration and Adversarial Security Verification: current
+   G6 boundaries are wired and the deterministic/adversarial failure matrix is
+   green; the task does not claim G6 closure.
 8. TASK-0068 — Independent G6 Closure Audit.
 
 G6 remains in progress until the independent closure audit succeeds.

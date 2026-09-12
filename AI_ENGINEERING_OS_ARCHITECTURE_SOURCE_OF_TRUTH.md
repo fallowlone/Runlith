@@ -1005,8 +1005,10 @@ TASK-0065 closes H7 worktree pollution at the provider-process environment
 boundary: inherited environment is cleared, provider-writable XDG/state/cache/
 scratch/temp roots are private and outside managed worktrees, and unsafe roots
 fail before spawn. Provider-owned authentication remains an explicit profile/
-HOME anchor and grants no canonical authority. Integrated production-path G6
-wiring remains TASK-0067.
+HOME anchor and grants no canonical authority. TASK-0067 wires the current
+production provider launch through canonical Policy evaluation and exact
+Runner enforcement before provider invocation, while retaining TASK-0065
+provider-environment isolation.
 
 ---
 
@@ -3218,7 +3220,12 @@ chain. The local hash chain is tamper-evidence, not an external signature
 against full host compromise. v1 has no automatic TTL/compaction or per-record
 deletion; whole app-owned local data deletion remains the deletion boundary.
 Ordered and correlation-scoped reads are the TASK-0066 query surface.
-Production-path atomic action/audit integration remains TASK-0067.
+TASK-0067 integrates current G6 action/audit boundaries: approval mutation and
+its audit append share one SQLite transaction; policy/Runner/provider evidence
+is recorded by trusted product code around the provider boundary; secret audit
+records carry opaque references only. External process execution cannot be
+made atomic with SQLite, so requested/enforcement evidence commits before the
+provider call and outcome evidence follows it.
 
 ## Agent Transcript
 
