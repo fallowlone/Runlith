@@ -20,6 +20,7 @@ provider-claude = { path = "../../adapters/provider-claude" }
 policy = { path = "../../crates/policy" }
 runner = { path = "../../crates/runner" }
 runner-native = { path = "../../adapters/runner-native" }
+runner-macos-seatbelt = { path = "../../adapters/runner-macos-seatbelt" }
 scheduler = { path = "../../crates/scheduler" }
 storage-sqlite = { path = "../../adapters/storage-sqlite" }
 task-domain = { path = "../../crates/task" }

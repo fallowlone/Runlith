@@ -12,6 +12,7 @@ agent-runtime = { path = "../../crates/agent-runtime" }
 task-domain = { path = "../../crates/task" }
 scheduler = { path = "../../crates/scheduler" }
 workspace = { path = "../../crates/workspace" }
+runner = { path = "../../crates/runner" }
 
 [dev-dependencies]
 execution-contract = { path = "../../crates/execution-contract" }

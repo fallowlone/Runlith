@@ -7,8 +7,16 @@
 
 use runner::{
     BackendIdentity, EnforcementAxes, EnforcementReport, IsolationBackend, IsolationPlan, Platform,
-    RunnerError, RunnerKind,
+    PreparedLaunch, RunnerError, RunnerKind,
 };
+use std::process::Command;
+
+#[derive(Debug, Default)]
+struct NativeLaunch;
+
+impl PreparedLaunch for NativeLaunch {
+    fn apply(&self, _command: &mut Command) {}
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NativeRunner;
@@ -28,5 +36,12 @@ impl IsolationBackend for NativeRunner {
             plan.clone(),
             EnforcementAxes::none(),
         ))
+    }
+
+    fn prepare_launch(
+        &self,
+        _plan: &IsolationPlan,
+    ) -> Result<Box<dyn PreparedLaunch + Send + Sync>, RunnerError> {
+        Ok(Box::new(NativeLaunch))
     }
 }

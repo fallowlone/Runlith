@@ -22,8 +22,10 @@
 //! only the independent evaluation path can complete a Task.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use agent_runtime::ProviderRef;
+use runner::PreparedLaunch;
 use scheduler::{ExecutionPort, ExecutionProblem, WorkEvidence, WorkItem};
 
 use crate::argv::build_argv;
@@ -53,7 +55,7 @@ pub struct ClaudeOutcome {
 /// One bound Claude execution: config plus the attempt's prompt and
 /// workspace directory. Constructed per attempt by the composition layer
 /// (or tests); single-flight (one in-flight `execute` at a time).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClaudeExecutor {
     config: ClaudeConfig,
     prompt: String,
@@ -61,6 +63,7 @@ pub struct ClaudeExecutor {
     environment: Result<ProviderEnvironment, String>,
     tracker: Option<LiveProcessTracker>,
     cancel: CancelFlag,
+    launch: Option<Arc<dyn PreparedLaunch + Send + Sync>>,
 }
 
 impl ClaudeExecutor {
@@ -95,6 +98,7 @@ impl ClaudeExecutor {
             environment,
             tracker: None,
             cancel: CancelFlag::fresh(),
+            launch: None,
         })
     }
 
@@ -115,6 +119,14 @@ impl ClaudeExecutor {
     #[must_use]
     pub fn with_cancel_flag(mut self, cancel: CancelFlag) -> Self {
         self.cancel = cancel;
+        self
+    }
+
+    /// Binds the exact runtime launch handoff installed by the Runner.
+    /// Provider execution cannot create an unrestricted child after this.
+    #[must_use]
+    pub fn with_prepared_launch(mut self, launch: Arc<dyn PreparedLaunch + Send + Sync>) -> Self {
+        self.launch = Some(launch);
         self
     }
 
@@ -157,6 +169,7 @@ impl ClaudeExecutor {
                 argv: &argv,
                 workdir: &self.workdir,
                 environment,
+                launch: self.launch.as_deref(),
             },
             &self.cancel,
             self.config.timeout(),

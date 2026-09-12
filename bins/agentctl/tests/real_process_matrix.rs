@@ -17,6 +17,8 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+const TEST_RUNTIME_ENV: &str = "AI_ENGINEERING_OS_RUNTIME_DIR";
+
 fn workspace_bin(name: &str) -> PathBuf {
     let mut dir = std::env::current_exe().expect("test executable path");
     dir.pop();
@@ -34,14 +36,18 @@ fn agentctl_bin() -> PathBuf {
 
 fn agentctl(args: &[&str]) -> std::process::Output {
     Command::new(agentctl_bin())
+        .env(TEST_RUNTIME_ENV, test_runtime_parent())
         .args(args)
         .output()
         .expect("run agentctl")
 }
 
+fn test_runtime_parent() -> PathBuf {
+    PathBuf::from(format!("/tmp/rl0069-{}", std::process::id()))
+}
+
 fn canonical_socket() -> PathBuf {
-    let tmpdir = std::env::var_os("TMPDIR").expect("TMPDIR on macOS test host");
-    PathBuf::from(tmpdir).join("ai-engineering-os/agentd.sock")
+    test_runtime_parent().join("ai-engineering-os/agentd.sock")
 }
 
 fn endpoint_present() -> bool {
@@ -82,6 +88,7 @@ fn wait_ping_ok() {
 
 fn spawn_daemon() -> Child {
     Command::new(agentd_bin())
+        .env(TEST_RUNTIME_ENV, test_runtime_parent())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -106,6 +113,9 @@ fn wait_child_exit(child: &mut Child, budget: Duration) -> Option<i32> {
 
 #[test]
 fn g1_real_process_matrix() {
+    let _ = std::fs::remove_dir_all(test_runtime_parent());
+    std::fs::create_dir_all(test_runtime_parent()).expect("create test runtime parent");
+
     // Phase 0 — prescribed precondition: no test daemon running. If a live
     // daemon owns the endpoint, shut it down through the product flow.
     if endpoint_present() && agentctl(&["ping"]).status.success() {
