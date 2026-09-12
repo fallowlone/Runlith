@@ -10,6 +10,7 @@ members = [
     "crates/scheduler",
     "crates/execution-contract",
     "crates/policy",
+    "crates/security-audit",
     "crates/runner",
     "crates/secrets",
     "crates/evaluation",

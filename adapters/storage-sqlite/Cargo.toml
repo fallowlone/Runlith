@@ -12,7 +12,9 @@ task-domain = { path = "../../crates/task" }
 agent-runtime = { path = "../../crates/agent-runtime" }
 workspace = { path = "../../crates/workspace" }
 secrets = { path = "../../crates/secrets" }
+security-audit = { path = "../../crates/security-audit" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+sha2 = "0.10"
 
 [dev-dependencies]
 policy = { path = "../../crates/policy" }

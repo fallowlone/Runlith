@@ -214,7 +214,7 @@ this document; physical decomposition happens incrementally.
 - Authoritative state: the journal itself (history), not current state.
 - Refs: ADR-0006; INV-010, INV-044.
 
-### Security Audit — Later core (G6)
+### Security Audit — Core (G6)
 
 - Purpose: tamper-evident record of security/privileged decisions and actions.
 - Owns: audit entries for privileged/security-relevant transitions.
@@ -222,11 +222,18 @@ this document; physical decomposition happens incrementally.
   session history — three separate concerns.
 - Inbound: policy decisions, execution receipts and privileged-action reports
   from runtime, runners and security workflows.
-- Outbound: append-only audit reads for incident review and compliance; never
-  into model context.
+- Outbound: ordered audit reads plus correlation-scoped reads for incident
+  review; never into model context.
 - Authoritative state: audit records (hashes/references, not secret payloads).
-- Refs: ADR-0006, ADR-0013, ADR-0026; persistence remains TASK-0066.
-  INV-073, INV-152.
+- Persistence: TASK-0066 adds a separate SQLite schema v10 store with stable
+  `aud-<seq>` identities, append-only triggers and a SHA-256 hash chain with a
+  persisted head. This detects row mutation/reordering and tail truncation when
+  the head is preserved; it is not an external signature against full local
+  host compromise.
+- Retention: no automatic TTL, compaction or per-record deletion in v1. Audit
+  remains with app-owned local data until an explicit whole-data deletion or a
+  future privacy/retention migration owns narrower semantics.
+- Refs: ADR-0006, ADR-0013, ADR-0026; TASK-0066; INV-073, INV-152.
 
 ### Secrets — Later core (G6)
 

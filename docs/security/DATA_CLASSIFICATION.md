@@ -78,8 +78,10 @@ summary of SECRET is not PROJECT; an embedding of PRIVATE is not PUBLIC.
 - Logging: Security Audit only; never operational logs.
 - Telemetry: excluded.
 - UI exposure: gated views; no bulk export without explicit action.
-- Deletion/export: retention governed by audit policy (see Open items in
-  [`THREAT_MODEL.md`](./THREAT_MODEL.md)); export is explicit and audited.
+- Deletion/export: TASK-0066 Security Audit has no automatic TTL, compaction or
+  per-record deletion; it remains with app-owned local data until explicit
+  whole-data deletion or a future privacy/retention migration. Export remains
+  explicit and audited.
 
 ## SECRET
 

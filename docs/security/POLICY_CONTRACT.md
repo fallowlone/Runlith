@@ -322,8 +322,27 @@ security-relevant provider/tool invocation.
 
 Product-controlled code creates canonical audit records. Provider/model/tool
 text may be attached as untrusted context but cannot author the authoritative
-decision/result. Persistence should be append-oriented and tamper-evident for
-the local threat model; exact storage/signing/retention is TASK-0066.
+decision/result. TASK-0066 materializes this boundary as a separate typed
+`security-audit` contract plus SQLite schema v10. Canonical records carry only
+bounded structured product facts: event/author/outcome, correlation/causation,
+Task/Execution/Attempt/operation references, typed subject references,
+policy/rule/reason/approval references and typed capability scopes. There is no
+generic payload, provider/model text, transcript, environment dump or secret
+value column.
+
+The store is append-oriented: normal SQL updates/deletes are trigger-rejected;
+stable `aud-<seq>` identities and a deterministic SHA-256 chain bind every
+record to its predecessor, while a persisted head detects ordinary tail
+truncation. This is tamper-evidence for the local application threat model, not
+an external signature or protection against a fully compromised local host.
+No signing key or remote audit service is introduced.
+
+Reads are ordered or correlation-scoped. No audit record is fed into model
+context or used as authorization. v1 has no automatic TTL, compaction or
+per-record deletion; audit persists with app-owned local data until explicit
+whole-data deletion or a future privacy/retention migration defines narrower
+semantics. Production-path atomic coupling of policy/approval/secret/runner/
+provider actions to these records remains TASK-0067 integration work.
 
 ## H7 provider environment isolation
 
@@ -362,8 +381,8 @@ but cannot become a dependency for securing local execution.
    fail-closed backend boundary and platform adapter contracts.
 5. TASK-0065 — Provider Environment Isolation: close H7 with controlled
    provider state/home/scratch/environment outside managed worktrees.
-6. TASK-0066 — Security Audit Persistence: append-oriented canonical audit
-   storage and correlation, separate from Event Journal.
+6. TASK-0066 — Security Audit Persistence: implemented append-oriented
+   canonical audit storage and correlation, separate from Event Journal.
 7. TASK-0067 — G6 Integration and Adversarial Security Verification: wire the
    G6 boundaries and run the security failure matrix without claiming closure.
 8. TASK-0068 — Independent G6 Closure Audit.
