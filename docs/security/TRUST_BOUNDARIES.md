@@ -112,12 +112,17 @@ an approved decision only by re-presenting the exact current canonical
   process escape from the intended workspace.
 - Required controls: provider adapters as anti-corruption layers (no Task
   mutation, no memory writes, no merges, no policy bypass); contract-tested
-  ports; FakeAgent precedence over real providers in testing; execution
-  receipts that prove runtime-observed execution only.
+  ports; FakeAgent precedence over real providers in testing; sanitized
+  provider-process environment with provider-writable state outside managed
+  worktrees; execution receipts that prove runtime-observed execution only.
 - Forbidden assumptions: "provider output is correct"; "tool success text
   proves execution"; "the CLI's login lets us read its credentials" —
   provider-native authentication stays provider-owned; the app never scrapes
   CLI credentials.
+- TASK-0065 H7 control: inherited environment is cleared before Claude launch;
+  writable XDG/state/cache/scratch/temp roots are private and outside Git;
+  the provider-owned HOME/profile auth anchor is explicit and grants no
+  product authority. Unsafe environment roots refuse before spawn.
 - Evidence/audit: execution receipts (provenance, not authorization);
   adapter contract-suite results.
 - Refs: ADR-0009; INV-004, INV-012, INV-066, INV-072, INV-093.

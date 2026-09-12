@@ -1001,8 +1001,12 @@ isolation.
 TASK-0064 does not select Docker/Podman, Seatbelt, Linux namespace/seccomp/
 cgroup mechanisms, Windows restricted-token/Job Object/AppContainer mechanisms
 or any equivalent. The concrete platform backend matrix remains open.
-Provider HOME/XDG/state/scratch isolation and H7 remain TASK-0065; integrated
-production-path G6 wiring remains TASK-0067.
+TASK-0065 closes H7 worktree pollution at the provider-process environment
+boundary: inherited environment is cleared, provider-writable XDG/state/cache/
+scratch/temp roots are private and outside managed worktrees, and unsafe roots
+fail before spawn. Provider-owned authentication remains an explicit profile/
+HOME anchor and grants no canonical authority. Integrated production-path G6
+wiring remains TASK-0067.
 
 ---
 

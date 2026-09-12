@@ -64,6 +64,11 @@ pub enum ClaudeFailure {
         /// Bounded diagnostic.
         detail: String,
     },
+    /// Mandatory provider-environment isolation could not be prepared.
+    EnvironmentIsolation {
+        /// Bounded diagnostic without environment values or secret material.
+        detail: String,
+    },
 }
 
 impl ClaudeFailure {
@@ -80,6 +85,7 @@ impl ClaudeFailure {
             Self::Failed { .. } => "failed",
             Self::MalformedOutput { .. } => "malformed_output",
             Self::WorkspaceBinding { .. } => "workspace_binding",
+            Self::EnvironmentIsolation { .. } => "environment_isolation",
         }
     }
 
@@ -112,7 +118,8 @@ impl std::fmt::Display for ClaudeFailure {
             | Self::TimedOut { detail }
             | Self::Failed { detail }
             | Self::MalformedOutput { detail }
-            | Self::WorkspaceBinding { detail } => {
+            | Self::WorkspaceBinding { detail }
+            | Self::EnvironmentIsolation { detail } => {
                 write!(f, "claude {}: {detail}", self.kind())
             }
         }
@@ -164,6 +171,7 @@ mod tests {
             ClaudeFailure::Failed { detail: "x".into() },
             ClaudeFailure::MalformedOutput { detail: "x".into() },
             ClaudeFailure::WorkspaceBinding { detail: "x".into() },
+            ClaudeFailure::EnvironmentIsolation { detail: "x".into() },
         ];
         let kinds: Vec<&str> = failures.iter().map(|f| f.kind()).collect();
         assert_eq!(
@@ -178,6 +186,7 @@ mod tests {
                 "failed",
                 "malformed_output",
                 "workspace_binding",
+                "environment_isolation",
             ]
         );
     }

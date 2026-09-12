@@ -67,7 +67,13 @@ fn executor_for(fixture: &Path, workdir: &Path, timeout: Duration) -> ClaudeExec
         .unwrap()
         .with_timeout(timeout)
         .unwrap();
-    ClaudeExecutor::bind(config, "contract prompt", workdir.to_path_buf()).unwrap()
+    ClaudeExecutor::bind(
+        config,
+        "contract prompt",
+        workdir.to_path_buf(),
+        workdir.parent().unwrap().join("provider-env"),
+    )
+    .unwrap()
 }
 
 #[test]

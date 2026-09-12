@@ -142,8 +142,10 @@ worker. Provider transfer ≠ our-cloud transfer, always.
   application; OS store owns values, app owns refs/bindings. Broker-owned
   temporary mutable bytes are cleared after the trusted delivery attempt.
 - **Runner boundary:** TASK-0064 isolation plans contain capability scope and
-  enforcement requirements only, never secret values. Broad environment
-  construction/provider HOME/XDG handling remains TASK-0065.
+  enforcement requirements only, never secret values. TASK-0065 separately
+  clears ambient provider-launch environment and routes provider-writable
+  XDG/state/cache/scratch/temp paths outside managed worktrees; provider-native
+  login remains provider-owned and is never converted into Secret Broker data.
 - **Observability requirement:** binding/decision audit without secret
   payloads (hashes/references only).
 - **Relevant PRIV/INV/ADR:** PRIV-006; INV-008, INV-099, INV-106;
