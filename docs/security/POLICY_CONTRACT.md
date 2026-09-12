@@ -394,6 +394,12 @@ but cannot become a dependency for securing local execution.
 7. TASK-0067 — G6 Integration and Adversarial Security Verification: current
    G6 boundaries are wired and the deterministic/adversarial failure matrix is
    green; the task does not claim G6 closure.
-8. TASK-0068 — Independent G6 Closure Audit.
+8. TASK-0068 — Independent G6 Closure Audit: completed with
+   `G6_REMEDIATION_REQUIRED`. Policy/approval/Secrets/H7/Security Audit
+   independently re-verified, but production provider execution still selects
+   explicit Trusted Host NativeRunner with zero sandbox axes, leaving the
+   mandatory ADR-0013 runtime-isolation layer unenforced for gate closure.
+9. TASK-0069 — Production Runtime Isolation Remediation.
+10. TASK-0070 — Independent Adversarial G6 Closure Re-Audit.
 
-G6 remains in progress until the independent closure audit succeeds.
+G6 remains in progress pending B-ISO-1 remediation and independent re-audit.
