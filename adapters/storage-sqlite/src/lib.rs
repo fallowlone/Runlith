@@ -20,7 +20,7 @@ mod runtime_store;
 mod task_store;
 mod workspace_store;
 
-pub use entry_store::{AdmittedExecutionEntry, ExecutionEntryAdmission};
+pub use entry_store::{AdmittedExecutionEntry, ExecutionEntryAdmission, StrandedPreAttemptEntry};
 pub use error::{StorageError, StorageResult};
 pub use event::{
     AttemptOutcome, EventId, EventType, JournalEvent, NewJournalEvent, EVENT_SCHEMA_VERSION,

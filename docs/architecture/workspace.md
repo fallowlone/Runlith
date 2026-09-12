@@ -80,20 +80,35 @@ grounds diff provenance, reproducibility, stale detection, and review.
 
 `BranchRef` (`refs/heads/<name>`) is recorded on the lease, separate from
 `WorkspaceId`. The managed-branch derivation maps the owner ExecutionId
-to `refs/heads/agent/<slug>` injectively (TASK-0051): `%`-escaping over
-the exact identity bytes (`%` → `%%`, other non-safe bytes → `%XX`),
-with overlong identities in the disjoint digest form
-`h<sha256-lowerhex>-` — distinct execution identities never share a
-managed branch. The exact ref is recorded durably; branch collisions are
-detectable because a new lease is never silently attached to an unrelated existing
-branch — a ref that exists without matching recorded ownership is an
-`OwnershipMismatch` typed failure. Execution entry additionally refuses
-before its first mutation when the derived branch is already recorded
-for another execution. Application-created vs user/external
-branches are distinguished by explicit recorded ownership; an unproven
-external branch is never deleted or rewritten as cleanup. Managed
-worktrees live on managed branches; an unexpected detached HEAD is
-`Invalid`, never silently continued.
+to `refs/heads/agent/<v2-slug>` (TASK-0053): a versioned,
+canonical-lowercase encoding over the exact identity bytes — `e2-…` for
+the reversible readable form (`[a-z0-9-_]` pass through, every other byte
+as `%` + lowercase hex), `h2-…` for the SHA-256 digest fallback past the
+readable budget. Readable outputs are exact-byte-preserving and
+reversible, hence injective over their supported input domain, and
+already ASCII-casefold-stable, so case-insensitive filesystems cannot
+merge two outputs. Digest outputs are deterministic and
+collision-resistant — explicitly NOT mathematically injective — and a
+digest collision fails closed through the durable identity reservation
+(migration 0007, committed atomically with execution entry) instead of
+silently reusing a workspace. The exact ref is recorded durably; branch
+collisions are detectable because a new lease is never silently attached
+to an unrelated existing branch — a ref that exists without matching
+recorded ownership is an `OwnershipMismatch` typed failure. Execution
+entry additionally refuses before its first mutation when the derived
+branch is already reserved or recorded for another execution. Pre-v2
+persisted leases keep their recorded branch/path byte-for-byte (never
+rederived) and reconcile through containment checks. Historical outputs
+may lexically overlap the `e2-`/`h2-` prefixes because old ExecutionIds
+could begin with those strings. TASK-0058 therefore classifies a persisted
+lease from the complete branch/worktree pair: exact current-v2 derivation
+plus the owner's durable identity reservation is current v2; an exact pair
+from a supported historical derivation is legacy; mixed, impossible, or
+reservation-conflicting pairs fail closed. Application-created
+vs user/external branches are distinguished by explicit recorded
+ownership; an unproven external branch is never deleted or rewritten as
+cleanup. Managed worktrees live on managed branches; an unexpected
+detached HEAD is `Invalid`, never silently continued.
 
 ## Default Branch Protection
 
@@ -175,6 +190,33 @@ cleanup incomplete. Staleness proposes action; it authorizes nothing
 destructive alone. Concurrent executions of one repository hold distinct
 writable paths; same-file touches across worktrees surface at
 integration, never via global file locks.
+
+Pre-attempt entry recovery (TASK-0054, decided in ADR-0025) reuses the
+`ensure_workspace_ready` reconciliation paths: a resumed execution with
+no lease allocates fresh, an `Allocated` lease resumes (`ResumedAllocated`)
+or is recognized (`RecognizedGitState`) without replaying Git mutation,
+and a `Ready` lease continues idempotently (`AlreadyReady`) with
+exactly-once `workspace.created`. The daemon-startup scan surfaces
+stranded pre-attempt entries with their resume invocation; startup itself
+spawns no provider work. Post-attempt crash/orphan recovery stays G11
+work.
+
+TASK-0057 adds one narrow `Allocated` recovery class for current v2
+leases. If the managed branch already exists exactly at the recorded base,
+the lease and durable identity reservation prove the same Execution owns
+it, no competing lease claims the branch/path, the target path is absent,
+and Git registers neither the target nor that branch in any worktree, the
+service continues the interrupted materialization using the existing
+branch (`git worktree add <path> <existing-branch>`). It never deletes or
+resets the branch. Any missing proof, unexpected branch tip, existing
+target, foreign registration, or ownership disagreement remains
+fail-closed. A second crash after attachment but before finalization is
+reconciled as the already-supported complete-Git/`Allocated` shape.
+TASK-0058 keeps this branch-only continuation current-v2-only. A genuine
+pre-v2 `Allocated` lease uses its persisted historical identity through the
+ordinary reconciliation/materialization path instead of entering the v2
+branch-only proof. Ambiguous or corrupt format evidence is refused before
+either path mutates Git.
 
 ## Failure Taxonomy
 

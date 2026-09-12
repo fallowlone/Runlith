@@ -8,8 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0051
+completed_through: TASK-0059
 current_gate: G5
+gate_status: CLOSED  # TASK-0059 independent closure audit: G5_CLOSED; G6 Security is next
 
 items:
   - id: TASK-0012
@@ -715,3 +716,182 @@ items:
     references:
       - docs/development/G5_ENTRY_ATOMICITY_REMEDIATION.md
       - docs/architecture/providers.md
+
+  - id: TASK-0053
+    gate: G5
+    title: G5 Case-Fold-Safe Managed Workspace Identity
+    objective: Make managed branch identity safe on case-insensitive
+      filesystems so execution identities that differ only by ASCII case
+      can neither wedge a committed entry on a branch collision nor alias
+      each other's managed branches (loose or packed refs). Keep exact-byte
+      injectivity of the readable form, escape or refuse filesystem-reserved
+      names, compare managed branches case-insensitively before admission,
+      preserve persisted old leases verbatim, and correct identity
+      terminology (readable form injective; digest form collision-resistant
+      with fail-closed detection).
+    scope: Managed-branch derivation and entry/store branch-conflict checks
+      with real-Git keepers on a case-insensitive filesystem (loose and
+      packed refs); workspace.md and code-doc terminology. No G6 scope.
+    exit_criteria_summary: Case-variant execution identities receive
+      independent workspaces or refuse typed before the first mutation; no
+      cross-execution ref aliasing after pack-refs; old leases unchanged;
+      repeated full workspace verification green.
+    depends_on:
+      - TASK-0052
+    blocked_by: []
+    references:
+      - docs/development/G5_CLOSURE_REREAUDIT.md
+      - docs/architecture/adr/ADR-0023-workspace-ownership-and-git-worktree-lifecycle.md
+
+  - id: TASK-0054
+    gate: G5
+    title: G5 Post-Admission Entry Recovery Path
+    objective: Give admitted executions that fail or crash before their
+      attempt a concrete, bounded, journaled recovery path through the
+      control plane instead of a permanently RUNNING Task. Validate the
+      repository path and resolve the base revision before admission with a
+      typed refusal and no mutation; decide by ADR how a stranded pre-attempt
+      entry is resumed or abandoned to a re-runnable state (no RUNNING to
+      READY edge exists today) and how stranded OPEN attempts are treated
+      (bounded conclusion or explicit G11 deferral); prove it across a real
+      daemon restart.
+    scope: Entry pre-validation, a recovery operation or startup
+      reconciliation for pre-attempt strands, ADR-0024 section 4 and 6 plus
+      workspace.md Crash/Reconciliation amendments, keepers through the
+      shipped binaries. No G6 scope and no general G11 orphan-process
+      recovery.
+    exit_criteria_summary: Non-repository paths and unresolvable base
+      revisions refuse before mutation; a daemon crash between admission and
+      attempt creation is recoverable through the product; docs match the
+      implementation; repeated full workspace verification green.
+    depends_on:
+      - TASK-0052
+    blocked_by: []
+    references:
+      - docs/development/G5_CLOSURE_REREAUDIT.md
+      - docs/architecture/adr/ADR-0024-g5-provider-execution-seam.md
+
+  - id: TASK-0055
+    gate: G5
+    title: Independent Adversarial G5 Closure Audit
+    objective: Independently verify the TASK-0053 and TASK-0054
+      remediations and every historical G5 blocker under adversarial
+      conditions and report G5_CLOSED or G5_REMEDIATION_REQUIRED.
+    scope: Audit only; no repairs, no implementation, no G6 scope.
+    exit_criteria_summary: A closure audit report exists with an explicit
+      overall status (reported G5_REMEDIATION_REQUIRED with blockers B-CR,
+      B-RS2 and B-OL).
+    depends_on:
+      - TASK-0053
+      - TASK-0054
+    blocked_by: []
+    references:
+      - docs/development/G5_INDEPENDENT_CLOSURE_AUDIT.md
+      - docs/development/G5_CASEFOLD_WORKSPACE_IDENTITY_REMEDIATION.md
+      - docs/development/G5_POST_ADMISSION_RECOVERY_REMEDIATION.md
+
+  - id: TASK-0056
+    gate: G5
+    title: G5 Resume Live-Run Ownership
+    objective: Make execution resume claim exclusive live-run ownership in
+      the shared daemon composition so a second resume, or a resume racing
+      an ordinary run for the same execution, refuses typed before
+      acceptance; scope cancel-flag unregistration to the registering run so
+      a losing background can never retire the winner. The live provider
+      stays observable as live and cancellable through the control plane.
+    scope: agentd execution composition (resume acceptance and cancel
+      registry ownership) with keepers over ONE shared composition and a
+      slow provider fixture (parallel resumes, run then resume) plus a
+      shipped-binary keeper; ADR-0025 section 4 wording. No G6 or G11
+      scope.
+    exit_criteria_summary: Overlapping resumes yield one acceptance and
+      typed refusals; while the provider runs status reports live and
+      cancel concludes the attempt CANCELLED; at most one attempt and one
+      provider launch; repeated full workspace verification green.
+    depends_on:
+      - TASK-0055
+    blocked_by: []
+    references:
+      - docs/development/G5_INDEPENDENT_CLOSURE_AUDIT.md
+      - docs/architecture/adr/ADR-0025-g5-post-admission-recovery.md
+
+  - id: TASK-0057
+    gate: G5
+    title: G5 Materialization-Crash Strand Recovery
+    objective: Make a pre-attempt strand left by a daemon crash inside
+      workspace materialization recoverable through the product. The
+      provably-owned branch-only shape (identity reservation owned by the
+      execution, managed branch at the recorded base, target path absent,
+      no worktree registration) must resume without manual Git surgery, and
+      shapes that stay genuinely ambiguous must refuse typed at resume
+      dispatch instead of being accepted and failing in the background.
+    scope: Workspace reconciliation for Allocated leases and resume
+      dispatch validation, with keepers that kill the daemon inside git
+      worktree add through the shipped binaries on a non-trivial
+      repository; workspace.md Crash/Reconciliation and ADR-0025 amendments
+      as needed. No G6 or G11 scope.
+    exit_criteria_summary: Randomized daemon kills inside the pre-attempt
+      window leave no strand that product resume cannot recover or refuse
+      typed; recovered executions reach VERIFYING with exactly-once facts;
+      repeated full workspace verification green.
+    depends_on:
+      - TASK-0055
+    blocked_by: []
+    references:
+      - docs/development/G5_INDEPENDENT_CLOSURE_AUDIT.md
+      - docs/development/G4_WORKSPACE_DURABILITY_RECONCILIATION.md
+
+  - id: TASK-0058
+    gate: G5
+    title: G5 Pre-v2 Lease Classification
+    objective: Classify persisted workspace leases as v2 only from evidence
+      that cannot coincide with historical outputs, so pre-v2 leases whose
+      execution identity begins with e2- or h2- keep their persisted branch
+      and worktree path verbatim through resume, reconciliation and
+      cleanup; correct the v2/old namespace disjointness documentation.
+    scope: Managed identity format classification in the workspace service
+      with keepers built from genuine old-scheme rows for e2-/h2- prefixed
+      identities (Allocated resume and Ready cleanup); workspace.md and
+      remediation-claim corrections in current docs. No G6 scope.
+    exit_criteria_summary: Old e2-/h2- prefixed leases resume and clean up
+      byte-for-byte on persisted values; v2 leases still rederive exactly;
+      repeated full workspace verification green.
+    depends_on:
+      - TASK-0055
+    blocked_by: []
+    references:
+      - docs/development/G5_INDEPENDENT_CLOSURE_AUDIT.md
+      - docs/development/G5_CASEFOLD_WORKSPACE_IDENTITY_REMEDIATION.md
+
+  - id: TASK-0059
+    gate: G5
+    title: Independent Adversarial G5 Closure Re-Audit
+    objective: Independently re-test every historical G5 blocker after the
+      TASK-0056, TASK-0057 and TASK-0058 remediations and report G5_CLOSED
+      or G5_REMEDIATION_REQUIRED without performing repairs in the audit.
+    scope: Audit only; B-CF, B-CR, B-RS2, B-OL, admission atomicity,
+      recovery, live ownership/cancellation, historical lease compatibility,
+      loose/packed refs, real restart, FakeAgent, real Claude, provider
+      neutrality, completion authority, migrations and deferred-finding
+      classifications. No G6 scope and no remediation implementation.
+    exit_criteria_summary: An independent adversarial closure report exists
+      with an explicit G5_CLOSED or G5_REMEDIATION_REQUIRED verdict.
+    outcome: G5_CLOSED. No G5 blocker remains; B-CF, B-CR, B-RS2 and B-OL
+      independently re-verified against genuine historical schema-6 data,
+      real daemon SIGKILL recovery, real Git loose/packed refs on a proven
+      case-insensitive filesystem, and real Claude Code 2.1.268 through the
+      production composition. Two new non-blocking HARDENING findings (N-1
+      managed-root create race, N-2 duplicate-row handling asymmetry).
+      Record: docs/development/G5_FINAL_CLOSURE_AUDIT.md. G6 Security is
+      the next gate and was not started.
+    depends_on:
+      - TASK-0056
+      - TASK-0057
+      - TASK-0058
+    blocked_by: []
+    references:
+      - docs/development/G5_INDEPENDENT_CLOSURE_AUDIT.md
+      - docs/development/G5_LIVE_OWNERSHIP_REMEDIATION.md
+      - docs/development/G5_BRANCH_ONLY_MATERIALIZATION_RECOVERY.md
+      - docs/development/G5_LEGACY_WORKSPACE_IDENTITY_REMEDIATION.md
+      - docs/development/G5_FINAL_CLOSURE_AUDIT.md

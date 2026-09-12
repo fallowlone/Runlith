@@ -181,6 +181,33 @@ pub trait GitPort {
         worktree_path: &str,
     ) -> Result<bool, WorkspaceFailure>;
 
+    /// Returns the registered worktree currently holding `branch`, if any.
+    /// Backends that cannot prove absence fail closed.
+    fn worktree_for_branch(
+        &self,
+        _repository_path: &str,
+        _branch: &BranchRef,
+    ) -> Result<Option<String>, WorkspaceFailure> {
+        Err(WorkspaceFailure::GitBackendFailure {
+            detail: "git backend cannot prove branch worktree ownership".to_owned(),
+        })
+    }
+
+    /// Continues materialization using an already-existing managed branch.
+    /// The caller proves durable ownership; the adapter must independently
+    /// verify exact base/branch/path postconditions. Unsupported backends
+    /// fail closed instead of replaying branch creation.
+    fn attach_worktree(
+        &self,
+        _lease: &WorkspaceLease,
+        _repository_path: &str,
+        _worktree_path: &str,
+    ) -> Result<(), WorkspaceFailure> {
+        Err(WorkspaceFailure::GitBackendFailure {
+            detail: "git backend cannot continue an existing managed branch".to_owned(),
+        })
+    }
+
     /// Whether `owner` still shows live activity for `repository`.
     /// Contractual in G4 (full Runner process authority arrives later and
     /// is never faked): adapters report what they can observe honestly.

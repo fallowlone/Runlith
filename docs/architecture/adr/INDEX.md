@@ -29,5 +29,6 @@
 | [ADR-0022](./ADR-0022-runtime-event-journal-scope.md) | Runtime events use typed Execution/Attempt journal scope | Accepted | events, runtime event taxonomy, execution/attempt scope, g3 sequencing |
 | [ADR-0023](./ADR-0023-workspace-ownership-and-git-worktree-lifecycle.md) | Workspace ownership and Git worktree lifecycle | Accepted | workspace, git, worktrees, branches, diff, cleanup, reconciliation, g4 sequencing |
 | [ADR-0024](./ADR-0024-g5-provider-execution-seam.md) | G5 provider execution seam (`ExecutionPort`), first real provider, IPC v2 execution | Accepted | providers, execution seam, contract suite, ipc v2, composition root, g5 sequencing |
+| [ADR-0025](./ADR-0025-g5-post-admission-recovery.md) | G5 post-admission entry recovery path (explicit resume, pre-admission validation) | Accepted | recovery, reconciliation, resume, entry validation, ipc v2 additive, g5 sequencing |
 
 Coverage register (not an ADR): [COVERAGE.md](./COVERAGE.md).

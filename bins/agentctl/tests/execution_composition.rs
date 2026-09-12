@@ -531,9 +531,12 @@ async fn missing_workspace_fails_closed_without_fallback() {
     wait_ready(&sandbox.endpoint).await;
     seed_ready(&sandbox.endpoint, "P-1", "T-1", "do the thing").await;
 
-    // A repository path that is not a Git repository: entry commits
-    // (RUNNING + execution), the background lease refuses, and nothing
-    // ever falls back to the daemon cwd, $HOME, or another workspace.
+    // A repository path that is not a Git repository: TASK-0054 refuses
+    // deterministically before admission (read-only Git preflight, typed
+    // INVALID_ARGUMENT, zero mutation) instead of committing a RUNNING
+    // entry that the background lease step would strand (the pre-TASK-0054
+    // shape this keeper used to pin). Nothing ever falls back to the
+    // daemon cwd, $HOME, or another workspace.
     let mut bad = run_req(&sandbox, "T-1", "E-1", "A-1");
     if let Some(execution_core_request::Payload::Run(run)) = &mut bad.payload {
         run.repository_path = sandbox
@@ -542,34 +545,24 @@ async fn missing_workspace_fails_closed_without_fallback() {
             .to_string_lossy()
             .into_owned();
     }
-    let started = execution(&sandbox.endpoint, bad).await;
-    assert!(
-        matches!(
-            started.payload,
-            Some(execution_core_response::Payload::Run(_))
-        ),
-        "entry commits before the lease step, got {started:?}"
+    let refused = execution(&sandbox.endpoint, bad).await;
+    assert_eq!(
+        error_code(&refused),
+        ipc_contracts::proto::BusinessErrorCode::InvalidArgument as i32,
+        "deterministic repo failure refuses before admission, got {refused:?}"
     );
-    let status = poll_status(
-        &sandbox.endpoint,
-        "E-1",
-        Duration::from_secs(60),
-        |response| !get_payload(response).execution_live,
-    )
-    .await;
-    let get = get_payload(&status);
-    assert!(
-        get.attempts.is_empty(),
-        "lease refusal creates no attempt, got {get:?}"
-    );
-    assert!(
-        get.workspace_path.is_empty(),
-        "no lease means no workspace path, got {get:?}"
-    );
+    // Refused entry commits nothing: the task stays READY, no execution
+    // exists, and no lease, worktree, or lifecycle fact was created.
     assert_eq!(
         task_state(&sandbox.endpoint, "T-1").await,
-        "RUNNING",
-        "honest recoverable intermediate, never silent success"
+        "READY",
+        "refused run mutates no lifecycle state"
+    );
+    let status = execution(&sandbox.endpoint, get_req("E-1")).await;
+    assert_eq!(
+        error_code(&status),
+        ipc_contracts::proto::BusinessErrorCode::NotFound as i32,
+        "refused run commits no execution, got {status:?}"
     );
     daemon.abort();
 }

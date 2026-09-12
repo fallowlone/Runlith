@@ -228,6 +228,33 @@ pub fn worktree_registered(
     Ok(false)
 }
 
+/// Returns the registered worktree path holding `branch`, if any.
+/// Uses Git porcelain rather than `.git/refs`, so packed refs are handled.
+pub fn worktree_for_branch(
+    executable: &OsStr,
+    repository_path: &str,
+    branch: &BranchRef,
+) -> Result<Option<String>, WorkspaceFailure> {
+    let root = repository_root(executable, repository_path)?;
+    let output = run_git(executable, &root, &["worktree", "list", "--porcelain"])?;
+    if !output.status.success() {
+        return Err(backend_failure(format!(
+            "git-cli: worktree list failed ({})",
+            stderr_excerpt(&output)
+        )));
+    }
+
+    let mut current = None;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            current = Some(path.to_owned());
+        } else if line.strip_prefix("branch ") == Some(branch.as_str()) {
+            return Ok(current);
+        }
+    }
+    Ok(None)
+}
+
 /// Live-observes worktree status at `worktree_path`.
 ///
 /// - missing path → `Missing`
