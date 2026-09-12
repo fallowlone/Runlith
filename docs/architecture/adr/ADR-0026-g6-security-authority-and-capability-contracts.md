@@ -62,6 +62,16 @@ issues separate requests. Policy compilation is insertion-order independent and
 binds decisions/approvals to a deterministic versioned SHA-256 policy
 fingerprint plus stable rule/reason provenance.
 
+TASK-0062 implementation clarification: approval state is durable current
+security state, separate from Event Journal and the future Security Audit. An
+approval record is created only from a canonical `REQUIRE_APPROVAL` decision.
+The authenticated local control plane may read that record and resolve it as
+approve/deny, but it cannot mint or alter the bound authority. Approved state
+is not a bearer token: the operation owner must re-present the current exact
+approval requirement, after which the trusted service atomically consumes the
+matching unexpired grant once. Binding mismatch, denial, expiry and replay fail
+closed.
+
 Policy evaluation and enforcement are separate responsibilities. An
 authorization preflight is not an enforcement boundary. The component that
 performs a privileged filesystem/process/Git/network/secret/tool operation

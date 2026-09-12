@@ -18,7 +18,8 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use ipc_contracts::proto::{
     control_request, control_response, ControlRequest, ControlResponse, ExecutionCoreRequest,
-    ExecutionCoreResponse, ShutdownRequest, TaskCoreRequest, TaskCoreResponse,
+    ExecutionCoreResponse, PolicyCoreRequest, PolicyCoreResponse, ShutdownRequest, TaskCoreRequest,
+    TaskCoreResponse,
 };
 use ipc_control::{ClientConfig, ClientSession, ControlError, CLIENT_KIND_AGENTCTL};
 use ipc_transport::{FramedTransport, TransportError};
@@ -54,6 +55,9 @@ pub const BUSINESS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// background, so this stays a fast-exchange bound — never provider
 /// time. Terminal results arrive via `status` polling.
 pub const EXECUTION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Deadline for one local approval control-plane exchange.
+pub const POLICY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Poll interval while waiting for endpoint disappearance.
 const ABSENCE_POLL: Duration = Duration::from_millis(50);
@@ -123,6 +127,9 @@ pub enum ClientError {
     /// known even when the reply is lost). `status` is a pure read and
     /// may be retried freely; `cancel` is idempotent and may be re-issued.
     ExecutionAmbiguous(String),
+    /// A G6 approval request may have reached the daemon but its reply is
+    /// unconfirmed. Human decisions are never replayed automatically.
+    PolicyAmbiguous(String),
     /// OS/runtime I/O failure.
     Io(io::Error),
 }
@@ -148,6 +155,9 @@ impl fmt::Display for ClientError {
             }
             Self::ExecutionAmbiguous(detail) => {
                 write!(f, "ambiguous execution result (run not replayed): {detail}")
+            }
+            Self::PolicyAmbiguous(detail) => {
+                write!(f, "ambiguous approval result (not replayed): {detail}")
             }
             Self::Io(error) => write!(f, "client I/O failure: {error}"),
         }
@@ -569,6 +579,127 @@ pub async fn execution_request(
 ) -> Result<ExecutionCoreResponse, ClientError> {
     let session = connect_or_start_with(spawn, || connect_and_handshake_v2(pipe_name)).await?;
     execution_session(session, request, absence_note(pipe_name)).await
+}
+
+/// Performs a protocol-v3 handshake for the bounded G6 approval surface.
+async fn handshake_stream_v3<S>(stream: S) -> Result<ClientSession<S>, ClientError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut session = ClientSession::new(
+        FramedTransport::new(stream),
+        ClientConfig::policy_default(CLIENT_KIND_AGENTCTL),
+    );
+    session
+        .perform_handshake()
+        .await
+        .map_err(classify_control)?;
+    if !session.policy_allowed() {
+        return Err(ClientError::Control(ControlError::UnsupportedProtocol {
+            negotiated: session.negotiated_version().unwrap_or(0),
+            required: ipc_contracts::IPC_PROTOCOL_VERSION_V3,
+        }));
+    }
+    Ok(session)
+}
+
+#[cfg(unix)]
+pub async fn connect_and_handshake_v3(
+    endpoint: &UnixEndpoint,
+) -> Result<ClientSession<UnixStream>, ClientError> {
+    let stream = transport_connect(endpoint)
+        .await
+        .map_err(|error| match error {
+            TransportError::EndpointUnavailable { endpoint } => {
+                ClientError::DaemonUnavailable(endpoint)
+            }
+            other => classify_transport(other),
+        })?;
+    handshake_stream_v3(stream).await
+}
+
+#[cfg(windows)]
+pub async fn connect_and_handshake_v3(
+    pipe_name: &str,
+) -> Result<ClientSession<NamedPipeClient>, ClientError> {
+    let stream = connect_client(pipe_name).map_err(|error| match error {
+        TransportError::EndpointUnavailable { endpoint } => {
+            ClientError::DaemonUnavailable(endpoint)
+        }
+        other => classify_transport(other),
+    })?;
+    handshake_stream_v3(stream).await
+}
+
+fn policy_request_frame(request: PolicyCoreRequest) -> Bytes {
+    Bytes::from(
+        ControlRequest {
+            payload: Some(control_request::Payload::PolicyCore(request)),
+        }
+        .encode_to_vec(),
+    )
+}
+
+async fn policy_session<S>(
+    session: ClientSession<S>,
+    request: PolicyCoreRequest,
+    absence: &str,
+) -> Result<PolicyCoreResponse, ClientError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut transport = session.into_inner();
+    transport
+        .write_frame(policy_request_frame(request))
+        .await
+        .map_err(|error| {
+            ClientError::PolicyAmbiguous(format!(
+                "PolicyCoreRequest send failed ({error}); endpoint {absence}; not replaying"
+            ))
+        })?;
+    let frame = tokio::time::timeout(POLICY_RESPONSE_TIMEOUT, transport.read_frame())
+        .await
+        .map_err(|_| {
+            ClientError::PolicyAmbiguous(format!(
+                "approval response timeout; endpoint {absence}; not replaying"
+            ))
+        })?;
+    let frame = frame.map_err(|error| {
+        ClientError::PolicyAmbiguous(format!(
+            "approval response lost ({error}); endpoint {absence}; not replaying"
+        ))
+    })?;
+    let response = ControlResponse::decode(&frame[..]).map_err(|error| {
+        ClientError::PolicyAmbiguous(format!(
+            "approval response undecodable ({error}); endpoint {absence}; not replaying"
+        ))
+    })?;
+    match response.payload {
+        Some(control_response::Payload::PolicyCore(policy)) => Ok(policy),
+        other => Err(ClientError::PolicyAmbiguous(format!(
+            "unexpected approval reply ({other:?}); endpoint {absence}; not replaying"
+        ))),
+    }
+}
+
+#[cfg(unix)]
+pub async fn policy_request(
+    endpoint: &UnixEndpoint,
+    spawn: impl FnOnce() -> io::Result<Child>,
+    request: PolicyCoreRequest,
+) -> Result<PolicyCoreResponse, ClientError> {
+    let session = connect_or_start_with(spawn, || connect_and_handshake_v3(endpoint)).await?;
+    policy_session(session, request, absence_note(endpoint)).await
+}
+
+#[cfg(windows)]
+pub async fn policy_request(
+    pipe_name: &str,
+    spawn: impl FnOnce() -> io::Result<Child>,
+    request: PolicyCoreRequest,
+) -> Result<PolicyCoreResponse, ClientError> {
+    let session = connect_or_start_with(spawn, || connect_and_handshake_v3(pipe_name)).await?;
+    policy_session(session, request, absence_note(pipe_name)).await
 }
 
 /// Shared connect-first + spawn-once + bounded-retry lifecycle.

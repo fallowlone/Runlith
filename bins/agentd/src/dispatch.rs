@@ -346,6 +346,10 @@ pub(crate) fn map_error(error: &ServiceError) -> (BusinessErrorCode, String) {
                 "internal storage failure".to_owned(),
             ),
         },
+        ServiceError::Policy(_) => (
+            BusinessErrorCode::Conflict,
+            "policy enforcement refused the request".to_owned(),
+        ),
     }
 }
 

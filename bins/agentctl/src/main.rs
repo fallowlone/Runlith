@@ -12,12 +12,14 @@ use std::process::ExitCode;
 
 use agentctl::{resolve_production_endpoint, spawn_sibling_daemon, ClientError};
 use ipc_contracts::proto::{
-    execution_core_request, execution_core_response, task_core_request, task_core_response,
-    AddDependencyRequest, CancelExecutionRequest, CreateProjectRequest, CreateTaskRequest,
-    ExecutionCoreRequest, ExecutionCoreResponse, GetExecutionRequest, GetProjectRequest,
-    GetTaskRequest, LifecycleRequest, ListDependenciesRequest, ListProjectsRequest,
-    ListTasksForProjectRequest, ResumeExecutionRequest, RunExecutionRequest, TaskCoreRequest,
-    TaskCoreResponse, TaskLifecycleOp,
+    execution_core_request, execution_core_response, policy_core_request, policy_core_response,
+    task_core_request, task_core_response, AddDependencyRequest, ApprovalDecision,
+    CancelExecutionRequest, CreateProjectRequest, CreateTaskRequest, DecideApprovalRequest,
+    ExecutionCoreRequest, ExecutionCoreResponse, GetApprovalRequest, GetExecutionRequest,
+    GetProjectRequest, GetTaskRequest, LifecycleRequest, ListDependenciesRequest,
+    ListProjectsRequest, ListTasksForProjectRequest, PolicyCoreRequest, PolicyCoreResponse,
+    ResumeExecutionRequest, RunExecutionRequest, TaskCoreRequest, TaskCoreResponse,
+    TaskLifecycleOp,
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -30,8 +32,9 @@ async fn main() -> ExitCode {
         Some("project") => cmd_project(args.collect()).await,
         Some("task") => cmd_task(args.collect()).await,
         Some("execution") => cmd_execution(args.collect()).await,
+        Some("approval") => cmd_approval(args.collect()).await,
         _ => {
-            eprintln!("usage: agentctl <start|ping|shutdown|project|task|execution> ...");
+            eprintln!("usage: agentctl <start|ping|shutdown|project|task|execution|approval> ...");
             eprintln!("  agentctl project create <id> <name>");
             eprintln!("  agentctl project get <id>");
             eprintln!("  agentctl project list");
@@ -45,6 +48,8 @@ async fn main() -> ExitCode {
             eprintln!("  agentctl execution status <execution-id>");
             eprintln!("  agentctl execution cancel <execution-id>");
             eprintln!("  agentctl execution resume <execution-id> <repository-path> [--ref <name>] [--rev <R>]");
+            eprintln!("  agentctl approval get <approval-request-id>");
+            eprintln!("  agentctl approval decide <approval-request-id> <approve|deny>");
             ExitCode::FAILURE
         }
     }
@@ -351,6 +356,149 @@ async fn cmd_task(args: Vec<String>) -> ExitCode {
         Err(_) => return usage_task(),
     };
     run_business(&pipe_name, request).await
+}
+
+fn usage_approval() -> ExitCode {
+    eprintln!("usage: agentctl approval <get|decide> ...");
+    eprintln!("  agentctl approval get <approval-request-id>");
+    eprintln!("  agentctl approval decide <approval-request-id> <approve|deny>");
+    ExitCode::FAILURE
+}
+
+fn approval_request(args: &[String]) -> Result<PolicyCoreRequest, ()> {
+    match args {
+        [verb, request_id] if verb == "get" && !request_id.trim().is_empty() => {
+            Ok(PolicyCoreRequest {
+                payload: Some(policy_core_request::Payload::GetApproval(
+                    GetApprovalRequest {
+                        request_id: request_id.clone(),
+                    },
+                )),
+            })
+        }
+        [verb, request_id, decision] if verb == "decide" && !request_id.trim().is_empty() => {
+            let decision = match decision.as_str() {
+                "approve" => ApprovalDecision::Approve,
+                "deny" => ApprovalDecision::Deny,
+                _ => return Err(()),
+            };
+            Ok(PolicyCoreRequest {
+                payload: Some(policy_core_request::Payload::DecideApproval(
+                    DecideApprovalRequest {
+                        request_id: request_id.clone(),
+                        decision: decision as i32,
+                    },
+                )),
+            })
+        }
+        _ => Err(()),
+    }
+}
+
+#[cfg(unix)]
+async fn cmd_approval(args: Vec<String>) -> ExitCode {
+    let endpoint = match resolve_production_endpoint() {
+        Ok(endpoint) => endpoint,
+        Err(error) => return fail(&error),
+    };
+    let request = match approval_request(&args) {
+        Ok(request) => request,
+        Err(_) => return usage_approval(),
+    };
+    run_policy(&endpoint, request).await
+}
+
+#[cfg(windows)]
+async fn cmd_approval(args: Vec<String>) -> ExitCode {
+    let pipe_name = match resolve_production_endpoint() {
+        Ok(pipe_name) => pipe_name,
+        Err(error) => return fail(&error),
+    };
+    let request = match approval_request(&args) {
+        Ok(request) => request,
+        Err(_) => return usage_approval(),
+    };
+    run_policy(&pipe_name, request).await
+}
+
+#[cfg(unix)]
+async fn run_policy(
+    endpoint: &ipc_transport::platform::unix::UnixEndpoint,
+    request: PolicyCoreRequest,
+) -> ExitCode {
+    match agentctl::policy_request(endpoint, spawn_sibling_daemon, request).await {
+        Ok(response) => print_policy_response(response),
+        Err(error) => fail(&error),
+    }
+}
+
+#[cfg(windows)]
+async fn run_policy(pipe_name: &str, request: PolicyCoreRequest) -> ExitCode {
+    match agentctl::policy_request(pipe_name, spawn_sibling_daemon, request).await {
+        Ok(response) => print_policy_response(response),
+        Err(error) => fail(&error),
+    }
+}
+
+fn print_policy_response(response: PolicyCoreResponse) -> ExitCode {
+    let approval = match response.payload {
+        Some(policy_core_response::Payload::GetApproval(response)) => response.approval,
+        Some(policy_core_response::Payload::DecideApproval(response)) => response.approval,
+        Some(policy_core_response::Payload::Error(error)) => {
+            eprintln!(
+                "error {}: {}",
+                business_error_name(error.code),
+                error.message
+            );
+            return ExitCode::FAILURE;
+        }
+        None => {
+            return fail(&ClientError::PolicyAmbiguous(
+                "daemon sent an empty approval response".to_owned(),
+            ))
+        }
+    };
+    let Some(approval) = approval else {
+        return fail(&ClientError::PolicyAmbiguous(
+            "daemon omitted the approval dto".to_owned(),
+        ));
+    };
+    println!(
+        "approval {} {} operation={} requester={} task={} expires_at_ms={}",
+        approval.request_id,
+        approval.state,
+        approval.operation_id,
+        approval.requester,
+        approval.task_id,
+        approval.expires_at_ms
+    );
+    if let Some(execution_id) = approval.execution_id.as_deref() {
+        println!("execution {execution_id}");
+    }
+    if let Some(attempt_id) = approval.attempt_id.as_deref() {
+        println!("attempt {attempt_id}");
+    }
+    println!("policy {}", approval.policy_fingerprint);
+    if let Some(approver) = approval.approver.as_deref() {
+        println!("approver {approver}");
+    }
+    for capability in approval.requested {
+        print_approval_capability("requested", capability);
+    }
+    for capability in approval.effective {
+        print_approval_capability("effective", capability);
+    }
+    ExitCode::SUCCESS
+}
+
+fn print_approval_capability(label: &str, capability: ipc_contracts::proto::ApprovalCapabilityDto) {
+    match capability.workspace {
+        Some(workspace) => println!(
+            "{label} {} workspace={} scope={}",
+            capability.kind, workspace, capability.scope
+        ),
+        None => println!("{label} {} scope={}", capability.kind, capability.scope),
+    }
 }
 
 fn project_request(args: &[String]) -> Result<TaskCoreRequest, ()> {
