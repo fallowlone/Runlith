@@ -362,11 +362,22 @@ Process mechanics (environment variables, PATH, working directory, PTY,
 stdio framing, shell strategy) are undecided unless already accepted, and
 user/model-controlled values must never become unsafe shell interpolation.
 
-G6 owns provider-process environment isolation. In particular, the H7 finding
-from TASK-0059 (`data/sessions.db` written by real Claude into a managed
-worktree) belongs to TASK-0065: provider HOME/XDG/data/scratch locations and
-inherited environment must be controlled outside the worktree without moving
-authorization authority into this adapter.
+TASK-0065 closes H7 at the provider-process environment boundary. The Claude
+adapter clears inherited environment, rebuilds a narrow launch allowlist and
+binds provider-writable XDG config/data/state/cache plus scratch/temp paths to
+an application-owned runtime root outside the managed worktree. The production
+composition derives that root beside application state and keys the provider
+environment by the existing managed worktree identity, so restart/recovery does
+not invent a second workspace identity.
+
+Provider-native authentication remains provider-owned. For the current Claude
+CLI, the real `HOME`/profile is an explicit authentication anchor because
+removing it makes the authenticated CLI report `Not logged in`; credentials
+are neither copied nor scraped. Ambient API-key/cloud/Git/SSH/provider/plugin
+environment variables are not inherited. `--safe-mode` disables user/project
+customizations as defense in depth. These mechanics grant no authority:
+Policy/approval/Runner remain canonical and unsupported mandatory isolation
+still fails closed.
 
 ## 16. Open Provider Design Items
 

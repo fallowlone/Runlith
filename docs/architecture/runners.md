@@ -252,8 +252,12 @@ downgrading. TASK-0064 deliberately selects no concrete macOS/Linux/Windows
 sandbox or container backend because that matrix remains an accepted open
 design item.
 
-Provider HOME/XDG/state/scratch construction remains TASK-0065. Full production
-composition of Policy/approval/Secrets/Runner boundaries remains TASK-0067.
+TASK-0065 now materializes provider-process environment hygiene at the Claude
+adapter/composition boundary: inherited environment is cleared, provider-
+writable XDG/state/cache/scratch paths live outside managed worktrees, and
+unsafe environment preparation fails before provider spawn. This is launch
+hygiene, not Runner authorization or an OS sandbox. Full production composition
+of Policy/approval/Secrets/Runner boundaries remains TASK-0067.
 
 ## 12. Replacement test
 
@@ -279,7 +283,6 @@ working-directory enforcement
 resource-limit capability taxonomy
 user-facing runner profile/preset representation
 network-policy enforcement integration
-provider HOME/XDG/state/scratch environment construction (H7; TASK-0065)
 runner cancellation ordering with provider cancellation
 runner timeout semantics
 container backend choice

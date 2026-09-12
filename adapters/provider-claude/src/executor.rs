@@ -28,9 +28,10 @@ use scheduler::{ExecutionPort, ExecutionProblem, WorkEvidence, WorkItem};
 
 use crate::argv::build_argv;
 use crate::config::{bounded_detail, ClaudeConfig};
+use crate::environment::ProviderEnvironment;
 use crate::failure::{looks_like_auth_failure, ClaudeFailure};
 use crate::output::{parse_provider_output, ParsedOutput};
-use crate::process::{spawn_and_supervise, CancelFlag, ChildOutcome};
+use crate::process::{spawn_and_supervise, CancelFlag, ChildOutcome, ProcessInvocation};
 use crate::tracker::LiveProcessTracker;
 use crate::usage::UsageSample;
 use crate::CLAUDE_PROVIDER_REF;
@@ -57,6 +58,7 @@ pub struct ClaudeExecutor {
     config: ClaudeConfig,
     prompt: String,
     workdir: PathBuf,
+    environment: Result<ProviderEnvironment, String>,
     tracker: Option<LiveProcessTracker>,
     cancel: CancelFlag,
 }
@@ -71,6 +73,7 @@ impl ClaudeExecutor {
         config: ClaudeConfig,
         prompt: impl Into<String>,
         workdir: impl Into<PathBuf>,
+        environment_base: impl Into<PathBuf>,
     ) -> Result<Self, String> {
         let prompt = prompt.into();
         if prompt.trim().is_empty() {
@@ -80,10 +83,16 @@ impl ClaudeExecutor {
         if workdir.as_os_str().is_empty() {
             return Err("claude workdir must not be blank".to_owned());
         }
+        let environment_base = environment_base.into();
+        if environment_base.as_os_str().is_empty() {
+            return Err("claude provider environment base must not be blank".to_owned());
+        }
+        let environment = ProviderEnvironment::prepare(&workdir, &environment_base);
         Ok(Self {
             config,
             prompt,
             workdir,
+            environment,
             tracker: None,
             cancel: CancelFlag::fresh(),
         })
@@ -135,11 +144,20 @@ impl ClaudeExecutor {
     }
 
     fn run(&self) -> Result<ClaudeOutcome, ClaudeFailure> {
+        let environment =
+            self.environment
+                .as_ref()
+                .map_err(|detail| ClaudeFailure::EnvironmentIsolation {
+                    detail: bounded_detail(detail.clone()),
+                })?;
         let argv = build_argv(&self.config, &self.prompt);
         let outcome = spawn_and_supervise(
-            self.config.executable(),
-            &argv,
-            &self.workdir,
+            ProcessInvocation {
+                executable: self.config.executable(),
+                argv: &argv,
+                workdir: &self.workdir,
+                environment,
+            },
             &self.cancel,
             self.config.timeout(),
             self.config.max_output_bytes(),
@@ -257,7 +275,10 @@ fn truncate(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use agent_runtime::{AttemptId, ExecutionId};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use task_domain::TaskId;
+
+    static ENV_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn work() -> WorkItem {
         WorkItem {
@@ -268,7 +289,21 @@ mod tests {
     }
 
     fn bind_default(prompt: &str) -> ClaudeExecutor {
-        ClaudeExecutor::bind(ClaudeConfig::default(), prompt, std::env::temp_dir()).unwrap()
+        ClaudeExecutor::bind(
+            ClaudeConfig::default(),
+            prompt,
+            std::env::temp_dir(),
+            test_environment_base(),
+        )
+        .unwrap()
+    }
+
+    fn test_environment_base() -> PathBuf {
+        let id = ENV_COUNTER.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!(
+            "runlith-provider-env-unit-{}-{id}",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -280,10 +315,20 @@ mod tests {
 
     #[test]
     fn bind_rejects_blank_prompt_and_workdir() {
-        assert!(ClaudeExecutor::bind(ClaudeConfig::default(), "  ", std::env::temp_dir()).is_err());
-        assert!(
-            ClaudeExecutor::bind(ClaudeConfig::default(), "prompt", PathBuf::from("")).is_err()
-        );
+        assert!(ClaudeExecutor::bind(
+            ClaudeConfig::default(),
+            "  ",
+            std::env::temp_dir(),
+            test_environment_base()
+        )
+        .is_err());
+        assert!(ClaudeExecutor::bind(
+            ClaudeConfig::default(),
+            "prompt",
+            PathBuf::from(""),
+            test_environment_base()
+        )
+        .is_err());
     }
 
     #[test]
@@ -291,7 +336,13 @@ mod tests {
         let config = ClaudeConfig::default()
             .with_executable("runlith-definitely-not-a-binary-xyz")
             .unwrap();
-        let executor = ClaudeExecutor::bind(config, "prompt", std::env::temp_dir()).unwrap();
+        let executor = ClaudeExecutor::bind(
+            config,
+            "prompt",
+            std::env::temp_dir(),
+            test_environment_base(),
+        )
+        .unwrap();
         let err = executor
             .execute(&work())
             .expect_err("missing CLI must fail");
@@ -307,6 +358,7 @@ mod tests {
             ClaudeConfig::default(),
             "prompt",
             PathBuf::from("/no/such/workdir-anywhere"),
+            test_environment_base(),
         )
         .unwrap();
         let err = executor

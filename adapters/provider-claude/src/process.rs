@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::config::bounded_detail;
+use crate::environment::ProviderEnvironment;
 use crate::failure::ClaudeFailure;
 
 /// Poll quantum for the wait loop. Correctness never depends on its
@@ -78,9 +79,9 @@ impl CancelFlag {
 ///
 /// - `executable` + `argv` travel as direct argv (no shell, ever).
 /// - `stdin` is closed (`null`); the prompt travels as argv.
-/// - Environment is inherited unchanged: provider authentication
-///   (subscription session, keychain helpers, `PATH`) lives there, and
-///   the adapter must not strip it nor inject secrets into it.
+/// - Environment is cleared and rebuilt from [`ProviderEnvironment`].
+///   Provider-owned authentication keeps only the explicit home/profile
+///   anchor; ambient credentials and provider/plugin variables do not pass.
 /// - `workdir` must exist as a directory or spawning refuses with
 ///   `WorkspaceBinding` — the provider never falls back to another
 ///   directory (G4 isolation preserved).
@@ -93,15 +94,26 @@ impl CancelFlag {
 ///   holding an inherited pipe then degrades to truncated tail output,
 ///   never to an unbounded join. The timeout/cancel paths kill the tree
 ///   first, so their joins stay prompt without a grace.
-pub fn spawn_and_supervise(
-    executable: &OsStr,
-    argv: &[OsString],
-    workdir: &Path,
+pub(crate) struct ProcessInvocation<'a> {
+    pub(crate) executable: &'a OsStr,
+    pub(crate) argv: &'a [OsString],
+    pub(crate) workdir: &'a Path,
+    pub(crate) environment: &'a ProviderEnvironment,
+}
+
+pub(crate) fn spawn_and_supervise(
+    invocation: ProcessInvocation<'_>,
     cancel: &CancelFlag,
     deadline: Duration,
     max_stream_bytes: usize,
     capture_grace: Duration,
 ) -> Result<ChildOutcome, ClaudeFailure> {
+    let ProcessInvocation {
+        executable,
+        argv,
+        workdir,
+        environment,
+    } = invocation;
     if !workdir.is_dir() {
         return Err(ClaudeFailure::WorkspaceBinding {
             detail: bounded_detail(format!(
@@ -123,6 +135,7 @@ pub fn spawn_and_supervise(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    environment.apply(&mut command);
     // Own process group (unix): timeout/cancel kills the whole child
     // tree (see kill_tree_and_reap), so forked grandchildren can neither
     // outlive supervision nor hold our capture pipes open. Harmless for
@@ -346,6 +359,17 @@ fn take_drain((shared, handle): (SharedCapture, Option<std::thread::JoinHandle<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static ENV_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn test_environment() -> ProviderEnvironment {
+        let workdir = std::env::current_dir().expect("test current dir");
+        let id = ENV_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base =
+            std::env::temp_dir().join(format!("runlith-process-env-{}-{id}", std::process::id()));
+        ProviderEnvironment::prepare(&workdir, &base).expect("test provider environment")
+    }
 
     #[test]
     fn cancel_flag_is_idempotent() {
@@ -360,9 +384,12 @@ mod tests {
     #[test]
     fn missing_workdir_fails_closed_without_spawning() {
         let outcome = spawn_and_supervise(
-            OsStr::new("runlith-definitely-not-a-binary-xyz"),
-            &[],
-            Path::new("/no/such/workdir-anywhere"),
+            ProcessInvocation {
+                executable: OsStr::new("runlith-definitely-not-a-binary-xyz"),
+                argv: &[],
+                workdir: Path::new("/no/such/workdir-anywhere"),
+                environment: &test_environment(),
+            },
             &CancelFlag::fresh(),
             Duration::from_secs(5),
             1024,
@@ -378,9 +405,12 @@ mod tests {
     fn missing_executable_is_cli_missing() {
         let dir = std::env::temp_dir();
         let outcome = spawn_and_supervise(
-            OsStr::new("runlith-definitely-not-a-binary-xyz"),
-            &[],
-            &dir,
+            ProcessInvocation {
+                executable: OsStr::new("runlith-definitely-not-a-binary-xyz"),
+                argv: &[],
+                workdir: &dir,
+                environment: &test_environment(),
+            },
             &CancelFlag::fresh(),
             Duration::from_secs(5),
             1024,
@@ -406,9 +436,12 @@ mod tests {
         let cancel = CancelFlag::fresh();
         cancel.cancel();
         let outcome = spawn_and_supervise(
-            OsStr::new("runlith-definitely-not-a-binary-xyz"),
-            &[],
-            &dir,
+            ProcessInvocation {
+                executable: OsStr::new("runlith-definitely-not-a-binary-xyz"),
+                argv: &[],
+                workdir: &dir,
+                environment: &test_environment(),
+            },
             &cancel,
             Duration::from_secs(5),
             1024,
