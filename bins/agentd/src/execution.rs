@@ -67,7 +67,7 @@ use policy::{
     Capability, CompiledPolicy, EffectiveCapabilities, FileScope, PolicyLayer, PolicyOutcome,
     PolicyRequest, PolicyRule, RequestOrigin, RequestedCapabilities, ScopeId,
 };
-use runner::IsolationRequirements;
+use runner::{IsolationBackend, IsolationRequirements};
 
 /// Wall-clock bound for one production provider execution. Matches the
 /// adapter default: the daemon does not invent its own timeout policy.
@@ -78,6 +78,18 @@ pub const PROVIDER_TIMEOUT: Duration = Duration::from_secs(300);
 pub const CAPTURE_GRACE: Duration = Duration::from_secs(5);
 
 const PROVIDER_LAUNCH_REQUESTER: &str = "agent-runtime";
+
+fn production_runner_backend() -> Box<dyn IsolationBackend> {
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(runner_macos_seatbelt::MacOsSeatbeltRunner)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Box::new(runner_native::NativeRunner)
+    }
+}
 
 /// Bound for server-local path inputs on the wire (repository paths).
 const MAX_PATH_LEN: usize = 4096;
@@ -321,20 +333,31 @@ impl scheduler::ExecutionPort for SecuredClaudeExecutor {
             }
         };
         let operation = PrivilegedOperation::from_policy_request(&launch.request);
+        let backend = production_runner_backend();
         let spec = ProcessSecuritySpec::new(
             launch.workspace.clone(),
             launch.executable.clone(),
-            IsolationRequirements::trusted_host(),
+            IsolationRequirements::new(true, false, true),
             provider_claude::CLAUDE_PROVIDER_REF,
         );
+        let prepared_launch = runner::prepare_process_launch(
+            backend.as_ref(),
+            &effective,
+            launch.workspace.clone(),
+            launch.executable.clone(),
+            IsolationRequirements::new(true, false, true),
+        )
+        .map_err(|error| scheduler::ExecutionProblem::Failed {
+            detail: format!("G6 runtime launch preparation refused: {error}"),
+        })?;
+        let provider = self
+            .inner
+            .clone()
+            .with_prepared_launch(Arc::from(prepared_launch));
         security
-            .enforce_process_operation(
-                &operation,
-                &runner_native::NativeRunner,
-                &effective,
-                &spec,
-                || self.inner.execute(work),
-            )
+            .enforce_process_operation(&operation, backend.as_ref(), &effective, &spec, || {
+                provider.execute(work)
+            })
             .map_err(security_execution_problem)?
     }
 }
@@ -367,7 +390,10 @@ fn build_provider_launch_security(
     work: &scheduler::WorkItem,
     executable: &std::ffi::OsStr,
 ) -> Result<ProviderLaunchSecurity, String> {
-    let workspace = lease.id().as_str().to_owned();
+    let workspace = Path::new(lease.worktree_ref())
+        .canonicalize()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| lease.worktree_ref().to_owned());
     let executable = ScopeId::new(executable.to_string_lossy().into_owned())
         .map_err(|error| format!("provider launch executable scope: {error}"))?;
     let capabilities = vec![
