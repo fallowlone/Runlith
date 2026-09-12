@@ -1001,6 +1001,17 @@ Merge Queue
 
 Не разрешать agent напрямую писать в main/master.
 
+Каждый `TASK-XXXX` выполняется в отдельной Git-ветке; отдельный worktree для
+этой ветки предпочтителен. Имя ветки обязано содержать task ID, например
+`task-0062-approval-enforcement` или эквивалент по текущей naming convention.
+
+Во время реализации `main`/`master` не изменяется. Task branch попадает в
+`main` только после полного выполнения task, удовлетворения acceptance criteria
+и зелёной required verification suite. Незавершённая или красная task branch
+не merge-ится. Если merge оставляет конфликт или post-merge verification
+красная, `main` ещё не принял task: конфликт/ошибка должны быть устранены, а
+verification повторена до зелёного результата.
+
 ---
 
 # 19. Git failure modes, которые обязаны тестироваться

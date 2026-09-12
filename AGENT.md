@@ -155,11 +155,15 @@ Skills are reusable workflows, not global prompt bloat.
 
 ## 10. Git/worktree rules
 
+- Every `TASK-XXXX` is implemented on a dedicated Git branch; prefer a dedicated worktree for that branch.
+- The task branch name must contain the task ID, for example `task-0062-approval-enforcement` (or the equivalent current naming convention).
 - Never write directly to `main` / `master` during autonomous execution.
 - Work only in the worktree/branch supplied by the Execution Envelope.
 - Do not delete a dirty worktree silently.
 - Do not force-push unless an explicit approved task requires it.
-- Do not merge your own work unless the workflow explicitly assigns that capability.
+- Merge a task branch into `main` only after the task is complete, its acceptance criteria are satisfied, and its required verification suite is green.
+- If merge conflicts remain unresolved or post-merge verification is red, `main` has not accepted the task; resolve the conflict/failure and re-run verification before considering it integrated.
+- Do not merge your own work unless the workflow explicitly assigns that capability; the workflow remains responsible for ensuring a verified completed task is merged.
 
 ## 11. Documentation changes
 
