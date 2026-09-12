@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0067
+completed_through: TASK-0068
 current_gate: G6
-gate_status: IN_PROGRESS
+gate_status: IN_PROGRESS  # TASK-0068: G6_REMEDIATION_REQUIRED; B-ISO-1 remains
 
 items:
   - id: TASK-0012
@@ -1124,10 +1124,65 @@ items:
     exit_criteria_summary: Independent report verifies policy authority,
       approvals, secrets, isolation, H7 closure, Security Audit and full
       regression before any G6 closure claim.
+    outcome: >-
+      G6_REMEDIATION_REQUIRED. Policy authority, durable exact-bound approvals,
+      Secrets Broker leakage/target controls, H7 provider environment and
+      product-authored Security Audit independently re-verified. Closure blocker
+      B-ISO-1 remains: shipped provider execution explicitly selects Trusted
+      Host NativeRunner with zero filesystem/network/process sandbox axes, so
+      workspace/process authority in IsolationPlan is not mechanically confined
+      at the OS boundary required by ADR-0013/INV-153. G5 remains CLOSED; G7 was
+      not started. Record: docs/development/G6_FINAL_CLOSURE_AUDIT.md.
     depends_on:
       - TASK-0067
     blocked_by: []
     references:
+      - docs/security/POLICY_CONTRACT.md
+      - docs/security/THREAT_MODEL.md
+      - docs/security/TRUST_BOUNDARIES.md
+      - docs/development/G6_FINAL_CLOSURE_AUDIT.md
+
+  - id: TASK-0069
+    gate: G6
+    title: Production Runtime Isolation Remediation
+    objective: Close TASK-0068 blocker B-ISO-1 by adding a concrete
+      production-capable isolation backend and requiring real filesystem,
+      process and network enforcement for autonomous provider execution rather
+      than accepting Trusted Host as the production security boundary.
+    scope: Concrete local isolation backend(s), production provider wiring,
+      capability-to-backend enforcement and adversarial escape keepers. Preserve
+      existing Policy/approval/Secrets/H7/Audit contracts; no G7 scope.
+    exit_criteria_summary: Production provider execution is mechanically
+      confined to its authorized filesystem/process/network scope; unavailable
+      mandatory isolation fails before spawn; outside-workspace write/read,
+      unauthorized child-process and unauthorized network probes fail closed;
+      real Claude plus full G6/G5 regression green.
+    depends_on:
+      - TASK-0068
+    blocked_by: []
+    references:
+      - docs/development/G6_FINAL_CLOSURE_AUDIT.md
+      - docs/architecture/adr/ADR-0013-policy-engine-os-isolation.md
+      - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
+      - docs/architecture/runners.md
+      - docs/security/POLICY_CONTRACT.md
+      - docs/security/TRUST_BOUNDARIES.md
+
+  - id: TASK-0070
+    gate: G6
+    title: Independent Adversarial G6 Closure Re-Audit
+    objective: Independently re-test B-ISO-1 and every G6 acceptance criterion
+      after TASK-0069 and report G6_CLOSED or G6_REMEDIATION_REQUIRED without
+      implementing repairs in the audit.
+    scope: Audit only; production isolation escapes, Policy/approval/Secrets,
+      H7, Security Audit, real provider and full G5 regression. No G7 scope.
+    exit_criteria_summary: Independent evidence proves real production
+      confinement and all G6 contracts/regressions before any G6_CLOSED claim.
+    depends_on:
+      - TASK-0069
+    blocked_by: []
+    references:
+      - docs/development/G6_FINAL_CLOSURE_AUDIT.md
       - docs/security/POLICY_CONTRACT.md
       - docs/security/THREAT_MODEL.md
       - docs/security/TRUST_BOUNDARIES.md
