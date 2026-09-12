@@ -72,7 +72,7 @@ is one of: `Mitigated by architecture` (control exists in accepted design),
 | THR-020 | Approval | Stale approval is replayed for another operation, policy revision or wider path/resource | TASK-0062 durable approval state binds exact request/scope/provenance/policy fingerprint/expiry and is single-use; operation owner must re-present the current exact REQUIRE_APPROVAL binding | Integration defect at a future privileged-operation enforcement point | Partially mitigated | ADR-0026; INV-150; TASK-0062 |
 | THR-021 | Filesystem | Path traversal or symlink/race escapes a managed workspace | Typed relative scope rejects traversal; future enforcement canonicalizes/revalidates adjacent to operation | OS/filesystem TOCTOU | Open | ADR-0026; INV-149, INV-153 |
 | THR-022 | Repository/process | Malicious Git hook, test/build script or project executable escalates from repository code to ambient host authority | Repository remains untrusted; process capability + runner isolation + controlled environment | Backend escape or over-broad process scope | Open | ADR-0013, ADR-0026; INV-013, INV-146 |
-| THR-023 | Provider process / credentials | Provider subprocess inherits HOME/XDG/environment secrets or writes provider state into the managed worktree (H7) | Sanitized provider environment; scoped HOME/XDG/state/scratch outside worktree; filesystem policy | Provider behavior/version changes | Open | ADR-0026; G5 final audit H7; TASK-0065 |
+| THR-023 | Provider process / credentials | Provider subprocess inherits HOME/XDG/environment secrets or writes provider state into the managed worktree (H7) | TASK-0065 clears inherited env, isolates provider-writable XDG/state/cache/scratch outside Git, keeps only explicit provider-owned auth/profile anchors and fails closed before spawn on unsafe roots | Provider behavior/version changes; provider-owned auth anchor remains host-visible until stronger OS isolation exists | Partially mitigated | ADR-0026; G5 final audit H7; TASK-0065 |
 | THR-024 | Secrets / network | Environment-variable or credential leakage enables network exfiltration | Secrets Broker releases scoped material only after policy; broad inheritance forbidden; network separate capability | Side channels inside approved tool | Open | ADR-0026; INV-151 |
 | THR-025 | Audit | Provider/model tampers with or fabricates security logs to hide a denied/elevated action | Product-authored Security Audit separate from provider output/Event Journal; append-oriented persistence planned | Local host compromise | Open | ADR-0026; INV-152; TASK-0066 |
 | THR-026 | Policy/enforcement | State changes between policy check and operation (TOCTOU), invalidating approved scope | Preflight is not authority; enforcement revalidates/couples restriction at operation boundary | Backend-specific atomicity limits | Open | ADR-0026; INV-153 |
@@ -122,8 +122,9 @@ Broker is implemented by TASK-0063. TASK-0064 implements the
 capability-to-runner enforcement contract, exact process-authority recheck,
 independent isolation-axis reporting and fail-closed NativeRunner behavior.
 Concrete OS/container sandbox backends and the per-OS backend matrix remain
-open; H7 provider-environment isolation, Security Audit persistence and final
-privileged-operation integration remain owned by later G6 tasks.
+open. H7 provider-environment worktree pollution is closed by TASK-0065;
+Security Audit persistence and final privileged-operation integration remain
+owned by later G6 tasks.
 
 ## 7. Accepted and deferred risks
 

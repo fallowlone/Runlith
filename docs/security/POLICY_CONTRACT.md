@@ -275,9 +275,9 @@ filesystem/network/process sandbox enforcement. It can satisfy only explicit
 trusted-host requirements. If any isolation axis is required, NativeRunner is
 insufficient and execution fails closed. TASK-0064 does not claim that current
 provider execution is OS-sandboxed and does not select a concrete platform
-backend; the platform matrix remains open. H7 provider HOME/XDG/state/scratch
-isolation remains TASK-0065 and final G6 production-path integration remains
-TASK-0067.
+backend; the platform matrix remains open. TASK-0065 closes H7 provider
+environment pollution at the provider launch boundary; final G6 production-
+path integration remains TASK-0067.
 
 ## Secrets Broker boundary
 
@@ -328,11 +328,20 @@ the local threat model; exact storage/signing/retention is TASK-0066.
 ## H7 provider environment isolation
 
 TASK-0059 reproduced real Claude writing `data/sessions.db` inside a managed
-worktree. G6 assigns H7 to TASK-0065. Its architectural owner is the
-Runner/provider-process environment boundary: controlled provider HOME/XDG/data
-directories outside the managed worktree, sanitized inherited environment,
-explicit writable scratch/state areas and filesystem policy. TASK-0060 records
-the owner and dependency only; it does not implement the remediation.
+worktree. TASK-0065 closes that finding at the provider-process environment
+boundary. The production Claude launch now clears inherited environment and
+rebuilds a narrow allowlist; provider-writable XDG config/data/state/cache and
+scratch/temp directories are private application-owned paths outside the
+managed worktree. Unsafe/overlapping environment roots fail before spawn.
+
+Provider-native authentication remains provider-owned and is not copied into
+Runlith persistence. The current Claude CLI requires the existing `HOME`/
+profile as an explicit authentication anchor; removing it causes the CLI to
+report `Not logged in`. That anchor is therefore allowlisted while ambient API
+keys, cloud credentials, Git/SSH overrides and provider/plugin variables are
+not inherited. Provider `--safe-mode` is defense in depth only. None of these
+environment mechanics can ALLOW, approve, widen `EffectiveCapabilities`,
+release a SecretRef or satisfy a Runner isolation requirement.
 
 ## Local-first constraints
 

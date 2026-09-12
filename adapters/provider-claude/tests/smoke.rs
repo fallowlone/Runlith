@@ -51,6 +51,24 @@ fn real_claude_smoke_replies_with_marker() {
             .as_millis()
     ));
     std::fs::create_dir_all(&workdir).expect("smoke workdir");
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&workdir)
+            .status()
+            .expect("smoke git command");
+        assert!(status.success(), "smoke git command failed: {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.name", "runlith-smoke"]);
+    git(&["config", "user.email", "smoke@example.invalid"]);
+    std::fs::write(workdir.join(".keep"), b"").expect("smoke marker");
+    git(&["add", ".keep"]);
+    git(&["commit", "-qm", "init"]);
+    let environment_base = workdir
+        .parent()
+        .expect("smoke parent")
+        .join(format!("runlith-claude-smoke-env-{}", std::process::id()));
     let config = ClaudeConfig::default()
         .with_timeout(Duration::from_secs(180))
         .expect("smoke timeout");
@@ -58,6 +76,7 @@ fn real_claude_smoke_replies_with_marker() {
         config,
         "Do not use any tools. Reply with exactly: G5_SMOKE_OK and nothing else.",
         workdir.clone(),
+        environment_base.clone(),
     )
     .expect("bind smoke executor");
     let work = WorkItem {
@@ -68,7 +87,22 @@ fn real_claude_smoke_replies_with_marker() {
     let started = std::time::Instant::now();
     let result = executor.execute(&work);
     eprintln!("smoke concluded in {:?}", started.elapsed());
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&workdir)
+        .output()
+        .expect("git status after smoke");
+    assert!(
+        status.status.success(),
+        "git status after smoke must succeed"
+    );
+    assert!(
+        status.stdout.is_empty(),
+        "real provider must not dirty smoke workdir; status={:?}",
+        String::from_utf8_lossy(&status.stdout)
+    );
     let _ = std::fs::remove_dir_all(&workdir);
+    let _ = std::fs::remove_dir_all(&environment_base);
 
     match result {
         Ok(evidence) => {

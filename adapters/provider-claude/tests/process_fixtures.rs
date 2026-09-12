@@ -56,6 +56,10 @@ impl Case {
         std::fs::create_dir_all(&workdir).expect("work dir");
         workdir
     }
+
+    fn environment_base(&self) -> PathBuf {
+        self.dir.join("provider-env")
+    }
 }
 
 impl Drop for Case {
@@ -78,7 +82,13 @@ fn executor_for(fixture: &Path, workdir: &Path, timeout: Duration) -> ClaudeExec
         .unwrap()
         .with_timeout(timeout)
         .unwrap();
-    ClaudeExecutor::bind(config, "fixture prompt", workdir.to_path_buf()).unwrap()
+    ClaudeExecutor::bind(
+        config,
+        "fixture prompt",
+        workdir.to_path_buf(),
+        workdir.parent().unwrap().join("provider-env"),
+    )
+    .unwrap()
 }
 
 fn success_fixture(case: &Case) -> PathBuf {
@@ -111,6 +121,97 @@ fn structured_success_becomes_canonical_evidence() {
         "claude:session:11111111-2222-3333-4444-555555555555"
     );
     assert_eq!(executor.provider_ref().as_str(), "claude-code");
+}
+
+#[test]
+fn h7_provider_state_is_outside_worktree_and_ambient_env_is_cleared() {
+    let case = Case::named("h7-env");
+    let workdir = case.workdir();
+    let fixture = case.fixture(
+        "h7.sh",
+        r#"case " $* " in
+  *" --safe-mode "*) ;;
+  *) mkdir -p data; : > data/sessions.db ;;
+esac
+if [ -n "${CARGO_MANIFEST_DIR+x}" ]; then
+  echo 'ambient cargo environment leaked' >&2
+  exit 41
+fi
+mkdir -p "$XDG_DATA_HOME"
+: > "$XDG_DATA_HOME/sessions.db"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"h7 isolated","session_id":"77777777-7777-7777-7777-777777777777"}'
+"#,
+    );
+    let config = ClaudeConfig::default()
+        .with_executable(&fixture)
+        .unwrap()
+        .with_timeout(Duration::from_secs(10))
+        .unwrap();
+    let environment_base = case.environment_base();
+    let executor = ClaudeExecutor::bind(
+        config,
+        "fixture prompt",
+        workdir.clone(),
+        environment_base.clone(),
+    )
+    .unwrap();
+
+    executor
+        .execute(&work("E-H7", "A-H7"))
+        .expect("isolated fixture succeeds");
+
+    assert!(
+        !workdir.join("data/sessions.db").exists(),
+        "provider-native ambient state must not dirty the managed worktree"
+    );
+    let runtime_state = environment_base
+        .join(workdir.file_name().unwrap())
+        .join("data/sessions.db");
+    assert!(
+        runtime_state.is_file(),
+        "provider writable state must land in the isolated provider environment"
+    );
+    assert!(!runtime_state.starts_with(&workdir));
+}
+
+#[test]
+fn provider_environment_inside_worktree_fails_before_spawn() {
+    let case = Case::named("h7-overlap");
+    let workdir = case.workdir();
+    let marker = case.dir.join("must-not-spawn.txt");
+    let fixture = case.fixture(
+        "marker.sh",
+        &format!(
+            "echo spawned > {}\nprintf '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"unexpected\",\"session_id\":\"88888888-8888-8888-8888-888888888888\"}}'\n",
+            marker.display()
+        ),
+    );
+    let config = ClaudeConfig::default()
+        .with_executable(&fixture)
+        .unwrap()
+        .with_timeout(Duration::from_secs(10))
+        .unwrap();
+    let executor = ClaudeExecutor::bind(
+        config,
+        "fixture prompt",
+        workdir.clone(),
+        workdir.join("provider-env"),
+    )
+    .unwrap();
+
+    let err = executor
+        .execute(&work("E-H7-BLOCK", "A-H7-BLOCK"))
+        .expect_err("overlapping provider environment must fail closed");
+    match err {
+        scheduler::ExecutionProblem::Failed { detail } => {
+            assert!(detail.contains("environment_isolation"), "got {detail:?}");
+        }
+        other => panic!("overlap must be a failed execution, got {other:?}"),
+    }
+    assert!(
+        !marker.exists(),
+        "provider must not spawn after isolation refusal"
+    );
 }
 
 #[test]
@@ -294,7 +395,13 @@ fn prompt_with_shell_metacharacters_stays_argv_safe() {
         .unwrap()
         .with_timeout(Duration::from_secs(10))
         .unwrap();
-    let executor = ClaudeExecutor::bind(config, hostile, case.workdir().to_path_buf()).unwrap();
+    let executor = ClaudeExecutor::bind(
+        config,
+        hostile,
+        case.workdir().to_path_buf(),
+        case.environment_base(),
+    )
+    .unwrap();
     let evidence = executor.execute(&work("E-1", "A-1")).expect("echo fixture");
     assert!(
         evidence.summary.contains(hostile),
@@ -336,8 +443,13 @@ fn daemon_grandchild_holding_pipes_does_not_block_finalization() {
         .unwrap()
         .with_capture_grace(grace)
         .unwrap();
-    let executor =
-        ClaudeExecutor::bind(config, "fixture prompt", case.workdir().to_path_buf()).unwrap();
+    let executor = ClaudeExecutor::bind(
+        config,
+        "fixture prompt",
+        case.workdir().to_path_buf(),
+        case.environment_base(),
+    )
+    .unwrap();
 
     let before = std::time::Instant::now();
     let evidence = executor
@@ -392,9 +504,14 @@ fn preset_cancel_flag_spawns_no_child() {
         .unwrap()
         .with_timeout(Duration::from_secs(60))
         .unwrap();
-    let executor = ClaudeExecutor::bind(config, "fixture prompt", workdir.to_path_buf())
-        .unwrap()
-        .with_cancel_flag(flag);
+    let executor = ClaudeExecutor::bind(
+        config,
+        "fixture prompt",
+        workdir.to_path_buf(),
+        case.environment_base(),
+    )
+    .unwrap()
+    .with_cancel_flag(flag);
 
     let err = executor
         .execute(&work("E-1", "A-1"))
@@ -423,9 +540,14 @@ fn external_cancel_flag_signals_the_owned_tree() {
         .unwrap()
         .with_timeout(Duration::from_secs(60))
         .unwrap();
-    let executor = ClaudeExecutor::bind(config, "fixture prompt", workdir.to_path_buf())
-        .unwrap()
-        .with_cancel_flag(flag.clone());
+    let executor = ClaudeExecutor::bind(
+        config,
+        "fixture prompt",
+        workdir.to_path_buf(),
+        case.environment_base(),
+    )
+    .unwrap()
+    .with_cancel_flag(flag.clone());
 
     let handle = std::thread::spawn(move || executor.execute(&work("E-1", "A-1")));
     std::thread::sleep(Duration::from_millis(300));

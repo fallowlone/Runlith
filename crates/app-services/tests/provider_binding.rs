@@ -450,8 +450,13 @@ mod unix {
                         .expect("fixture exe")
                         .with_timeout(Duration::from_secs(30))
                         .expect("timeout");
-                    ClaudeExecutor::bind(config, prompt, lease.worktree_ref().to_owned())
-                        .expect("bind executor to lease path")
+                    ClaudeExecutor::bind(
+                        config,
+                        prompt,
+                        lease.worktree_ref().to_owned(),
+                        env.dir.join("provider-env"),
+                    )
+                    .expect("bind executor to lease path")
                 },
                 &evaluator,
             )
@@ -508,6 +513,87 @@ mod unix {
             state,
             TaskState::Completed,
             "verified path completes via evaluation"
+        );
+    }
+
+    #[test]
+    fn h7_provider_state_outside_worktree_allows_normal_cleanup() {
+        let env = TestEnv::new("claude-h7-cleanup");
+        let fixture_path = fixture(
+            &env.dir,
+            "claude-h7-fixture.sh",
+            r#"mkdir -p "$XDG_DATA_HOME"; echo provider-state > "$XDG_DATA_HOME/sessions.db"; printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture worked","session_id":"99999999-9999-9999-9999-999999999999","usage":{"input_tokens":1,"output_tokens":1}}'"#,
+        );
+        let mut orchestration = env.orchestration();
+        let task_id = seed_ready(orchestration.tasks_mut(), "P-H7", "T-H7");
+        let mut workspace = env.workspace_service();
+        let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
+        let environment_base = env.dir.join("provider-env");
+
+        let outcome = orchestration
+            .schedule_in_workspace(
+                &mut workspace,
+                &task_id,
+                ids("E-H7", "A-H7"),
+                workspace_request(&env, &ExecutionId::new("E-H7").unwrap()),
+                |task, lease| {
+                    let prompt = build_task_prompt(task.objective(), task.acceptance());
+                    let config = ClaudeConfig::default()
+                        .with_executable(fixture_path.clone())
+                        .expect("fixture exe")
+                        .with_timeout(Duration::from_secs(30))
+                        .expect("timeout");
+                    ClaudeExecutor::bind(
+                        config,
+                        prompt,
+                        lease.worktree_ref().to_owned(),
+                        environment_base.clone(),
+                    )
+                    .expect("bind isolated executor")
+                },
+                &evaluator,
+            )
+            .expect("isolated claude-shaped cycle");
+        assert!(matches!(
+            outcome,
+            OrchestrationOutcome::ExecutionSucceededAndVerified { .. }
+        ));
+
+        let lease = workspace
+            .workspace_for_execution(&ExecutionId::new("E-H7").unwrap())
+            .unwrap()
+            .expect("lease")
+            .clone();
+        let worktree = Path::new(lease.worktree_ref());
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(worktree)
+            .output()
+            .expect("worktree status");
+        assert!(status.status.success());
+        assert!(
+            status.stdout.is_empty(),
+            "provider runtime state must not dirty the managed worktree"
+        );
+        let provider_state = environment_base
+            .join(worktree.file_name().expect("managed worktree leaf"))
+            .join("data/sessions.db");
+        assert!(
+            provider_state.is_file(),
+            "provider state must remain outside Git"
+        );
+
+        let cleaned = workspace
+            .cleanup_workspace(lease.id(), &env.repo_path())
+            .expect("ordinary cleanup stays safe after isolated provider run");
+        assert_eq!(
+            cleaned.lease.lifecycle(),
+            workspace::LeaseLifecycle::Removed
+        );
+        assert!(!worktree.exists(), "managed worktree must be removed");
+        assert!(
+            provider_state.is_file(),
+            "TASK-0065 keeps provider runtime evidence separate from Git cleanup"
         );
     }
 }
