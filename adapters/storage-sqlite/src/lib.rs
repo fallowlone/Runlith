@@ -14,6 +14,7 @@
 //! scheduler/provider/session concepts.
 
 mod approval_store;
+mod audit_store;
 mod entry_store;
 mod error;
 mod event;
@@ -32,4 +33,9 @@ pub use event::{
     AttemptOutcome, EventId, EventType, JournalEvent, NewJournalEvent, EVENT_SCHEMA_VERSION,
 };
 pub use migration::SUPPORTED_SCHEMA_VERSION;
+pub use security_audit::{
+    AuditCapability, NewSecurityAuditRecord, SecurityAuditAuthor, SecurityAuditEvent,
+    SecurityAuditId, SecurityAuditOutcome, SecurityAuditRecord, SecurityAuditSubject,
+    SecurityAuditSubjectKind, SECURITY_AUDIT_RECORD_VERSION,
+};
 pub use task_store::SqliteStore;

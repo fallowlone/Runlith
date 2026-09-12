@@ -1,0 +1,11 @@
+[package]
+name = "security-audit"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "security_audit"
+path = "src/lib.rs"
+
+[dependencies]
+policy = { path = "../policy" }

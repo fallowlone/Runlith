@@ -8,7 +8,7 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0065
+completed_through: TASK-0066
 current_gate: G6
 gate_status: IN_PROGRESS
 
@@ -1061,6 +1061,12 @@ items:
     exit_criteria_summary: Policy/approval/secret/elevation/denial/isolation
       events are durably correlated without secret payloads; provider text
       cannot author canonical audit decisions.
+    outcome: Product-authored Security Audit contract and SQLite schema v10
+      implemented as a separate append-oriented store with stable aud-<seq>
+      identities, correlation reads, structured capability/provenance fields,
+      append-only SQL guards and a SHA-256 hash chain with a persisted head.
+      Secret/provider/model payload fields are absent; Event Journal remains
+      separate. G6 remains IN_PROGRESS pending TASK-0067/0068.
     depends_on:
       - TASK-0062
       - TASK-0063
@@ -1069,6 +1075,9 @@ items:
     references:
       - docs/security/POLICY_CONTRACT.md
       - docs/architecture/adr/ADR-0006-state-event-journal-event-sourcing.md
+      - docs/development/G6_SECURITY_AUDIT_PERSISTENCE.md
+      - crates/security-audit/src/lib.rs
+      - adapters/storage-sqlite/migrations/0010_security_audit.sql
 
   - id: TASK-0067
     gate: G6

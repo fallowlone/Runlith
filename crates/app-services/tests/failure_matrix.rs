@@ -1990,7 +1990,7 @@ fn no_scenario_expands_the_durable_taxonomy() {
         // Schema version is asserted structurally by the storage adapter
         // (SUPPORTED_SCHEMA_VERSION); the closed workload-bearing migration
         // sequence (0001..0009) is proven by the storage census tests.
-        assert_eq!(storage_sqlite::SUPPORTED_SCHEMA_VERSION, 9);
+        assert_eq!(storage_sqlite::SUPPORTED_SCHEMA_VERSION, 10);
     }
 }
 

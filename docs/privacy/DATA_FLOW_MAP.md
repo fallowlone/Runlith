@@ -114,8 +114,9 @@ worker. Provider transfer ≠ our-cloud transfer, always.
 - **Policy/consent expectation:** none beyond using the product;
   inspectable and deletable (PRIV-007, PRIV-008).
 - **Persistence at destination:** durable until user/application lifecycle
-  removes it; exact per-category retention durations unresolved (open
-  design item — none invented here).
+  removes it. TASK-0066 Security Audit specifically has no automatic TTL,
+  compaction or per-record deletion; exact retention durations for other
+  categories remain unresolved unless their owning contract says otherwise.
 - **Observability requirement:** auditable mutations (INV-010).
 - **Relevant PRIV/INV/ADR:** PRIV-007, PRIV-008; INV-001, INV-008, INV-010,
   INV-015, INV-025; ADR-0004/0005/0006/0012.
