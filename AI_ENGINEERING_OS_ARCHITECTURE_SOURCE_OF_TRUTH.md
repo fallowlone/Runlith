@@ -3098,21 +3098,47 @@ System
 
 # 57. Secrets Broker
 
-Actual secrets не хранятся в SQLite.
+Actual secrets не хранятся в ordinary application/domain state, SQLite или
+Event Journal. Durable state содержит только opaque `SecretRef` и exact
+`SecretBinding` metadata:
 
 ```text
-DB → secret_ref
+DB → SecretRef + SecretBinding(target = Execution | Tool)
 ```
 
-Secret backend:
+TASK-0063 materializes provider-neutral `SecretsBroker`. Release принимает
+только уже вычисленный `EffectiveCapabilities`, требует exact
+`SecretAccess(secret_ref)` и exact bound delivery target до чтения backend:
+
+```text
+Policy / TASK-0062 approval
+  → EffectiveCapabilities
+  → SecretsBroker
+  → exact SecretRef + exact Execution|Tool binding
+  → local native credential backend
+  → trusted SecretDelivery
+```
+
+Local native credential backend:
 
 - macOS Keychain;
 - Windows Credential Manager;
 - Linux Secret Service.
 
-Если Claude/Codex CLI уже авторизован, наше приложение **не должно извлекать его credential**.
+Cloud/file fallback в TASK-0063 отсутствует. Borrowed secret bytes передаются
+только trusted delivery boundary; временный mutable buffer очищается после
+delivery attempt. Secret material не входит в ordinary logs, frontend state,
+model context или approval explanation.
 
-Запускаем CLI и оставляем auth provider-native.
+Если Claude/Codex CLI уже авторизован, наше приложение **не должно извлекать
+его credential**.
+
+Запускаем CLI и оставляем auth provider-native. Provider-native auth/permission
+не является canonical authority и не может расширить product-owned
+`EffectiveCapabilities`.
+
+TASK-0063 не захватывает Runner/OS isolation (TASK-0064), provider environment
+isolation/H7 (TASK-0065) или Security Audit persistence (TASK-0066).
 
 ---
 

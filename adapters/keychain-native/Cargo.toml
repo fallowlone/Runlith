@@ -1,0 +1,12 @@
+[package]
+name = "keychain-native"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "keychain_native"
+path = "src/lib.rs"
+
+[dependencies]
+keyring = "4.2.0"
+secrets = { path = "../../crates/secrets" }

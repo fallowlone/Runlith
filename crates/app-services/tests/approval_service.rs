@@ -1,8 +1,10 @@
 //! TASK-0062 trusted approval lifecycle: exact binding, restart durability,
 //! expiry, denial and replay refusal.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use app_services::{ApprovalService, FixedClock, ServiceError};
 use policy::{
@@ -10,6 +12,12 @@ use policy::{
     HumanDecision, PolicyContractError, PolicyDecision, PolicyRequest, RequestOrigin,
     RequestedCapabilities,
 };
+use secrets::{
+    SecretBackend, SecretBackendError, SecretBinding, SecretBindingId, SecretBrokerError,
+    SecretDelivery, SecretDeliveryError, SecretDeliveryTarget, SecretMetadataStore, SecretRef,
+    SecretsBroker,
+};
+use storage_sqlite::SqliteStore;
 use storage_sqlite::{ApprovalState, StorageError};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -62,6 +70,72 @@ fn approval_decision(
     .unwrap();
     PolicyDecision::require_approval(request, requirement, "approval.write", "human_required")
         .unwrap()
+}
+
+fn secret_approval_decision(request_id: &str, expires_at_ms: u64) -> PolicyDecision {
+    let capability = Capability::secret("github-token").unwrap();
+    let request = PolicyRequest::new(
+        "op-secret-1",
+        "tool-dispatch",
+        RequestOrigin::new("TASK-1", Some("E-1".into()), Some("A-1".into())).unwrap(),
+        RequestedCapabilities::new(vec![capability.clone()]),
+    )
+    .unwrap();
+    let requirement = ApprovalRequirement::new(
+        request_id,
+        ApprovalBinding::new(request.clone(), "policy-v1", expires_at_ms).unwrap(),
+        EffectiveCapabilities::new(vec![capability]),
+    )
+    .unwrap();
+    PolicyDecision::require_approval(request, requirement, "approval.secret", "human_required")
+        .unwrap()
+}
+
+fn test_secret_material() -> Vec<u8> {
+    (0_u8..40)
+        .map(|value| value.wrapping_mul(31).wrapping_add(5))
+        .collect()
+}
+
+#[derive(Clone, Default)]
+struct MemorySecretBackend(Arc<Mutex<HashMap<String, Vec<u8>>>>);
+
+impl SecretBackend for MemorySecretBackend {
+    fn store(&self, secret: &SecretRef, value: &[u8]) -> Result<(), SecretBackendError> {
+        self.0
+            .lock()
+            .unwrap()
+            .insert(secret.as_str().to_owned(), value.to_vec());
+        Ok(())
+    }
+
+    fn load(&self, secret: &SecretRef) -> Result<Vec<u8>, SecretBackendError> {
+        self.0
+            .lock()
+            .unwrap()
+            .get(secret.as_str())
+            .cloned()
+            .ok_or(SecretBackendError::NotFound)
+    }
+
+    fn delete(&self, secret: &SecretRef) -> Result<(), SecretBackendError> {
+        self.0.lock().unwrap().remove(secret.as_str());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct CaptureSecretDelivery(Vec<Vec<u8>>);
+
+impl SecretDelivery for CaptureSecretDelivery {
+    fn deliver(
+        &mut self,
+        _target: &SecretDeliveryTarget,
+        value: &[u8],
+    ) -> Result<(), SecretDeliveryError> {
+        self.0.push(value.to_vec());
+        Ok(())
+    }
 }
 
 #[test]
@@ -162,4 +236,50 @@ fn denial_expiry_and_hard_deny_remain_final() {
         service.authorize(&hard_deny),
         Err(ServiceError::Policy(PolicyContractError::HardDenied))
     ));
+}
+
+#[test]
+fn approved_secret_row_is_not_bearer_authority_for_broker_release() {
+    let db = TestDb::new("secret-boundary");
+    let decision = secret_approval_decision("approval-secret", 100);
+    let mut approval = ApprovalService::open(&db.0, FixedClock(50)).unwrap();
+    approval.register(&decision).unwrap();
+    approval
+        .decide("approval-secret", HumanDecision::Approve, "local-user")
+        .unwrap();
+
+    let secret = SecretRef::new("github-token").unwrap();
+    let binding = SecretBinding::new(
+        SecretBindingId::new("binding-secret").unwrap(),
+        secret.clone(),
+        SecretDeliveryTarget::tool("github-api").unwrap(),
+    );
+    let backend = MemorySecretBackend::default();
+    let material = test_secret_material();
+    backend.store(&secret, &material).unwrap();
+    let mut store = SqliteStore::open(&db.0).unwrap();
+    store.ensure_ref(&secret).unwrap();
+    store.put_binding(&binding).unwrap();
+    let broker = SecretsBroker::new(store, backend.clone());
+    let mut delivery = CaptureSecretDelivery::default();
+
+    assert_eq!(
+        broker.release(
+            binding.id(),
+            binding.target(),
+            &EffectiveCapabilities::none(),
+            &mut delivery,
+        ),
+        Err(SecretBrokerError::Unauthorized)
+    );
+    assert!(delivery.0.is_empty());
+    drop(broker);
+
+    let effective = approval.authorize(&decision).unwrap();
+    let store = SqliteStore::open(&db.0).unwrap();
+    let broker = SecretsBroker::new(store, backend);
+    broker
+        .release(binding.id(), binding.target(), &effective, &mut delivery)
+        .unwrap();
+    assert_eq!(delivery.0, [material]);
 }
