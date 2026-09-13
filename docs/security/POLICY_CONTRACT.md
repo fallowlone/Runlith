@@ -408,7 +408,15 @@ but cannot become a dependency for securing local execution.
 9. TASK-0069 — Production Runtime Isolation Remediation: implemented concrete
    macOS Seatbelt confinement and mandatory filesystem/network/process axes for
    production Claude execution; B-ISO-1 is remediated in implementation.
-10. TASK-0070 — Independent Adversarial G6 Closure Re-Audit.
+10. TASK-0070 — Independent Adversarial G6 Closure Re-Audit: completed with
+    `G6_CLOSED`. It re-derived all G6 criteria from canonical authority and
+    independently re-tested B-ISO-1, proving production macOS Seatbelt
+    confinement (filesystem/process/network) at the real OS boundary via the
+    shipped adapter keepers plus an external `sandbox-exec` probe, with
+    fail-closed backend selection on unsupported platforms. Policy, approval,
+    Secrets, H7 and Security Audit re-verified; G5 and the mandatory workspace
+    suite green.
 
-G6 remains in progress pending the independent TASK-0070 re-audit; TASK-0069
-does not self-issue a G6 closure verdict.
+G6 is `CLOSED` as of the TASK-0070 independent re-audit. Entry into G7 is a
+separate orchestration step; the coarse `tcp:443` network scope and the
+macOS-only concrete backend remain documented non-blocking residuals.
