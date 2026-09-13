@@ -129,9 +129,13 @@ current G6 privileged boundaries plus adversarial verification. TASK-0068's
 independent closure audit reports `G6_REMEDIATION_REQUIRED`: production
 provider execution still chooses Trusted Host NativeRunner with zero sandbox
 axes in the audited tree. TASK-0069 remediates B-ISO-1 by requiring and
-mechanically enforcing filesystem/network/process axes on macOS; TASK-0070
-owns the independent re-audit and is the only task authorized to turn that
-remediation evidence into a G6 closure verdict.
+mechanically enforcing filesystem/network/process axes on macOS; the TASK-0070
+independent re-audit re-tested B-ISO-1 and every G6 criterion and returned
+`G6_REMEDIATION_REQUIRED`. The provider Seatbelt boundary is real, but the
+confirmed confined-provider → Trusted Host Git execution chain remains open.
+Repository config, fsmonitor, hooks, filters and `.git` pointer replacement are
+relevant attack surfaces. See the TASK-0070 supplemental security evidence.
+F-002 remains a residual NEEDS_MORE_EVIDENCE item.
 
 ## 7. Accepted and deferred risks
 

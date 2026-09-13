@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0069
+completed_through: TASK-0070
 current_gate: G6
-gate_status: IN_PROGRESS  # TASK-0069 remediated B-ISO-1; TASK-0070 owns independent G6 re-audit
+gate_status: IN_PROGRESS  # TASK-0070 audit completed; final verdict G6_REMEDIATION_REQUIRED
 
 items:
   - id: TASK-0012
@@ -1193,11 +1193,20 @@ items:
       H7, Security Audit, real provider and full G5 regression. No G7 scope.
     exit_criteria_summary: Independent evidence proves real production
       confinement and all G6 contracts/regressions before any G6_CLOSED claim.
+    outcome: >-
+      G6_REMEDIATION_REQUIRED. Initial provisional G6_CLOSED was recorded by
+      commit 2402ce2 and later invalidated by supplemental adversarial evidence.
+      F-003 was independently reproduced through the production Trusted Host Git
+      path. Provider Seatbelt confinement remains proven, but G6 is blocked by
+      the Git boundary. F-002 remains NEEDS_MORE_EVIDENCE. Record: docs/development/G6_FINAL_CLOSURE_REAUDIT.md.
     depends_on:
       - TASK-0069
     blocked_by: []
     references:
+      - docs/development/G6_FINAL_CLOSURE_REAUDIT.md
+      - docs/development/G6_TASK_0070_SUPPLEMENTAL_SECURITY_EVIDENCE.md
       - docs/development/G6_FINAL_CLOSURE_AUDIT.md
+      - docs/development/G6_PRODUCTION_RUNTIME_ISOLATION_REMEDIATION.md
       - docs/security/POLICY_CONTRACT.md
       - docs/security/THREAT_MODEL.md
       - docs/security/TRUST_BOUNDARIES.md
