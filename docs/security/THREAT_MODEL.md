@@ -121,14 +121,17 @@ single-use replay enforcement plus the minimal local control plane. Secrets
 Broker is implemented by TASK-0063. TASK-0064 implements the
 capability-to-runner enforcement contract, exact process-authority recheck,
 independent isolation-axis reporting and fail-closed NativeRunner behavior.
-Concrete OS/container sandbox backends and the per-OS backend matrix remain
-open. H7 provider-environment worktree pollution is closed by TASK-0065;
+The per-OS backend matrix remains open, but TASK-0069 now provides concrete
+macOS Seatbelt confinement for autonomous Claude execution. H7 provider-
+environment worktree pollution is closed by TASK-0065;
 TASK-0066 supplies Security Audit persistence and TASK-0067 integrates the
 current G6 privileged boundaries plus adversarial verification. TASK-0068's
 independent closure audit reports `G6_REMEDIATION_REQUIRED`: production
 provider execution still chooses Trusted Host NativeRunner with zero sandbox
-axes, so ADR-0013's mandatory runtime-isolation layer is not satisfied for G6
-closure. TASK-0069 owns B-ISO-1 remediation; TASK-0070 owns re-audit.
+axes in the audited tree. TASK-0069 remediates B-ISO-1 by requiring and
+mechanically enforcing filesystem/network/process axes on macOS; TASK-0070
+owns the independent re-audit and is the only task authorized to turn that
+remediation evidence into a G6 closure verdict.
 
 ## 7. Accepted and deferred risks
 

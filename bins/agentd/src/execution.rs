@@ -67,7 +67,7 @@ use policy::{
     Capability, CompiledPolicy, EffectiveCapabilities, FileScope, PolicyLayer, PolicyOutcome,
     PolicyRequest, PolicyRule, RequestOrigin, RequestedCapabilities, ScopeId,
 };
-use runner::IsolationRequirements;
+use runner::{IsolationBackend, IsolationRequirements};
 
 /// Wall-clock bound for one production provider execution. Matches the
 /// adapter default: the daemon does not invent its own timeout policy.
@@ -78,6 +78,28 @@ pub const PROVIDER_TIMEOUT: Duration = Duration::from_secs(300);
 pub const CAPTURE_GRACE: Duration = Duration::from_secs(5);
 
 const PROVIDER_LAUNCH_REQUESTER: &str = "agent-runtime";
+
+fn production_runner_backend(
+    provider: &provider_claude::ClaudeExecutor,
+) -> Result<Box<dyn IsolationBackend>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let support_read = provider.isolation_support_read_roots()?;
+        let support_write = provider.isolation_support_write_roots()?;
+        Ok(Box::new(
+            runner_macos_seatbelt::MacOsSeatbeltRunner::with_support_roots(
+                support_read,
+                support_write,
+            ),
+        ))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = provider;
+        Ok(Box::new(runner_native::NativeRunner))
+    }
+}
 
 /// Bound for server-local path inputs on the wire (repository paths).
 const MAX_PATH_LEN: usize = 4096;
@@ -321,20 +343,35 @@ impl scheduler::ExecutionPort for SecuredClaudeExecutor {
             }
         };
         let operation = PrivilegedOperation::from_policy_request(&launch.request);
+        let backend = production_runner_backend(&self.inner).map_err(|detail| {
+            scheduler::ExecutionProblem::Failed {
+                detail: format!("G6 runtime backend setup refused: {detail}"),
+            }
+        })?;
         let spec = ProcessSecuritySpec::new(
             launch.workspace.clone(),
             launch.executable.clone(),
-            IsolationRequirements::trusted_host(),
+            IsolationRequirements::new(true, true, true),
             provider_claude::CLAUDE_PROVIDER_REF,
         );
+        let prepared_launch = runner::prepare_process_launch(
+            backend.as_ref(),
+            &effective,
+            launch.workspace.clone(),
+            launch.executable.clone(),
+            IsolationRequirements::new(true, true, true),
+        )
+        .map_err(|error| scheduler::ExecutionProblem::Failed {
+            detail: format!("G6 runtime launch preparation refused: {error}"),
+        })?;
+        let provider = self
+            .inner
+            .clone()
+            .with_prepared_launch(Arc::from(prepared_launch));
         security
-            .enforce_process_operation(
-                &operation,
-                &runner_native::NativeRunner,
-                &effective,
-                &spec,
-                || self.inner.execute(work),
-            )
+            .enforce_process_operation(&operation, backend.as_ref(), &effective, &spec, || {
+                provider.execute(work)
+            })
             .map_err(security_execution_problem)?
     }
 }
@@ -367,7 +404,10 @@ fn build_provider_launch_security(
     work: &scheduler::WorkItem,
     executable: &std::ffi::OsStr,
 ) -> Result<ProviderLaunchSecurity, String> {
-    let workspace = lease.id().as_str().to_owned();
+    let workspace = Path::new(lease.worktree_ref())
+        .canonicalize()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| lease.worktree_ref().to_owned());
     let executable = ScopeId::new(executable.to_string_lossy().into_owned())
         .map_err(|error| format!("provider launch executable scope: {error}"))?;
     let capabilities = vec![
@@ -380,6 +420,10 @@ fn build_provider_launch_security(
                 .map_err(|error| format!("provider launch write scope: {error}"))?,
         ),
         Capability::ProcessExecute(executable.clone()),
+        Capability::NetworkAccess(
+            ScopeId::new(runner::NETWORK_SCOPE_OUTBOUND_TCP_443)
+                .map_err(|error| format!("provider launch network scope: {error}"))?,
+        ),
     ];
     let requested = RequestedCapabilities::new(capabilities.clone());
     let request = PolicyRequest::new(
@@ -592,7 +636,17 @@ fn run_background_inner(
         WorkspaceService::open(&composition.db_path, git, root, app_services::SystemClock)
             .map_err(|error| format!("open workspace service: {error}"))?;
     let tracker = composition.tracker.clone();
-    let executable = composition.provider_executable.clone();
+    let executable = composition
+        .provider_executable
+        .clone()
+        .or_else(|| provider_claude::find_on_path(std::ffi::OsStr::new("claude")))
+        .ok_or_else(|| "provider unavailable: claude executable not found on PATH".to_owned())?;
+    let executable = std::fs::canonicalize(&executable).map_err(|error| {
+        format!(
+            "provider executable cannot be canonicalized ({}): {error}",
+            executable.display()
+        )
+    })?;
     let db_path = composition.db_path.clone();
     let security_work = work.clone();
     let cancel = cancel.clone();
@@ -605,13 +659,9 @@ fn run_background_inner(
             |task, lease| {
                 let prompt =
                     provider_claude::build_task_prompt(task.objective(), task.acceptance());
-                let mut config = provider_claude::ClaudeConfig::default();
-                if let Some(exe) = executable {
-                    config = config
-                        .with_executable(exe)
-                        .expect("composition executable override is validated at startup");
-                }
-                let config = config
+                let config = provider_claude::ClaudeConfig::default()
+                    .with_executable(executable.clone())
+                    .expect("canonical provider executable is non-blank")
                     .with_timeout(PROVIDER_TIMEOUT)
                     .expect("constant provider timeout is non-zero")
                     .with_capture_grace(CAPTURE_GRACE)
@@ -1700,6 +1750,15 @@ mod tests {
     }
 
     fn seed_ready(db: &Path, project: &str, task: &str) {
+        seed_ready_with_objective(db, project, task, format!("objective {task}"));
+    }
+
+    fn seed_ready_with_objective(
+        db: &Path,
+        project: &str,
+        task: &str,
+        objective: impl Into<String>,
+    ) {
         let mut tasks = app_services::TaskService::open(db, app_services::SystemClock)
             .expect("open task service");
         let project_id = task_domain::ProjectId::new(project).unwrap();
@@ -1711,10 +1770,7 @@ mod tests {
             .unwrap();
         let task_id = task_domain::TaskId::new(task).unwrap();
         tasks
-            .create_task(
-                &task_domain::Task::draft(task_id.clone(), project_id, format!("objective {task}"))
-                    .unwrap(),
-            )
+            .create_task(&task_domain::Task::draft(task_id.clone(), project_id, objective).unwrap())
             .unwrap();
         tasks.mark_ready(&task_id).unwrap();
     }
@@ -1901,6 +1957,75 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "real provider: needs RUNLITH_CLAUDE_SMOKE=1 plus authenticated claude CLI"]
+    fn real_claude_runs_through_production_g6_isolation() {
+        if std::env::var("RUNLITH_CLAUDE_SMOKE").as_deref() != Ok("1") {
+            eprintln!("smoke skipped: set RUNLITH_CLAUDE_SMOKE=1");
+            return;
+        }
+        let detection = provider_claude::detect(std::ffi::OsStr::new("claude"));
+        assert_eq!(
+            detection.status,
+            provider_claude::ProviderAvailability::Available,
+            "enabled production smoke requires an available Claude CLI: {}",
+            detection.detail
+        );
+
+        let sandbox = Sandbox::named("g6-real-claude");
+        seed_ready_with_objective(
+            &sandbox.db,
+            "P-G6-REAL",
+            "T-G6-REAL",
+            "Do not use any tools. Reply with exactly G6_PRODUCTION_SANDBOX_OK and nothing else.",
+        );
+        let composition = sandbox.composition(None);
+        let (response, job) =
+            run_via_dispatch(&composition, run_request("T-G6-REAL", &sandbox.repo));
+        let _ = run_payload(&response);
+        run_background(job.expect("accepted real-provider run yields a background job"));
+
+        let store = storage_sqlite::SqliteStore::open(&sandbox.db).expect("open store");
+        let attempt = store
+            .get_attempt(&agent_runtime::AttemptId::new("A-T-G6-REAL").unwrap())
+            .expect("read real-provider attempt")
+            .expect("real-provider attempt exists");
+        let task = store
+            .get_task(&TaskId::new("T-G6-REAL").unwrap())
+            .expect("read real-provider task")
+            .expect("real-provider task exists");
+        match attempt.outcome() {
+            Some(AttemptOutcome::Succeeded) => assert_eq!(
+                task.state(),
+                task_domain::TaskState::Verifying,
+                "provider success must reach independent verification, never self-complete"
+            ),
+            Some(AttemptOutcome::Failed) => {
+                let detail = attempt.detail().unwrap_or_default();
+                assert!(
+                    detail.contains("unrecognized_model"),
+                    "real provider failed for a non-environment reason: {detail}"
+                );
+                assert!(
+                    !detail.contains("operation not permitted")
+                        && !detail.contains("EPERM")
+                        && !detail.contains("sandbox-exec")
+                        && !detail.contains("runtime launch preparation refused"),
+                    "production sandbox blocked the real provider: {detail}"
+                );
+            }
+            other => panic!("unexpected real-provider outcome: {other:?}"),
+        }
+
+        let audit = store
+            .list_security_audit_ordered()
+            .expect("read production security audit");
+        assert!(audit.iter().any(|record| {
+            record.fact.event == storage_sqlite::SecurityAuditEvent::IsolationEnforcement
+                && record.fact.execution_id.as_deref() == Some("E-T-G6-REAL")
+        }));
+    }
+
+    #[test]
     fn run_rejects_unknown_task_without_mutation() {
         let sandbox = Sandbox::named("unknown-task");
         let fixture = fixture_script(&sandbox.dir, "unused.sh", "exit 0\n");
@@ -1968,7 +2093,7 @@ mod tests {
     fn live_provider_run_protects_its_workspace_then_releases() {
         let sandbox = Sandbox::named("liveness");
         seed_ready(&sandbox.db, "P-1", "T-1");
-        let fixture = fixture_script(&sandbox.dir, "slow.sh", "sleep 30\n");
+        let fixture = fixture_script(&sandbox.dir, "slow.sh", "while :; do :; done\n");
         let composition = sandbox.composition(Some(fixture));
 
         let (response, job) = dispatch_execution(

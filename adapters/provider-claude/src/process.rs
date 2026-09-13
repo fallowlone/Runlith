@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use crate::config::bounded_detail;
 use crate::environment::ProviderEnvironment;
 use crate::failure::ClaudeFailure;
+use runner::PreparedLaunch;
 
 /// Poll quantum for the wait loop. Correctness never depends on its
 /// value: exit, cancellation, and deadline are all level-checked every
@@ -99,6 +100,7 @@ pub(crate) struct ProcessInvocation<'a> {
     pub(crate) argv: &'a [OsString],
     pub(crate) workdir: &'a Path,
     pub(crate) environment: &'a ProviderEnvironment,
+    pub(crate) launch: Option<&'a (dyn PreparedLaunch + Send + Sync)>,
 }
 
 pub(crate) fn spawn_and_supervise(
@@ -113,6 +115,7 @@ pub(crate) fn spawn_and_supervise(
         argv,
         workdir,
         environment,
+        launch,
     } = invocation;
     if !workdir.is_dir() {
         return Err(ClaudeFailure::WorkspaceBinding {
@@ -129,8 +132,15 @@ pub(crate) fn spawn_and_supervise(
         return Ok(ChildOutcome::Cancelled);
     }
     let mut command = Command::new(executable);
+    command.args(argv);
+    if let Some(launch) = launch {
+        launch.apply(&mut command);
+    }
+    // `PreparedLaunch::apply` may replace the command with an OS isolation
+    // wrapper (for example macOS sandbox-exec). Apply ordinary process
+    // wiring after that handoff so the wrapper cannot accidentally discard
+    // the real execution contract (cwd, pipes, and stdin policy).
     command
-        .args(argv)
         .current_dir(workdir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -389,6 +399,7 @@ mod tests {
                 argv: &[],
                 workdir: Path::new("/no/such/workdir-anywhere"),
                 environment: &test_environment(),
+                launch: None,
             },
             &CancelFlag::fresh(),
             Duration::from_secs(5),
@@ -410,6 +421,7 @@ mod tests {
                 argv: &[],
                 workdir: &dir,
                 environment: &test_environment(),
+                launch: None,
             },
             &CancelFlag::fresh(),
             Duration::from_secs(5),
@@ -441,6 +453,7 @@ mod tests {
                 argv: &[],
                 workdir: &dir,
                 environment: &test_environment(),
+                launch: None,
             },
             &cancel,
             Duration::from_secs(5),

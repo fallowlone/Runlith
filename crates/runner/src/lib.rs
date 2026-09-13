@@ -8,8 +8,14 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::process::Command;
 
 use policy::{Capability, EffectiveCapabilities, ScopeId};
+
+/// Coarse outbound HTTPS authority currently enforceable by the macOS
+/// Seatbelt backend. Scope text matches the actual OS primitive: any remote
+/// TCP destination on port 443, with all other remote ports denied.
+pub const NETWORK_SCOPE_OUTBOUND_TCP_443: &str = "tcp:443";
 
 /// Runner implementations accepted by the architecture. Only Native is
 /// implemented by TASK-0064; Container remains a replaceable future backend,
@@ -300,6 +306,23 @@ pub trait IsolationBackend {
     fn identity(&self) -> BackendIdentity;
 
     fn enforce(&self, plan: &IsolationPlan) -> Result<EnforcementReport, RunnerError>;
+
+    fn prepare_launch(
+        &self,
+        plan: &IsolationPlan,
+    ) -> Result<Box<dyn PreparedLaunch + Send + Sync>, RunnerError> {
+        let _ = plan;
+        Err(RunnerError::BackendUnavailable {
+            backend: "launch handoff unavailable",
+        })
+    }
+}
+
+/// Prepared child-process launch handoff. The backend that reports
+/// enforcement owns the launch mutation, so providers cannot bypass the
+/// runtime boundary with a raw `Command::spawn`.
+pub trait PreparedLaunch {
+    fn apply(&self, command: &mut Command);
 }
 
 /// Enforces the current exact authority and then performs the privileged
@@ -317,6 +340,21 @@ pub fn enforce_process_operation<T>(
     let report = backend.enforce(&plan)?;
     verify_report(backend.identity(), &plan, &report)?;
     Ok(operation(&plan))
+}
+
+/// Installs and returns the exact launch handoff for a verified plan.
+/// Providers must carry this object into the real child spawn.
+pub fn prepare_process_launch(
+    backend: &dyn IsolationBackend,
+    effective: &EffectiveCapabilities,
+    workspace: impl Into<String>,
+    executable: ScopeId,
+    requirements: IsolationRequirements,
+) -> Result<Box<dyn PreparedLaunch + Send + Sync>, RunnerError> {
+    let plan = IsolationPlan::compile(effective, workspace, executable, requirements)?;
+    let report = backend.enforce(&plan)?;
+    verify_report(backend.identity(), &plan, &report)?;
+    backend.prepare_launch(&plan)
 }
 
 fn verify_report(

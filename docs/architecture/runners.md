@@ -3,8 +3,9 @@
 > Repository-local contract for the execution Runner: where and how
 > executable work runs, what isolation is actually enforced, and how runtime
 > evidence flows back. TASK-0064 materializes the bounded provider-neutral
-> isolation/enforcement foundation described here; the full Runner lifecycle
-> and concrete OS/container sandbox backends remain incremental work.
+> isolation/enforcement foundation described here; TASK-0069 adds the first
+> concrete production backend (macOS Seatbelt), while the full Runner lifecycle
+> and additional platform/container backends remain incremental work.
 >
 > - Binding rules: [`INVARIANTS.md`](./INVARIANTS.md)
 > - Task lifecycle: [`task-engine.md`](./task-engine.md)
@@ -225,8 +226,8 @@ compile to explicit capability/isolation requirements. They cannot authorize
 an operation or bypass Policy, and a Runner reports only restrictions it can
 actually enforce.
 
-Future OS-specific adapters consume those effective requirements behind this
-Runner boundary: product-compatible macOS sandbox mechanisms, Linux
+OS-specific adapters consume those effective requirements behind this Runner
+boundary: product-compatible macOS sandbox mechanisms, Linux
 namespace/seccomp/cgroup/filesystem/network mechanisms, and Windows restricted
 token/Job Object/AppContainer-equivalent mechanisms as appropriate.
 
@@ -252,15 +253,29 @@ downgrading. TASK-0064 deliberately selects no concrete macOS/Linux/Windows
 sandbox or container backend because that matrix remains an accepted open
 design item.
 
+TASK-0069 adds the first production-capable concrete backend,
+`adapters/runner-macos-seatbelt`. Autonomous Claude execution on macOS now
+requires all three filesystem/network/process axes and enters the provider
+through `/usr/bin/sandbox-exec`; it no longer requests Trusted Host. The
+backend derives workspace read/write and executable allowlists from the exact
+`IsolationPlan`, adds only provider-runtime support roots supplied by the
+trusted Claude adapter, keeps the provider-owned `~/.claude` / `.claude.json`
+authentication anchors read-only, and currently supports one explicit network
+scope: outbound TCP/443. Any other network scope fails before spawn. The
+platform runtime baseline imported by Seatbelt is support required for native
+process startup, not task authority. On platforms without a concrete backend,
+production still selects NativeRunner but the mandatory three-axis requirement
+makes execution fail closed before the provider operation.
+
 TASK-0065 now materializes provider-process environment hygiene at the Claude
 adapter/composition boundary: inherited environment is cleared, provider-
 writable XDG/state/cache/scratch paths live outside managed worktrees, and
 unsafe environment preparation fails before provider spawn. This is launch
 hygiene, not Runner authorization or an OS sandbox. TASK-0067 composes the
 current production provider launch through canonical Policy evaluation and
-exact Runner enforcement immediately around provider execution. NativeRunner
-still satisfies only explicit Trusted Host requirements; stronger required
-isolation fails closed.
+exact Runner enforcement immediately around provider execution. TASK-0069
+changes that production launch from explicit Trusted Host to mandatory
+filesystem/network/process confinement and supplies the macOS Seatbelt backend.
 
 ## 12. Replacement test
 
@@ -285,14 +300,13 @@ environment construction
 working-directory enforcement
 resource-limit capability taxonomy
 user-facing runner profile/preset representation
-network-policy enforcement integration
+network-policy enforcement beyond the current outbound TCP/443 Seatbelt scope
 runner cancellation ordering with provider cancellation
 runner timeout semantics
 container backend choice
 rootless container backend compatibility
 workspace mount implementation
-filesystem/symlink escape handling
-platform-specific sandbox matrix
+additional platform-specific sandbox backends (Linux/Windows)
 RemoteRunner protocol
 VMRunner backend
 ```

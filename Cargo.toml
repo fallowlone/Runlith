@@ -23,6 +23,7 @@ members = [
     "adapters/git-cli",
     "adapters/keychain-native",
     "adapters/runner-native",
+    "adapters/runner-macos-seatbelt",
     "crates/product-version",
 ]
 resolver = "2"

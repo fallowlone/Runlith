@@ -160,6 +160,27 @@ impl ProviderEnvironment {
     pub fn scratch_dir(&self) -> &Path {
         &self.scratch_dir
     }
+
+    /// Provider-owned paths the OS sandbox may read in addition to the task
+    /// workspace. The real HOME contribution is limited to Claude's explicit
+    /// authentication anchor rather than the whole user profile.
+    #[must_use]
+    pub fn isolation_support_read_roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![self.runtime_root.clone()];
+        if let Some(home) = &self.home {
+            let home = PathBuf::from(home);
+            roots.push(home.join(".claude"));
+            roots.push(home.join(".claude.json"));
+        }
+        roots
+    }
+
+    /// Provider-writable sandbox support is limited to the isolated runtime
+    /// root. Authentication anchors remain read-only at the OS boundary.
+    #[must_use]
+    pub fn isolation_support_write_roots(&self) -> Vec<PathBuf> {
+        vec![self.runtime_root.clone()]
+    }
 }
 
 fn non_empty_env(name: &str) -> Option<OsString> {

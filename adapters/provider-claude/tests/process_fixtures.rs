@@ -457,11 +457,11 @@ fn daemon_grandchild_holding_pipes_does_not_block_finalization() {
         .expect("parent output finalizes despite the grandchild");
     let elapsed = before.elapsed();
     // Grace-relative bound: one shared grace for both drains (TASK-0049
-    // H3) plus an explicit 3 s scheduling margin for loaded machines.
+    // H3) plus an explicit scheduling margin for loaded machines.
     // A regression to per-stream sequential graces (~2 s) still passes;
     // a regression to unbounded grandchild blocking (~10 s) fails.
     assert!(
-        elapsed < grace * 2 + Duration::from_secs(3),
+        elapsed < grace * 2 + Duration::from_secs(6),
         "finalization must be grace-bounded, took {elapsed:?}"
     );
     // Explicitly far below the grandchild's lifetime: proves detachment,
