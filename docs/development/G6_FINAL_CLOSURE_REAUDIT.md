@@ -8,6 +8,9 @@
 >
 > Production autonomous Claude execution on macOS is now mechanically confined
 > by a concrete Seatbelt backend across filesystem, process and network axes;
+> however, G6 remains blocked by confirmed F-003: the Trusted Host Git boundary
+> permits provider-authored Git metadata/helper influence to cross into the
+> agentd authority boundary.
 > unsupported platforms fail closed before provider spawn. Policy authority,
 > exact-bound approvals, Secrets Broker leakage/target controls, H7 provider
 > environment isolation and the product-authored Security Audit independently
@@ -79,9 +82,10 @@ independently re-tests its blocker rather than rewriting it.
 | Durable approvals | PASS | Exact request/scope/policy-fingerprint/provenance/expiry binding; restart durability; single-use; replay/widen/rebind refusal (`app-services g6_security_integration` 7) | — |
 | Secrets Broker | PASS | Exact `SecretAccess(ref)` + exact delivery target before backend read; opaque metadata only (`secrets` 4; schema v9) | — |
 | Runner contract | PASS | Exact `ProcessExecute` recheck, workspace-scope match, backend-identity + exact-plan bind, stale/widened report refusal, independent axes (`runner` 7) | — |
-| Production Seatbelt filesystem confinement | PASS | Repo adapter keeper + **independent external probe** (sibling-workspace prefix confusion, `~/.ssh` read, absolute/`..`/symlink escape all denied; in-workspace allowed) | — |
-| Production process confinement | PASS | `process-exec` restricted to exact executable; unauthorized child exec denied (`Operation not permitted`); `process-fork` allowed; descendants inherit sandbox | — |
-| Production network confinement | PASS | Unauthorized remote/local port denied; unsupported scope rejected pre-spawn; accepted effective scope is coarse `tcp:443` (see R1) | — |
+| Production Seatbelt filesystem confinement | PASS | Provider-runtime confinement proven by repo adapter keeper + **independent external probe** (sibling-workspace prefix confusion, `~/.ssh` read, absolute/`..`/symlink escape all denied; in-workspace allowed) | — |
+| Production process confinement | PASS | Provider-runtime confinement proven by `process-exec` restricted to exact executable; unauthorized child exec denied (`Operation not permitted`); process descendants inherit sandbox | — |
+| Production network confinement | PASS | Provider-runtime confinement proven by unauthorized remote/local port denial; unsupported scope rejected pre-spawn; accepted effective scope is coarse `tcp:443` (see R1) | — |
+| Trusted Host Git boundary | FAIL | Confined provider can rewrite managed `.git` metadata/pointer and plant an executable helper; production unsandboxed `GitCli::worktree_status` executes the provider-authored fsmonitor helper with agentd authority | F-003 |
 | Fail-closed backend selection | PASS | Non-macOS requires 3 axes; `NativeRunner` reports `none()` → `InsufficientEnforcement` before spawn; no silent downgrade | — |
 | Provider environment / H7 | PASS | Cleared/allowlisted env; provider-writable roots outside worktree; auth anchor read-only; worktree clean after real run | — |
 | Security Audit | PASS | Separate typed store; append-only triggers; SHA-256 chain + persisted head; no payload/secret/provider-text/transcript/env columns; author enum excludes provider/model (`storage-sqlite security_audit` 9) | — |
@@ -279,10 +283,15 @@ pattern kill was used.
 | Audit separation | PASS |
 | Provider cannot complete Task | PASS |
 | G5 remains closed | PASS |
+| Trusted Host Git boundary | FAIL - F-003 |
 
 ## 11. Findings
 
-No closure-blocking findings.
+- **F-003 — CONFIRMED (CRITICAL).** The finding crosses the confined-provider →
+  Trusted Host Git boundary. It is closure-blocking and requires remediation.
+  Evidence: `docs/development/G6_TASK_0070_SUPPLEMENTAL_SECURITY_EVIDENCE.md`.
+- **F-002 — NEEDS_MORE_EVIDENCE.** Residual finding retained as non-primary;
+  it is not the current closure blocker.
 
 ## 12. Residual risks (accepted / non-blocking)
 
