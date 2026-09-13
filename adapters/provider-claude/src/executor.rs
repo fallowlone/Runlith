@@ -142,6 +142,23 @@ impl ClaudeExecutor {
         &self.workdir
     }
 
+    /// Narrow provider-owned paths required by the concrete OS sandbox.
+    /// Environment preparation has already validated the runtime root before
+    /// these paths are exposed to the composition layer.
+    pub fn isolation_support_read_roots(&self) -> Result<Vec<PathBuf>, String> {
+        self.environment
+            .as_ref()
+            .map(ProviderEnvironment::isolation_support_read_roots)
+            .map_err(Clone::clone)
+    }
+
+    pub fn isolation_support_write_roots(&self) -> Result<Vec<PathBuf>, String> {
+        self.environment
+            .as_ref()
+            .map(ProviderEnvironment::isolation_support_write_roots)
+            .map_err(Clone::clone)
+    }
+
     /// Runs one bounded execution, returning the full adapter outcome
     /// (evidence + usage). The provider-neutral seam uses [`Self::execute`].
     pub fn execute_detailed(&self, work: &WorkItem) -> Result<ClaudeOutcome, ClaudeFailure> {

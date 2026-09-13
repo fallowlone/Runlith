@@ -1323,6 +1323,7 @@ dependencies = [
 name = "runner-macos-seatbelt"
 version = "0.1.0"
 dependencies = [
+ "policy",
  "runner",
 ]
 

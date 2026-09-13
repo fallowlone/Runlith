@@ -1000,7 +1000,13 @@ isolation.
 
 TASK-0064 does not select Docker/Podman, Seatbelt, Linux namespace/seccomp/
 cgroup mechanisms, Windows restricted-token/Job Object/AppContainer mechanisms
-or any equivalent. The concrete platform backend matrix remains open.
+or any equivalent. TASK-0069 later adds the first concrete production backend:
+macOS Seatbelt for autonomous Claude execution. That production path requires
+filesystem, network and process enforcement, derives workspace/process scope
+from `IsolationPlan`, grants only the isolated provider runtime plus read-only
+Claude auth anchors as support roots, and currently permits outbound TCP/443 as
+its explicit network scope. Unsupported scopes/platforms fail closed rather
+than downgrading to Trusted Host. Linux/Windows concrete backends remain open.
 TASK-0065 closes H7 worktree pollution at the provider-process environment
 boundary: inherited environment is cleared, provider-writable XDG/state/cache/
 scratch/temp roots are private and outside managed worktrees, and unsafe roots
@@ -1008,7 +1014,9 @@ fail before spawn. Provider-owned authentication remains an explicit profile/
 HOME anchor and grants no canonical authority. TASK-0067 wires the current
 production provider launch through canonical Policy evaluation and exact
 Runner enforcement before provider invocation, while retaining TASK-0065
-provider-environment isolation.
+provider-environment isolation. TASK-0069 strengthens that launch from
+Trusted Host requirements to mandatory three-axis confinement; TASK-0070 owns
+the independent G6 closure re-audit.
 
 ---
 

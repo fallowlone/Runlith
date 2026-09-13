@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0068
+completed_through: TASK-0069
 current_gate: G6
-gate_status: IN_PROGRESS  # TASK-0068: G6_REMEDIATION_REQUIRED; B-ISO-1 remains
+gate_status: IN_PROGRESS  # TASK-0069 remediated B-ISO-1; TASK-0070 owns independent G6 re-audit
 
 items:
   - id: TASK-0012
@@ -1157,10 +1157,25 @@ items:
       mandatory isolation fails before spawn; outside-workspace write/read,
       unauthorized child-process and unauthorized network probes fail closed;
       real Claude plus full G6/G5 regression green.
+    outcome: >-
+      Completed. Production Claude execution on macOS now requires filesystem,
+      network and process isolation and launches through a concrete Seatbelt
+      backend; NativeRunner cannot satisfy those requirements and therefore
+      remains fail-closed on unsupported platforms. The sandbox restricts
+      workspace access, provider runtime/auth support roots, exact executable
+      authority and outbound TCP/443. Adversarial direct/symlink filesystem
+      escape, unauthorized child execution, unauthorized network-port and
+      unsupported-network-scope keepers pass. The real Claude production path
+      reaches the provider under Seatbelt without sandbox denial; the locally
+      configured provider currently returns the same unrecognized-model error
+      both inside and outside Runlith. Full serial workspace regression is
+      green (825 passed, 2 ignored) and clippy -D warnings is green. G6 remains
+      IN_PROGRESS pending the independent TASK-0070 closure re-audit.
     depends_on:
       - TASK-0068
     blocked_by: []
     references:
+      - docs/development/G6_PRODUCTION_RUNTIME_ISOLATION_REMEDIATION.md
       - docs/development/G6_FINAL_CLOSURE_AUDIT.md
       - docs/architecture/adr/ADR-0013-policy-engine-os-isolation.md
       - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md

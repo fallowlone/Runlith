@@ -78,7 +78,7 @@ impl Sandbox {
         file.write_all(
             br#"LAST=""; for P; do LAST="$P"; done
 case "$LAST" in
-  *SLOW*) sleep 45; printf '{"type":"result","subtype":"success","is_error":false,"result":"slow work finished","session_id":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"}'; exit 0 ;;
+  *SLOW*) while :; do :; done ;;
   *BADJSON*) printf 'this is not json{{{'; exit 0 ;;
   *EXIT3*) echo 'provider exploded' >&2; exit 3 ;;
   *) printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture completed the work","session_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}'; exit 0 ;;

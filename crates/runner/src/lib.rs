@@ -12,6 +12,11 @@ use std::process::Command;
 
 use policy::{Capability, EffectiveCapabilities, ScopeId};
 
+/// Coarse outbound HTTPS authority currently enforceable by the macOS
+/// Seatbelt backend. Scope text matches the actual OS primitive: any remote
+/// TCP destination on port 443, with all other remote ports denied.
+pub const NETWORK_SCOPE_OUTBOUND_TCP_443: &str = "tcp:443";
+
 /// Runner implementations accepted by the architecture. Only Native is
 /// implemented by TASK-0064; Container remains a replaceable future backend,
 /// while Remote/VM remain later architecture targets.

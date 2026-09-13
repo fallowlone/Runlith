@@ -248,10 +248,11 @@ Platform adapters remain replaceable:
 - Windows: restricted token/Job Object/AppContainer-equivalent mechanisms as
   appropriate.
 
-TASK-0060 selected none of these backends, and TASK-0064 deliberately still
-does not choose one because the concrete platform matrix remains open. An
-adapter must advertise only what it actually enforces; filesystem restriction
-never implies network isolation.
+TASK-0060 selected none of these backends, and TASK-0064 deliberately did not
+choose one. TASK-0069 adds a concrete macOS Seatbelt backend for autonomous
+Claude execution. Linux/Windows concrete backends remain open. An adapter must
+advertise only what it actually enforces; filesystem restriction never implies
+network isolation.
 
 TASK-0064 implements the bounded provider-neutral foundation in `crates/runner`:
 
@@ -274,12 +275,17 @@ grant and a stale/widened report cannot authorize another operation.
 filesystem/network/process sandbox enforcement. It can satisfy only explicit
 trusted-host requirements. If any isolation axis is required, NativeRunner is
 insufficient and execution fails closed. TASK-0064 does not claim that current
-provider execution is OS-sandboxed and does not select a concrete platform
-backend; the platform matrix remains open. TASK-0065 closes H7 provider
-environment pollution at the provider launch boundary. TASK-0067 composes the
-current production provider launch through Policy evaluation and exact Runner
-enforcement immediately before provider execution. Explicit Trusted Host
-requirements remain the only requirements NativeRunner can satisfy.
+provider execution is OS-sandboxed. TASK-0065 closes H7 provider environment
+pollution at the provider launch boundary. TASK-0067 composes the production
+provider launch through Policy evaluation and exact Runner enforcement
+immediately before provider execution. TASK-0069 then requires filesystem,
+network and process enforcement for that launch and provides
+`runner-macos-seatbelt` on macOS. Its current network capability is explicitly
+`tcp:443` (remote outbound TCP port 443); unsupported network scopes fail
+before spawn. Provider runtime state is writable only under the isolated
+runtime root and the existing Claude HOME auth anchors are sandbox-readable,
+not writable. NativeRunner remains Trusted Host only, so unsupported platforms
+cannot silently downgrade autonomous production execution.
 
 ## Secrets Broker boundary
 
@@ -399,7 +405,10 @@ but cannot become a dependency for securing local execution.
    independently re-verified, but production provider execution still selects
    explicit Trusted Host NativeRunner with zero sandbox axes, leaving the
    mandatory ADR-0013 runtime-isolation layer unenforced for gate closure.
-9. TASK-0069 — Production Runtime Isolation Remediation.
+9. TASK-0069 — Production Runtime Isolation Remediation: implemented concrete
+   macOS Seatbelt confinement and mandatory filesystem/network/process axes for
+   production Claude execution; B-ISO-1 is remediated in implementation.
 10. TASK-0070 — Independent Adversarial G6 Closure Re-Audit.
 
-G6 remains in progress pending B-ISO-1 remediation and independent re-audit.
+G6 remains in progress pending the independent TASK-0070 re-audit; TASK-0069
+does not self-issue a G6 closure verdict.

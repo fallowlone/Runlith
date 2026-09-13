@@ -126,6 +126,17 @@ or container backend is selected by TASK-0064; provider HOME/XDG/state/scratch
 isolation remains TASK-0065 and final production-path G6 wiring remains
 TASK-0067.
 
+TASK-0069 implementation clarification: the production autonomous Claude path
+now requires filesystem, network and process isolation instead of trusted-host
+requirements. On macOS, `adapters/runner-macos-seatbelt` maps the exact
+workspace/process authority to a Seatbelt profile, adds only the isolated
+provider runtime plus read-only provider-owned Claude authentication anchors as
+trusted runtime support, and implements the explicit `tcp:443` outbound network
+scope. Unsupported network scopes or platforms without a backend capable of
+all required axes fail before provider execution; NativeRunner remains an
+honest Trusted Host adapter and is never an implicit downgrade. TASK-0070 owns
+the independent closure verdict for this remediation.
+
 Security Audit remains separate from Event Journal, operational logging and
 model-visible execution receipts. Product-controlled code records canonical
 security decisions and privileged-action evidence; provider/model metadata is
