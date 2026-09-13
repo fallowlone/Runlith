@@ -146,7 +146,7 @@ fn stderr(output: &Output) -> String {
 const SUCCESS_BODY: &str = r#"printf '{"type":"result","subtype":"success","is_error":false,"result":"binary fixture finished","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"}'; exit 0
 "#;
 
-const SLOW_BODY: &str = "sleep 45\n";
+const SLOW_BODY: &str = "while :; do :; done\n";
 
 fn seed_ready(sandbox: &Sandbox, project: &str, task: &str) {
     let created = sandbox.agentctl(&["project", "create", project, &format!("project {project}")]);

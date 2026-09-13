@@ -54,6 +54,7 @@ dependencies = [
  "prost",
  "provider-claude",
  "runner",
+ "runner-macos-seatbelt",
  "runner-native",
  "scheduler",
  "storage-sqlite",
@@ -1251,6 +1252,7 @@ version = "0.1.0"
 dependencies = [
  "agent-runtime",
  "execution-contract",
+ "runner",
  "scheduler",
  "task-domain",
  "workspace",
@@ -1315,6 +1317,14 @@ name = "runner"
 version = "0.1.0"
 dependencies = [
  "policy",
+]
+
+[[package]]
+name = "runner-macos-seatbelt"
+version = "0.1.0"
+dependencies = [
+ "policy",
+ "runner",
 ]
 
 [[package]]

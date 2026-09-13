@@ -1,0 +1,14 @@
+[package]
+name = "runner-macos-seatbelt"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "runner_macos_seatbelt"
+path = "src/lib.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+runner = { path = "../../crates/runner" }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+policy = { path = "../../crates/policy" }
