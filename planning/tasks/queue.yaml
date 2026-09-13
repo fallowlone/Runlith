@@ -1204,6 +1204,7 @@ items:
     blocked_by: []
     references:
       - docs/development/G6_FINAL_CLOSURE_REAUDIT.md
+      - docs/development/G6_TASK_0070_SUPPLEMENTAL_SECURITY_EVIDENCE.md
       - docs/development/G6_FINAL_CLOSURE_AUDIT.md
       - docs/development/G6_PRODUCTION_RUNTIME_ISOLATION_REMEDIATION.md
       - docs/security/POLICY_CONTRACT.md
