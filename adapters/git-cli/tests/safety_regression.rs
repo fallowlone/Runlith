@@ -8,6 +8,190 @@ use workspace::{GitPort, WorkspaceFailure, WorktreeStatus};
 
 use common::{git, lease_for, target_path, Fixture};
 
+#[test]
+fn hostile_git_metadata_is_rejected_before_git_discovery() {
+    let adapter = GitCli::new();
+    let fx = Fixture::new("git-metadata-hostile");
+
+    let original = fx.dir.join(".git");
+    let moved = fx.case_dir.join("real-git-dir");
+    std::fs::rename(&original, &moved).expect("move git metadata");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&moved, &original).expect("create .git symlink");
+
+    #[cfg(unix)]
+    {
+        let err = adapter
+            .is_repository(&fx.path_str())
+            .expect_err(".git symlink metadata must fail closed");
+        assert!(matches!(err, WorkspaceFailure::GitBackendFailure { .. }));
+    }
+}
+
+#[test]
+fn malicious_git_pointer_target_is_rejected() {
+    let adapter = GitCli::new();
+    let fx = Fixture::new("git-pointer-hostile");
+
+    std::fs::remove_dir_all(fx.dir.join(".git")).expect("remove git dir");
+    std::fs::write(fx.dir.join(".git"), "gitdir: /path/that/does/not/exist\n")
+        .expect("write pointer");
+
+    let err = adapter
+        .is_repository(&fx.path_str())
+        .expect_err("unavailable gitdir target must fail closed");
+    assert!(matches!(err, WorkspaceFailure::GitBackendFailure { .. }));
+}
+
+#[test]
+fn git_extension_execution_surfaces_are_disabled() {
+    let adapter = GitCli::new();
+    let fx = Fixture::new("git-extension-surfaces");
+    let marker = fx.case_dir.join("extension-marker");
+
+    // These values would execute helper commands with an unguarded Git
+    // invocation. The adapter should clear config inheritance and apply its
+    // explicit policy before Git reads repository state.
+    std::fs::write(
+        fx.dir.join(".git/config"),
+        format!(
+            "[core]\n\texternalDiff = touch {}\n\tfsmonitor = touch {}\n[credential]\n\thelper = touch {}\n",
+            marker.display(),
+            marker.display(),
+            marker.display()
+        ),
+    )
+    .expect("write hostile config");
+
+    adapter
+        .is_repository(&fx.path_str())
+        .expect("hostile config must not execute extensions");
+    assert!(!marker.exists(), "git extension must not execute helper");
+}
+
+/// TASK-0071 remediation of independent-review Finding 4: the keeper above
+/// exercises `is_repository` (`rev-parse --is-inside-work-tree`), which
+/// never invokes Git's fsmonitor hook and therefore passed even against the
+/// vulnerable e9009a8 baseline (no `run_git` hardening at all). This is the
+/// real production path the TASK-0070 supplemental evidence used to
+/// reproduce F-003: `GitCli::worktree_status` runs `git status`, which is
+/// what triggers `core.fsmonitor`. On e9009a8 this creates the marker file
+/// (RED); with the current `run_git` hardening (`-c core.fsmonitor=false`
+/// plus `env_clear`) it must not (GREEN).
+#[test]
+fn worktree_status_production_path_disables_fsmonitor_execution() {
+    let adapter = GitCli::new();
+    let fx = Fixture::new("fsmonitor-production-path");
+    let marker = fx.case_dir.join("fsmonitor-marker");
+
+    std::fs::write(
+        fx.dir.join(".git/config"),
+        format!("[core]\n\tfsmonitor = touch {}\n", marker.display()),
+    )
+    .expect("write hostile fsmonitor config");
+
+    adapter
+        .worktree_status(&fx.path_str())
+        .expect("hostile fsmonitor config must not break worktree_status");
+    assert!(
+        !marker.exists(),
+        "core.fsmonitor helper must not execute via worktree_status"
+    );
+}
+
+/// TASK-0071 remediation of independent-review Finding 1 (BLOCKER): a
+/// `.git` pointer that is syntactically valid and targets a real, existing
+/// Git metadata directory must still be refused when that directory belongs
+/// to a different repository. Without this check, repository A's `.git`
+/// could point at repository B's real `.git`, and every observation made
+/// while operating on path A (branch, HEAD, revision) would silently
+/// reflect B's identity instead.
+#[test]
+fn valid_but_wrong_gitdir_pointer_redirection_is_refused() {
+    let adapter = GitCli::new();
+    let fx_a = Fixture::new("identity-redirect-a");
+    let fx_b = Fixture::new("identity-redirect-b");
+    // `Fixture::new`'s initial empty commit can collide in OID with another
+    // fixture created in the same second (identical tree, message, and
+    // second-granularity timestamp); a second, differently-worded commit on
+    // B makes the two identities observably distinct beyond doubt.
+    git(
+        &fx_b.dir,
+        &["commit", "-q", "--allow-empty", "-m", "identity-b-marker"],
+    );
+    let b_head = fx_b.primary_head();
+    assert_ne!(
+        fx_a.base_oid, b_head,
+        "fixtures must have observably distinct identities"
+    );
+
+    std::fs::remove_dir_all(fx_a.dir.join(".git")).expect("remove A's real .git directory");
+    std::fs::write(
+        fx_a.dir.join(".git"),
+        format!("gitdir: {}\n", fx_b.dir.join(".git").display()),
+    )
+    .expect("redirect A's .git at B's real, valid metadata");
+
+    let err = adapter
+        .is_repository(&fx_a.path_str())
+        .expect_err("a valid-but-foreign gitdir target must fail closed");
+    assert!(
+        matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
+        "got {err:?}"
+    );
+
+    let err = adapter
+        .resolve_revision(&fx_a.path_str(), "HEAD")
+        .expect_err("resolve_revision must not resolve identity through a foreign redirect");
+    assert!(
+        matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
+        "got {err:?}"
+    );
+}
+
+/// TASK-0071 remediation of independent-review Finding 2 (HIGH):
+/// `worktree_status` previously called Git directly, bypassing the same
+/// `.git` metadata validation `classify_repository` performs for every other
+/// entry point. This proves both hostile shapes fail closed through
+/// `worktree_status` specifically, never silently producing status evidence
+/// for a symlinked or redirected repository identity.
+#[test]
+fn worktree_status_refuses_symlinked_and_redirected_git_metadata() {
+    let adapter = GitCli::new();
+
+    let fx = Fixture::new("worktree-status-symlink-hostile");
+    let original = fx.dir.join(".git");
+    let moved = fx.case_dir.join("real-git-dir");
+    std::fs::rename(&original, &moved).expect("move git metadata");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&moved, &original).expect("create .git symlink");
+        let err = adapter
+            .worktree_status(&fx.path_str())
+            .expect_err(".git symlink metadata must fail closed via worktree_status");
+        assert!(
+            matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
+            "got {err:?}"
+        );
+    }
+
+    let fx_a = Fixture::new("worktree-status-redirect-a");
+    let fx_b = Fixture::new("worktree-status-redirect-b");
+    std::fs::remove_dir_all(fx_a.dir.join(".git")).expect("remove A's real .git directory");
+    std::fs::write(
+        fx_a.dir.join(".git"),
+        format!("gitdir: {}\n", fx_b.dir.join(".git").display()),
+    )
+    .expect("redirect A's .git at B's real, valid metadata");
+    let err = adapter
+        .worktree_status(&fx_a.path_str())
+        .expect_err("redirected .git metadata must not silently produce status evidence");
+    assert!(
+        matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
+        "got {err:?}"
+    );
+}
+
 /// Every value below must either fail typed validation or reach Git as one
 /// literal argv element — never shell interpretation. A shell would execute
 /// the `;`/`$()`/backtick payloads with cwd inside the fixture; success here

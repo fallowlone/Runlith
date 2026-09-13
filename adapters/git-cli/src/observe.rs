@@ -14,7 +14,7 @@ use workspace::{BranchRef, WorkspaceFailure, WorktreeStatus};
 
 use crate::runner::{
     absolutize, backend_failure, bounded_detail, classify_repository, run_git, run_git_text,
-    stderr_excerpt, RepoClass,
+    stderr_excerpt, validate_repository_metadata, RepoClass,
 };
 
 /// Canonical metadata source for the protected/default branch.
@@ -279,6 +279,11 @@ pub fn worktree_status(
     if Path::new(&abs).is_file() {
         return Ok(WorktreeStatus::Invalid);
     }
+    // Same repository-identity check every other Git entry point performs
+    // (`classify_repository`) before Git is allowed to interpret `.git`
+    // metadata at this path — this is the production path TASK-0071 closes
+    // (`worktree_status` previously ran Git here unvalidated).
+    validate_repository_metadata(&abs)?;
     let inside = run_git(executable, &abs, &["rev-parse", "--is-inside-work-tree"])?;
     if !inside.status.success() || String::from_utf8_lossy(&inside.stdout).trim() != "true" {
         return Ok(WorktreeStatus::Invalid);
