@@ -131,11 +131,11 @@ provider execution still chooses Trusted Host NativeRunner with zero sandbox
 axes in the audited tree. TASK-0069 remediates B-ISO-1 by requiring and
 mechanically enforcing filesystem/network/process axes on macOS; the TASK-0070
 independent re-audit re-tested B-ISO-1 and every G6 criterion and returned
-`G6_CLOSED` (OS-boundary confinement proven by the shipped adapter keepers and
-an external `sandbox-exec` probe, fail-closed backend selection on unsupported
-platforms, with Policy/approval/Secrets/H7/Security-Audit and full G5 + mandatory
-regression green). The coarse `tcp:443` egress scope and macOS-only concrete
-backend remain documented non-blocking residuals.
+`G6_REMEDIATION_REQUIRED`. The provider Seatbelt boundary is real, but the
+confirmed confined-provider → Trusted Host Git execution chain remains open.
+Repository config, fsmonitor, hooks, filters and `.git` pointer replacement are
+relevant attack surfaces. See the TASK-0070 supplemental security evidence.
+F-002 remains a residual NEEDS_MORE_EVIDENCE item.
 
 ## 7. Accepted and deferred risks
 
