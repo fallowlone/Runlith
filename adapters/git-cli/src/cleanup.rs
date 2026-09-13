@@ -28,7 +28,10 @@ use std::path::{Path, PathBuf};
 use workspace::{BranchRef, WorkspaceFailure, WorkspaceLease, WorktreeStatus};
 
 use crate::observe::{self, worktree_registered};
-use crate::runner::{absolutize, backend_failure, bounded_detail, run_git, stderr_excerpt};
+use crate::runner::{
+    absolutize, backend_failure, bounded_detail, run_git, stderr_excerpt,
+    validate_repository_metadata,
+};
 
 /// Removes the lease's worktree registration without force.
 pub fn remove_worktree(
@@ -61,6 +64,10 @@ pub fn remove_worktree(
             )),
         });
     }
+    // Same repository-identity check as every other Git entry point: this
+    // function goes on to call Git directly (`attached_branch`,
+    // `discover_primary`, the removal mutation itself) against this path.
+    validate_repository_metadata(&target_abs)?;
     // Dirtiness pre-check: ordinary cleanup never destroys uncommitted or
     // untracked work. Git's own non-forced refusal below is the second
     // boundary (TOCTOU); this pre-check gives the typed dirty signal.

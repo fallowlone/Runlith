@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0070
+completed_through: TASK-0071
 current_gate: G6
-gate_status: IN_PROGRESS  # TASK-0070 audit completed; final verdict G6_REMEDIATION_REQUIRED
+gate_status: IN_PROGRESS  # TASK-0071 remediation implemented; pending independent re-review before any G6 closure verdict
 
 items:
   - id: TASK-0012
@@ -1209,4 +1209,54 @@ items:
       - docs/development/G6_PRODUCTION_RUNTIME_ISOLATION_REMEDIATION.md
       - docs/security/POLICY_CONTRACT.md
       - docs/security/THREAT_MODEL.md
+      - docs/security/TRUST_BOUNDARIES.md
+
+  - id: TASK-0071
+    gate: G6
+    title: Trusted Host Git Boundary Hardening — Repository Identity Remediation
+    objective: Close the F-003 gaps identified by two independent security
+      reviews after TASK-0070's re-audit — insufficient `.git` pointer
+      validation (a valid-but-wrong `gitdir:` target could redirect
+      repository identity to an unrelated repository) and validation
+      coverage gaps in `worktree_status`/`compute_diff` — while preserving
+      the already-working `run_git` hardening and every existing G6
+      regression.
+    scope: Repository-identity validation in the git-cli adapter
+      (`runner::validate_repository_metadata` and its call sites in
+      `observe`, `diff`, `cleanup`) plus permanent regression coverage for
+      the reproduced findings. No policy/approval/Secrets/H7 changes, no
+      adapter redesign, no G7 scope.
+    exit_criteria_summary: A `.git` pointer redirecting to a different, real
+      repository fails closed; every Git-invoking entry point in the
+      adapter validates repository metadata before running Git; a
+      regression exists using the actual production
+      `worktree_status`/`core.fsmonitor` path (not an inert `rev-parse`
+      keeper); full git-cli plus G6 integration regression green.
+    outcome: >-
+      Implemented and independently retestable; not self-certified.
+      Strengthened `validate_repository_metadata` to require the Git-native
+      linked-worktree back-reference (`gitdir`/`commondir`) before accepting
+      a `.git` pointer target, closing the valid-but-wrong redirection
+      (Finding 1). Added the same validation to `worktree_status`, which
+      transitively covers `compute_diff` and `remove_worktree`'s first Git
+      call, plus explicit re-validation in `compute_diff` and
+      `remove_worktree` for their own further direct Git calls (Findings 2,
+      3). Added a real F-003 regression using `worktree_status` plus
+      `core.fsmonitor` (Finding 4) and permanent regressions for both the
+      redirection attack and `worktree_status`-specific hostile metadata
+      (Finding 2). All 61 pre-existing git-cli tests plus 4 new (65 total)
+      and the 7 app-services G6 integration tests are green; fmt and
+      clippy -D warnings are clean. TOCTOU between validation and
+      invocation (Finding 5) is acknowledged as a bounded residual, not
+      eliminated. Record: docs/development/G6_TASK_0071_TRUSTED_HOST_GIT_BOUNDARY_HARDENING_EVIDENCE.md.
+      G6 remains IN_PROGRESS pending independent re-review of this
+      remediation; not merged.
+    depends_on:
+      - TASK-0070
+    blocked_by: []
+    references:
+      - docs/development/G6_TASK_0071_TRUSTED_HOST_GIT_BOUNDARY_HARDENING_EVIDENCE.md
+      - docs/development/G6_TASK_0070_SUPPLEMENTAL_SECURITY_EVIDENCE.md
+      - docs/development/G6_FINAL_CLOSURE_REAUDIT.md
+      - docs/security/POLICY_CONTRACT.md
       - docs/security/TRUST_BOUNDARIES.md

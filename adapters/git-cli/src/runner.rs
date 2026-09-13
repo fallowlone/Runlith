@@ -19,6 +19,7 @@
 //! appear nowhere as executed commands.
 
 use std::ffi::OsStr;
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -111,6 +112,163 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     }
 }
 
+/// Validates the repository metadata entry before asking Git to interpret it.
+///
+/// Git accepts `.git` files for linked worktrees: `gitdir: <path>` pointing
+/// at `<main-repo>/.git/worktrees/<id>`. Existence and directory-ness alone
+/// are not enough: a caller could point `.git` at any other syntactically
+/// valid Git metadata directory — another repository's `.git`, or another
+/// worktree's metadata — and this adapter would silently observe and report
+/// that repository's identity instead of the one at this path.
+///
+/// A genuine linked-worktree metadata directory always carries a `gitdir`
+/// file holding the absolute path back to the *specific* worktree `.git`
+/// file that points at it, plus a `commondir` file pointing back to the real
+/// common `.git` directory — the exact back-reference Git itself relies on
+/// (`git worktree list`/`repair` use it to detect a moved or foreign
+/// worktree). Requiring that back-reference to resolve to this `.git` file
+/// is what distinguishes a legitimate linked worktree from an arbitrary
+/// (even validly-formed) redirection target: Git wrote the back-reference
+/// for the real worktree at creation time, so a `.git` file redirected at a
+/// foreign repository's metadata fails this check because that metadata's
+/// own back-reference (if it has one at all) points elsewhere.
+///
+/// This is invoked on every call that is about to run Git against `path`
+/// (see `classify_repository`, `observe::worktree_status`,
+/// `diff::compute_diff`, `cleanup::remove_worktree`): the metadata backing a
+/// worktree is provider-writable content, so it is re-checked at each
+/// operation rather than once and cached.
+pub(crate) fn validate_repository_metadata(path: &Path) -> Result<(), WorkspaceFailure> {
+    let git_path = path.join(".git");
+    let metadata = match fs::symlink_metadata(&git_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(backend_failure(format!(
+                "git-cli: cannot inspect repository metadata {}: {e}",
+                git_path.display()
+            )));
+        }
+    };
+
+    if metadata.file_type().is_symlink() {
+        return Err(backend_failure(
+            "git-cli: symbolic-link .git metadata is not accepted",
+        ));
+    }
+
+    if metadata.is_file() {
+        let resolved = resolve_gitdir_pointer(&git_path)?;
+        let target_meta = fs::symlink_metadata(&resolved).map_err(|e| {
+            backend_failure(format!(
+                "git-cli: .git pointer target is unavailable {}: {e}",
+                resolved.display()
+            ))
+        })?;
+        if target_meta.file_type().is_symlink() {
+            return Err(backend_failure(
+                "git-cli: .git pointer target must not be a symbolic link",
+            ));
+        }
+        if !target_meta.is_dir() {
+            return Err(backend_failure(
+                "git-cli: .git pointer target is not a directory",
+            ));
+        }
+        validate_linked_worktree_backreference(&git_path, &resolved)?;
+    }
+
+    Ok(())
+}
+
+/// Parses and resolves a `gitdir: <path>` `.git` file to an absolute,
+/// lexically-normalized path, without touching the filesystem beyond the
+/// read of `git_path` itself.
+fn resolve_gitdir_pointer(git_path: &Path) -> Result<PathBuf, WorkspaceFailure> {
+    let content = fs::read_to_string(git_path).map_err(|e| {
+        backend_failure(format!(
+            "git-cli: cannot read .git metadata {}: {e}",
+            git_path.display()
+        ))
+    })?;
+    let pointer = content
+        .strip_prefix("gitdir:")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| backend_failure("git-cli: invalid .git pointer metadata"))?;
+    let target = PathBuf::from(pointer);
+    let base = git_path.parent().unwrap_or(git_path);
+    let resolved = if target.is_absolute() {
+        target
+    } else {
+        base.join(target)
+    };
+    Ok(lexical_normalize(&resolved))
+}
+
+/// Confirms `target` is the linked-worktree metadata directory Git itself
+/// created for the worktree whose `.git` file is `git_path` — never an
+/// arbitrary directory, or another repository's metadata, that merely
+/// happens to be a syntactically valid pointer target.
+fn validate_linked_worktree_backreference(
+    git_path: &Path,
+    target: &Path,
+) -> Result<(), WorkspaceFailure> {
+    let reverse_pointer = target.join("gitdir");
+    let reverse = fs::read_to_string(&reverse_pointer).map_err(|_| {
+        backend_failure(
+            "git-cli: .git pointer target is missing the linked-worktree back-reference; \
+             refusing repository identity redirection",
+        )
+    })?;
+    let reverse_path = lexical_normalize(&PathBuf::from(reverse.trim()));
+    // Git canonicalizes (resolves symlinks in) the absolute path it records
+    // in both the forward and reverse worktree pointers, so the comparison
+    // must do the same (e.g. macOS `/tmp` -> `/private/tmp`) — a purely
+    // lexical comparison would reject every legitimate linked worktree
+    // created under a symlinked temp/root directory.
+    let canonical_or_lexical =
+        |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    if canonical_or_lexical(&reverse_path) != canonical_or_lexical(git_path) {
+        return Err(backend_failure(
+            "git-cli: .git pointer target does not reference this worktree; \
+             refusing repository identity redirection",
+        ));
+    }
+
+    let commondir_pointer = target.join("commondir");
+    let commondir = fs::read_to_string(&commondir_pointer).map_err(|_| {
+        backend_failure(
+            "git-cli: .git pointer target is missing the linked-worktree common-directory \
+             reference",
+        )
+    })?;
+    let commondir_path = PathBuf::from(commondir.trim());
+    let commondir_resolved = if commondir_path.is_absolute() {
+        commondir_path
+    } else {
+        target.join(commondir_path)
+    };
+    let commondir_resolved = lexical_normalize(&commondir_resolved);
+    let common_meta = fs::symlink_metadata(&commondir_resolved).map_err(|e| {
+        backend_failure(format!(
+            "git-cli: linked-worktree common directory is unavailable {}: {e}",
+            commondir_resolved.display()
+        ))
+    })?;
+    if common_meta.file_type().is_symlink() {
+        return Err(backend_failure(
+            "git-cli: linked-worktree common directory must not be a symbolic link",
+        ));
+    }
+    if !common_meta.is_dir() {
+        return Err(backend_failure(
+            "git-cli: linked-worktree common directory is not a directory",
+        ));
+    }
+    Ok(())
+}
+
 /// Whether `child` lies strictly inside `parent` (both absolute, normalized).
 #[must_use]
 pub fn path_strictly_inside(parent: &Path, child: &Path) -> bool {
@@ -130,12 +288,48 @@ pub fn run_git<A: AsRef<OsStr>>(
     args: &[A],
 ) -> Result<Output, WorkspaceFailure> {
     let mut command = Command::new(executable);
+    // The child process receives a controlled Git environment. Repository
+    // configuration, hooks, filters, fsmonitor, helpers, and inherited
+    // GIT_* variables are attacker-controlled input at this boundary.
+    // Disable configuration discovery and executable extension points before
+    // Git parses the untrusted repository.
     command
+        .env_clear()
+        .args([
+            OsStr::new("-c"),
+            OsStr::new("core.hooksPath=/dev/null"),
+            OsStr::new("-c"),
+            OsStr::new("core.fsmonitor=false"),
+            OsStr::new("-c"),
+            OsStr::new("core.sshCommand=false"),
+            OsStr::new("-c"),
+            OsStr::new("credential.helper="),
+            OsStr::new("-c"),
+            OsStr::new("core.externalDiff="),
+            OsStr::new("-c"),
+            OsStr::new("diff.external="),
+            OsStr::new("-c"),
+            OsStr::new("core.pager=cat"),
+            OsStr::new("-c"),
+            OsStr::new("pager.status=false"),
+        ])
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        // Do not inherit host Git configuration locations. Repository-local
+        // configuration is still handled by explicit `-c` policy above and
+        // remains an area guarded by the metadata identity work in TASK-0071.
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_OPTIONAL_LOCKS", "0");
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_PAGER", "cat")
+        .env("PAGER", "cat")
+        .env("GIT_EDITOR", ":")
+        .env("GIT_SEQUENCE_EDITOR", ":");
     let output = command.output().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             backend_failure(format!(
@@ -205,6 +399,7 @@ pub fn classify_repository(executable: &OsStr, path: &Path) -> Result<RepoClass,
             });
         }
     }
+    validate_repository_metadata(path)?;
     let inside = run_git(executable, path, &["rev-parse", "--is-inside-work-tree"])?;
     if inside.status.success() && String::from_utf8_lossy(&inside.stdout).trim() == "true" {
         let (_, root_text) = run_git_text(executable, path, &["rev-parse", "--show-toplevel"])?;

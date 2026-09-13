@@ -22,7 +22,10 @@ use workspace::{
 };
 
 use crate::observe;
-use crate::runner::{absolutize, backend_failure, bounded_detail, run_git, run_git_text};
+use crate::runner::{
+    absolutize, backend_failure, bounded_detail, run_git, run_git_text,
+    validate_repository_metadata,
+};
 
 /// Computes the workspace diff baselined at the lease's recorded base.
 pub fn compute_diff(
@@ -62,6 +65,13 @@ pub fn compute_diff(
     let worktree_str = abs
         .to_str()
         .ok_or_else(|| backend_failure("git-cli: worktree path is not UTF-8; refusing diff"))?;
+
+    // `worktree_status` above already validated this same path, but this
+    // function goes on to run several more direct Git invocations
+    // (`prove_base_present`, `committed_changes`, `working_changes`);
+    // re-checking here keeps every Git call in this function behind the same
+    // identity boundary rather than trusting an earlier, separate check.
+    validate_repository_metadata(&abs)?;
 
     let head =
         observe::resolve_revision(executable, worktree_str, "HEAD").map_err(|e| match e {
