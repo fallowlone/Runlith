@@ -408,7 +408,14 @@ but cannot become a dependency for securing local execution.
 9. TASK-0069 — Production Runtime Isolation Remediation: implemented concrete
    macOS Seatbelt confinement and mandatory filesystem/network/process axes for
    production Claude execution; B-ISO-1 is remediated in implementation.
-10. TASK-0070 — Independent Adversarial G6 Closure Re-Audit.
+10. TASK-0070 — Independent Adversarial G6 Closure Re-Audit: completed with
+    `G6_REMEDIATION_REQUIRED`. Supplemental adversarial evidence invalidated
+    the provisional `G6_CLOSED` result recorded by commit `2402ce2`. F-003 was
+    independently reproduced through the production Trusted Host Git path.
+    Policy, approval, Secrets, H7 and Security Audit boundaries remain valid;
+    G6 remains IN_PROGRESS pending Git boundary remediation.
 
-G6 remains in progress pending the independent TASK-0070 re-audit; TASK-0069
-does not self-issue a G6 closure verdict.
+G6 remains `IN_PROGRESS` after the TASK-0070 independent re-audit. Provider
+Seatbelt confinement is real, but it does not secure later Trusted Host Git
+operations. Final privileged-operation owners must enforce their own boundary.
+Entry into G7 has not started.
