@@ -35,7 +35,7 @@ const SUCCESS_BODY: &str = r#"printf '{"type":"result","subtype":"success","is_e
 /// Slow provider double: sleeps so the winner stays live while the test
 /// inspects status/cancel, then observes cancellation via the composition
 /// flag (kill of the owned tree) like the real CLI supervision.
-const SLOW_BODY: &str = "sleep 10\n";
+const SLOW_BODY: &str = "while :; do :; done\n";
 
 struct Sandbox {
     root: PathBuf,
