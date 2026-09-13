@@ -4,7 +4,7 @@
 > remediation. Re-tests TASK-0068 blocker **B-ISO-1** and every G6 acceptance
 > criterion.
 >
-> **Verdict: `G6_CLOSED`.**
+> **Verdict: `G6_REMEDIATION_REQUIRED`.**
 >
 > Production autonomous Claude execution on macOS is now mechanically confined
 > by a concrete Seatbelt backend across filesystem, process and network axes;
@@ -313,17 +313,20 @@ No closure-blocking findings.
   (read-only) and remain host-visible. Documented accepted residual until
   stronger isolation exists.
 
-## 13. Verdict
+## 13. Corrected verdict after supplemental evidence
 
-**`G6_CLOSED`.**
+**`G6_REMEDIATION_REQUIRED`.**
 
-All twenty-one closure criteria are independently satisfied with captured
-evidence. B-ISO-1 is remediated and re-proven at the OS boundary. No
-closure-blocking finding remains. G6 moves to `CLOSED`.
+The initial audit result recorded by commit `2402ce2` was a provisional
+`G6_CLOSED` verdict. Supplemental adversarial evidence discovered F-003 and
+invalidated that conclusion. Claude independently reproduced the same issue
+through the production execution path, confirming that the Trusted Host Git
+boundary remained a G6 blocker.
+
+The historical provisional result is preserved as audit history. The corrected
+TASK-0070 outcome is `G6_REMEDIATION_REQUIRED`, and G6 remains `IN_PROGRESS`
+while the Git boundary remediation is handled by a future canonical task.
 
 G7 was not started. This audit performs no remediation and changes no
-production code, test, ADR or historical record. The next canonical action is
-independent review of the TASK-0070 audit commit, then normal merge into `main`
-and post-merge verification; entry into G7 is a separate orchestration step and
-`planning/roadmap.yaml` is intentionally unchanged (TASK-0059 closure
-precedent).
+production implementation. The next canonical action is review and acceptance
+of this corrected audit state, followed by a separate remediation task allocation.

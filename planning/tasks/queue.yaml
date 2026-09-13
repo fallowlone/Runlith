@@ -10,7 +10,7 @@
 schema_version: 1
 completed_through: TASK-0070
 current_gate: G6
-gate_status: CLOSED  # TASK-0070 independent re-audit verdict G6_CLOSED; B-ISO-1 remediated and re-proven
+gate_status: IN_PROGRESS  # TASK-0070 audit completed; final verdict G6_REMEDIATION_REQUIRED
 
 items:
   - id: TASK-0012
@@ -1194,30 +1194,11 @@ items:
     exit_criteria_summary: Independent evidence proves real production
       confinement and all G6 contracts/regressions before any G6_CLOSED claim.
     outcome: >-
-      G6_CLOSED. Independent re-audit re-derived all G6 criteria from canonical
-      authority and re-tested blocker B-ISO-1 rather than trusting the TASK-0069
-      record. Production autonomous Claude execution on macOS is mechanically
-      confined by the concrete Seatbelt backend across filesystem/process/
-      network axes and fails closed before spawn on unsupported platforms
-      (NativeRunner cannot satisfy the mandatory three axes). Filesystem escape
-      (sibling-workspace prefix confusion, ~/.ssh, absolute/../ /symlink),
-      unauthorized child exec and unauthorized network ports are denied at the
-      real OS boundary, proven by the shipped adapter keepers and an independent
-      external sandbox-exec probe (ALL_PASS). Policy authority, exact-bound
-      approvals (replay/expiry/widen/rebind/concurrency refusal), Secrets Broker
-      target/authority controls and secret non-persistence, H7 provider
-      environment isolation, and the append-only tamper-evident product-authored
-      Security Audit (author enum excludes provider/model) independently
-      re-verify. The real Claude production path reached the provider under
-      Seatbelt with no sandbox denial; its unrecognized-model error was
-      reproduced identically outside the sandbox and classified as external
-      provider state. G5 regression and the mandatory workspace suite are green
-      (825 passed, 0 failed, 2 ignored, 98 suites; clippy -D warnings clean).
-      Non-blocking residuals: coarse tcp:443 network scope, macOS-only concrete
-      backend (Windows compile-only, Linux not exercised), provider model
-      configuration gap, local-host audit-tamper bound, read-only provider auth
-      anchor visibility. No implementation/test/ADR/historical record changed;
-      G7 not started. Record: docs/development/G6_FINAL_CLOSURE_REAUDIT.md.
+      G6_REMEDIATION_REQUIRED. Initial provisional G6_CLOSED was recorded by
+      commit 2402ce2 and later invalidated by supplemental adversarial evidence.
+      F-003 was independently reproduced through the production Trusted Host Git
+      path. Provider Seatbelt confinement remains proven, but G6 is blocked by
+      the Git boundary. F-002 remains NEEDS_MORE_EVIDENCE. Record: docs/development/G6_FINAL_CLOSURE_REAUDIT.md.
     depends_on:
       - TASK-0069
     blocked_by: []
