@@ -104,7 +104,26 @@ impl Sandbox {
             r#"#!/bin/sh
 REAL_GIT='{real_git}'
 MARKER='{marker}'
-if [ "$1" = "worktree" ] && [ "$2" = "add" ] && [ "$3" = "-b" ]; then
+# Production run_git prefixes global `-c k=v` hardening flags before the
+# subcommand (TASK-0071). Peek past those pairs WITHOUT consuming "$@",
+# so unmatched invocations still exec faithfully with every flag intact.
+# What the test proves is unchanged.
+stripped=0
+sub1=''
+sub2=''
+sub3=''
+skip=0
+for arg in "$@"; do
+  if [ "$skip" -gt 0 ]; then skip=$((skip - 1)); continue; fi
+  case "$arg" in
+    -c) skip=1; stripped=$((stripped + 2)); continue ;;
+  esac
+  if [ -z "$sub1" ]; then sub1="$arg";
+  elif [ -z "$sub2" ]; then sub2="$arg";
+  elif [ -z "$sub3" ]; then sub3="$arg"; break; fi
+done
+if [ "$sub1" = "worktree" ] && [ "$sub2" = "add" ] && [ "$sub3" = "-b" ]; then
+  shift "$stripped"
   shift 2
   branch=''
   target=''
