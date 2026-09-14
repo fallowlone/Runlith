@@ -1,10 +1,12 @@
 use std::cell::Cell;
 use std::ffi::OsString;
+use std::process::Stdio;
+use std::sync::Arc;
 
 use policy::{Capability, EffectiveCapabilities, ScopeId};
 use runner::{
-    enforce_process_operation, prepare_process_launch, ChildEnvironment, IsolationRequirements,
-    RunnerError,
+    enforce_process_operation, prepare_process_launch, ChildEnvironment, CommandSpec,
+    IsolationRequirements, RunnerError,
 };
 use runner_native::NativeRunner;
 
@@ -89,8 +91,6 @@ fn native_runner_cannot_widen_process_authority() {
 #[cfg(unix)]
 #[test]
 fn r1_h2_child_env_cannot_see_poisoned_vars() {
-    use std::process::Command;
-
     // Only a non-allowlisted name is poisoned, so allowlist resolution in
     // concurrently running tests is unaffected.
     const CANARY: &str = "RUNLITH_SEC_CANARY_AWS_SECRET_ACCESS_KEY";
@@ -105,7 +105,7 @@ fn r1_h2_child_env_cannot_see_poisoned_vars() {
     let env_authority =
         EffectiveCapabilities::new(vec![Capability::process("/usr/bin/env").unwrap()]);
     let launch = prepare_process_launch(
-        &NativeRunner,
+        Arc::new(NativeRunner),
         &env_authority,
         "ws-1",
         ScopeId::new("/usr/bin/env").unwrap(),
@@ -114,9 +114,20 @@ fn r1_h2_child_env_cannot_see_poisoned_vars() {
     )
     .expect("trusted-host plan is verifiable");
 
-    let mut command = Command::new("/usr/bin/env");
-    launch.apply(&mut command);
-    let output = command.output().expect("run /usr/bin/env child");
+    let sandboxed = launch
+        .bind(CommandSpec::new(
+            OsString::from("/usr/bin/env"),
+            std::iter::empty(),
+        ))
+        .expect("bind sandboxed recipe");
+    let child = sandboxed
+        .spawn(|wire| {
+            wire.stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+        })
+        .expect("spawn sandboxed child");
+    let output = child.wait_with_output().expect("run /usr/bin/env child");
     assert!(output.status.success());
 
     let observed = String::from_utf8_lossy(&output.stdout);

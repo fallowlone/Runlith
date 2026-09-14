@@ -17,6 +17,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 
 use policy::{Capability, EffectiveCapabilities, ScopeId};
 
@@ -450,29 +451,98 @@ impl EnforcementReport {
     }
 }
 
+/// Non-spawnable description of the child process a caller wants to launch
+/// (TASK-SEC-R1 R1-H1).
+///
+/// It carries only a program and argv: no `std::process::Command`, no
+/// environment and no `spawn`. The only way to turn it into a running child is
+/// [`SandboxedLaunch::bind`], which asks the isolation backend to install its
+/// restrictions first. There is therefore no un-sandboxed command object a
+/// caller could spawn by forgetting a step.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandSpec {
+    program: OsString,
+    args: Vec<OsString>,
+}
+
+impl CommandSpec {
+    #[must_use]
+    pub fn new(program: impl Into<OsString>, args: impl IntoIterator<Item = OsString>) -> Self {
+        Self {
+            program: program.into(),
+            args: args.into_iter().collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn program(&self) -> &OsStr {
+        &self.program
+    }
+
+    #[must_use]
+    pub fn args(&self) -> &[OsString] {
+        &self.args
+    }
+}
+
+/// Exact, already-restricted launch recipe produced by an isolation backend.
+///
+/// Plain data: it can be cloned, inspected and audited, but it has no spawn
+/// method of its own. Only [`SandboxedCommand`] can start the child.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LaunchRecipe {
+    program: OsString,
+    args: Vec<OsString>,
+    environment: Vec<(OsString, OsString)>,
+}
+
+impl LaunchRecipe {
+    #[must_use]
+    pub fn new(
+        program: impl Into<OsString>,
+        args: impl IntoIterator<Item = OsString>,
+        environment: impl IntoIterator<Item = (OsString, OsString)>,
+    ) -> Self {
+        Self {
+            program: program.into(),
+            args: args.into_iter().collect(),
+            environment: environment.into_iter().collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn program(&self) -> &OsStr {
+        &self.program
+    }
+
+    #[must_use]
+    pub fn args(&self) -> &[OsString] {
+        &self.args
+    }
+
+    #[must_use]
+    pub fn environment(&self) -> &[(OsString, OsString)] {
+        &self.environment
+    }
+}
+
 /// Replaceable backend boundary. Implementations must report only restrictions
 /// actually installed for the supplied exact plan.
-pub trait IsolationBackend {
+///
+/// `sandbox` is the backend-owned launch path: it installs the backend's
+/// restrictions for the exact plan *and* returns the resulting recipe. A
+/// backend that cannot restrict a launch must refuse here instead of returning
+/// an unrestricted recipe.
+pub trait IsolationBackend: Send + Sync {
     fn identity(&self) -> BackendIdentity;
 
     fn enforce(&self, plan: &IsolationPlan) -> Result<EnforcementReport, RunnerError>;
 
-    fn prepare_launch(
+    fn sandbox(
         &self,
         plan: &IsolationPlan,
-    ) -> Result<Box<dyn PreparedLaunch + Send + Sync>, RunnerError> {
-        let _ = plan;
-        Err(RunnerError::BackendUnavailable {
-            backend: "launch handoff unavailable",
-        })
-    }
-}
-
-/// Prepared child-process launch handoff. The backend that reports
-/// enforcement owns the launch mutation, so providers cannot bypass the
-/// runtime boundary with a raw `Command::spawn`.
-pub trait PreparedLaunch {
-    fn apply(&self, command: &mut Command);
+        spec: &CommandSpec,
+    ) -> Result<LaunchRecipe, RunnerError>;
 }
 
 /// Enforces the current exact authority and then performs the privileged
@@ -493,20 +563,162 @@ pub fn enforce_process_operation<T>(
     Ok(operation(&plan))
 }
 
-/// Installs and returns the exact launch handoff for a verified plan.
-/// Providers must carry this object into the real child spawn.
+/// Verified launch context for one governed process operation (TASK-SEC-R1
+/// R1-H1).
+///
+/// It exists only after a backend produced enforcement evidence that was
+/// verified against the exact plan, and it carries that backend. Callers can
+/// therefore not reach a spawnable command without the backend that owns the
+/// restrictions.
+#[derive(Clone)]
+pub struct SandboxedLaunch {
+    report: EnforcementReport,
+    backend: Arc<dyn IsolationBackend>,
+}
+
+impl SandboxedLaunch {
+    #[must_use]
+    pub fn plan(&self) -> &IsolationPlan {
+        &self.report.plan
+    }
+
+    #[must_use]
+    pub fn backend(&self) -> BackendIdentity {
+        self.report.backend
+    }
+
+    /// Binds an exact program/argv. The backend installs its restrictions for
+    /// the verified plan; the returned [`SandboxedCommand`] is the only
+    /// spawnable form of that child.
+    pub fn bind(&self, spec: CommandSpec) -> Result<SandboxedCommand, RunnerError> {
+        let recipe = self.backend.sandbox(&self.report.plan, &spec)?;
+        Ok(SandboxedCommand {
+            plan: self.report.plan.clone(),
+            recipe,
+        })
+    }
+}
+
+impl fmt::Debug for SandboxedLaunch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SandboxedLaunch")
+            .field("backend", &self.report.backend)
+            .field("plan", &self.report.plan)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Compiles the plan, verifies enforcement evidence, and returns the verified
+/// launch context. The returned [`SandboxedLaunch`] is the only route to a
+/// spawnable child; callers must carry it into the real spawn instead of
+/// keeping a pre-sandbox command of their own.
 pub fn prepare_process_launch(
-    backend: &dyn IsolationBackend,
+    backend: Arc<dyn IsolationBackend>,
     effective: &EffectiveCapabilities,
     workspace: impl Into<String>,
     executable: ScopeId,
     requirements: IsolationRequirements,
     environment: ChildEnvironment,
-) -> Result<Box<dyn PreparedLaunch + Send + Sync>, RunnerError> {
+) -> Result<SandboxedLaunch, RunnerError> {
     let plan = IsolationPlan::compile(effective, workspace, executable, requirements, environment)?;
     let report = backend.enforce(&plan)?;
     verify_report(backend.identity(), &plan, &report)?;
-    backend.prepare_launch(&plan)
+    Ok(SandboxedLaunch {
+        report,
+        backend: Arc::clone(&backend),
+    })
+}
+
+/// The only spawnable form of a Runner-governed child command.
+///
+/// It is produced exclusively by [`SandboxedLaunch::bind`] (backend-owned
+/// restrictions already installed) and exposes a narrow wiring surface: cwd,
+/// stdio and process group. Program, argv and environment cannot be rewritten
+/// here, and no raw `Command` escapes.
+#[derive(Clone, Debug)]
+pub struct SandboxedCommand {
+    plan: IsolationPlan,
+    recipe: LaunchRecipe,
+}
+
+impl SandboxedCommand {
+    #[must_use]
+    pub fn plan(&self) -> &IsolationPlan {
+        &self.plan
+    }
+
+    #[must_use]
+    pub fn program(&self) -> &OsStr {
+        self.recipe.program()
+    }
+
+    #[must_use]
+    pub fn args(&self) -> &[OsString] {
+        self.recipe.args()
+    }
+
+    /// Environment installed by the backend: cleared ambient state plus
+    /// exactly the plan's explicit pairs.
+    #[must_use]
+    pub fn environment(&self) -> &[(OsString, OsString)] {
+        self.recipe.environment()
+    }
+
+    /// Spawns the already-sandboxed child. `wire` may only adjust process
+    /// wiring (working directory, stdio, process group).
+    pub fn spawn(
+        &self,
+        wire: impl FnOnce(&mut SpawnWiring<'_>),
+    ) -> Result<std::process::Child, std::io::Error> {
+        let mut command = Command::new(self.recipe.program());
+        command.args(self.recipe.args());
+        command.env_clear();
+        for (name, value) in self.recipe.environment() {
+            command.env(name, value);
+        }
+        wire(&mut SpawnWiring {
+            command: &mut command,
+        });
+        command.spawn()
+    }
+}
+
+/// Narrow wiring handle for an already-sandboxed command. It deliberately
+/// exposes no spawn, no program/argv rewrite and no environment mutation.
+pub struct SpawnWiring<'a> {
+    command: &'a mut Command,
+}
+
+impl SpawnWiring<'_> {
+    pub fn current_dir(&mut self, dir: &std::path::Path) -> &mut Self {
+        self.command.current_dir(dir);
+        self
+    }
+
+    pub fn stdin(&mut self, configuration: std::process::Stdio) -> &mut Self {
+        self.command.stdin(configuration);
+        self
+    }
+
+    pub fn stdout(&mut self, configuration: std::process::Stdio) -> &mut Self {
+        self.command.stdout(configuration);
+        self
+    }
+
+    pub fn stderr(&mut self, configuration: std::process::Stdio) -> &mut Self {
+        self.command.stderr(configuration);
+        self
+    }
+
+    /// Own process group for the sandboxed child (unix), so timeout/cancel
+    /// paths can kill the whole tree.
+    #[cfg(unix)]
+    pub fn process_group(&mut self, process_group: i32) -> &mut Self {
+        use std::os::unix::process::CommandExt;
+        self.command.process_group(process_group);
+        self
+    }
 }
 
 fn verify_report(

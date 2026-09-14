@@ -81,12 +81,12 @@ const PROVIDER_LAUNCH_REQUESTER: &str = "agent-runtime";
 
 fn production_runner_backend(
     provider: &provider_claude::ClaudeExecutor,
-) -> Result<Box<dyn IsolationBackend>, String> {
+) -> Result<Arc<dyn IsolationBackend>, String> {
     #[cfg(target_os = "macos")]
     {
         let support_read = provider.isolation_support_read_roots()?;
         let support_write = provider.isolation_support_write_roots()?;
-        Ok(Box::new(
+        Ok(Arc::new(
             runner_macos_seatbelt::MacOsSeatbeltRunner::with_support_roots(
                 support_read,
                 support_write,
@@ -97,7 +97,7 @@ fn production_runner_backend(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = provider;
-        Ok(Box::new(runner_native::NativeRunner))
+        Ok(Arc::new(runner_native::NativeRunner))
     }
 }
 
@@ -373,7 +373,7 @@ impl scheduler::ExecutionPort for SecuredClaudeExecutor {
             provider_claude::CLAUDE_PROVIDER_REF,
         );
         let prepared_launch = runner::prepare_process_launch(
-            backend.as_ref(),
+            Arc::clone(&backend),
             &effective,
             launch.workspace.clone(),
             launch.executable.clone(),
@@ -386,7 +386,7 @@ impl scheduler::ExecutionPort for SecuredClaudeExecutor {
         let provider = self
             .inner
             .clone()
-            .with_prepared_launch(Arc::from(prepared_launch));
+            .with_sandboxed_launch(Arc::new(prepared_launch));
         security
             .enforce_process_operation(&operation, backend.as_ref(), &effective, &spec, || {
                 provider.execute(work)

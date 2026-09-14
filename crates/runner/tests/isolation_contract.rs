@@ -1,12 +1,14 @@
 use std::cell::Cell;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use policy::{Capability, EffectiveCapabilities, FileScope, ScopeId};
 use runner::{
     enforce_process_operation, prepare_process_launch, BackendIdentity, ChildEnvironment,
-    EnforcementAxes, EnforcementReport, IsolationBackend, IsolationPlan, IsolationRequirements,
-    Platform, RunnerError, RunnerKind,
+    CommandSpec, EnforcementAxes, EnforcementReport, IsolationBackend, IsolationPlan,
+    IsolationRequirements, LaunchRecipe, Platform, RunnerError, RunnerKind,
 };
 
 fn file_read(workspace: &str, root: &str) -> Capability {
@@ -48,6 +50,8 @@ struct FixedBackend {
     enforced: EnforcementAxes,
     report_plan: Option<IsolationPlan>,
     env_isolated: bool,
+    sandbox_calls: Arc<AtomicUsize>,
+    recipe_program: Option<OsString>,
 }
 
 impl FixedBackend {
@@ -61,6 +65,8 @@ impl FixedBackend {
             enforced,
             report_plan: None,
             env_isolated: true,
+            sandbox_calls: Arc::new(AtomicUsize::new(0)),
+            recipe_program: None,
         }
     }
 }
@@ -78,6 +84,21 @@ impl IsolationBackend for FixedBackend {
             self.env_isolated,
         ))
     }
+
+    fn sandbox(
+        &self,
+        plan: &IsolationPlan,
+        spec: &CommandSpec,
+    ) -> Result<LaunchRecipe, RunnerError> {
+        self.sandbox_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(LaunchRecipe::new(
+            self.recipe_program
+                .clone()
+                .unwrap_or_else(|| spec.program().to_owned()),
+            spec.args().iter().cloned(),
+            plan.environment().vars().to_vec(),
+        ))
+    }
 }
 
 struct UnavailableBackend;
@@ -92,6 +113,16 @@ impl IsolationBackend for UnavailableBackend {
     }
 
     fn enforce(&self, _plan: &IsolationPlan) -> Result<EnforcementReport, RunnerError> {
+        Err(RunnerError::BackendUnavailable {
+            backend: "unavailable-fixture",
+        })
+    }
+
+    fn sandbox(
+        &self,
+        _plan: &IsolationPlan,
+        _spec: &CommandSpec,
+    ) -> Result<LaunchRecipe, RunnerError> {
         Err(RunnerError::BackendUnavailable {
             backend: "unavailable-fixture",
         })
@@ -313,7 +344,7 @@ fn r1_h2_report_without_env_isolation_fails_verification() {
 
     assert_eq!(
         prepare_process_launch(
-            &backend,
+            Arc::new(backend),
             &effective(),
             "ws-1",
             scope("cargo"),
@@ -322,6 +353,83 @@ fn r1_h2_report_without_env_isolation_fails_verification() {
         )
         .err(),
         Some(RunnerError::EnvironmentNotIsolated)
+    );
+}
+
+/// TASK-SEC-R1 R1-H1 (adversarial, real child): a caller cannot reach a
+/// running child without the backend. Binding goes through the backend's
+/// `sandbox` step (counted here), the spawned program is the backend's recipe
+/// choice rather than the caller's request, and the child environment is the
+/// recipe's plan environment.
+#[test]
+fn r1_h1_spawn_route_is_backend_owned() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let backend = FixedBackend {
+        sandbox_calls: Arc::clone(&calls),
+        recipe_program: Some(OsString::from("/usr/bin/env")),
+        ..FixedBackend::new(EnforcementAxes::all())
+    };
+    let launch = prepare_process_launch(
+        Arc::new(backend),
+        &effective(),
+        "ws-1",
+        scope("cargo"),
+        IsolationRequirements::trusted_host(),
+        environment(),
+    )
+    .expect("verified launch context");
+
+    // Verification alone does not sandbox anything; the backend owns that step.
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let sandboxed = launch
+        .bind(CommandSpec::new(
+            OsString::from("/usr/bin/false"),
+            [OsString::from("must-not-run")],
+        ))
+        .expect("backend recipe");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // The backend chose the program: the caller's requested program never ran.
+    assert_eq!(sandboxed.program(), OsStr::new("/usr/bin/env"));
+    assert_eq!(
+        sandboxed.args(),
+        &[OsString::from("must-not-run")],
+        "argv stays caller-owned; program selection stays backend-owned"
+    );
+    let recipe_environment: Vec<_> = sandboxed
+        .environment()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        recipe_environment,
+        vec![
+            ("HOME".to_owned(), "/home/tester".to_owned()),
+            ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+        ]
+    );
+
+    let child = sandboxed
+        .spawn(|wire| {
+            wire.stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .stdin(std::process::Stdio::null());
+        })
+        .expect("spawn through the backend-owned recipe");
+    let output = child.wait_with_output().expect("wait for child");
+    // `/usr/bin/env must-not-run` is what actually ran: `env` reports 127 for a
+    // command it cannot find, while the caller's requested `/usr/bin/false`
+    // would have reported 1. The backend's recipe decided the program.
+    assert_eq!(
+        output.status.code(),
+        Some(127),
+        "spawned program was not the backend recipe program: {:?}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
