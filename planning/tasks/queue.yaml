@@ -1379,6 +1379,24 @@ items:
       approval weakening, budget bounds, duplicate-decomposition
       rejection); vocabulary overlaps resolved with explicit decisions;
       G6 stays closed.
+    outcome: >-
+      Accepted contract materialized as ADR-0027 (G7 planning/
+      orchestration): proposal-only PlannerPort with typed I/O and
+      PlannerFault taxonomy, PlanChangeSet required fields including
+      proposal_hash, executable validation rules V1-V9, PlanRevision
+      provenance with atomic revision-plus-event journal coupling,
+      numeric liveness guardrails (depth 4, fan-out 8, branch nodes 64,
+      1 revision/cycle/branch) with dual pre-call/on-proposal
+      enforcement, and a token/time planner call envelope with
+      cost-as-derived-receipt. Vocabulary reconciled with zero
+      undecided rows (ActionProposal/HandoffPacket/ResumeToken merged,
+      CapabilityLease/Council/AgentMessage/WorkClaim/ContextItem
+      deferred to owning gates, HDR + procedure/mission vocabulary
+      adopted). Former G6 follow-ups re-homed (F1 to TASK-0078/0079,
+      F2a deferred post-G7, F2b already materialized in G6) with G6
+      closure untouched. Record:
+      docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md;
+      adr/INDEX.md and COVERAGE.md updated. G7 remains IN_PROGRESS.
     depends_on:
       - TASK-0074
     blocked_by: []
