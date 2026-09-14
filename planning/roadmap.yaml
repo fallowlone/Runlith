@@ -109,3 +109,37 @@ gates:
     status: planned
     objective: Account, billing, encrypted sync, teams, org policies.
     scope_ref: AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
+
+future_product_engineering_spikes:
+  - id: UI-TECHNOLOGY-SPIKE
+    status: deferred
+    trigger: After the first serious desktop UI exists and can serve as a
+      representative implementation baseline.
+    objective: Compare Tauri 2 + React/TypeScript, Slint, and GPUI by
+      implementing the same representative Task Detail / Execution workspace.
+    evaluate:
+      - startup time
+      - idle/runtime memory
+      - render/scroll performance on large lists and logs
+      - accessibility
+      - multi-window support
+      - keyboard-first UX
+      - terminal/diff/code rendering suitability
+      - drag-and-drop
+      - native OS integration
+      - security boundary implications
+      - IPC integration with separate Rust agentd
+      - development velocity
+      - testing/tooling maturity
+      - cross-platform support
+      - maintainability
+      - migration cost/risk
+      - framework maturity/stability
+    outcome: Evidence-based recommendation to keep Tauri, migrate to Slint,
+      migrate to GPUI, or defer the decision.
+    constraints:
+      - This spike is deferred future product-engineering work and does not
+        change the current gate or task queue priority.
+      - The spike does not authorize or perform a migration automatically.
+      - The UI shell remains replaceable; agentd, control-plane, and domain
+        logic remain independent behind versioned IPC.
