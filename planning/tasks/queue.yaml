@@ -9,8 +9,8 @@
 
 schema_version: 1
 completed_through: TASK-0074
-current_gate: G6
-gate_status: CLOSED  # TASK-0074 independent closure re-audit: G6_CLOSED (F-002/F-003 closed, residuals accepted); G7 not started
+current_gate: G7
+gate_status: IN_PROGRESS  # G7 breakdown materialized (TASK-0075..0081); implementation starts at TASK-0075 contract
 
 items:
   - id: TASK-0012
@@ -1251,9 +1251,10 @@ items:
       `app-services`/`storage-sqlite` suites green, plus 2 deleted
       auditor-authored probes (passed). Independently re-audited as TASK-0072
       with verdict F7_CLOSED (G6 still IN_PROGRESS: F-002 open, full G6
-      closure re-audit pending). Record:
-      docs/development/G6_TASK_0071_TRUSTED_HOST_GIT_BOUNDARY_HARDENING_EVIDENCE.md
-      (§11) and docs/development/G6_TASK_0072_F7_TRUSTED_ANCHOR_REAUDIT.md.
+      closure re-audit pending).
+      Record:
+        docs/development/G6_TASK_0071_TRUSTED_HOST_GIT_BOUNDARY_HARDENING_EVIDENCE.md
+        (§11) and docs/development/G6_TASK_0072_F7_TRUSTED_ANCHOR_REAUDIT.md.
     depends_on:
       - TASK-0070
     blocked_by: []
@@ -1299,10 +1300,12 @@ items:
       whose `git` shim matched `$1 = worktree` while production `run_git`
       prefixes global `-c k=v` hardening flags (accepted TASK-0071
       contract), so the shim never reached the branch-only crash seam.
-    scope: Test-harness shim only (`bins/agentctl/tests/execution_recovery.rs`):
-      peek past leading `-c value` pairs without consuming `$@`, so the
-      seam match works and unmatched invocations still exec faithfully
-      with every flag intact. No production code, no weakened assertions,
+    scope: >-
+      Test-harness shim only
+      (`bins/agentctl/tests/execution_recovery.rs`): peek past leading
+      `-c value` pairs without consuming `$@`, so the seam match works
+      and unmatched invocations still exec faithfully with every flag
+      intact. No production code, no weakened assertions,
       no changed crash seam.
     exit_criteria_summary: The keeper passes through the shipped binaries
       with the shim intercepting inside `git worktree add`; full `agentctl`
@@ -1344,8 +1347,8 @@ items:
       compile check clean, real-CLI smoke external-unrecognized_model.
       F-002 enumerated (24-check probe ALL_PASS) and closed as
       documented residual; F-003 closed. Residuals R1-R5 accepted;
-      observations O1-O3 non-blocking. Record:
-      docs/development/G6_TASK_0074_G6_CLOSURE_REAUDIT.md.
+      observations O1-O3 non-blocking.
+      Record: docs/development/G6_TASK_0074_G6_CLOSURE_REAUDIT.md.
     depends_on:
       - TASK-0073
     blocked_by: []
@@ -1354,3 +1357,141 @@ items:
       - docs/development/G6_TASK_0072_F7_TRUSTED_ANCHOR_REAUDIT.md
       - docs/development/G6_FINAL_CLOSURE_REAUDIT.md
       - docs/development/G6_TASK_0070_SUPPLEMENTAL_SECURITY_EVIDENCE.md
+
+  - id: TASK-0075
+    gate: G7
+    title: Planning and Orchestration Contract
+    objective: >-
+      Materialize the G7 planning contract before implementation:
+      PlannerPort (proposal-only seam), PlanChangeSet shape and
+      validation rules, PlanRevision authority and provenance,
+      recursion/depth/fan-out/budget bounds, and the vocabulary
+      reconcile between reddit-research terms (ActionProposal,
+      HandoffPacket/ResumeToken, CapabilityLease) and accepted-future
+      terms (HumanDecisionRequest, Council, Procedures, AgentMessage).
+      Re-home the former "G6 follow-up" items to explicit G7 tasks.
+      Contract/docs/ADR only; no domain code, no persistence, no
+      provider calls.
+    scope: Planning ADR(s) plus planning.md/orchestration contract docs
+      and queue sequence; no G8/G9 scope.
+    exit_criteria_summary: Accepted contract exists with validation rules
+      (acyclicity, scope containment, criteria preservation, no policy/
+      approval weakening, budget bounds, duplicate-decomposition
+      rejection); vocabulary overlaps resolved with explicit decisions;
+      G6 stays closed.
+    depends_on:
+      - TASK-0074
+    blocked_by: []
+    references:
+      - AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
+      - docs/architecture/adr/INDEX.md
+
+  - id: TASK-0076
+    gate: G7
+    title: Plan Domain Core
+    objective: Implement the pure plan-domain model (PlanRevision,
+      PlanChangeSet validation, atomicity assessment types) with
+      exhaustive tests. No persistence, no scheduler, no provider.
+    scope: Pure domain crate only; no SQLite, journal, or execution
+      wiring.
+    exit_criteria_summary: Validation rules from TASK-0075 executable;
+      planner output cannot mutate Task state by construction; workspace
+      green.
+    depends_on:
+      - TASK-0075
+    blocked_by: []
+    references:
+      - docs/architecture/task-engine.md
+
+  - id: TASK-0077
+    gate: G7
+    title: Plan Persistence and Revision Journal
+    objective: Durable plan revisions with atomic revision-plus-event
+      commits, mirroring the Task core pattern.
+    scope: Storage migration(s) plus revision events only; no planner,
+      no scheduler.
+    exit_criteria_summary: Plan structure survives restarts with
+      provenance intact; every revision carries reason and evidence
+      refs; workspace green.
+    depends_on:
+      - TASK-0076
+    blocked_by: []
+    references:
+      - docs/architecture/events.md
+
+  - id: TASK-0078
+    gate: G7
+    title: Real LLM Planner Adapter and Scheduler Integration
+    objective: Wire a real provider-backed PlannerPort adapter (Claude,
+      through the G5 provider seam) plus a deterministic FakePlanner for
+      the shared contract suite (G5 TASK-0049 pattern); integrate
+      propose → validate → persist → execute → replan loop with
+      recursion guardrails enforced before any LLM call and on every
+      proposal. Planner proposes only; validated application services
+      mutate the graph; approvals/policy never weakened; token/time
+      budgets bounded and recorded.
+    scope: Planner adapter(s), contract suite, scheduler integration,
+      guardrail enforcement; no HDQ UI, no Council, no G8/G9 scope.
+    exit_criteria_summary: Real planner decomposes a fixture project
+      through the production path with bounded cost; FakePlanner and
+      real adapter pass the same contract suite; guardrail violations
+      refuse typed before mutation; workspace green.
+    depends_on:
+      - TASK-0077
+    blocked_by: []
+    references:
+      - docs/architecture/providers.md
+      - docs/architecture/adr/ADR-0024-g5-provider-execution-seam.md
+
+  - id: TASK-0079
+    gate: G7
+    title: Human Decision Queue (Bounded)
+    objective: Implement the minimal durable HumanDecisionRequest
+      lifecycle needed by planning (structured request with
+      task/risk/options/recommendation, minimal blocking scope,
+      RESUME/REPLAN/ABORT continuation) with control-plane enforcement.
+      No graphical UI; batching only if free.
+    scope: Decision-request persistence/state and minimal IPC/CLI
+      contract; no G8/G9 scope.
+    exit_criteria_summary: Blocked scope waits while unrelated work
+      continues; stale/widened decisions refuse; restart durability
+      proven; workspace green.
+    depends_on:
+      - TASK-0077
+    blocked_by: []
+    references:
+      - AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
+
+  - id: TASK-0080
+    gate: G7
+    title: G7 Planning Failure Matrix
+    objective: Exercise the full G7 failure taxonomy deterministically
+      (cyclic proposal, scope escape, acceptance-criteria weakening,
+      policy/approval weakening attempt, budget/depth/fan-out breach,
+      duplicate recursive decomposition, planner crash mid-proposal,
+      adversarial proposal content) through FakePlanner plus recorded
+      real-planner cases.
+    scope: Failure-matrix verification only.
+    exit_criteria_summary: Every taxonomy class behaves per contract
+      with durable evidence; workspace green.
+    depends_on:
+      - TASK-0078
+      - TASK-0079
+    blocked_by: []
+    references:
+      - AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
+
+  - id: TASK-0081
+    gate: G7
+    title: G7 Closure Audit
+    objective: Independent gate verification for G7 (adaptive planning
+      with real LLM planner) and report G7_CLOSED or
+      G7_REMEDIATION_REQUIRED without implementing repairs.
+    scope: Audit only; no repairs, no implementation, no G8 scope.
+    exit_criteria_summary: A closure audit report exists with an explicit
+      overall status.
+    depends_on:
+      - TASK-0080
+    blocked_by: []
+    references:
+      - AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
