@@ -1312,7 +1312,11 @@ items:
       Shim peeks past `-c` pairs, shifts only on match, preserves `$@`
       for the fallthrough exec. Full `agentctl` package green
       (execution_recovery 3/3, real_process_matrix 1/1), fmt clean,
-      clippy `-D warnings` clean. G6 remains IN_PROGRESS.
+      clippy `-D warnings` clean. Operational note: binary-level suites
+      spawn `target/debug/agentd` via `workspace_bin`, which `cargo test`
+      never rebuilds — run `cargo build -p agentd -p agentctl` first or a
+      stale pre-migration binary fails phantom-style at daemon startup
+      (observed: v10 binary vs v11 schema). G6 remains IN_PROGRESS.
     depends_on:
       - TASK-0071
     blocked_by: []
