@@ -64,8 +64,11 @@ gates:
         ActionProposal and approval bound to the exact proposal hash.
       - Task-scoped Capability Leases with principal/scope/TTL binding and
         canonical DENY-attempt audit evidence.
-    note: These follow-ups do not resequence TASK-0065 through TASK-0068 or
-      expand their accepted implementation scope.
+    note: Historical placement (pre-G6-closure; TASK-0065 through TASK-0068
+      are complete and G6 is CLOSED). These items are not G6 work: re-home
+      them to new tasks when scheduled, and reconcile ActionProposal /
+      CapabilityLease vocabulary with HumanDecisionRequest / Council /
+      Procedures before implementing.
     scope_ref:
       - docs/architecture/adr/ADR-0013-policy-engine-os-isolation.md
       - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md

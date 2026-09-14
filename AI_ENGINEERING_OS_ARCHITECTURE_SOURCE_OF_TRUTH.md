@@ -7344,6 +7344,17 @@ Status: **roadmap direction backed by external community evidence; contracts are
 not considered implemented until their owning gate/task materializes and verifies
 them.** The source is supporting evidence, never architecture authority.
 
+> Staleness note (2026-09-14, post-G6-closure): references below to the
+> "active G6 queue" and "G6 follow-up / G6 hardening follow-up" placement
+> (§105.3, §105.4) predate G6 closure (TASK-0074, `G6_CLOSED`). G6 is
+> closed and must not be reopened: when these items are scheduled, re-home
+> them to new tasks under the then-current gate. Likewise, reconcile the
+> §105 vocabulary (`ActionProposal`, `HandoffPacket`/`ResumeToken`,
+> `CapabilityLease`, `ContextItem` envelope) with the already-accepted
+> future vocabulary (`HumanDecisionRequest`, Council Engine,
+> Playbooks/Procedures, `AgentMessage`) before implementing either —
+> overlap, not contradiction.
+
 This research reinforces the existing Runlith thesis: durable state, explicit
 authority, recovery, evidence, continuity and independent verification matter
 more than adding another provider-specific agent loop. It also supplies a strong

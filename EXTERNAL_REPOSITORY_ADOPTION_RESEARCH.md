@@ -8877,6 +8877,11 @@ metrics. **No change is made to Verified Delivery Cost.**
 
 ### Adoption boundary
 
+> Staleness note (2026-09-14, post-G6-closure): "the active G6 queue" below
+> is historical — G6 closed as `G6_CLOSED` (TASK-0074). Items placed as "G6
+> follow-up" await re-homing to new tasks; see the §105 staleness note in
+> `AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md`.
+
 These findings are now reflected in the Architecture Source of Truth and
 `planning/roadmap.yaml`. They do not resequence the active G6 queue, create a
 new implementation task, change current completion claims, make Event Sourcing
