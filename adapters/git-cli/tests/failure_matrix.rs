@@ -18,14 +18,15 @@ mod common;
 use git_cli::GitCli;
 use workspace::{GitPort, WorkspaceFailure, WorktreeStatus};
 
-use common::{git, lease_for, target_path, Fixture};
+use common::{anchor_for, git, lease_for, target_path, Fixture};
 
 #[test]
 fn repository_path_with_unicode_inspects_and_creates() {
     let adapter = GitCli::new();
     let fx = Fixture::new("ünicode-répo-日本語");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     assert!(
-        adapter.is_repository(&fx.path_str()).unwrap(),
+        adapter.is_repository(&fx.path_str(), &anchor).unwrap(),
         "unicode repo path must inspect as a repository"
     );
     let base = fx.primary_head();
@@ -37,7 +38,7 @@ fn repository_path_with_unicode_inspects_and_creates() {
         target.to_str().unwrap(),
     );
     adapter
-        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap())
+        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap(), &anchor)
         .unwrap();
     assert!(
         target.is_dir(),
@@ -59,21 +60,22 @@ fn linked_worktree_dotgit_file_counts_as_repository() {
     // must not rely on `.git`-directory heuristics.
     let adapter = GitCli::new();
     let fx = Fixture::new("linked-dotgit");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
     let target = target_path(&fx, "ws-linked");
     let lease = lease_for("linked", "agent/e-linked", &base, target.to_str().unwrap());
     adapter
-        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap())
+        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap(), &anchor)
         .unwrap();
     let dotgit = target.join(".git");
     assert!(dotgit.is_file(), "linked worktree must carry a .git file");
     let target_str = target.to_str().unwrap().to_owned();
     assert!(
-        adapter.is_repository(&target_str).unwrap(),
+        adapter.is_repository(&target_str, &anchor).unwrap(),
         ".git-file worktree must inspect as a repository"
     );
     assert_eq!(
-        adapter.worktree_status(&target_str).unwrap(),
+        adapter.worktree_status(&target_str, &anchor).unwrap(),
         WorktreeStatus::Clean
     );
 }
@@ -82,10 +84,11 @@ fn linked_worktree_dotgit_file_counts_as_repository() {
 fn default_branch_without_metadata_fails_closed_without_guessing() {
     let adapter = GitCli::new();
     let fx = Fixture::new("no-origin-head");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     // Remove the single canonical metadata fact.
     git(&fx.dir, &["symbolic-ref", "-d", "refs/remotes/origin/HEAD"]);
     let err = adapter
-        .default_branch(&fx.path_str())
+        .default_branch(&fx.path_str(), &anchor)
         .expect_err("indeterminate default branch must fail");
     let detail = err.to_string();
     assert!(
@@ -108,7 +111,7 @@ fn default_branch_without_metadata_fails_closed_without_guessing() {
         target.to_str().unwrap(),
     );
     adapter
-        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap())
+        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap(), &anchor)
         .unwrap();
 }
 
@@ -116,28 +119,35 @@ fn default_branch_without_metadata_fails_closed_without_guessing() {
 fn resolve_revision_matrix() {
     let adapter = GitCli::new();
     let fx = Fixture::new("rev-matrix");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let repo = fx.path_str();
     let head = fx.primary_head();
 
     // Valid forms resolve to the exact immutable OID.
     assert_eq!(
-        adapter.resolve_revision(&repo, &head).unwrap().as_str(),
-        head
-    );
-    assert_eq!(
-        adapter.resolve_revision(&repo, "HEAD").unwrap().as_str(),
-        head
-    );
-    assert_eq!(
         adapter
-            .resolve_revision(&repo, &fx.branch)
+            .resolve_revision(&repo, &head, &anchor)
             .unwrap()
             .as_str(),
         head
     );
     assert_eq!(
         adapter
-            .resolve_revision(&repo, &head[..12])
+            .resolve_revision(&repo, "HEAD", &anchor)
+            .unwrap()
+            .as_str(),
+        head
+    );
+    assert_eq!(
+        adapter
+            .resolve_revision(&repo, &fx.branch, &anchor)
+            .unwrap()
+            .as_str(),
+        head
+    );
+    assert_eq!(
+        adapter
+            .resolve_revision(&repo, &head[..12], &anchor)
             .unwrap()
             .as_str(),
         head,
@@ -153,7 +163,7 @@ fn resolve_revision_matrix() {
         "ffffffffffffffffffffffffffffffffffffffff",
     ] {
         let err = adapter
-            .resolve_revision(&repo, bad)
+            .resolve_revision(&repo, bad, &anchor)
             .expect_err(&format!("revision {bad:?} must fail"));
         assert!(
             matches!(err, WorkspaceFailure::InvalidRevision { .. }),
@@ -166,6 +176,7 @@ fn resolve_revision_matrix() {
 fn branch_at_unexpected_revision_is_collision_not_reuse() {
     let adapter = GitCli::new();
     let fx = Fixture::new("unexpected-rev");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let first = fx.primary_head();
     // Plant the managed branch name at a *different* commit.
     git(&fx.dir, &["commit", "-q", "--allow-empty", "-m", "second"]);
@@ -183,7 +194,7 @@ fn branch_at_unexpected_revision_is_collision_not_reuse() {
         target.to_str().unwrap(),
     );
     let err = adapter
-        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap())
+        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap(), &anchor)
         .expect_err("branch at unexpected revision must collide");
     assert!(
         matches!(err, WorkspaceFailure::BranchCollision { .. }),
@@ -203,6 +214,7 @@ fn branch_at_unexpected_revision_is_collision_not_reuse() {
 fn symlinked_target_is_collision_not_escape() {
     let adapter = GitCli::new();
     let fx = Fixture::new("symlink-target");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
     // A symlink under the managed root pointing outside must never be
     // followed into an overwrite: the pre-existence check fires first.
@@ -215,7 +227,7 @@ fn symlinked_target_is_collision_not_escape() {
     std::os::windows::fs::symlink_dir(&outside, &link).expect("symlink");
     let lease = lease_for("link", "agent/e-link", &base, link.to_str().unwrap());
     let err = adapter
-        .create_worktree(&lease, &fx.path_str(), link.to_str().unwrap())
+        .create_worktree(&lease, &fx.path_str(), link.to_str().unwrap(), &anchor)
         .expect_err("symlinked target must be refused");
     assert!(
         matches!(err, WorkspaceFailure::WorktreeCollision { .. }),
@@ -237,11 +249,12 @@ fn symlinked_target_is_collision_not_escape() {
 fn target_with_missing_parent_is_typed_backend_failure() {
     let adapter = GitCli::new();
     let fx = Fixture::new("missing-parent");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
     let target = fx.roots.join("no-such-dir").join("ws-orphan");
     let lease = lease_for("orphan", "agent/e-orphan", &base, target.to_str().unwrap());
     let err = adapter
-        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap())
+        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap(), &anchor)
         .expect_err("missing parent must fail");
     assert!(
         matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
@@ -254,11 +267,12 @@ fn target_with_missing_parent_is_typed_backend_failure() {
 fn worktree_status_ranks_untracked_above_tracked() {
     let adapter = GitCli::new();
     let fx = Fixture::new("dirt-ranking");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
     let target = target_path(&fx, "ws-dirt");
     let lease = lease_for("dirt", "agent/e-dirt", &base, target.to_str().unwrap());
     adapter
-        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap())
+        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap(), &anchor)
         .unwrap();
     let target_str = target.to_str().unwrap().to_owned();
     // Tracked file first: DirtyTracked.
@@ -268,13 +282,13 @@ fn worktree_status_ranks_untracked_above_tracked() {
     git(&target, &["commit", "-q", "-m", "seed"]);
     std::fs::write(target.join("seed.txt"), b"v2").expect("dirty tracked");
     assert_eq!(
-        adapter.worktree_status(&target_str).unwrap(),
+        adapter.worktree_status(&target_str, &anchor).unwrap(),
         WorktreeStatus::DirtyTracked
     );
     // Adding one untracked file must escalate to DirtyUntracked.
     std::fs::write(target.join("notes.txt"), b"untracked").expect("untracked file");
     assert_eq!(
-        adapter.worktree_status(&target_str).unwrap(),
+        adapter.worktree_status(&target_str, &anchor).unwrap(),
         WorktreeStatus::DirtyUntracked,
         "untracked evidence must rank above tracked dirt"
     );
@@ -284,6 +298,7 @@ fn worktree_status_ranks_untracked_above_tracked() {
 fn primary_checkout_survives_every_matrix_failure() {
     let adapter = GitCli::new();
     let fx = Fixture::new("primary-preserved");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
     let status_before = fx.primary_status();
     // Dirty the primary first: failures must neither clean nor reset it.
@@ -292,7 +307,7 @@ fn primary_checkout_survives_every_matrix_failure() {
     fx.write_tracked("user.txt", b"user data");
     let dirty_bytes = fx.read_tracked("user.txt");
     assert_eq!(
-        adapter.worktree_status(&fx.path_str()).unwrap(),
+        adapter.worktree_status(&fx.path_str(), &anchor).unwrap(),
         WorktreeStatus::DirtyUntracked
     );
 
@@ -305,7 +320,12 @@ fn primary_checkout_survives_every_matrix_failure() {
         &base,
         clash_target.to_str().unwrap(),
     );
-    let _ = adapter.create_worktree(&clash, &fx.path_str(), clash_target.to_str().unwrap());
+    let _ = adapter.create_worktree(
+        &clash,
+        &fx.path_str(),
+        clash_target.to_str().unwrap(),
+        &anchor,
+    );
 
     // Invalid-revision failure.
     let bad_target = target_path(&fx, "ws-badrev");
@@ -315,7 +335,7 @@ fn primary_checkout_survives_every_matrix_failure() {
         &"0".repeat(40),
         bad_target.to_str().unwrap(),
     );
-    let _ = adapter.create_worktree(&bad, &fx.path_str(), bad_target.to_str().unwrap());
+    let _ = adapter.create_worktree(&bad, &fx.path_str(), bad_target.to_str().unwrap(), &anchor);
 
     assert_eq!(fx.primary_head(), base, "primary HEAD must not move");
     assert_eq!(
@@ -340,14 +360,15 @@ fn failure_taxonomy_stays_bounded() {
     // kind set — one class per cause family, never one per stderr string.
     let adapter = GitCli::new();
     let fx = Fixture::new("bounded");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     git(&fx.dir, &["symbolic-ref", "-d", "refs/remotes/origin/HEAD"]);
-    let indeterminate = adapter.default_branch(&fx.path_str()).unwrap_err();
+    let indeterminate = adapter.default_branch(&fx.path_str(), &anchor).unwrap_err();
     assert_eq!(indeterminate.kind(), "git_backend_failure");
     let invalid = adapter
-        .resolve_revision(&fx.path_str(), "nope")
+        .resolve_revision(&fx.path_str(), "nope", &anchor)
         .unwrap_err();
     assert_eq!(invalid.kind(), "invalid_revision");
-    let not_repo = adapter.is_repository("/definitely/not/a/repo/path-xyz");
+    let not_repo = adapter.is_repository("/definitely/not/a/repo/path-xyz", &anchor);
     assert!(matches!(not_repo, Ok(false)));
     for failure in [indeterminate, invalid] {
         assert!(

@@ -1,23 +1,120 @@
 # G6 Trusted Host Git Boundary Hardening (TASK-0071)
 
-> Remediation of the F-003 gaps left open after TASK-0070's independent
-> adversarial re-audit: (1) `.git` pointer validation accepted any existing,
-> syntactically valid directory, so a caller could redirect a worktree's
-> repository identity to an unrelated but real repository; (2)
-> `GitCli::worktree_status` (and, transitively, `compute_diff`) ran Git
-> directly against a path without performing that identity validation at
-> all. A final independent-style self-review also found that the first
-> back-reference design could be bypassed with a forged local linked-worktree
-> metadata shim whose reverse `gitdir` pointed back to the expected worktree
-> while `commondir` pointed at a foreign repository. All three paths are
-> closed. The already-applied `run_git` hardening
-> (`env_clear`, explicit `-c` neutralization of hooks/fsmonitor/credential
-> helper/external diff/pager/editor, `GIT_CONFIG_NOSYSTEM`,
-> `GIT_CONFIG_GLOBAL=/dev/null`) is preserved unchanged.
+> TASK-0071 remediation evidence and independent continuation re-review.
+> The earlier implementation record on this branch concluded that
+> linked-worktree back-reference + structural `commondir/worktrees/<id>`
+> validation closed repository-identity redirection. The required
+> independent-style continuation disproved that conclusion: those fields are
+> self-consistent metadata, not a trusted identity anchor, and a confined
+> provider can construct the complete shape in another provider-writable
+> directory. Additional RED cases also found ancestor-discovery and
+> repository-local filter/include gaps. The latter two have an uncommitted
+> remediation candidate; the trusted-anchor blocker remains open.
 >
-> **Verdict: remediation implemented and independently retestable. G6 status
-> to be updated by the required independent re-review (§20 of the task
-> brief), not self-certified here.**
+> **Current verdict: FAIL / NOT READY. TASK-0071 must not be committed as
+> complete or merged. G6 remains `IN_PROGRESS`.**
+
+## 0. Independent continuation re-review — authoritative current state
+
+This section supersedes any later statement in this document that says all
+repository-redirection paths are closed or that TASK-0071 is merge-ready.
+Those later sections are retained as the historical implementation record for
+commits `4128e7b`, `06b33dc`, and `edd5749`.
+
+### Repository state
+
+| Field | Value |
+| --- | --- |
+| Worktree | `/Users/artemmac/dev/runlith-task0071` |
+| Branch | `task-0071-g6-trusted-host-git-boundary-hardening` |
+| Vulnerable baseline | `e9009a8f7ca8db8230232c3a647dd6950cdfc3cf` |
+| Current committed HEAD at re-review | `edd574914bab25236c49db9cec548a8a931825f6` |
+| Re-review working tree | dirty; remediation candidate + permanent blocker keeper, intentionally uncommitted |
+| Commit readiness | `NOT READY` |
+| Merge readiness | `NOT READY` |
+
+### New independent findings
+
+| Finding | Severity | Status | Evidence / implication |
+| --- | --- | --- | --- |
+| F7 — fully forged linked-worktree identity can satisfy every self-consistency check | **BLOCKER / CRITICAL** | **OPEN** | A fake repository placed in a provider-writable sibling (modeling provider scratch/support storage) can create its own `.git/worktrees/<id>`, reverse `gitdir`, `commondir`, and `HEAD`. `resolve_revision(A, "HEAD")` accepts it and returns the attacker's commit. Structural ownership proves only that the forged metadata is internally consistent; it does not prove that it belongs to the repository Runlith originally authorized. |
+| F8 — nested repository paths bypass root `.git` validation | **BLOCKER** | **FIXED IN UNCOMMITTED CANDIDATE** | `validate_repository_metadata(path)` checked only `<path>/.git`, while Git walks ancestors. Calling `resolve_revision` on `A/nested/path` therefore skipped validation of hostile `A/.git` and resolved repo B. Candidate fix canonicalizes the start path and validates the nearest ancestor `.git` before Git discovery. |
+| F9 — repository-local clean/process filter commands remain executable | **BLOCKER / CRITICAL** | **FIXED IN UNCOMMITTED CANDIDATE** | `run_git` neutralized fixed singleton config keys such as `core.fsmonitor`, but `.gitattributes` can select arbitrary named `filter.<name>.clean/smudge/process` commands. `GitCli::worktree_status` → `git status` executed the clean filter with Trusted Host authority. Candidate fix refuses executable local filter/diff-driver keys and repository-local config includes before normal Git operations; `extensions.worktreeConfig` is scanned when enabled. |
+
+F7 is the completion blocker. It is not a TOCTOU variant and cannot be made
+sound by adding more self-referential filesystem checks. A correct invariant
+needs an independently trusted repository anchor (for example an expected
+canonical repository/common-Git identity carried from admission into every
+worktree Git operation). The current `GitPort::worktree_status(worktree_path)`
+and `GitPort::compute_diff(lease)` contracts do not carry that anchor, and
+`RepositoryRef` is intentionally distinct from a local `RepositoryRoot`.
+Adding the anchor therefore requires an architecture-sensitive contract and
+composition change outside TASK-0071's declared "no adapter redesign" scope.
+
+### New RED evidence
+
+All baseline probes used disposable detached worktrees and were removed after
+execution. Temporary RED test files were never added to the task branch.
+
+| Attack | SHA | Result |
+| --- | --- | --- |
+| Ancestor discovery bypass + named clean filter + local include helper | `e9009a8f7ca8db8230232c3a647dd6950cdfc3cf` | Temporary `red_task0071_rereview` suite: nested `resolve_revision` returned repo B's HEAD; direct clean filter marker was created; filter imported through repository-local `include.path` also created its marker. `3 passed; 0 failed`, exit `0` because the RED tests asserted the vulnerable behavior. |
+| Fully forged linked-worktree identity in provider-writable sibling | `e9009a8f7ca8db8230232c3a647dd6950cdfc3cf` | Temporary `red_task0071_anchor` probe returned the forged repository HEAD exactly (`997d66c9eedb6e88638187b5add8aa9acf673a7d` in the recorded run). The vulnerability assertion passed. |
+| Fully forged linked-worktree identity after the existing TASK-0071 structural fix | current `edd5749` code plus the uncommitted F8/F9 candidate | Permanent keeper `fully_forged_linked_worktree_identity_in_provider_writable_sibling_is_refused` fails: `resolve_revision` returns the attacker-controlled revision instead of an error. Exact mandatory `cargo test -p git-cli` exits `101`. |
+
+### Candidate remediation that is GREEN apart from F7
+
+The uncommitted working tree contains bounded changes that independently fix
+F8/F9 without changing public domain contracts:
+
+- one `validate_repository_boundary` entry point combines metadata identity
+  checks with repository-local executable-config checks;
+- metadata discovery canonicalizes the supplied directory and walks ancestors
+  to the nearest `.git`, matching Git's discovery shape for nested paths;
+- local config is inspected with `git config --local --no-includes` before
+  normal Git operations and refuses repository-local `include*.path`,
+  `filter.<name>.clean|smudge|process`, and
+  `diff.<name>.command|textconv` surfaces;
+- when `extensions.worktreeConfig=true`, the separate per-worktree config
+  scope is inspected as well; benign linked worktrees with that extension
+  remain supported;
+- `worktree_status`, `compute_diff`, and `remove_worktree` use the same
+  reusable boundary.
+
+Verification of the candidate:
+
+```text
+$ cargo fmt --check
+exit 0
+
+$ cargo clippy -p git-cli --all-targets -- -D warnings
+exit 0
+
+$ cargo test -p app-services --test g6_security_integration
+7 passed; 0 failed
+
+$ cargo test -p git-cli -- --skip fully_forged_linked_worktree_identity_in_provider_writable_sibling_is_refused
+69 passed; 0 failed; 1 filtered out
+
+$ cargo test -p git-cli
+all preceding groups green; safety_regression: 20 passed, 1 failed
+failed: fully_forged_linked_worktree_identity_in_provider_writable_sibling_is_refused
+exit 101
+```
+
+The exact mandatory suite is therefore RED for the correct reason and no
+completion commit is permitted.
+
+### Required architectural next step
+
+Define a trusted repository/common-Git anchor at the application/port
+boundary and bind every linked-worktree operation to it. The anchor must be
+established before provider execution from trusted admission state and must
+not be derivable solely from provider-writable `.git`, `gitdir`, `commondir`,
+config, or sibling support/scratch files. Once that contract exists,
+TASK-0071 can finish by requiring the observed linked-worktree metadata target
+to match the trusted anchor, rerunning every RED keeper, and only then
+advancing completion/version state.
 
 ## 1. Repository identity
 
@@ -356,3 +453,117 @@ No policy, approval, Secrets, H7, or unrelated production code was touched.
 - This task: `TASK-0071`, scope = F-003 trusted-host Git boundary hardening
   (repository-identity validation coverage + regression hardening), no
   merge performed.
+
+## 11. Trusted-anchor follow-up — F7 closure (appended, history above unchanged)
+
+> This section appends the F7 follow-up record. Sections 0–10 above are the
+> retained historical implementation record (commits `4128e7b`, `06b33dc`,
+> `edd5749` plus the independent re-review that found F7/F8/F9 OPEN). Nothing
+> above was rewritten to claim closure prematurely.
+
+### Design
+
+- New consumer-owned type `workspace::TrustedCommonGit` (opaque;
+  `canonical_commondir: PathBuf`, byte-equality). `RepositoryRef` (domain
+  identity) and `TrustedCommonGit` (local infrastructure binding) stay
+  separate; the anchor never enters `WorkspaceLeaseSnapshot`, the journal,
+  or Task semantics.
+- Sole anchor-free path: `GitPort::establish_trusted_anchor` (admission,
+  trusted-deposit before provider execution) via hardened `run_git`
+  `rev-parse --git-common-dir` + `fs::canonicalize` + `symlink_metadata`
+  refusal; otherwise `GitBackendFailure`. Bare → `BareRepositoryUnsupported`,
+  non-repo → `NotRepository` independent of the anchor.
+- Durable sidecar `workspace_trusted_anchor` (migration `0011`, schema v11):
+  `(workspace_id PRIMARY KEY REFERENCES workspace_leases ON DELETE CASCADE,
+  canonical_commondir, captured_at_millis, capture_provenance DEFAULT
+  'workspace-application-service/allocate_workspace')`. Immutable via
+  `workspace_trusted_anchor_no_update` trigger; no explicit anchor DELETE;
+  no journal events for anchors.
+- Capture order (INV-145): Git observations (`establish`, anchored
+  `is_repository` + `resolve_revision`) precede one short SQLite transaction
+  (`insert_allocated_lease_with_anchor` with lease + anchor). No SQLite
+  transaction spans a Git subprocess.
+- Enforcement adjacent to operation:
+  `runner::validate_repository_boundary(exe, path, expected)` keeps existing
+  checks (nearest `.git` via ancestors, symlink refusal, `gitdir`/`commondir`
+  back-reference + structural ownership, F9 config refusals) plus a new step
+  deriving the observed canonical commondir from the `.git → gitdir →
+  commondir` chain (reusing `resolve_gitdir_pointer`), canonicalized and
+  compared byte-wise with `expected`. Mismatch → `Err(GitBackendFailure)`,
+  never `Ok(Invalid)`. Called from `classify_repository`,
+  `observe::worktree_status`, `diff::compute_diff`, `cleanup::remove_worktree`
+  (same points as before); every Git invocation stays behind a per-function
+  re-check, not a cache. No Policy authority was added to the adapter/runner
+  (ADR-0026: Policy decides, operation owners enforce).
+- `core.*` extension (same function, F9 pattern): `DANGEROUS_CONFIG_PATTERN`
+  now also refuses `core.worktree`, `core.gitProxy`, `core.sshCommand`,
+  `core.hooksPath` in `--local` always and `--worktree` when
+  `extensions.worktreeConfig=true`. Any match → `Err(GitBackendFailure)`
+  before Git operations. `core.fsmonitor` / `credential.helper` /
+  `core.externalDiff` remain on `-c` neutralization (existing GREEN keepers
+  preserved).
+- Missing sidecar row (pre-existing lease, machine move, loss) fails closed
+  as `GitBackendFailure` until re-admission with a new lease. No backfill
+  from current FS.
+
+### Keepers (no skips, no weakening)
+
+- F7
+  `fully_forged_linked_worktree_identity_in_provider_writable_sibling_is_refused`
+  is GREEN (anchor captured before forging, mismatch → `Err`).
+- `core.worktree` keeper now expects `Err` (`Ok(Invalid)` → `Err`) via the
+  new config refusal; previously RED (`Invalid`) in the candidate tree.
+- New keepers by the same pattern: `core.gitProxy`, `core.sshCommand`,
+  `core.hooksPath` refusals; nested-path and forged-anchor-mismatch keepers
+  remain and are GREEN with anchors.
+- Benign `git worktree add` + `extensions.worktreeConfig`
+  (`linked_worktree_config_scope_is_supported_and_scanned`) remains GREEN.
+- F-002/Seatbelt untouched. Policy/approval/Secrets/Audit untouched.
+
+### Verification (required suites GREEN)
+
+```text
+$ cargo fmt --check
+exit 0
+
+$ cargo clippy -p git-cli --all-targets -- -D warnings
+exit 0
+
+$ cargo test -p git-cli
+8 + 18 + 10 + 2 + 25 + 11 = 74 passed, 0 failed (F7 GREEN, no --skip)
+
+$ cargo test -p app-services --test g6_security_integration
+7 passed; 0 failed
+```
+
+Broader `cargo test -p app-services` and `cargo test -p storage-sqlite`
+are GREEN apart from intentional expectation updates required by the new
+invariant: pre-anchor legacy leases fail closed (`GitBackendFailure`, no
+backfill), wrong-repository service paths fail via anchor mismatch
+(`GitBackendFailure`) instead of only registration `OwnershipMismatch`
+(both fail closed), and schema-version censuses moved 10 → 11. The slow
+binary-level `agentctl --test execution_recovery`
+`daemon_sigkill_after_branch_creation_recovers_branch_only_through_binaries`
+remains outside required verification (its git shim matches
+`$1 = worktree` but hardened `run_git` prefixes `-c` flags; pre-existing
+harness shape, not a product regression from this change).
+
+### Residual risk (accepted, bounded)
+
+- TOCTOU validation → `run_git` is accepted and bounded by per-entry-point
+  re-validation (no caching); eliminating it would need an atomic
+  open-and-verify primitive Git CLI does not expose or Git-process
+  sandboxing, both out of scope.
+- Capture trusts the admission-entry `repository_path` (trusted-deposit
+  before provider execution for that lease). A hostile admission input is
+  outside the provider-threat model.
+- No protection against full host compromise: with host authority an
+  attacker can rewrite the DB sidecar and `.git` together. The anchor
+  detects provider-writable forgery, not a host owner turning malicious.
+
+### Canonical state (unchanged by this follow-up)
+
+- `completed_through`: `TASK-0070` (not promoted here; closure needs
+  independent re-review).
+- `current_gate`: `G6`, `gate_status`: `IN_PROGRESS`.
+- No G6-closure claim, no version bump, no merge performed here.

@@ -27,8 +27,8 @@ use git_cli::GitCli;
 use storage_sqlite::{EventType, SqliteStore};
 use task_domain::{Project, ProjectId, Task, TaskId};
 use workspace::{
-    BranchRef, GitPort, LeaseLifecycle, RepositoryRef, Revision, WorkspaceFailure, WorkspaceId,
-    WorkspaceLease, WorktreeStatus,
+    BranchRef, GitPort, LeaseLifecycle, RepositoryRef, Revision, TrustedCommonGit,
+    WorkspaceFailure, WorkspaceId, WorkspaceLease, WorktreeStatus,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(5000);
@@ -476,7 +476,14 @@ fn cleanup_of_one_lease_preserves_dirty_sibling_byte_identical() {
         branch_before
     );
     assert_eq!(
-        GitCli::new().worktree_status(w2.worktree_ref()).unwrap(),
+        GitCli::new()
+            .worktree_status(
+                w2.worktree_ref(),
+                &GitCli::new()
+                    .establish_trusted_anchor(&env.repo_path())
+                    .unwrap()
+            )
+            .unwrap(),
         WorktreeStatus::DirtyUntracked
     );
 }
@@ -541,29 +548,49 @@ impl GitPort for DirtAfterFirstCheck {
     fn backend_ref(&self) -> &'static str {
         self.inner.backend_ref()
     }
-    fn is_repository(&self, path: &str) -> Result<bool, WorkspaceFailure> {
-        self.inner.is_repository(path)
+    fn establish_trusted_anchor(
+        &self,
+        trusted_repository_path: &str,
+    ) -> Result<TrustedCommonGit, WorkspaceFailure> {
+        self.inner.establish_trusted_anchor(trusted_repository_path)
     }
-    fn default_branch(&self, repository_path: &str) -> Result<String, WorkspaceFailure> {
-        self.inner.default_branch(repository_path)
+    fn is_repository(
+        &self,
+        path: &str,
+        expected: &TrustedCommonGit,
+    ) -> Result<bool, WorkspaceFailure> {
+        self.inner.is_repository(path, expected)
+    }
+    fn default_branch(
+        &self,
+        repository_path: &str,
+        expected: &TrustedCommonGit,
+    ) -> Result<String, WorkspaceFailure> {
+        self.inner.default_branch(repository_path, expected)
     }
     fn resolve_revision(
         &self,
         repository_path: &str,
         rev: &str,
+        expected: &TrustedCommonGit,
     ) -> Result<Revision, WorkspaceFailure> {
-        self.inner.resolve_revision(repository_path, rev)
+        self.inner.resolve_revision(repository_path, rev, expected)
     }
     fn create_worktree(
         &self,
         lease: &WorkspaceLease,
         repository_path: &str,
         worktree_path: &str,
+        expected: &TrustedCommonGit,
     ) -> Result<(), WorkspaceFailure> {
         self.inner
-            .create_worktree(lease, repository_path, worktree_path)
+            .create_worktree(lease, repository_path, worktree_path, expected)
     }
-    fn worktree_status(&self, worktree_path: &str) -> Result<WorktreeStatus, WorkspaceFailure> {
+    fn worktree_status(
+        &self,
+        worktree_path: &str,
+        expected: &TrustedCommonGit,
+    ) -> Result<WorktreeStatus, WorkspaceFailure> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
         // Calls 0 (finalize verification) and 1 (cleanup entry check)
         // observe a clean tree — the entry check's view is stale by
@@ -574,43 +601,48 @@ impl GitPort for DirtAfterFirstCheck {
         if n <= 1 {
             Ok(WorktreeStatus::Clean)
         } else {
-            self.inner.worktree_status(worktree_path)
+            self.inner.worktree_status(worktree_path, expected)
         }
     }
     fn compute_diff(
         &self,
         lease: &WorkspaceLease,
+        expected: &TrustedCommonGit,
     ) -> Result<workspace::DiffEvidence, WorkspaceFailure> {
-        self.inner.compute_diff(lease)
+        self.inner.compute_diff(lease, expected)
     }
     fn remove_worktree(
         &self,
         lease: &WorkspaceLease,
         worktree_path: &str,
+        expected: &TrustedCommonGit,
     ) -> Result<(), WorkspaceFailure> {
-        self.inner.remove_worktree(lease, worktree_path)
+        self.inner.remove_worktree(lease, worktree_path, expected)
     }
     fn remove_branch(
         &self,
         repository_path: &str,
         branch: &BranchRef,
+        expected: &TrustedCommonGit,
     ) -> Result<(), WorkspaceFailure> {
-        self.inner.remove_branch(repository_path, branch)
+        self.inner.remove_branch(repository_path, branch, expected)
     }
     fn branch_exists(
         &self,
         repository_path: &str,
         branch: &BranchRef,
+        expected: &TrustedCommonGit,
     ) -> Result<bool, WorkspaceFailure> {
-        self.inner.branch_exists(repository_path, branch)
+        self.inner.branch_exists(repository_path, branch, expected)
     }
     fn is_registered_worktree(
         &self,
         repository_path: &str,
         worktree_path: &str,
+        expected: &TrustedCommonGit,
     ) -> Result<bool, WorkspaceFailure> {
         self.inner
-            .is_registered_worktree(repository_path, worktree_path)
+            .is_registered_worktree(repository_path, worktree_path, expected)
     }
     fn owner_is_live(
         &self,
@@ -673,65 +705,90 @@ impl GitPort for LiveOwner {
     fn backend_ref(&self) -> &'static str {
         self.0.backend_ref()
     }
-    fn is_repository(&self, path: &str) -> Result<bool, WorkspaceFailure> {
-        self.0.is_repository(path)
+    fn establish_trusted_anchor(
+        &self,
+        trusted_repository_path: &str,
+    ) -> Result<TrustedCommonGit, WorkspaceFailure> {
+        self.0.establish_trusted_anchor(trusted_repository_path)
     }
-    fn default_branch(&self, repository_path: &str) -> Result<String, WorkspaceFailure> {
-        self.0.default_branch(repository_path)
+    fn is_repository(
+        &self,
+        path: &str,
+        expected: &TrustedCommonGit,
+    ) -> Result<bool, WorkspaceFailure> {
+        self.0.is_repository(path, expected)
+    }
+    fn default_branch(
+        &self,
+        repository_path: &str,
+        expected: &TrustedCommonGit,
+    ) -> Result<String, WorkspaceFailure> {
+        self.0.default_branch(repository_path, expected)
     }
     fn resolve_revision(
         &self,
         repository_path: &str,
         rev: &str,
+        expected: &TrustedCommonGit,
     ) -> Result<Revision, WorkspaceFailure> {
-        self.0.resolve_revision(repository_path, rev)
+        self.0.resolve_revision(repository_path, rev, expected)
     }
     fn create_worktree(
         &self,
         lease: &WorkspaceLease,
         repository_path: &str,
         worktree_path: &str,
+        expected: &TrustedCommonGit,
     ) -> Result<(), WorkspaceFailure> {
         self.0
-            .create_worktree(lease, repository_path, worktree_path)
+            .create_worktree(lease, repository_path, worktree_path, expected)
     }
-    fn worktree_status(&self, worktree_path: &str) -> Result<WorktreeStatus, WorkspaceFailure> {
-        self.0.worktree_status(worktree_path)
+    fn worktree_status(
+        &self,
+        worktree_path: &str,
+        expected: &TrustedCommonGit,
+    ) -> Result<WorktreeStatus, WorkspaceFailure> {
+        self.0.worktree_status(worktree_path, expected)
     }
     fn compute_diff(
         &self,
         lease: &WorkspaceLease,
+        expected: &TrustedCommonGit,
     ) -> Result<workspace::DiffEvidence, WorkspaceFailure> {
-        self.0.compute_diff(lease)
+        self.0.compute_diff(lease, expected)
     }
     fn remove_worktree(
         &self,
         lease: &WorkspaceLease,
         worktree_path: &str,
+        expected: &TrustedCommonGit,
     ) -> Result<(), WorkspaceFailure> {
-        self.0.remove_worktree(lease, worktree_path)
+        self.0.remove_worktree(lease, worktree_path, expected)
     }
     fn remove_branch(
         &self,
         repository_path: &str,
         branch: &BranchRef,
+        expected: &TrustedCommonGit,
     ) -> Result<(), WorkspaceFailure> {
-        self.0.remove_branch(repository_path, branch)
+        self.0.remove_branch(repository_path, branch, expected)
     }
     fn branch_exists(
         &self,
         repository_path: &str,
         branch: &BranchRef,
+        expected: &TrustedCommonGit,
     ) -> Result<bool, WorkspaceFailure> {
-        self.0.branch_exists(repository_path, branch)
+        self.0.branch_exists(repository_path, branch, expected)
     }
     fn is_registered_worktree(
         &self,
         repository_path: &str,
         worktree_path: &str,
+        expected: &TrustedCommonGit,
     ) -> Result<bool, WorkspaceFailure> {
         self.0
-            .is_registered_worktree(repository_path, worktree_path)
+            .is_registered_worktree(repository_path, worktree_path, expected)
     }
     fn owner_is_live(
         &self,
@@ -775,7 +832,13 @@ fn live_owner_rejects_cleanup_before_any_mutation() {
         "refused cleanup writes nothing"
     );
     assert!(GitCli::new()
-        .branch_exists(&env.repo_path(), lease.branch())
+        .branch_exists(
+            &env.repo_path(),
+            lease.branch(),
+            &GitCli::new()
+                .establish_trusted_anchor(&env.repo_path())
+                .unwrap()
+        )
         .unwrap());
     assert_eq!(
         workspace_facts(&service, lease.id().as_str(), EventType::WorkspaceRemoved),
@@ -804,7 +867,13 @@ fn externally_deleted_branch_with_clean_base_worktree_finalizes_safely() {
     git(&env.repo, &["update-ref", "-d", lease.branch().as_str()]);
     assert!(
         !GitCli::new()
-            .branch_exists(&env.repo_path(), lease.branch())
+            .branch_exists(
+                &env.repo_path(),
+                lease.branch(),
+                &GitCli::new()
+                    .establish_trusted_anchor(&env.repo_path())
+                    .unwrap()
+            )
             .unwrap(),
         "precondition: managed branch is gone"
     );
@@ -900,8 +969,10 @@ fn restart_with_far_future_clock_never_auto_deletes() {
 fn failure_classification_stays_bounded_and_domain_level() {
     let env = TestEnv::new("bounded");
     // Missing backend surfaces as typed GitBackendFailure through the port.
+    let dummy_canon = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    let dummy_anchor = workspace::TrustedCommonGit::from_canonical_commondir(dummy_canon).unwrap();
     let port_err = GitCli::with_executable("/nonexistent/git-binary-xyz")
-        .is_repository(&env.repo_path())
+        .is_repository(&env.repo_path(), &dummy_anchor)
         .unwrap_err();
     assert_eq!(port_err.kind(), "git_backend_failure");
 
@@ -1137,7 +1208,12 @@ fn indeterminate_default_branch_creates_without_guessing() {
     );
     assert_eq!(
         GitCli::new()
-            .default_branch(&env.repo_path())
+            .default_branch(
+                &env.repo_path(),
+                &GitCli::new()
+                    .establish_trusted_anchor(&env.repo_path())
+                    .unwrap()
+            )
             .unwrap_err()
             .kind(),
         "git_backend_failure"
@@ -1225,9 +1301,11 @@ fn cleanup_with_wrong_but_valid_repository_fails_closed_before_mutation() {
     let err = service
         .cleanup_workspace(lease.id(), &wrong_path)
         .expect_err("wrong-repo cleanup must fail closed");
+    // TASK-0071 anchor: wrong repository fails via trusted-anchor mismatch
+    // (GitBackendFailure) before registration checks; both fail closed.
     assert!(
-        matches!(err, WorkspaceFailure::OwnershipMismatch { .. }),
-        "wrong-repo cleanup must be OwnershipMismatch, got {err:?}"
+        matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
+        "wrong-repo cleanup must be GitBackendFailure (anchor), got {err:?}"
     );
     // Nothing mutated: lease still Ready, worktree intact and still
     // registered in the true repository, managed branch alive there, no
@@ -1240,13 +1318,25 @@ fn cleanup_with_wrong_but_valid_repository_fails_closed_before_mutation() {
     );
     assert!(
         GitCli::new()
-            .is_registered_worktree(&env.repo_path(), lease.worktree_ref())
+            .is_registered_worktree(
+                &env.repo_path(),
+                lease.worktree_ref(),
+                &GitCli::new()
+                    .establish_trusted_anchor(&env.repo_path())
+                    .unwrap()
+            )
             .unwrap(),
         "worktree still registered in the true repository"
     );
     assert!(
         GitCli::new()
-            .branch_exists(&env.repo_path(), lease.branch())
+            .branch_exists(
+                &env.repo_path(),
+                lease.branch(),
+                &GitCli::new()
+                    .establish_trusted_anchor(&env.repo_path())
+                    .unwrap()
+            )
             .unwrap(),
         "managed branch must not leak-delete nor leak-away"
     );
@@ -1293,7 +1383,10 @@ fn cleanup_after_external_worktree_loss_with_wrong_repo_fails_closed() {
         .cleanup_workspace(lease.id(), &wrong_path)
         .expect_err("wrong-repo continuation must fail closed");
     assert!(
-        matches!(err, WorkspaceFailure::OwnershipMismatch { .. }),
+        matches!(
+            err,
+            WorkspaceFailure::OwnershipMismatch { .. } | WorkspaceFailure::GitBackendFailure { .. }
+        ),
         "absent-shape wrong repo must be OwnershipMismatch, got {err:?}"
     );
     let stored = service.workspace(lease.id()).unwrap().unwrap();
@@ -1318,7 +1411,13 @@ fn cleanup_after_external_worktree_loss_with_wrong_repo_fails_closed() {
     assert_eq!(stored.lifecycle(), LeaseLifecycle::CleanupPending);
     assert!(
         GitCli::new()
-            .branch_exists(&env.repo_path(), lease.branch())
+            .branch_exists(
+                &env.repo_path(),
+                lease.branch(),
+                &GitCli::new()
+                    .establish_trusted_anchor(&env.repo_path())
+                    .unwrap()
+            )
             .unwrap(),
         "managed branch preserved through refused continuation"
     );

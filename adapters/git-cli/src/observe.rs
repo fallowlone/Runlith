@@ -10,11 +10,11 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use workspace::{BranchRef, WorkspaceFailure, WorktreeStatus};
+use workspace::{BranchRef, TrustedCommonGit, WorkspaceFailure, WorktreeStatus};
 
 use crate::runner::{
     absolutize, backend_failure, bounded_detail, classify_repository, run_git, run_git_text,
-    stderr_excerpt, validate_repository_metadata, RepoClass,
+    stderr_excerpt, validate_repository_boundary, RepoClass,
 };
 
 /// Canonical metadata source for the protected/default branch.
@@ -33,12 +33,16 @@ const ORIGIN_HEAD_REF: &str = "refs/remotes/origin/HEAD";
 /// - bare repository → `Err(BareRepositoryUnsupported)` (explicit kind)
 /// - normal directory, file, or missing path → `Ok(false)`
 /// - unusable Git backend → `Err(GitBackendFailure)`
-pub fn is_repository(executable: &OsStr, path: &str) -> Result<bool, WorkspaceFailure> {
+pub fn is_repository(
+    executable: &OsStr,
+    path: &str,
+    expected: &TrustedCommonGit,
+) -> Result<bool, WorkspaceFailure> {
     let abs = match absolutize(path) {
         Ok(abs) => abs,
         Err(_) => return Ok(false),
     };
-    match classify_repository(executable, &abs) {
+    match classify_repository(executable, &abs, expected) {
         Ok(RepoClass::Normal { .. }) => Ok(true),
         Err(WorkspaceFailure::NotRepository { .. }) => Ok(false),
         Err(other) => Err(other),
@@ -52,11 +56,12 @@ pub fn is_repository(executable: &OsStr, path: &str) -> Result<bool, WorkspaceFa
 pub fn repository_root(
     executable: &OsStr,
     repository_path: &str,
+    expected: &TrustedCommonGit,
 ) -> Result<PathBuf, WorkspaceFailure> {
     let abs = absolutize(repository_path).map_err(|_| WorkspaceFailure::NotRepository {
         detail: bounded_detail("git-cli: invalid repository path".to_owned()),
     })?;
-    match classify_repository(executable, &abs)? {
+    match classify_repository(executable, &abs, expected)? {
         RepoClass::Normal { root } => Ok(root),
     }
 }
@@ -72,6 +77,7 @@ pub fn resolve_revision(
     executable: &OsStr,
     repository_path: &str,
     rev: &str,
+    expected: &TrustedCommonGit,
 ) -> Result<workspace::Revision, WorkspaceFailure> {
     let trimmed = rev.trim();
     if trimmed.is_empty() || trimmed.contains('\0') {
@@ -82,7 +88,7 @@ pub fn resolve_revision(
     let abs = absolutize(repository_path).map_err(|_| WorkspaceFailure::NotRepository {
         detail: bounded_detail("git-cli: invalid repository path".to_owned()),
     })?;
-    let root = match classify_repository(executable, &abs)? {
+    let root = match classify_repository(executable, &abs, expected)? {
         RepoClass::Normal { root } => root,
     };
     let candidate = format!("{trimmed}^{{commit}}");
@@ -111,11 +117,12 @@ pub fn resolve_revision(
 pub fn default_branch(
     executable: &OsStr,
     repository_path: &str,
+    expected: &TrustedCommonGit,
 ) -> Result<String, WorkspaceFailure> {
     let abs = absolutize(repository_path).map_err(|_| WorkspaceFailure::NotRepository {
         detail: bounded_detail("git-cli: invalid repository path".to_owned()),
     })?;
-    let root = match classify_repository(executable, &abs)? {
+    let root = match classify_repository(executable, &abs, expected)? {
         RepoClass::Normal { root } => root,
     };
     let (output, target) = run_git_text(
@@ -146,11 +153,12 @@ pub fn branch_exists(
     executable: &OsStr,
     repository_path: &str,
     branch: &BranchRef,
+    expected: &TrustedCommonGit,
 ) -> Result<bool, WorkspaceFailure> {
     let abs = absolutize(repository_path).map_err(|_| WorkspaceFailure::NotRepository {
         detail: bounded_detail("git-cli: invalid repository path".to_owned()),
     })?;
-    let root = match classify_repository(executable, &abs)? {
+    let root = match classify_repository(executable, &abs, expected)? {
         RepoClass::Normal { root } => root,
     };
     let output = run_git(
@@ -182,11 +190,12 @@ pub fn is_registered_worktree(
     executable: &OsStr,
     repository_path: &str,
     worktree_path: &str,
+    expected: &TrustedCommonGit,
 ) -> Result<bool, WorkspaceFailure> {
     let repo_abs = absolutize(repository_path).map_err(|_| WorkspaceFailure::NotRepository {
         detail: bounded_detail("git-cli: invalid repository path".to_owned()),
     })?;
-    let root = match classify_repository(executable, &repo_abs)? {
+    let root = match classify_repository(executable, &repo_abs, expected)? {
         RepoClass::Normal { root } => root,
     };
     let target_abs =
@@ -234,8 +243,9 @@ pub fn worktree_for_branch(
     executable: &OsStr,
     repository_path: &str,
     branch: &BranchRef,
+    expected: &TrustedCommonGit,
 ) -> Result<Option<String>, WorkspaceFailure> {
-    let root = repository_root(executable, repository_path)?;
+    let root = repository_root(executable, repository_path, expected)?;
     let output = run_git(executable, &root, &["worktree", "list", "--porcelain"])?;
     if !output.status.success() {
         return Err(backend_failure(format!(
@@ -268,6 +278,7 @@ pub fn worktree_for_branch(
 pub fn worktree_status(
     executable: &OsStr,
     worktree_path: &str,
+    expected: &TrustedCommonGit,
 ) -> Result<WorktreeStatus, WorkspaceFailure> {
     let abs = match absolutize(worktree_path) {
         Ok(abs) => abs,
@@ -282,8 +293,9 @@ pub fn worktree_status(
     // Same repository-identity check every other Git entry point performs
     // (`classify_repository`) before Git is allowed to interpret `.git`
     // metadata at this path — this is the production path TASK-0071 closes
-    // (`worktree_status` previously ran Git here unvalidated).
-    validate_repository_metadata(&abs)?;
+    // (`worktree_status` previously ran Git here unvalidated). Anchor
+    // mismatch fails closed as `GitBackendFailure`, never `Ok(Invalid)`.
+    validate_repository_boundary(executable, &abs, expected)?;
     let inside = run_git(executable, &abs, &["rev-parse", "--is-inside-work-tree"])?;
     if !inside.status.success() || String::from_utf8_lossy(&inside.stdout).trim() != "true" {
         return Ok(WorktreeStatus::Invalid);

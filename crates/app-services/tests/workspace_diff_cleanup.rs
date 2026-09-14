@@ -25,7 +25,9 @@ use app_services::{
 use git_cli::GitCli;
 use storage_sqlite::EventType;
 use task_domain::{Project, ProjectId, Task, TaskId};
-use workspace::{DiffChangeKind, GitPort, LeaseLifecycle, RepositoryRef, WorkspaceFailure};
+use workspace::{
+    DiffChangeKind, GitPort, LeaseLifecycle, RepositoryRef, TrustedCommonGit, WorkspaceFailure,
+};
 
 static COUNTER: AtomicU64 = AtomicU64::new(1000);
 
@@ -445,7 +447,10 @@ fn clean_cleanup_runs_the_full_lifecycle_exactly_once() {
     assert!(!GitCli::new()
         .branch_exists(
             &env.repo_path(),
-            &workspace::BranchRef::new(&branch).unwrap()
+            &workspace::BranchRef::new(&branch).unwrap(),
+            &GitCli::new()
+                .establish_trusted_anchor(&env.repo_path())
+                .unwrap()
         )
         .unwrap());
     assert_eq!(removed_count(&service, &ws), 1);
@@ -592,7 +597,13 @@ fn unmerged_managed_branch_survives_ordinary_cleanup() {
     // force-deletes it.
     assert!(!Path::new(&worktree).exists());
     assert!(GitCli::new()
-        .branch_exists(&env.repo_path(), &branch)
+        .branch_exists(
+            &env.repo_path(),
+            &branch,
+            &GitCli::new()
+                .establish_trusted_anchor(&env.repo_path())
+                .unwrap()
+        )
         .unwrap());
     let lease = service.workspace_for_execution(&exec).unwrap().unwrap();
     assert_eq!(lease.lifecycle(), LeaseLifecycle::CleanupPending);
@@ -645,7 +656,13 @@ fn crash_after_worktree_removal_continues_through_branch() {
     assert_eq!(removed_count(&service, ws.as_str()), 1);
     let branch_ref = workspace::BranchRef::new(&branch).unwrap();
     assert!(!GitCli::new()
-        .branch_exists(&env.repo_path(), &branch_ref)
+        .branch_exists(
+            &env.repo_path(),
+            &branch_ref,
+            &GitCli::new()
+                .establish_trusted_anchor(&env.repo_path())
+                .unwrap()
+        )
         .unwrap());
 }
 
@@ -778,7 +795,13 @@ fn cleaning_one_lease_leaves_siblings_and_primary_untouched() {
     assert!(!Path::new(&w1_worktree).exists());
     let w1_ref = workspace::BranchRef::new(&w1_branch).unwrap();
     assert!(!GitCli::new()
-        .branch_exists(&env.repo_path(), &w1_ref)
+        .branch_exists(
+            &env.repo_path(),
+            &w1_ref,
+            &GitCli::new()
+                .establish_trusted_anchor(&env.repo_path())
+                .unwrap()
+        )
         .unwrap());
 
     // Sibling intact: files, branch, dirtiness.
@@ -787,7 +810,13 @@ fn cleaning_one_lease_leaves_siblings_and_primary_untouched() {
         b"sibling"
     );
     assert!(GitCli::new()
-        .branch_exists(&env.repo_path(), w2.branch())
+        .branch_exists(
+            &env.repo_path(),
+            w2.branch(),
+            &GitCli::new()
+                .establish_trusted_anchor(&env.repo_path())
+                .unwrap()
+        )
         .unwrap());
     let w2_after = service.workspace_for_execution(&e2).unwrap().unwrap();
     assert_eq!(w2_after.lifecycle(), LeaseLifecycle::Ready);
@@ -833,7 +862,10 @@ fn default_branch_named_trunkline_survives_cleanup() {
     assert!(GitCli::new()
         .branch_exists(
             &env.repo_path(),
-            &workspace::BranchRef::new("refs/heads/trunkline").unwrap()
+            &workspace::BranchRef::new("refs/heads/trunkline").unwrap(),
+            &GitCli::new()
+                .establish_trusted_anchor(&env.repo_path())
+                .unwrap()
         )
         .unwrap());
 }
@@ -865,13 +897,19 @@ fn branch_drift_fails_closed_without_deleting_either_branch() {
     assert!(GitCli::new()
         .branch_exists(
             &env.repo_path(),
-            &workspace::BranchRef::new(&managed).unwrap()
+            &workspace::BranchRef::new(&managed).unwrap(),
+            &GitCli::new()
+                .establish_trusted_anchor(&env.repo_path())
+                .unwrap()
         )
         .unwrap());
     assert!(GitCli::new()
         .branch_exists(
             &env.repo_path(),
-            &workspace::BranchRef::new("refs/heads/unexpected-branch").unwrap()
+            &workspace::BranchRef::new("refs/heads/unexpected-branch").unwrap(),
+            &GitCli::new()
+                .establish_trusted_anchor(&env.repo_path())
+                .unwrap()
         )
         .unwrap());
     assert!(wt.is_dir());
@@ -944,16 +982,33 @@ impl GitPort for LiveOwnerPort {
     fn backend_ref(&self) -> &'static str {
         "stub-live-owner"
     }
-    fn is_repository(&self, _path: &str) -> Result<bool, WorkspaceFailure> {
+    fn establish_trusted_anchor(
+        &self,
+        _trusted_repository_path: &str,
+    ) -> Result<TrustedCommonGit, WorkspaceFailure> {
+        Err(WorkspaceFailure::GitBackendFailure {
+            detail: "stub cannot establish".to_owned(),
+        })
+    }
+    fn is_repository(
+        &self,
+        _path: &str,
+        _expected: &TrustedCommonGit,
+    ) -> Result<bool, WorkspaceFailure> {
         Ok(true)
     }
-    fn default_branch(&self, _repository_path: &str) -> Result<String, WorkspaceFailure> {
+    fn default_branch(
+        &self,
+        _repository_path: &str,
+        _expected: &TrustedCommonGit,
+    ) -> Result<String, WorkspaceFailure> {
         Ok("refs/heads/trunk".to_owned())
     }
     fn resolve_revision(
         &self,
         _repository_path: &str,
         _rev: &str,
+        _expected: &TrustedCommonGit,
     ) -> Result<workspace::Revision, WorkspaceFailure> {
         workspace::Revision::new("a".repeat(40)).map_err(|e| WorkspaceFailure::GitBackendFailure {
             detail: e.to_string(),
@@ -964,18 +1019,21 @@ impl GitPort for LiveOwnerPort {
         _lease: &workspace::WorkspaceLease,
         _repository_path: &str,
         _worktree_path: &str,
+        _expected: &TrustedCommonGit,
     ) -> Result<(), WorkspaceFailure> {
         Ok(())
     }
     fn worktree_status(
         &self,
         _worktree_path: &str,
+        _expected: &TrustedCommonGit,
     ) -> Result<workspace::WorktreeStatus, WorkspaceFailure> {
         Ok(workspace::WorktreeStatus::Clean)
     }
     fn compute_diff(
         &self,
         lease: &workspace::WorkspaceLease,
+        _expected: &TrustedCommonGit,
     ) -> Result<workspace::DiffEvidence, WorkspaceFailure> {
         Ok(workspace::DiffEvidence {
             diff: workspace::WorktreeDiff {
@@ -994,6 +1052,7 @@ impl GitPort for LiveOwnerPort {
         &self,
         _lease: &workspace::WorkspaceLease,
         _worktree_path: &str,
+        _expected: &TrustedCommonGit,
     ) -> Result<(), WorkspaceFailure> {
         panic!("live owner must be rejected before any Git mutation");
     }
@@ -1001,6 +1060,7 @@ impl GitPort for LiveOwnerPort {
         &self,
         _repository_path: &str,
         _branch: &workspace::BranchRef,
+        _expected: &TrustedCommonGit,
     ) -> Result<(), WorkspaceFailure> {
         panic!("live owner must be rejected before any Git mutation");
     }
@@ -1008,6 +1068,7 @@ impl GitPort for LiveOwnerPort {
         &self,
         _repository_path: &str,
         _branch: &workspace::BranchRef,
+        _expected: &TrustedCommonGit,
     ) -> Result<bool, WorkspaceFailure> {
         Ok(true)
     }
@@ -1015,6 +1076,7 @@ impl GitPort for LiveOwnerPort {
         &self,
         _repository_path: &str,
         _worktree_path: &str,
+        _expected: &TrustedCommonGit,
     ) -> Result<bool, WorkspaceFailure> {
         // Static stub: binding assumed so the test reaches the live-owner
         // rejection it exists to prove.

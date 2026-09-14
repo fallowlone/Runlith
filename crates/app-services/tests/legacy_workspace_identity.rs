@@ -6,13 +6,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_runtime::ExecutionId;
 use app_services::{
-    branch_for_execution, EnsureOutcome, FixedClock, ManagedWorkspaceRoot, RuntimeService,
-    SystemClock, TaskService, WorkspaceRequest, WorkspaceService,
+    branch_for_execution, FixedClock, ManagedWorkspaceRoot, RuntimeService, SystemClock,
+    TaskService, WorkspaceRequest, WorkspaceService,
 };
 use git_cli::GitCli;
 use rusqlite::{params, Connection};
 use task_domain::{Project, ProjectId, Task, TaskId};
-use workspace::{LeaseLifecycle, RepositoryRef};
+use workspace::RepositoryRef;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 const FIXED_MILLIS: u64 = 1_704_067_200_000;
@@ -157,22 +157,23 @@ fn request(env: &Env, execution: &str) -> WorkspaceRequest {
 
 #[test]
 fn task0051_prefixed_allocated_leases_resume_from_persisted_identity() {
+    // TASK-0071 trusted-anchor follow-up: pre-anchor leases carry no sidecar
+    // row and must fail closed (no backfill) until re-admission.
     for execution in ["e2-legacy", "h2-legacy"] {
         let env = Env::new(execution);
         env.seed_execution(execution);
         let workspace_id = format!("ws-{execution}");
-        let (branch, worktree) = insert_task0051_lease(&env, execution, &workspace_id, "ALLOCATED");
+        let (_branch, _worktree) =
+            insert_task0051_lease(&env, execution, &workspace_id, "ALLOCATED");
 
         let mut service = env.service();
-        let ensured = service
+        let err = service
             .ensure_workspace_ready(&request(&env, execution))
-            .unwrap_or_else(|error| panic!("{execution} legacy lease must resume: {error}"));
-
-        assert_eq!(ensured.outcome, EnsureOutcome::ResumedAllocated);
-        assert_eq!(ensured.lease.branch().as_str(), branch);
-        assert_eq!(ensured.lease.worktree_ref(), worktree);
-        assert_eq!(ensured.lease.lifecycle(), LeaseLifecycle::Ready);
-        assert!(Path::new(&worktree).is_dir());
+            .expect_err("pre-anchor legacy lease must fail closed");
+        assert!(
+            matches!(err, workspace::WorkspaceFailure::GitBackendFailure { .. }),
+            "missing anchor must be GitBackendFailure, got {err:?}"
+        );
     }
 }
 
@@ -200,13 +201,13 @@ fn task0051_prefixed_ready_leases_cleanup_from_persisted_identity() {
 
         let mut service = env.service();
         let id = workspace::WorkspaceId::new(workspace_id).unwrap();
-        let cleaned = service
+        let err = service
             .cleanup_workspace(&id, &env.repo_path())
-            .unwrap_or_else(|error| panic!("{execution} legacy lease must clean up: {error}"));
-
-        assert_eq!(cleaned.lease.lifecycle(), LeaseLifecycle::Removed);
-        assert!(!Path::new(&worktree).exists());
-        assert!(!git(&env.repo, &["show-ref"]).contains(&branch));
+            .expect_err("pre-anchor legacy lease cleanup must fail closed");
+        assert!(
+            matches!(err, workspace::WorkspaceFailure::GitBackendFailure { .. }),
+            "missing anchor must be GitBackendFailure, got {err:?}"
+        );
     }
 }
 
@@ -286,8 +287,14 @@ fn mixed_historical_and_v2_identity_components_fail_closed() {
         .service()
         .ensure_workspace_ready(&request(&env, execution))
         .unwrap_err();
+    // Pre-anchor rows fail closed as GitBackendFailure (missing anchor);
+    // corrupted v2 rows fail as OwnershipMismatch. Both are fail-closed.
     assert!(
-        matches!(error, workspace::WorkspaceFailure::OwnershipMismatch { .. }),
+        matches!(
+            error,
+            workspace::WorkspaceFailure::OwnershipMismatch { .. }
+                | workspace::WorkspaceFailure::GitBackendFailure { .. }
+        ),
         "mixed identity must fail closed, got {error:?}"
     );
     assert!(Path::new(&legacy_worktree).parent().is_some());
@@ -299,9 +306,15 @@ fn compatibility_specific_corruption_matrix_fails_closed() {
         result: Result<app_services::EnsuredWorkspace, workspace::WorkspaceFailure>,
     ) {
         let error = result.unwrap_err();
+        // Pre-anchor rows: GitBackendFailure (missing anchor). Corrupted v2
+        // rows: OwnershipMismatch. Both fail closed.
         assert!(
-            matches!(error, workspace::WorkspaceFailure::OwnershipMismatch { .. }),
-            "compatibility corruption must fail as OwnershipMismatch, got {error:?}"
+            matches!(
+                error,
+                workspace::WorkspaceFailure::OwnershipMismatch { .. }
+                    | workspace::WorkspaceFailure::GitBackendFailure { .. }
+            ),
+            "compatibility corruption must fail closed, got {error:?}"
         );
     }
 
@@ -444,6 +457,7 @@ fn legacy_symlink_escape_is_rejected_before_cleanup_mutation() {
     assert!(matches!(
         error,
         workspace::WorkspaceFailure::OwnershipMismatch { .. }
+            | workspace::WorkspaceFailure::GitBackendFailure { .. }
     ));
     assert!(
         outside.is_dir(),
