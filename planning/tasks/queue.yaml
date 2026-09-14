@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0071
+completed_through: TASK-0072
 current_gate: G6
-gate_status: IN_PROGRESS  # TASK-0071 remediation implemented; pending independent re-review before any G6 closure verdict
+gate_status: IN_PROGRESS  # TASK-0071 F7 trusted-anchor remediation implemented and independently re-audited (TASK-0072 F7_CLOSED); F-002 still open, G6 closure needs separate re-audit
 
 items:
   - id: TASK-0012
@@ -1233,36 +1233,61 @@ items:
       `worktree_status`/`core.fsmonitor` path (not an inert `rev-parse`
       keeper); full git-cli plus G6 integration regression green.
     outcome: >-
-      Implemented and independently retestable; not self-certified.
-      Strengthened `validate_repository_metadata` to require the Git-native
-      linked-worktree back-reference (`gitdir`/`commondir`) before accepting
-      a `.git` pointer target, then tightened that rule after self-review to
-      require the target itself to be structurally owned at
-      `<commondir>/worktrees/<id>`; this closes both a direct valid-but-wrong
-      pointer and a forged local metadata shim whose reverse `gitdir` points
-      back correctly while `commondir` redirects to a foreign repository
-      (Finding 1 plus the follow-up self-review blocker). Added the same
-      validation to `worktree_status`, which
-      transitively covers `compute_diff` and `remove_worktree`'s first Git
-      call, plus explicit re-validation in `compute_diff` and
-      `remove_worktree` for their own further direct Git calls (Findings 2,
-      3). Added a real F-003 regression using `worktree_status` plus
-      `core.fsmonitor` (Finding 4) and permanent regressions for both the
-      direct redirection attack, the forged-`commondir` shim bypass, and
-      `worktree_status`-specific hostile metadata (Finding 2). All 61
-      pre-existing git-cli tests plus 5 new (66 total)
-      and the 7 app-services G6 integration tests are green; fmt and
-      clippy -D warnings are clean. TOCTOU between validation and
-      invocation (Finding 5) is acknowledged as a bounded residual, not
-      eliminated. Record: docs/development/G6_TASK_0071_TRUSTED_HOST_GIT_BOUNDARY_HARDENING_EVIDENCE.md.
-      G6 remains IN_PROGRESS pending independent re-review of this
-      remediation; not merged.
+      Implemented, including the F7 trusted-anchor follow-up beyond the
+      original no-redesign scope: consumer-owned `workspace::TrustedCommonGit`
+      (opaque canonical commondir, byte-equality), `GitPort` with
+      `establish_trusted_anchor` as the sole anchor-free method and every
+      Git-invoking method anchored (compiler-enforced threading), durable
+      immutable sidecar `workspace_trusted_anchor` (schema v11, no journal,
+      no backfill, fail-closed when absent), admission capture before
+      provider execution with Git-before-SQLite ordering (INV-145), per-entry
+      re-validation with mismatch → `GitBackendFailure`, and `core.worktree`/
+      `gitProxy`/`sshCommand`/`hooksPath` config refusals. The fully-forged
+      linked-worktree identity (F7 BLOCKER) now fails closed on every read
+      entry point; cross-repo anchor confusion refused; no Policy authority,
+      Secrets, or Audit coupling added; no absolute paths in snapshots or
+      journal. Verification: fmt clean, clippy `-D warnings` clean,
+      `cargo test -p git-cli` 74 passed, G6 integration 7 passed,
+      `app-services`/`storage-sqlite` suites green, plus 2 deleted
+      auditor-authored probes (passed). Independently re-audited as TASK-0072
+      with verdict F7_CLOSED (G6 still IN_PROGRESS: F-002 open, full G6
+      closure re-audit pending). Record:
+      docs/development/G6_TASK_0071_TRUSTED_HOST_GIT_BOUNDARY_HARDENING_EVIDENCE.md
+      (§11) and docs/development/G6_TASK_0072_F7_TRUSTED_ANCHOR_REAUDIT.md.
     depends_on:
       - TASK-0070
     blocked_by: []
     references:
       - docs/development/G6_TASK_0071_TRUSTED_HOST_GIT_BOUNDARY_HARDENING_EVIDENCE.md
+      - docs/development/G6_TASK_0072_F7_TRUSTED_ANCHOR_REAUDIT.md
       - docs/development/G6_TASK_0070_SUPPLEMENTAL_SECURITY_EVIDENCE.md
       - docs/development/G6_FINAL_CLOSURE_REAUDIT.md
       - docs/security/POLICY_CONTRACT.md
       - docs/security/TRUST_BOUNDARIES.md
+
+  - id: TASK-0072
+    gate: G6
+    title: Independent Re-Audit of the F7 Trusted-Anchor Follow-Up
+    objective: Independently verify that the uncommitted TASK-0071
+      trusted-anchor follow-up closes re-review BLOCKER F7 without weakening
+      prior guarantees, and report F7_CLOSED or REMEDIATION_REQUIRED without
+      implementing repairs.
+    scope: Audit only; exact worktree state recorded by hash (committed
+      `edd5749` plus uncommitted diff); code reading, independent suite
+      re-runs, auditor-authored adversarial probes (deleted after run);
+      no code changes retained.
+    exit_criteria_summary: An independent re-audit report exists with an
+      explicit F7 verdict (reported F7_CLOSED; G6 remains IN_PROGRESS).
+    outcome: >-
+      F7_CLOSED at the audited state. Design, threading, capture ordering,
+      sidecar integrity, sandbox write-scope, fail-closed paths, snapshot
+      hygiene, and Policy separation all verified; required suites re-ran
+      GREEN with no skips; 2 independent probes passed and were removed.
+      Record: docs/development/G6_TASK_0072_F7_TRUSTED_ANCHOR_REAUDIT.md.
+      Not a G6 closure claim; no commit/merge/version authority granted.
+    depends_on:
+      - TASK-0071
+    blocked_by: []
+    references:
+      - docs/development/G6_TASK_0072_F7_TRUSTED_ANCHOR_REAUDIT.md
+      - docs/development/G6_TASK_0071_TRUSTED_HOST_GIT_BOUNDARY_HARDENING_EVIDENCE.md
