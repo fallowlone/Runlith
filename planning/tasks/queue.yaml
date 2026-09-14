@@ -1236,15 +1236,21 @@ items:
       Implemented and independently retestable; not self-certified.
       Strengthened `validate_repository_metadata` to require the Git-native
       linked-worktree back-reference (`gitdir`/`commondir`) before accepting
-      a `.git` pointer target, closing the valid-but-wrong redirection
-      (Finding 1). Added the same validation to `worktree_status`, which
+      a `.git` pointer target, then tightened that rule after self-review to
+      require the target itself to be structurally owned at
+      `<commondir>/worktrees/<id>`; this closes both a direct valid-but-wrong
+      pointer and a forged local metadata shim whose reverse `gitdir` points
+      back correctly while `commondir` redirects to a foreign repository
+      (Finding 1 plus the follow-up self-review blocker). Added the same
+      validation to `worktree_status`, which
       transitively covers `compute_diff` and `remove_worktree`'s first Git
       call, plus explicit re-validation in `compute_diff` and
       `remove_worktree` for their own further direct Git calls (Findings 2,
       3). Added a real F-003 regression using `worktree_status` plus
       `core.fsmonitor` (Finding 4) and permanent regressions for both the
-      redirection attack and `worktree_status`-specific hostile metadata
-      (Finding 2). All 61 pre-existing git-cli tests plus 4 new (65 total)
+      direct redirection attack, the forged-`commondir` shim bypass, and
+      `worktree_status`-specific hostile metadata (Finding 2). All 61
+      pre-existing git-cli tests plus 5 new (66 total)
       and the 7 app-services G6 integration tests are green; fmt and
       clippy -D warnings are clean. TOCTOU between validation and
       invocation (Finding 5) is acknowledged as a bounded residual, not
