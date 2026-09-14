@@ -42,7 +42,13 @@ type CanonicalAddition<'a> = (
     Option<&'a str>,
 );
 /// Canonical material of one node update, sorted by target id upstream.
-type CanonicalUpdate<'a> = (&'a str, Option<Vec<u8>>, Option<&'a str>, Option<&'a str>);
+type CanonicalGateUpdate<'a> = (&'static str, Option<&'a str>);
+type CanonicalUpdate<'a> = (
+    &'a str,
+    Option<Vec<u8>>,
+    Option<&'a str>,
+    CanonicalGateUpdate<'a>,
+);
 
 /// Canonical digest of a changeset, excluding `proposal_hash` itself (the
 /// hash covers material content; including it would be self-referential).
@@ -107,20 +113,26 @@ fn canonical_changeset_digest(changeset: &PlanChangeSet) -> sha2::digest::Output
                     crate::risk::RiskClass::High => "high",
                     crate::risk::RiskClass::Critical => "critical",
                 }),
-                update.required_gate.as_ref().map(|gate| match gate {
-                    crate::model::GateUpdate::Set(reference) => reference.as_str(),
-                    crate::model::GateUpdate::Clear => "clear",
-                }),
+                match update.required_gate.as_ref() {
+                    None => ("none", None),
+                    Some(crate::model::GateUpdate::Set(reference)) => {
+                        ("set", Some(reference.as_str()))
+                    }
+                    Some(crate::model::GateUpdate::Clear) => ("clear", None),
+                },
             )
         })
         .collect();
     updates.sort_by(|a, b| a.0.cmp(b.0));
     push_u64(&mut hasher, updates.len() as u64);
-    for (target, scope, risk, gate) in updates {
+    for (target, scope, risk, (gate_variant, gate_value)) in updates {
         push_str(&mut hasher, target);
         push_field(&mut hasher, scope.as_deref().unwrap_or(&[]));
         push_str(&mut hasher, risk.unwrap_or(""));
-        push_str(&mut hasher, gate.unwrap_or(""));
+        push_str(&mut hasher, gate_variant);
+        if let Some(value) = gate_value {
+            push_str(&mut hasher, value);
+        }
     }
 
     let mut removals: Vec<&str> = changeset.node_removals.iter().map(AsRef::as_ref).collect();

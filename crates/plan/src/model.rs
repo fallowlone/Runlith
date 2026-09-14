@@ -14,7 +14,9 @@
 use std::collections::BTreeMap;
 
 use crate::error::{checked_id, PlanDomainError};
-use crate::ids::{CriterionId, EvidenceRef, PlanBranchId, PlanNodeId, PlannerAdapterId};
+use crate::ids::{
+    CriterionId, EvidenceRef, PlanBranchId, PlanNodeId, PlannerAdapterId, PlanningCostReceiptRef,
+};
 use crate::risk::{CriterionDecl, GateRef, RiskClass, RiskDelta};
 use crate::scope::{PlanScope, ScopeBound};
 
@@ -234,6 +236,30 @@ impl PlanningCostReceipt {
     }
 }
 
+/// Planner provenance attached to an accepted revision: planner identity plus
+/// a reference to the planning-cost receipt recorded for the proposal call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevisionProposedBy {
+    /// Planner identity that produced the accepted proposal.
+    pub planner: PlannerIdentity,
+    /// Reference to the separately recorded planner cost receipt.
+    pub planning_cost_receipt_ref: PlanningCostReceiptRef,
+}
+
+impl RevisionProposedBy {
+    /// Binds planner identity to the receipt reference required by ADR-0027 §4.
+    #[must_use]
+    pub fn new(
+        planner: PlannerIdentity,
+        planning_cost_receipt_ref: PlanningCostReceiptRef,
+    ) -> Self {
+        Self {
+            planner,
+            planning_cost_receipt_ref,
+        }
+    }
+}
+
 /// The immutable proposal object (ADR-0027 §2): every field is required; a
 /// missing or blank core field is malformed and rejected before validation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -339,9 +365,12 @@ pub struct PlanRevision {
     /// Typed evidence refs (execution/attempt/test/human-decision).
     pub caused_by: Vec<EvidenceRef>,
     /// Planner identity + planning-cost-receipt ref.
-    pub proposed_by: PlannerIdentity,
+    pub proposed_by: RevisionProposedBy,
     /// Reconciler/service identity + policy fingerprint.
     pub validated_by: ValidatedBy,
+    /// Creation timestamp supplied by the trusted caller (Unix epoch ms).
+    /// The pure domain never reads the system clock itself.
+    pub created_at: u64,
 }
 
 impl PlanRevision {
@@ -355,8 +384,9 @@ impl PlanRevision {
         changeset_hash: String,
         reason: String,
         caused_by: Vec<EvidenceRef>,
-        proposed_by: PlannerIdentity,
+        proposed_by: RevisionProposedBy,
         validated_by: ValidatedBy,
+        created_at: u64,
     ) -> Result<Self, PlanDomainError> {
         if revision_seq == 0 {
             return Err(PlanDomainError::input("revision_seq must be >= 1"));
@@ -376,6 +406,7 @@ impl PlanRevision {
             caused_by,
             proposed_by,
             validated_by,
+            created_at,
         })
     }
 }

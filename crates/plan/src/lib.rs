@@ -27,12 +27,14 @@ pub use guardrails::{
     MAX_PLANNER_WALL_CLOCK_SECS, MAX_REVISIONS_PER_CYCLE_PER_BRANCH, NO_PROGRESS_REJECTIONS_TRIP,
 };
 pub use hash::{compute_proposal_hash, decomposition_fingerprint, verify_proposal_hash};
-pub use ids::{CriterionId, EvidenceRef, PlanBranchId, PlanNodeId, PlannerAdapterId};
+pub use ids::{
+    CriterionId, EvidenceRef, PlanBranchId, PlanNodeId, PlannerAdapterId, PlanningCostReceiptRef,
+};
 pub use model::{
     AtomicityAssessment, AtomicityBlocker, AtomicityRequest, AtomicityVerdict, BudgetDelta,
     DecompositionRequest, EdgeAddition, EdgeRemoval, GateUpdate, NodeAddition, NodeUpdate,
     PlanChangeSet, PlanGraph, PlanNode, PlanRevision, PlannerFault, PlannerIdentity, PlannerPort,
-    PlanningBudget, PlanningCostReceipt, ReplanRequest, ValidatedBy,
+    PlanningBudget, PlanningCostReceipt, ReplanRequest, RevisionProposedBy, ValidatedBy,
 };
 pub use risk::{CriterionDecl, GateRef, RiskClass, RiskDelta, VerificationMethod};
 pub use scope::{PlanScope, ScopeBound};
