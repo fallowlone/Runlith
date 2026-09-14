@@ -1415,6 +1415,34 @@ items:
     exit_criteria_summary: Validation rules from TASK-0075 executable;
       planner output cannot mutate Task state by construction; workspace
       green.
+    outcome: >-
+      Pure plan-domain crate materialized (crates/plan-domain, dep-free
+      except SHA-256): proposal-only PlannerPort with typed
+      AtomicityRequest/Assessment (ATOMIC/DECOMPOSABLE/BLOCKED) and
+      DecompositionRequest/ReplanRequest data-only inputs;
+      PlanChangeSet with every ADR-0027 §2 field including
+      proposal_hash (SHA-256 over length-prefixed, sorted canonical
+      bytes) and pre-validation MALFORMED_PROPOSAL rejection;
+      validation rules V1-V9 executable in ADR order with stable
+      refusal codes (CYCLIC_PROPOSAL, DANGLING_REF, CRITERION_DROPPED,
+      SCOPE_ESCAPE, POLICY_WEAKENING, LIMIT_EXCEEDED,
+      DUPLICATE_DECOMPOSITION, STALE_BASE, RISK_GATE_OPEN); PlanRevision
+      provenance (revision_seq, base_revision, changeset_hash, reason,
+      caused_by, proposed_by, validated_by) per ADR-0027 §4; guardrail
+      constants transcribed exactly (depth 4, fan-out 8, 64 branch
+      nodes, 1 revision/cycle/branch, L3 trip at 2 rejections, §6
+      envelope 120 s / 32k in / 8k out / 8 calls / 256k cumulative
+      tokens) with typed GuardrailTrip; scope syntax (workspace:path,
+      fail-closed relative paths) owned by the crate. Compile-time
+      no-mutation property: every type is owned data (opaque ids, refs,
+      scopes, hashes); the crate cannot name any Task, storage,
+      scheduler, policy-engine or provider type (integration test pins
+      the dependency set to sha2 alone), so planner output carries no
+      mutation authority over durable state by construction. 47 tests
+      (7 unit + 40 integration, one per stable V-rule ID plus taxonomy,
+      hash-determinism, rule-order and dependency-pin tests); fmt +
+      clippy -D warnings clean; workspace green. G7 remains
+      IN_PROGRESS.
     depends_on:
       - TASK-0075
     blocked_by: []
