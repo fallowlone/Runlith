@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0072
+completed_through: TASK-0073
 current_gate: G6
-gate_status: IN_PROGRESS  # TASK-0071 F7 trusted-anchor remediation implemented and independently re-audited (TASK-0072 F7_CLOSED); F-002 still open, G6 closure needs separate re-audit
+gate_status: IN_PROGRESS  # TASK-0073 shim fix merged; F-002 still open, G6 closure needs separate re-audit
 
 items:
   - id: TASK-0012
@@ -1291,3 +1291,30 @@ items:
     references:
       - docs/development/G6_TASK_0072_F7_TRUSTED_ANCHOR_REAUDIT.md
       - docs/development/G6_TASK_0071_TRUSTED_HOST_GIT_BOUNDARY_HARDENING_EVIDENCE.md
+
+  - id: TASK-0073
+    gate: G6
+    title: Execution-Recovery Git Shim Hardening-Contract Fix
+    objective: Repair the `daemon_sigkill_after_branch_creation` keeper,
+      whose `git` shim matched `$1 = worktree` while production `run_git`
+      prefixes global `-c k=v` hardening flags (accepted TASK-0071
+      contract), so the shim never reached the branch-only crash seam.
+    scope: Test-harness shim only (`bins/agentctl/tests/execution_recovery.rs`):
+      peek past leading `-c value` pairs without consuming `$@`, so the
+      seam match works and unmatched invocations still exec faithfully
+      with every flag intact. No production code, no weakened assertions,
+      no changed crash seam.
+    exit_criteria_summary: The keeper passes through the shipped binaries
+      with the shim intercepting inside `git worktree add`; full `agentctl`
+      suite, fmt, and clippy green.
+    outcome: >-
+      Implemented. RED (21s marker-timeout panic) → GREEN (3.7s).
+      Shim peeks past `-c` pairs, shifts only on match, preserves `$@`
+      for the fallthrough exec. Full `agentctl` package green
+      (execution_recovery 3/3, real_process_matrix 1/1), fmt clean,
+      clippy `-D warnings` clean. G6 remains IN_PROGRESS.
+    depends_on:
+      - TASK-0071
+    blocked_by: []
+    references:
+      - bins/agentctl/tests/execution_recovery.rs
