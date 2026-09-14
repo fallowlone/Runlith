@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use workspace::{
     BranchRef, DiffEvidence, ExecutionId, GitPort, OwnerLiveness, RepositoryRef, Revision,
-    WorkspaceFailure, WorkspaceLease, WorktreeStatus,
+    TrustedCommonGit, WorkspaceFailure, WorkspaceLease, WorktreeStatus,
 };
 
 mod cleanup;
@@ -109,20 +109,44 @@ impl GitPort for GitCli {
         BACKEND_REF
     }
 
-    fn is_repository(&self, path: &str) -> Result<bool, WorkspaceFailure> {
-        observe::is_repository(self.exe(), path)
+    fn establish_trusted_anchor(
+        &self,
+        trusted_repository_path: &str,
+    ) -> Result<TrustedCommonGit, WorkspaceFailure> {
+        let abs = match runner::absolutize(trusted_repository_path) {
+            Ok(abs) => abs,
+            Err(_) => {
+                return Err(WorkspaceFailure::NotRepository {
+                    detail: "git-cli: invalid repository path".to_owned(),
+                });
+            }
+        };
+        runner::establish_trusted_anchor(self.exe(), &abs)
     }
 
-    fn default_branch(&self, repository_path: &str) -> Result<String, WorkspaceFailure> {
-        observe::default_branch(self.exe(), repository_path)
+    fn is_repository(
+        &self,
+        path: &str,
+        expected: &TrustedCommonGit,
+    ) -> Result<bool, WorkspaceFailure> {
+        observe::is_repository(self.exe(), path, expected)
+    }
+
+    fn default_branch(
+        &self,
+        repository_path: &str,
+        expected: &TrustedCommonGit,
+    ) -> Result<String, WorkspaceFailure> {
+        observe::default_branch(self.exe(), repository_path, expected)
     }
 
     fn resolve_revision(
         &self,
         repository_path: &str,
         rev: &str,
+        expected: &TrustedCommonGit,
     ) -> Result<Revision, WorkspaceFailure> {
-        observe::resolve_revision(self.exe(), repository_path, rev)
+        observe::resolve_revision(self.exe(), repository_path, rev, expected)
     }
 
     fn create_worktree(
@@ -130,19 +154,28 @@ impl GitPort for GitCli {
         lease: &WorkspaceLease,
         repository_path: &str,
         worktree_path: &str,
+        expected: &TrustedCommonGit,
     ) -> Result<(), WorkspaceFailure> {
-        create::create_worktree(self.exe(), lease, repository_path, worktree_path)
+        create::create_worktree(self.exe(), lease, repository_path, worktree_path, expected)
     }
 
-    fn worktree_status(&self, worktree_path: &str) -> Result<WorktreeStatus, WorkspaceFailure> {
-        observe::worktree_status(self.exe(), worktree_path)
+    fn worktree_status(
+        &self,
+        worktree_path: &str,
+        expected: &TrustedCommonGit,
+    ) -> Result<WorktreeStatus, WorkspaceFailure> {
+        observe::worktree_status(self.exe(), worktree_path, expected)
     }
 
     /// Read-only diff baselined at the lease's recorded base revision
     /// (ADR-0023 §6): HEAD history plus working-tree/index layers. Never
     /// mutates Git; bounded structured entries, no raw patch text.
-    fn compute_diff(&self, lease: &WorkspaceLease) -> Result<DiffEvidence, WorkspaceFailure> {
-        diff::compute_diff(self.exe(), lease)
+    fn compute_diff(
+        &self,
+        lease: &WorkspaceLease,
+        expected: &TrustedCommonGit,
+    ) -> Result<DiffEvidence, WorkspaceFailure> {
+        diff::compute_diff(self.exe(), lease, expected)
     }
 
     /// Safe non-forced worktree removal (no `--force`). Dirty, detached,
@@ -151,8 +184,9 @@ impl GitPort for GitCli {
         &self,
         lease: &WorkspaceLease,
         worktree_path: &str,
+        expected: &TrustedCommonGit,
     ) -> Result<(), WorkspaceFailure> {
-        cleanup::remove_worktree(self.exe(), lease, worktree_path)
+        cleanup::remove_worktree(self.exe(), lease, worktree_path, expected)
     }
 
     /// Safe non-forced branch deletion (`branch -d` only, never `-D`).
@@ -161,16 +195,18 @@ impl GitPort for GitCli {
         &self,
         repository_path: &str,
         branch: &BranchRef,
+        expected: &TrustedCommonGit,
     ) -> Result<(), WorkspaceFailure> {
-        cleanup::remove_branch(self.exe(), repository_path, branch)
+        cleanup::remove_branch(self.exe(), repository_path, branch, expected)
     }
 
     fn branch_exists(
         &self,
         repository_path: &str,
         branch: &BranchRef,
+        expected: &TrustedCommonGit,
     ) -> Result<bool, WorkspaceFailure> {
-        observe::branch_exists(self.exe(), repository_path, branch)
+        observe::branch_exists(self.exe(), repository_path, branch, expected)
     }
 
     /// Lease-to-repository binding probe (TASK-0046, G4 finding F1): the
@@ -180,16 +216,18 @@ impl GitPort for GitCli {
         &self,
         repository_path: &str,
         worktree_path: &str,
+        expected: &TrustedCommonGit,
     ) -> Result<bool, WorkspaceFailure> {
-        observe::is_registered_worktree(self.exe(), repository_path, worktree_path)
+        observe::is_registered_worktree(self.exe(), repository_path, worktree_path, expected)
     }
 
     fn worktree_for_branch(
         &self,
         repository_path: &str,
         branch: &BranchRef,
+        expected: &TrustedCommonGit,
     ) -> Result<Option<String>, WorkspaceFailure> {
-        observe::worktree_for_branch(self.exe(), repository_path, branch)
+        observe::worktree_for_branch(self.exe(), repository_path, branch, expected)
     }
 
     fn attach_worktree(
@@ -197,8 +235,9 @@ impl GitPort for GitCli {
         lease: &WorkspaceLease,
         repository_path: &str,
         worktree_path: &str,
+        expected: &TrustedCommonGit,
     ) -> Result<(), WorkspaceFailure> {
-        create::attach_worktree(self.exe(), lease, repository_path, worktree_path)
+        create::attach_worktree(self.exe(), lease, repository_path, worktree_path, expected)
     }
 
     /// Owner liveness from the wired [`OwnerLiveness`] source when present

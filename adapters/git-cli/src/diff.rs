@@ -17,20 +17,24 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use workspace::{
-    DiffChangeKind, DiffEntry, DiffEvidence, Revision, WorkspaceFailure, WorkspaceLease,
-    WorktreeStatus, MAX_DIFF_ENTRIES, MAX_DIFF_SUMMARY_CHARS,
+    DiffChangeKind, DiffEntry, DiffEvidence, Revision, TrustedCommonGit, WorkspaceFailure,
+    WorkspaceLease, WorktreeStatus, MAX_DIFF_ENTRIES, MAX_DIFF_SUMMARY_CHARS,
 };
 
 use crate::observe;
-use crate::runner::{absolutize, backend_failure, bounded_detail, run_git, run_git_text};
+use crate::runner::{
+    absolutize, backend_failure, bounded_detail, run_git, run_git_text,
+    validate_repository_boundary,
+};
 
 /// Computes the workspace diff baselined at the lease's recorded base.
 pub fn compute_diff(
     executable: &OsStr,
     lease: &WorkspaceLease,
+    expected: &TrustedCommonGit,
 ) -> Result<DiffEvidence, WorkspaceFailure> {
     let worktree_ref = lease.worktree_ref();
-    let status = observe::worktree_status(executable, worktree_ref)?;
+    let status = observe::worktree_status(executable, worktree_ref, expected)?;
     let usable = match status {
         WorktreeStatus::Clean | WorktreeStatus::DirtyTracked | WorktreeStatus::DirtyUntracked => {
             true
@@ -63,13 +67,21 @@ pub fn compute_diff(
         .to_str()
         .ok_or_else(|| backend_failure("git-cli: worktree path is not UTF-8; refusing diff"))?;
 
-    let head =
-        observe::resolve_revision(executable, worktree_str, "HEAD").map_err(|e| match e {
+    // `worktree_status` above already validated this same path, but this
+    // function goes on to run several more direct Git invocations
+    // (`prove_base_present`, `committed_changes`, `working_changes`);
+    // re-checking here keeps every Git call in this function behind the same
+    // identity boundary rather than trusting an earlier, separate check.
+    validate_repository_boundary(executable, &abs, expected)?;
+
+    let head = observe::resolve_revision(executable, worktree_str, "HEAD", expected).map_err(
+        |e| match e {
             WorkspaceFailure::InvalidRevision { detail } => {
                 WorkspaceFailure::GitBackendFailure { detail }
             }
             other => other,
-        })?;
+        },
+    )?;
     prove_base_present(executable, &abs, lease.base_revision())?;
 
     let mut truncated = false;

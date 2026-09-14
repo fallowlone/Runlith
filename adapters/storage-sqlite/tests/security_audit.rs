@@ -101,8 +101,8 @@ fn secret_access(correlation: &str) -> NewSecurityAuditRecord {
 fn fresh_database_reaches_schema_v10_with_empty_separate_audit() {
     let db = TestDb::new("fresh");
     let store = db.open();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 10);
-    assert_eq!(store.schema_version().unwrap(), 10);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 11);
+    assert_eq!(store.schema_version().unwrap(), 11);
     assert!(store.list_security_audit_ordered().unwrap().is_empty());
 }
 

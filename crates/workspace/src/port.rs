@@ -12,6 +12,7 @@ use crate::failure::WorkspaceFailure;
 use crate::ids::{BranchRef, RepositoryRef, Revision};
 use crate::lease::WorkspaceLease;
 use crate::status::WorktreeStatus;
+use crate::trusted::TrustedCommonGit;
 
 /// Upper bound for structured diff entries per evidence layer. Raw patch
 /// text is never returned; large workspaces truncate with an explicit flag
@@ -106,18 +107,38 @@ pub trait GitPort {
     /// Opaque backend identity for diagnostics (never branched on).
     fn backend_ref(&self) -> &'static str;
 
+    /// Captures the trusted common-Git anchor from trusted admission state.
+    ///
+    /// Sole anchor-free path, admission only (trusted-deposit before provider
+    /// execution). Bare → `BareRepositoryUnsupported`, non-repo →
+    /// `NotRepository`; symlink/canonicalize/config failures →
+    /// `GitBackendFailure`.
+    fn establish_trusted_anchor(
+        &self,
+        trusted_repository_path: &str,
+    ) -> Result<TrustedCommonGit, WorkspaceFailure>;
+
     /// Whether `path` resolves inside a Git working repository.
-    fn is_repository(&self, path: &str) -> Result<bool, WorkspaceFailure>;
+    fn is_repository(
+        &self,
+        path: &str,
+        expected: &TrustedCommonGit,
+    ) -> Result<bool, WorkspaceFailure>;
 
     /// Resolves the repository default branch from metadata (never by
     /// assuming `main`/`master`). Returns the full ref name.
-    fn default_branch(&self, repository_path: &str) -> Result<String, WorkspaceFailure>;
+    fn default_branch(
+        &self,
+        repository_path: &str,
+        expected: &TrustedCommonGit,
+    ) -> Result<String, WorkspaceFailure>;
 
     /// Resolves `rev` to an immutable commit OID ([`Revision`]).
     fn resolve_revision(
         &self,
         repository_path: &str,
         rev: &str,
+        expected: &TrustedCommonGit,
     ) -> Result<Revision, WorkspaceFailure>;
 
     /// Creates an isolated worktree + managed branch for `lease` and
@@ -128,13 +149,22 @@ pub trait GitPort {
         lease: &WorkspaceLease,
         repository_path: &str,
         worktree_path: &str,
+        expected: &TrustedCommonGit,
     ) -> Result<(), WorkspaceFailure>;
 
     /// Live-observes worktree status ([`WorktreeStatus`]).
-    fn worktree_status(&self, worktree_path: &str) -> Result<WorktreeStatus, WorkspaceFailure>;
+    fn worktree_status(
+        &self,
+        worktree_path: &str,
+        expected: &TrustedCommonGit,
+    ) -> Result<WorktreeStatus, WorkspaceFailure>;
 
     /// Computes the diff baselined at the lease's recorded base revision.
-    fn compute_diff(&self, lease: &WorkspaceLease) -> Result<DiffEvidence, WorkspaceFailure>;
+    fn compute_diff(
+        &self,
+        lease: &WorkspaceLease,
+        expected: &TrustedCommonGit,
+    ) -> Result<DiffEvidence, WorkspaceFailure>;
 
     /// Removes the worktree registration (and only after the caller has
     /// enforced cleanup safety). Idempotent for already-absent owned
@@ -143,6 +173,7 @@ pub trait GitPort {
         &self,
         lease: &WorkspaceLease,
         worktree_path: &str,
+        expected: &TrustedCommonGit,
     ) -> Result<(), WorkspaceFailure>;
 
     /// Removes the managed branch ref after the worktree is gone, using
@@ -155,6 +186,7 @@ pub trait GitPort {
         &self,
         repository_path: &str,
         branch: &BranchRef,
+        expected: &TrustedCommonGit,
     ) -> Result<(), WorkspaceFailure>;
 
     /// Whether `branch` exists as a ref in the repository.
@@ -162,6 +194,7 @@ pub trait GitPort {
         &self,
         repository_path: &str,
         branch: &BranchRef,
+        expected: &TrustedCommonGit,
     ) -> Result<bool, WorkspaceFailure>;
 
     /// Whether `worktree_path` is registered in `repository_path`'s
@@ -179,6 +212,7 @@ pub trait GitPort {
         &self,
         repository_path: &str,
         worktree_path: &str,
+        expected: &TrustedCommonGit,
     ) -> Result<bool, WorkspaceFailure>;
 
     /// Returns the registered worktree currently holding `branch`, if any.
@@ -187,6 +221,7 @@ pub trait GitPort {
         &self,
         _repository_path: &str,
         _branch: &BranchRef,
+        _expected: &TrustedCommonGit,
     ) -> Result<Option<String>, WorkspaceFailure> {
         Err(WorkspaceFailure::GitBackendFailure {
             detail: "git backend cannot prove branch worktree ownership".to_owned(),
@@ -202,6 +237,7 @@ pub trait GitPort {
         _lease: &WorkspaceLease,
         _repository_path: &str,
         _worktree_path: &str,
+        _expected: &TrustedCommonGit,
     ) -> Result<(), WorkspaceFailure> {
         Err(WorkspaceFailure::GitBackendFailure {
             detail: "git backend cannot continue an existing managed branch".to_owned(),
@@ -235,11 +271,28 @@ mod tests {
             "stub-git-port"
         }
 
-        fn is_repository(&self, _path: &str) -> Result<bool, WorkspaceFailure> {
+        fn establish_trusted_anchor(
+            &self,
+            _trusted_repository_path: &str,
+        ) -> Result<TrustedCommonGit, WorkspaceFailure> {
+            Err(WorkspaceFailure::GitBackendFailure {
+                detail: "stub cannot establish trusted anchor".to_owned(),
+            })
+        }
+
+        fn is_repository(
+            &self,
+            _path: &str,
+            _expected: &TrustedCommonGit,
+        ) -> Result<bool, WorkspaceFailure> {
             Ok(true)
         }
 
-        fn default_branch(&self, _repository_path: &str) -> Result<String, WorkspaceFailure> {
+        fn default_branch(
+            &self,
+            _repository_path: &str,
+            _expected: &TrustedCommonGit,
+        ) -> Result<String, WorkspaceFailure> {
             Ok("refs/heads/trunk".to_owned())
         }
 
@@ -247,6 +300,7 @@ mod tests {
             &self,
             _repository_path: &str,
             _rev: &str,
+            _expected: &TrustedCommonGit,
         ) -> Result<Revision, WorkspaceFailure> {
             Revision::new("a".repeat(40)).map_err(|e| WorkspaceFailure::GitBackendFailure {
                 detail: e.to_string(),
@@ -258,6 +312,7 @@ mod tests {
             _lease: &WorkspaceLease,
             _repository_path: &str,
             _worktree_path: &str,
+            _expected: &TrustedCommonGit,
         ) -> Result<(), WorkspaceFailure> {
             Ok(())
         }
@@ -265,11 +320,16 @@ mod tests {
         fn worktree_status(
             &self,
             _worktree_path: &str,
+            _expected: &TrustedCommonGit,
         ) -> Result<WorktreeStatus, WorkspaceFailure> {
             Ok(WorktreeStatus::Clean)
         }
 
-        fn compute_diff(&self, lease: &WorkspaceLease) -> Result<DiffEvidence, WorkspaceFailure> {
+        fn compute_diff(
+            &self,
+            lease: &WorkspaceLease,
+            _expected: &TrustedCommonGit,
+        ) -> Result<DiffEvidence, WorkspaceFailure> {
             Ok(DiffEvidence {
                 diff: WorktreeDiff {
                     base_revision: lease.base_revision().clone(),
@@ -288,6 +348,7 @@ mod tests {
             &self,
             _lease: &WorkspaceLease,
             _worktree_path: &str,
+            _expected: &TrustedCommonGit,
         ) -> Result<(), WorkspaceFailure> {
             Ok(())
         }
@@ -296,6 +357,7 @@ mod tests {
             &self,
             _repository_path: &str,
             _branch: &BranchRef,
+            _expected: &TrustedCommonGit,
         ) -> Result<(), WorkspaceFailure> {
             Ok(())
         }
@@ -304,6 +366,7 @@ mod tests {
             &self,
             _repository_path: &str,
             _branch: &BranchRef,
+            _expected: &TrustedCommonGit,
         ) -> Result<bool, WorkspaceFailure> {
             Ok(false)
         }
@@ -312,6 +375,7 @@ mod tests {
             &self,
             _repository_path: &str,
             _worktree_path: &str,
+            _expected: &TrustedCommonGit,
         ) -> Result<bool, WorkspaceFailure> {
             Ok(false)
         }
@@ -330,7 +394,17 @@ mod tests {
         let port = StubPort;
         assert_eq!(port.backend_ref(), "stub-git-port");
         // Default branch comes from metadata, never assumed.
-        assert_eq!(port.default_branch("/repo").unwrap(), "refs/heads/trunk");
+        let anchor = TrustedCommonGit::restore(
+            std::fs::canonicalize(std::env::temp_dir())
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            port.default_branch("/repo", &anchor).unwrap(),
+            "refs/heads/trunk"
+        );
         let lease = WorkspaceLease::allocate(
             WorkspaceId::new("ws-1").unwrap(),
             RepositoryRef::new("repo-local:x").unwrap(),
@@ -340,7 +414,7 @@ mod tests {
             "ref:ws-1",
         )
         .unwrap();
-        let evidence = port.compute_diff(&lease).unwrap();
+        let evidence = port.compute_diff(&lease, &anchor).unwrap();
         assert_eq!(evidence.diff.base_revision, lease.base_revision().clone());
     }
 }

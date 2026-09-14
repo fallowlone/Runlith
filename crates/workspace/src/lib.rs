@@ -18,6 +18,7 @@ mod liveness;
 mod port;
 mod status;
 mod store;
+mod trusted;
 
 pub use failure::WorkspaceFailure;
 pub use ids::{
@@ -32,6 +33,7 @@ pub use port::{
 };
 pub use status::WorktreeStatus;
 pub use store::{WorkspaceEventKind, WorkspaceJournalEvidence, WorkspaceStore};
+pub use trusted::TrustedCommonGit;
 
 // Identity re-exports so port implementors depend on this contract crate
 // plus `agent-runtime` only: ownership stays typed without extra deps.

@@ -640,9 +640,7 @@ fn generated_refs_satisfy_git_check_ref_format() {
 /// through finalize, diff, and cleanup on a real repository.
 #[test]
 fn old_format_allocated_lease_reconciles_from_persisted_values() {
-    use workspace::{
-        BranchRef, LeaseLifecycle, Revision, WorkspaceId, WorkspaceLease, WorkspaceStore,
-    };
+    use workspace::{BranchRef, Revision, WorkspaceId, WorkspaceLease, WorkspaceStore};
 
     let env = Env::named("old-lease");
     // Legacy-faithful setup: the execution exists WITHOUT an admission
@@ -711,29 +709,14 @@ fn old_format_allocated_lease_reconciles_from_persisted_values() {
         repository_path: env.repo_path(),
         base_revision: "HEAD".to_owned(),
     };
-    let ensured = workspace
+    // TASK-0071 trusted-anchor follow-up: pre-anchor leases carry no sidecar
+    // row and must fail closed (no backfill from current FS) until
+    // re-admission with a new lease.
+    let err = workspace
         .ensure_workspace_ready(&request)
-        .expect("old lease reconciles");
-    assert_eq!(ensured.outcome, EnsureOutcome::RecognizedGitState);
-    // Persisted identity untouched by the new derivation.
-    assert_eq!(ensured.lease.branch().as_str(), old_branch);
-    assert_eq!(ensured.lease.worktree_ref(), worktree.to_string_lossy());
-    assert_eq!(ensured.lease.lifecycle(), LeaseLifecycle::Ready);
-
-    // Diff observes through the persisted lease (compat path), then
-    // ordinary cleanup tears down the recorded branch and worktree.
-    workspace
-        .compute_diff(ensured.lease.id())
-        .expect("diff observes old lease");
-    workspace
-        .request_cleanup(ensured.lease.id())
-        .expect("cleanup requests");
-    let cleaned = workspace
-        .cleanup_workspace(ensured.lease.id(), &env.repo_path())
-        .expect("old lease cleans up");
-    assert_eq!(cleaned.lease.lifecycle(), LeaseLifecycle::Removed);
+        .expect_err("pre-anchor legacy lease must fail closed");
     assert!(
-        !git(&env.repo, &["show-ref"]).contains("agent/E-OLD-1"),
-        "managed branch must be gone after cleanup"
+        matches!(err, workspace::WorkspaceFailure::GitBackendFailure { .. }),
+        "missing anchor must be GitBackendFailure, got {err:?}"
     );
 }
