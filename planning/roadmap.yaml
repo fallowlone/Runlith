@@ -8,7 +8,7 @@
 # Near-term work lives in planning/tasks/queue.yaml, not here.
 
 schema_version: 1
-current_gate: G6
+current_gate: G7
 task_queue: planning/tasks/queue.yaml
 
 gates:
@@ -77,7 +77,7 @@ gates:
 
   - id: G7
     name: Multi-agent DAG + bounded adaptive planning
-    status: planned
+    status: in_progress
     objective: Planner/Worker/Reviewer with typed messages, versioned plan
       revisions, PlannerPort, atomicity proposals, recursion guardrails.
     planned_capabilities:
