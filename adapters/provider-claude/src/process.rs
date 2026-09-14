@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use crate::config::bounded_detail;
 use crate::environment::ProviderEnvironment;
 use crate::failure::ClaudeFailure;
-use runner::PreparedLaunch;
+use runner::{CommandSpec, SandboxedLaunch};
 
 /// Poll quantum for the wait loop. Correctness never depends on its
 /// value: exit, cancellation, and deadline are all level-checked every
@@ -95,12 +95,84 @@ impl CancelFlag {
 ///   holding an inherited pipe then degrades to truncated tail output,
 ///   never to an unbounded join. The timeout/cancel paths kill the tree
 ///   first, so their joins stay prompt without a grace.
+///
+/// How one provider invocation reaches its child process (TASK-SEC-R1 R1-H1).
+///
+/// The production composition always attaches [`Self::Sandboxed`]: the child
+/// can then only be spawned through the Runner backend's verified recipe, so
+/// forgetting a handoff step cannot silently produce an unmanaged child. The
+/// unmanaged supervisor state is a separate, explicitly named choice used by
+/// the provider's own contract tests and trusted-host development runs; an
+/// unattached executor refuses to spawn (see [`Self::Unattached`]).
+#[derive(Clone, Default)]
+pub(crate) enum ProviderLaunch {
+    /// No Runner launch attached. Spawning refuses: the executor cannot prove
+    /// where its child would run.
+    #[default]
+    Unattached,
+    /// Explicit trusted-host supervisor: the provider spawns the configured
+    /// executable directly with its own allowlisted environment. This is the
+    /// test/development path and never the production G6 path.
+    TrustedHost,
+    /// Verified Runner launch: the only spawnable child is the one the backend
+    /// installed restrictions for.
+    Sandboxed(Arc<SandboxedLaunch>),
+}
+
 pub(crate) struct ProcessInvocation<'a> {
     pub(crate) executable: &'a OsStr,
     pub(crate) argv: &'a [OsString],
     pub(crate) workdir: &'a Path,
     pub(crate) environment: &'a ProviderEnvironment,
-    pub(crate) launch: Option<&'a (dyn PreparedLaunch + Send + Sync)>,
+    pub(crate) launch: &'a ProviderLaunch,
+}
+
+/// Maps one spawn failure onto the adapter taxonomy, keeping the
+/// "missing binary" class distinguishable.
+fn spawn_failure(error: std::io::Error, executable: &OsStr) -> ClaudeFailure {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        ClaudeFailure::CliMissing {
+            detail: bounded_detail(format!(
+                "claude executable not found at spawn: {}",
+                executable.to_string_lossy()
+            )),
+        }
+    } else {
+        ClaudeFailure::SpawnFailed {
+            detail: bounded_detail(format!("claude process spawn failed: {error}")),
+        }
+    }
+}
+
+/// Installs the provider's ordinary process wiring on a child that is already
+/// backed by a verified Runner sandbox recipe.
+fn wire_sandboxed_child(
+    launch: &SandboxedLaunch,
+    executable: &OsStr,
+    argv: &[OsString],
+    workdir: &Path,
+) -> Result<Child, ClaudeFailure> {
+    let spec = CommandSpec::new(executable.to_owned(), argv.iter().cloned());
+    let sandboxed = launch
+        .bind(spec)
+        .map_err(|error| ClaudeFailure::SpawnFailed {
+            detail: bounded_detail(format!("runner refused the sandboxed launch: {error}")),
+        })?;
+    // The child environment travels inside the verified recipe (ambient state
+    // cleared, exactly the plan's explicit pairs installed): the provider does
+    // not re-apply its own environment on this path.
+    sandboxed
+        .spawn(|wire| {
+            wire.current_dir(workdir)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            // Own process group (unix): timeout/cancel kills the whole child
+            // tree; harmless for normal exits.
+            #[cfg(unix)]
+            wire.process_group(0);
+        })
+        .map_err(|error| spawn_failure(error, executable))
 }
 
 pub(crate) fn spawn_and_supervise(
@@ -131,44 +203,45 @@ pub(crate) fn spawn_and_supervise(
     if cancel.is_cancelled() {
         return Ok(ChildOutcome::Cancelled);
     }
-    let mut command = Command::new(executable);
-    command.args(argv);
-    if let Some(launch) = launch {
-        launch.apply(&mut command);
-    }
-    // `PreparedLaunch::apply` may replace the command with an OS isolation
-    // wrapper (for example macOS sandbox-exec). Apply ordinary process
-    // wiring after that handoff so the wrapper cannot accidentally discard
-    // the real execution contract (cwd, pipes, and stdin policy).
-    command
-        .current_dir(workdir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    environment.apply(&mut command);
-    // Own process group (unix): timeout/cancel kills the whole child
-    // tree (see kill_tree_and_reap), so forked grandchildren can neither
-    // outlive supervision nor hold our capture pipes open. Harmless for
-    // normal exits; no terminal job control in non-interactive use.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    let mut child: Child = command.spawn().map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            ClaudeFailure::CliMissing {
-                detail: bounded_detail(format!(
-                    "claude executable not found at spawn: {}",
-                    executable.to_string_lossy()
-                )),
-            }
-        } else {
-            ClaudeFailure::SpawnFailed {
-                detail: bounded_detail(format!("claude process spawn failed: {error}")),
-            }
+    let mut child: Child = match launch {
+        ProviderLaunch::Sandboxed(launch) => {
+            wire_sandboxed_child(launch, executable, argv, workdir)?
         }
-    })?;
+        ProviderLaunch::Unattached => {
+            return Err(ClaudeFailure::LaunchUnmanaged {
+                detail: bounded_detail(
+                    "no Runner sandbox is attached to this provider execution; refusing to \
+                     spawn an unmanaged child"
+                        .to_owned(),
+                ),
+            });
+        }
+        ProviderLaunch::TrustedHost => {
+            // Explicit trusted-host supervisor (provider contract tests and
+            // trusted-host development runs). No policy authority exists to
+            // present here, so no Runner plan can be built; the environment is
+            // still cleared and rebuilt from the allowlisted provider set.
+            let mut command = Command::new(executable);
+            command.args(argv);
+            command
+                .current_dir(workdir)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            environment.apply(&mut command);
+            // Own process group (unix): timeout/cancel kills the whole child
+            // tree (see kill_tree_and_reap), so forked grandchildren can neither
+            // outlive supervision nor hold our capture pipes open.
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                command.process_group(0);
+            }
+            command
+                .spawn()
+                .map_err(|error| spawn_failure(error, executable))?
+        }
+    };
 
     // Drain threads: bounded shared buffers so a chatty child can
     // neither deadlock on a full pipe nor exceed the capture bound. The
@@ -399,7 +472,7 @@ mod tests {
                 argv: &[],
                 workdir: Path::new("/no/such/workdir-anywhere"),
                 environment: &test_environment(),
-                launch: None,
+                launch: &ProviderLaunch::TrustedHost,
             },
             &CancelFlag::fresh(),
             Duration::from_secs(5),
@@ -421,7 +494,7 @@ mod tests {
                 argv: &[],
                 workdir: &dir,
                 environment: &test_environment(),
-                launch: None,
+                launch: &ProviderLaunch::TrustedHost,
             },
             &CancelFlag::fresh(),
             Duration::from_secs(5),
@@ -431,6 +504,31 @@ mod tests {
         assert!(
             matches!(outcome, Err(ClaudeFailure::CliMissing { .. })),
             "missing binary must be CliMissing, got {outcome:?}"
+        );
+    }
+
+    /// TASK-SEC-R1 R1-H1 (adversarial): an executor with no Runner launch
+    /// attached must refuse to spawn, even when the executable exists. The old
+    /// handoff could be silently skipped; this state cannot produce a child.
+    #[test]
+    fn r1_h1_unattached_provider_launch_refuses_to_spawn() {
+        let dir = std::env::temp_dir();
+        let outcome = spawn_and_supervise(
+            ProcessInvocation {
+                executable: OsStr::new("/usr/bin/env"),
+                argv: &[],
+                workdir: &dir,
+                environment: &test_environment(),
+                launch: &ProviderLaunch::Unattached,
+            },
+            &CancelFlag::fresh(),
+            Duration::from_secs(5),
+            1024,
+            crate::config::DEFAULT_CAPTURE_GRACE,
+        );
+        assert!(
+            matches!(outcome, Err(ClaudeFailure::LaunchUnmanaged { .. })),
+            "unattached launch must refuse to spawn, got {outcome:?}"
         );
     }
 
@@ -453,7 +551,7 @@ mod tests {
                 argv: &[],
                 workdir: &dir,
                 environment: &test_environment(),
-                launch: None,
+                launch: &ProviderLaunch::TrustedHost,
             },
             &cancel,
             Duration::from_secs(5),

@@ -40,6 +40,13 @@ pub enum ClaudeFailure {
         /// Bounded diagnostic.
         detail: String,
     },
+    /// The executor was asked to spawn with no Runner sandbox attached
+    /// (TASK-SEC-R1 R1-H1). Fail closed: an unattached launch is refused
+    /// instead of silently running the provider child unmanaged.
+    LaunchUnmanaged {
+        /// Bounded diagnostic.
+        detail: String,
+    },
     /// The child did not conclude within the configured bound.
     TimedOut {
         /// Bounded diagnostic (configured bound).
@@ -80,6 +87,7 @@ impl ClaudeFailure {
             Self::Incompatible { .. } => "incompatible",
             Self::AuthRequired { .. } => "auth_required",
             Self::SpawnFailed { .. } => "spawn_failed",
+            Self::LaunchUnmanaged { .. } => "launch_unmanaged",
             Self::TimedOut { .. } => "timed_out",
             Self::Cancelled => "cancelled",
             Self::Failed { .. } => "failed",
@@ -120,6 +128,9 @@ impl std::fmt::Display for ClaudeFailure {
             | Self::MalformedOutput { detail }
             | Self::WorkspaceBinding { detail }
             | Self::EnvironmentIsolation { detail } => {
+                write!(f, "claude {}: {detail}", self.kind())
+            }
+            Self::LaunchUnmanaged { detail } => {
                 write!(f, "claude {}: {detail}", self.kind())
             }
         }

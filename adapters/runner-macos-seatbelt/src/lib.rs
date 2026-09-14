@@ -7,55 +7,17 @@
 #![cfg(target_os = "macos")]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use runner::{
-    BackendIdentity, ChildEnvironment, EnforcementAxes, EnforcementReport, IsolationBackend,
-    IsolationPlan, Platform, PreparedLaunch, RunnerError, RunnerKind,
-    NETWORK_SCOPE_OUTBOUND_TCP_443,
+    BackendIdentity, CommandSpec, EnforcementAxes, EnforcementReport, IsolationBackend,
+    IsolationPlan, LaunchRecipe, Platform, RunnerError, RunnerKind, NETWORK_SCOPE_OUTBOUND_TCP_443,
 };
+use std::ffi::OsString;
 
 #[derive(Clone, Debug, Default)]
 pub struct MacOsSeatbeltRunner {
     support_read_roots: Vec<PathBuf>,
     support_write_roots: Vec<PathBuf>,
-}
-
-#[derive(Clone, Debug)]
-struct SeatbeltLaunch {
-    profile: String,
-    interpreter: Option<&'static str>,
-    environment: ChildEnvironment,
-}
-
-impl PreparedLaunch for SeatbeltLaunch {
-    fn apply(&self, command: &mut Command) {
-        let program = command.get_program().to_owned();
-        let args: Vec<_> = command.get_args().map(ToOwned::to_owned).collect();
-        let mut sandboxed = Command::new("/usr/bin/sandbox-exec");
-        sandboxed.arg("-p").arg(&self.profile);
-        if let Some(interpreter) = self.interpreter {
-            sandboxed.arg(interpreter).arg(program).args(args);
-        } else {
-            sandboxed.arg(program).args(args);
-        }
-        // `sandbox-exec` execs the sandboxed program with its own environment,
-        // so the allowlist must be installed on the wrapper command. Seatbelt
-        // restricts files/network/process, never `execve` environment, and a
-        // governed child therefore must not inherit the daemon environment
-        // (TASK-SEC-R1 R1-H2).
-        install_environment(&mut sandboxed, &self.environment);
-        *command = sandboxed;
-    }
-}
-
-/// Clears every inherited variable and installs exactly the explicit pairs of
-/// the plan.
-fn install_environment(command: &mut Command, environment: &ChildEnvironment) {
-    command.env_clear();
-    for (name, value) in environment.vars() {
-        command.env(name, value);
-    }
 }
 
 impl MacOsSeatbeltRunner {
@@ -90,15 +52,28 @@ impl IsolationBackend for MacOsSeatbeltRunner {
         ))
     }
 
-    fn prepare_launch(
+    /// Installs the Seatbelt profile and returns the exact already-sandboxed
+    /// recipe (`sandbox-exec` as the program). `sandbox-exec` execs the child
+    /// with its own environment, so the plan's explicit allowlist is carried in
+    /// the recipe and installed by the runner-owned spawn path.
+    fn sandbox(
         &self,
         plan: &IsolationPlan,
-    ) -> Result<Box<dyn PreparedLaunch + Send + Sync>, RunnerError> {
-        Ok(Box::new(SeatbeltLaunch {
-            profile: self.profile_for(plan)?,
-            interpreter: interpreter_for(plan.launch_executable().as_str()),
-            environment: plan.environment().clone(),
-        }))
+        spec: &CommandSpec,
+    ) -> Result<LaunchRecipe, RunnerError> {
+        let profile = self.profile_for(plan)?;
+        let program = spec.program().to_owned();
+        let mut args: Vec<OsString> = vec![OsString::from("-p"), OsString::from(&profile)];
+        if let Some(interpreter) = interpreter_for(plan.launch_executable().as_str()) {
+            args.push(OsString::from(interpreter));
+        }
+        args.push(program);
+        args.extend(spec.args().iter().cloned());
+        Ok(LaunchRecipe::new(
+            "/usr/bin/sandbox-exec",
+            args,
+            plan.environment().vars().to_vec(),
+        ))
     }
 }
 
@@ -265,8 +240,10 @@ fn interpreter_for(executable: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
     use policy::{Capability, EffectiveCapabilities, FileScope, ScopeId};
-    use std::process::Output;
+    use runner::{prepare_process_launch, ChildEnvironment, SandboxedLaunch};
+    use std::process::{Output, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -295,7 +272,11 @@ mod tests {
             Self { root, workspace }
         }
 
-        fn plan(&self, executable: &Path, network: Option<&str>) -> IsolationPlan {
+        fn authority(
+            &self,
+            executable: &Path,
+            network: Option<&str>,
+        ) -> (EffectiveCapabilities, String, ScopeId) {
             let workspace = self.workspace.to_string_lossy().into_owned();
             let executable = executable.to_string_lossy().into_owned();
             let mut capabilities = vec![
@@ -306,10 +287,23 @@ mod tests {
             if let Some(network) = network {
                 capabilities.push(Capability::network(network).unwrap());
             }
-            IsolationPlan::compile(
-                &EffectiveCapabilities::new(capabilities),
+            (
+                EffectiveCapabilities::new(capabilities),
                 workspace,
                 ScopeId::new(executable).unwrap(),
+            )
+        }
+
+        /// Builds the explicit isolation plan for one probe. Retained for
+        /// parity with isolation_contract.rs fixtures and future negative-path
+        /// assertions (TASK-SEC-R1). Not currently asserted on directly.
+        #[allow(dead_code)]
+        fn plan(&self, executable: &Path, network: Option<&str>) -> IsolationPlan {
+            let (effective, workspace, launch_executable) = self.authority(executable, network);
+            IsolationPlan::compile(
+                &effective,
+                workspace,
+                launch_executable,
                 runner::IsolationRequirements::new(true, true, true),
                 child_environment(),
             )
@@ -323,14 +317,50 @@ mod tests {
         }
     }
 
-    fn run(backend: &MacOsSeatbeltRunner, plan: &IsolationPlan, args: &[&str]) -> Output {
-        let launch = backend
-            .prepare_launch(plan)
-            .expect("prepare Seatbelt launch");
-        let mut command = Command::new(plan.launch_executable().as_str());
-        command.args(args);
-        launch.apply(&mut command);
-        command.output().expect("run sandbox-exec")
+    /// Verifies enforcement and returns the only spawnable launch context
+    /// (TASK-SEC-R1 R1-H1).
+    fn prepare(
+        backend: &MacOsSeatbeltRunner,
+        case: &Case,
+        executable: &Path,
+        network: Option<&str>,
+    ) -> Result<SandboxedLaunch, RunnerError> {
+        let (effective, workspace, launch_executable) = case.authority(executable, network);
+        prepare_process_launch(
+            Arc::new(backend.clone()),
+            &effective,
+            workspace,
+            launch_executable,
+            runner::IsolationRequirements::new(true, true, true),
+            child_environment(),
+        )
+    }
+
+    /// Runs one child through the backend-owned sandbox path: the command is
+    /// only spawnable after the backend installed its restrictions.
+    fn run(
+        backend: &MacOsSeatbeltRunner,
+        case: &Case,
+        executable: &Path,
+        network: Option<&str>,
+        args: &[&str],
+    ) -> Output {
+        let launch = prepare(backend, case, executable, network).expect("verifiable sandbox plan");
+        let sandboxed = launch
+            .bind(CommandSpec::new(
+                executable,
+                args.iter().map(std::ffi::OsString::from),
+            ))
+            .expect("backend installs a sandboxed recipe");
+        let child = sandboxed
+            .spawn(|wire| {
+                wire.current_dir(&case.workspace)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+            })
+            .expect("spawn sandboxed child");
+        child.wait_with_output().expect("collect child output")
     }
 
     #[test]
@@ -346,8 +376,13 @@ mod tests {
         symlink(&outside, &link).unwrap();
 
         let backend = MacOsSeatbeltRunner::default();
-        let read_plan = case.plan(Path::new("/usr/bin/head"), None);
-        let inside_result = run(&backend, &read_plan, &["-c", "1", inside.to_str().unwrap()]);
+        let inside_result = run(
+            &backend,
+            &case,
+            Path::new("/usr/bin/head"),
+            None,
+            &["-c", "1", inside.to_str().unwrap()],
+        );
         assert!(
             inside_result.status.success(),
             "inside read failed: {:?}",
@@ -355,30 +390,43 @@ mod tests {
         );
         assert!(!run(
             &backend,
-            &read_plan,
+            &case,
+            Path::new("/usr/bin/head"),
+            None,
             &["-c", "1", outside.to_str().unwrap()]
         )
         .status
         .success());
-        assert!(
-            !run(&backend, &read_plan, &["-c", "1", link.to_str().unwrap()])
-                .status
-                .success()
-        );
+        assert!(!run(
+            &backend,
+            &case,
+            Path::new("/usr/bin/head"),
+            None,
+            &["-c", "1", link.to_str().unwrap()]
+        )
+        .status
+        .success());
 
-        let write_plan = case.plan(Path::new("/usr/bin/touch"), None);
         let inside_write = case.workspace.join("new.txt");
-        assert!(
-            run(&backend, &write_plan, &[inside_write.to_str().unwrap()])
-                .status
-                .success()
-        );
+        assert!(run(
+            &backend,
+            &case,
+            Path::new("/usr/bin/touch"),
+            None,
+            &[inside_write.to_str().unwrap()]
+        )
+        .status
+        .success());
         let outside_write = case.root.join("outside-write.txt");
-        assert!(
-            !run(&backend, &write_plan, &[outside_write.to_str().unwrap()])
-                .status
-                .success()
-        );
+        assert!(!run(
+            &backend,
+            &case,
+            Path::new("/usr/bin/touch"),
+            None,
+            &[outside_write.to_str().unwrap()]
+        )
+        .status
+        .success());
         assert!(!outside_write.exists());
     }
 
@@ -387,8 +435,13 @@ mod tests {
         let case = Case::new("process");
         let backend =
             MacOsSeatbeltRunner::with_support_roots(vec![PathBuf::from("/usr/bin")], Vec::new());
-        let plan = case.plan(Path::new("/usr/bin/env"), None);
-        let output = run(&backend, &plan, &["/usr/bin/true"]);
+        let output = run(
+            &backend,
+            &case,
+            Path::new("/usr/bin/env"),
+            None,
+            &["/usr/bin/true"],
+        );
         assert!(!output.status.success());
         assert!(
             String::from_utf8_lossy(&output.stderr).contains("Operation not permitted"),
@@ -403,10 +456,6 @@ mod tests {
 
         let case = Case::new("network");
         let backend = MacOsSeatbeltRunner::default();
-        let plan = case.plan(
-            Path::new("/usr/bin/nc"),
-            Some(NETWORK_SCOPE_OUTBOUND_TCP_443),
-        );
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -416,7 +465,13 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
 
         let port = address.port().to_string();
-        let output = run(&backend, &plan, &["-z", "127.0.0.1", &port]);
+        let output = run(
+            &backend,
+            &case,
+            Path::new("/usr/bin/nc"),
+            Some(NETWORK_SCOPE_OUTBOUND_TCP_443),
+            &["-z", "127.0.0.1", &port],
+        );
         assert!(!output.status.success());
         assert!(matches!(
             listener.accept(),
@@ -427,11 +482,61 @@ mod tests {
     #[test]
     fn unsupported_network_scope_fails_before_spawn() {
         let case = Case::new("network-scope");
-        let plan = case.plan(Path::new("/usr/bin/true"), Some("example.com"));
         assert!(matches!(
-            MacOsSeatbeltRunner::default().prepare_launch(&plan),
+            prepare(
+                &MacOsSeatbeltRunner::default(),
+                &case,
+                Path::new("/usr/bin/true"),
+                Some("example.com")
+            ),
             Err(RunnerError::BackendUnavailable { .. })
         ));
+    }
+
+    /// TASK-SEC-R1 R1-H1 (adversarial, real sandboxed child): the backend-owned
+    /// spawn path must produce a child that is actually confined. The probe
+    /// reads a file outside the plan's filesystem scope through the very path
+    /// production uses, and the sandbox must refuse it.
+    #[test]
+    fn r1_h1_child_of_seatbelt_backend_is_sandboxed() {
+        let case = Case::new("h1-probe");
+        let outside = case.root.join("outside-probe.txt");
+        std::fs::write(&outside, b"secret").unwrap();
+        let backend = MacOsSeatbeltRunner::default();
+
+        let launch =
+            prepare(&backend, &case, Path::new("/usr/bin/head"), None).expect("sandboxed plan");
+        assert_eq!(launch.backend().name, "macos-seatbelt-sandbox-exec");
+        let sandboxed = launch
+            .bind(CommandSpec::new(
+                Path::new("/usr/bin/head"),
+                [
+                    std::ffi::OsString::from("-c"),
+                    std::ffi::OsString::from("1"),
+                    outside.as_os_str().to_owned(),
+                ],
+            ))
+            .expect("sandboxed recipe");
+        assert_eq!(sandboxed.program(), Path::new("/usr/bin/sandbox-exec"));
+        assert!(!sandboxed
+            .args()
+            .iter()
+            .any(|arg| arg == "/usr/bin/sandbox-exec"));
+
+        let child = sandboxed
+            .spawn(|wire| {
+                wire.current_dir(&case.workspace)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+            })
+            .expect("spawn sandboxed child");
+        let output = child.wait_with_output().expect("wait for sandboxed child");
+        assert!(
+            !output.status.success(),
+            "child spawned through the backend escaped the sandbox: {:?}",
+            String::from_utf8_lossy(&output.stdout)
+        );
     }
 
     /// TASK-SEC-R1 R1-H2 (adversarial, real sandboxed child): a poisoned
@@ -444,8 +549,7 @@ mod tests {
 
         let case = Case::new("env-isolation");
         let backend = MacOsSeatbeltRunner::default();
-        let plan = case.plan(Path::new("/usr/bin/env"), None);
-        let output = run(&backend, &plan, &[]);
+        let output = run(&backend, &case, Path::new("/usr/bin/env"), None, &[]);
         std::env::remove_var(CANARY);
 
         assert!(

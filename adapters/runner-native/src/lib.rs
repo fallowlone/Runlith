@@ -5,36 +5,17 @@
 //! Any required filesystem/network/process isolation is rejected by the shared
 //! runner verifier instead of silently downgrading to host execution.
 //!
-//! It *does* install child environment isolation (TASK-SEC-R1 R1-H2): the
-//! ambient environment is cleared and exactly the plan's explicit allowlist is
-//! installed, and the report claims only that axis.
+//! It *does* install child environment isolation (TASK-SEC-R1 R1-H2) and it
+//! owns the launch path (TASK-SEC-R1 R1-H1): the ambient environment is
+//! cleared and exactly the plan's explicit allowlist is installed, and the
+//! backend hands back the sandboxed launch recipe instead of a command object
+//! any caller could spawn unmodified.
 
 use runner::{
-    BackendIdentity, ChildEnvironment, EnforcementAxes, EnforcementReport, IsolationBackend,
-    IsolationPlan, Platform, PreparedLaunch, RunnerError, RunnerKind,
+    BackendIdentity, ChildEnvironment, CommandSpec, EnforcementAxes, EnforcementReport,
+    IsolationBackend, IsolationPlan, LaunchRecipe, Platform, RunnerError, RunnerKind,
 };
-use std::process::Command;
-
-#[derive(Debug, Default)]
-struct NativeLaunch {
-    environment: ChildEnvironment,
-}
-
-impl PreparedLaunch for NativeLaunch {
-    fn apply(&self, command: &mut Command) {
-        install_environment(command, &self.environment);
-    }
-}
-
-/// Clears every inherited variable and installs exactly the explicit pairs.
-/// Ambient credentials therefore cannot reach a governed child on this
-/// backend, which enforces no other axis at all.
-fn install_environment(command: &mut Command, environment: &ChildEnvironment) {
-    command.env_clear();
-    for (name, value) in environment.vars() {
-        command.env(name, value);
-    }
-}
+use std::ffi::OsString;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NativeRunner;
@@ -57,12 +38,25 @@ impl IsolationBackend for NativeRunner {
         ))
     }
 
-    fn prepare_launch(
+    /// No OS sandbox axis is installed on this backend, so the child may run
+    /// wherever the host allows. The environment is still enforced: the recipe
+    /// carries exactly the plan's explicit pairs and nothing ambient.
+    fn sandbox(
         &self,
         plan: &IsolationPlan,
-    ) -> Result<Box<dyn PreparedLaunch + Send + Sync>, RunnerError> {
-        Ok(Box::new(NativeLaunch {
-            environment: plan.environment().clone(),
-        }))
+        spec: &CommandSpec,
+    ) -> Result<LaunchRecipe, RunnerError> {
+        Ok(LaunchRecipe::new(
+            spec.program(),
+            spec.args().iter().cloned(),
+            environment_pairs(plan.environment()),
+        ))
     }
+}
+
+/// Clears every inherited variable and installs exactly the explicit pairs.
+/// Ambient credentials therefore cannot reach a governed child on this
+/// backend, which enforces no other axis at all.
+fn environment_pairs(environment: &ChildEnvironment) -> Vec<(OsString, OsString)> {
+    environment.vars().to_vec()
 }
