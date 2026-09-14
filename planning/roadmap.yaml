@@ -56,7 +56,7 @@ gates:
 
   - id: G6
     name: Security
-    status: in_progress
+    status: completed
     objective: Policy Engine, approvals, Secret Broker, audit, runner
       security levels.
     scope_ref:
