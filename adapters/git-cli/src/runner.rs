@@ -126,12 +126,12 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 /// file that points at it, plus a `commondir` file pointing back to the real
 /// common `.git` directory — the exact back-reference Git itself relies on
 /// (`git worktree list`/`repair` use it to detect a moved or foreign
-/// worktree). Requiring that back-reference to resolve to this `.git` file
-/// is what distinguishes a legitimate linked worktree from an arbitrary
-/// (even validly-formed) redirection target: Git wrote the back-reference
-/// for the real worktree at creation time, so a `.git` file redirected at a
-/// foreign repository's metadata fails this check because that metadata's
-/// own back-reference (if it has one at all) points elsewhere.
+/// worktree). A legitimate target must therefore satisfy both directions:
+/// its reverse `gitdir` resolves to this exact `.git` file, and the target
+/// itself is structurally owned by the resolved common repository at
+/// `<commondir>/worktrees/<id>`. The structural check matters because a
+/// forged local metadata shim could otherwise point its reverse `gitdir`
+/// back here while redirecting `commondir` at a foreign repository.
 ///
 /// This is invoked on every call that is about to run Git against `path`
 /// (see `classify_repository`, `observe::worktree_status`,
@@ -222,14 +222,27 @@ fn validate_linked_worktree_backreference(
         )
     })?;
     let reverse_path = lexical_normalize(&PathBuf::from(reverse.trim()));
+    if !reverse_path.is_absolute() {
+        return Err(backend_failure(
+            "git-cli: linked-worktree back-reference must be absolute",
+        ));
+    }
     // Git canonicalizes (resolves symlinks in) the absolute path it records
-    // in both the forward and reverse worktree pointers, so the comparison
-    // must do the same (e.g. macOS `/tmp` -> `/private/tmp`) — a purely
-    // lexical comparison would reject every legitimate linked worktree
-    // created under a symlinked temp/root directory.
-    let canonical_or_lexical =
-        |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    if canonical_or_lexical(&reverse_path) != canonical_or_lexical(git_path) {
+    // in both the forward and reverse worktree pointers, so compare the
+    // actual filesystem identities (e.g. macOS `/tmp` -> `/private/tmp`).
+    let reverse_canonical = fs::canonicalize(&reverse_path).map_err(|e| {
+        backend_failure(format!(
+            "git-cli: linked-worktree back-reference is unavailable {}: {e}",
+            reverse_path.display()
+        ))
+    })?;
+    let git_canonical = fs::canonicalize(git_path).map_err(|e| {
+        backend_failure(format!(
+            "git-cli: worktree .git metadata is unavailable {}: {e}",
+            git_path.display()
+        ))
+    })?;
+    if reverse_canonical != git_canonical {
         return Err(backend_failure(
             "git-cli: .git pointer target does not reference this worktree; \
              refusing repository identity redirection",
@@ -264,6 +277,34 @@ fn validate_linked_worktree_backreference(
     if !common_meta.is_dir() {
         return Err(backend_failure(
             "git-cli: linked-worktree common directory is not a directory",
+        ));
+    }
+
+    // A real linked-worktree gitdir is structurally owned by its common
+    // repository: `<commondir>/worktrees/<id>`. Merely checking that the
+    // `commondir` exists is insufficient because an attacker could forge a
+    // local metadata shim whose reverse `gitdir` points back to this
+    // worktree while `commondir` points at a different repository. Git would
+    // then resolve refs/objects from that foreign repository. Bind the
+    // forward target to the resolved common directory exactly as Git lays
+    // out linked-worktree metadata.
+    let target_canonical = fs::canonicalize(target).map_err(|e| {
+        backend_failure(format!(
+            "git-cli: linked-worktree metadata target is unavailable {}: {e}",
+            target.display()
+        ))
+    })?;
+    let common_canonical = fs::canonicalize(&commondir_resolved).map_err(|e| {
+        backend_failure(format!(
+            "git-cli: linked-worktree common directory is unavailable {}: {e}",
+            commondir_resolved.display()
+        ))
+    })?;
+    let expected_parent = common_canonical.join("worktrees");
+    if target_canonical.parent() != Some(expected_parent.as_path()) {
+        return Err(backend_failure(
+            "git-cli: .git pointer target is not owned by its linked-worktree common directory; \
+             refusing repository identity redirection",
         ));
     }
     Ok(())
