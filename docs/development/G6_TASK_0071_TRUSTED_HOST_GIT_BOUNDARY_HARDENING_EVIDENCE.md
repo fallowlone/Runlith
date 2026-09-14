@@ -6,7 +6,11 @@
 > repository identity to an unrelated but real repository; (2)
 > `GitCli::worktree_status` (and, transitively, `compute_diff`) ran Git
 > directly against a path without performing that identity validation at
-> all. Both are closed. The already-applied `run_git` hardening
+> all. A final independent-style self-review also found that the first
+> back-reference design could be bypassed with a forged local linked-worktree
+> metadata shim whose reverse `gitdir` pointed back to the expected worktree
+> while `commondir` pointed at a foreign repository. All three paths are
+> closed. The already-applied `run_git` hardening
 > (`env_clear`, explicit `-c` neutralization of hooks/fsmonitor/credential
 > helper/external diff/pager/editor, `GIT_CONFIG_NOSYSTEM`,
 > `GIT_CONFIG_GLOBAL=/dev/null`) is preserved unchanged.
@@ -22,6 +26,8 @@
 | Worktree | `/Users/artemmac/dev/runlith-task0071` |
 | Branch | `task-0071-g6-trusted-host-git-boundary-hardening` |
 | Starting HEAD | `e9009a8f7ca8db8230232c3a647dd6950cdfc3cf` |
+| Initial TASK-0071 commit | `4128e7bfd58bf8c67a0a042ab26d3c694e28f96c` (superseded on this branch by the self-review remediation) |
+| Final code remediation commit | `06b33dc906ea480316b4d09636465dc901217ed3` |
 | Host | macOS 26.6.2 (build 25G83), arm64 (aarch64-apple-darwin) |
 | Toolchain | rustc 1.95.0 / cargo 1.95.0 |
 
@@ -46,6 +52,7 @@ discarded.
 | 3 — `compute_diff` bypasses validation | **Yes** | `diff::compute_diff` calls `observe::worktree_status` (itself unvalidated, per Finding 2) and then makes three further direct `run_git` calls (`prove_base_present`, `committed_changes`, `working_changes`) on the same path with no validation of its own. |
 | 4 (MEDIUM) — `git_extension_execution_surfaces_are_disabled` is inert | **Yes** | It calls `is_repository` → `rev-parse --is-inside-work-tree`, which never invokes `core.fsmonitor`. It passes unchanged against the vulnerable e9009a8 baseline, proving it exercises no real hardening. Preserved as-is (still a valid, if narrow, keeper); a new keeper using the real path is added alongside it (§4, §5). |
 | 5 (MEDIUM) — TOCTOU between validation and invocation | **Acknowledged, bounded** | See §7. No redesign attempted per task scope; validation is re-run at every entry point immediately before the Git calls it guards, rather than cached, which bounds the window to a single synchronous function's execution. |
+| 6 (self-review BLOCKER) — forged linked-worktree shim redirects `commondir` | **Yes** | The initial `4128e7b` fix verified that the target's reverse `gitdir` pointed back to this `.git` and that `commondir` was an existing directory, but did not bind the target to that common repository. A local forged metadata directory could satisfy the reverse link while setting `commondir` to repo B; `resolve_revision(A, "HEAD")` then returned B's OID. The final fix additionally requires the metadata target itself to be structurally owned at `<resolved commondir>/worktrees/<id>`. |
 
 ## 3. Git entry-point audit
 
@@ -92,15 +99,20 @@ requires:
    paths — needed for e.g. macOS `/tmp` → `/private/tmp`) to this exact
    `.git` file;
 3. the target's `commondir` file exists and resolves to a real, non-symlink
-   directory.
+   directory;
+4. after canonicalization, the metadata target's parent is exactly
+   `<resolved commondir>/worktrees`, binding the target to the repository
+   whose common metadata Git will actually use.
 
 An arbitrary redirection target — another repository's ordinary `.git`
-directory, or another repository's *own* worktree metadata directory — fails
-step 2: Git never wrote a back-reference from that metadata to *this*
-worktree, because Git never created that relationship. A legitimate
-Runlith-managed linked worktree (created via `create_worktree`/
-`attach_worktree`, i.e. real `git worktree add`) always satisfies all three
-steps, because Git wrote them.
+directory, another repository's *own* worktree metadata directory, or a
+forged local shim with a valid-looking reverse link — fails one of these
+checks. The shim case is the subtle one: its reverse `gitdir` can point back
+to this worktree, but if its `commondir` points at repo B then the shim is not
+located under `B/.git/worktrees/<id>` and is rejected before Git sees it. A
+legitimate Runlith-managed linked worktree (created via `create_worktree`/
+`attach_worktree`, i.e. real `git worktree add`) satisfies all four checks
+because Git wrote exactly that structure.
 
 ### B — validation coverage (Findings 2, 3)
 
@@ -147,20 +159,35 @@ proves, specifically through `worktree_status` (not `is_repository`), that
 silently returning canonical status evidence (`Clean`/`DirtyTracked`/etc.)
 for the wrong repository.
 
+### F — forged `commondir` shim regression (self-review Finding 6)
+
+`forged_linked_worktree_commondir_redirection_is_refused` builds two
+independent repositories, replaces A's `.git` with a pointer to a forged
+linked-worktree-shaped metadata directory inside A, writes the expected
+reverse `gitdir` back to A, but points `commondir` and `HEAD` at repository B.
+The keeper proves that this shape is rejected before `resolve_revision` can
+return B's commit identity. This test was first added against `4128e7b` and
+failed with `resolve_revision(A, "HEAD") = Revision(<B HEAD>)`, directly
+demonstrating the incomplete first fix before the structural ownership check
+was added.
+
 ## 5. RED evidence
 
 Captured against a disposable detached worktree at the vulnerable baseline
 (`git worktree add --detach <scratch>/red-baseline-e9009a8 e9009a8`, removed
 afterward — never the shared `~/dev/runlith` main worktree). A temporary,
 uncommitted test file (`red_task0071_evidence.rs`, not part of any commit)
-exercised the same fixture harness with assertions inverted to prove the
-vulnerable behavior.
+exercised the original three cases with assertions inverted to prove the
+vulnerable behavior. The self-review shim bypass was independently re-run in
+the same manner via temporary `red_task0071_commondir.rs`; neither RED file
+is part of the task branch.
 
 | Attack | SHA | Command | Result | Exit code |
 | --- | --- | --- | --- | --- |
 | Valid-but-wrong `gitdir:` redirection | `e9009a8f7ca8db8230232c3a647dd6950cdfc3cf` | `cargo test -p git-cli --test red_task0071_evidence red_valid_but_wrong_gitdir_pointer_redirects_identity -- --nocapture` | `resolve_revision(A) == B's HEAD` (e.g. `839df659233e0aada218ec4294746920dd485bf0` == `839df659233e0aada218ec4294746920dd485bf0`); `is_repository(A)` returns `Ok(true)` | `0` (assertions proving the vulnerability passed) |
 | `worktree_status` + symlinked `.git` | `e9009a8f7ca8db8230232c3a647dd6950cdfc3cf` | `cargo test -p git-cli --test red_task0071_evidence red_worktree_status_accepts_symlinked_git_metadata -- --nocapture` | `worktree_status(symlinked) = Clean` — no error, canonical-looking status returned for hostile metadata | `0` |
 | `worktree_status` + `core.fsmonitor` helper | `e9009a8f7ca8db8230232c3a647dd6950cdfc3cf` | `cargo test -p git-cli --test red_task0071_evidence red_worktree_status_executes_fsmonitor_helper -- --nocapture` | marker file created (`marker.exists() == true`) — hostile helper executed by the production `worktree_status` path | `0` |
+| Forged linked-worktree shim with foreign `commondir` | `e9009a8f7ca8db8230232c3a647dd6950cdfc3cf` | `cargo test -p git-cli --test red_task0071_commondir red_forged_linked_worktree_commondir_redirects_identity -- --nocapture` | `resolve_revision(A) == B's HEAD` (`943864fee81c6dbae0ec97ee37545df438fc526f` in the recorded run) even though the shim's reverse `gitdir` pointed correctly back to A | `0` (assertion proving the vulnerability passed) |
 
 Full run (all three in one process):
 
@@ -196,10 +223,10 @@ running 8 tests   (src/lib.rs unit tests)           ... 8 passed
 running 18 tests  (tests/diff_cleanup.rs)           ... 18 passed
 running 10 tests  (tests/failure_matrix.rs)         ... 10 passed
 running 2 tests   (tests/liveness_binding.rs)       ... 2 passed
-running 15 tests  (tests/safety_regression.rs)      ... 15 passed   (61 pre-existing + 4 new)
+running 16 tests  (tests/safety_regression.rs)      ... 16 passed   (61 pre-existing + 5 new)
 running 11 tests  (tests/worktree_creation.rs)      ... 11 passed
 Doc-tests git_cli: 0 passed
-Total: 65 passed, 0 failed, 0 ignored
+Total: 66 passed, 0 failed, 0 ignored
 
 $ cargo test -p app-services --test g6_security_integration
 running 7 tests
@@ -214,8 +241,8 @@ test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
 
 The pre-existing 61 `git-cli` tests (8 unit + 18 + 10 + 2 + 12 + 11, matching
-the count named in the task brief) all remain green unmodified, plus the 4
-new tests, for 65 total. `git_extension_execution_surfaces_are_disabled` and
+the count named in the task brief) all remain green unmodified, plus the 5
+new tests, for 66 total. `git_extension_execution_surfaces_are_disabled` and
 the two pre-existing `.git`-metadata keepers (`hostile_git_metadata_is_
 rejected_before_git_discovery`, `malicious_git_pointer_target_is_rejected`)
 were left exactly as committed and still pass.
@@ -226,7 +253,8 @@ Mid-verification, five `safety_regression` tests failed transiently after a
 `cargo test` run in the disposable RED-baseline worktree had been pointed
 (via `CARGO_TARGET_DIR`) at this worktree's own `target/` directory to share
 build cache across the two source trees. `cargo clean -p git-cli` followed
-by a rebuild reproduced the full 65/65 green result shown above; this was
+by a rebuild reproduced the then-current 65/65 green result; the final
+post-self-review suite is 66/66 as shown above. This was
 build-cache cross-contamination from a one-off convenience during evidence
 gathering, not a code defect, and is called out here only for transparency
 since it briefly looked like a regression during this session.
@@ -242,18 +270,14 @@ which exercise real, Git-created linked worktrees) needed to change to stay
 green.
 
 **Arbitrary repository redirection is prevented.** A `.git` file can only
-name a target that (a) exists, (b) is a real directory, and (c) itself
-contains a `gitdir` file whose content is the absolute path back to this
-exact `.git` file. An attacker confined to writing inside their own
-authorized worktree cannot forge that back-reference for a *foreign*,
-pre-existing repository, because they do not control that repository's
-metadata; they can only redirect at a target that was never linked back to
-them, which is exactly what is rejected. (Fabricating an *entirely
-self-contained* fake worktree-metadata-shaped directory purely from content
-already inside their own authorized worktree grants no new capability beyond
-directly editing that worktree's own real `.git` — a vector already bounded
-by the existing `run_git` hardening — since it does not let them observe or
-mutate any *other*, foreign repository's identity.)
+name a target that (a) exists, (b) is a real directory, (c) contains an
+absolute reverse `gitdir` that canonicalizes to this exact `.git` file, and
+(d) is itself located at `<canonical commondir>/worktrees/<id>`. The fourth
+condition closes the self-review bypass: fabricating a metadata-shaped
+directory inside the authorized worktree no longer lets an attacker redirect
+Git's refs/objects by setting `commondir` to a different repository. A
+foreign real worktree target also fails because its reverse `gitdir` points
+to its actual worktree rather than the caller-controlled one.
 
 **Git entry points obtain validated identity.** `classify_repository`
 already validated every observation function (`is_repository`,
@@ -316,7 +340,7 @@ $ git -C A rev-parse HEAD
   direct `run_git` calls (Finding 3).
 - `adapters/git-cli/src/cleanup.rs` — `remove_worktree` validates before
   its own direct `run_git` calls (defense in depth).
-- `adapters/git-cli/tests/safety_regression.rs` — 4 new tests (§4 C–E plus
+- `adapters/git-cli/tests/safety_regression.rs` — 5 new tests (§4 C–F plus
   the Finding 1 keeper); 3 pre-existing tests from the in-progress work
   unchanged.
 
