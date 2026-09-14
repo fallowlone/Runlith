@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use runner::{
-    BackendIdentity, EnforcementAxes, EnforcementReport, IsolationBackend, IsolationPlan, Platform,
-    PreparedLaunch, RunnerError, RunnerKind, NETWORK_SCOPE_OUTBOUND_TCP_443,
+    BackendIdentity, ChildEnvironment, EnforcementAxes, EnforcementReport, IsolationBackend,
+    IsolationPlan, Platform, PreparedLaunch, RunnerError, RunnerKind,
+    NETWORK_SCOPE_OUTBOUND_TCP_443,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -24,6 +25,7 @@ pub struct MacOsSeatbeltRunner {
 struct SeatbeltLaunch {
     profile: String,
     interpreter: Option<&'static str>,
+    environment: ChildEnvironment,
 }
 
 impl PreparedLaunch for SeatbeltLaunch {
@@ -37,7 +39,22 @@ impl PreparedLaunch for SeatbeltLaunch {
         } else {
             sandboxed.arg(program).args(args);
         }
+        // `sandbox-exec` execs the sandboxed program with its own environment,
+        // so the allowlist must be installed on the wrapper command. Seatbelt
+        // restricts files/network/process, never `execve` environment, and a
+        // governed child therefore must not inherit the daemon environment
+        // (TASK-SEC-R1 R1-H2).
+        install_environment(&mut sandboxed, &self.environment);
         *command = sandboxed;
+    }
+}
+
+/// Clears every inherited variable and installs exactly the explicit pairs of
+/// the plan.
+fn install_environment(command: &mut Command, environment: &ChildEnvironment) {
+    command.env_clear();
+    for (name, value) in environment.vars() {
+        command.env(name, value);
     }
 }
 
@@ -69,6 +86,7 @@ impl IsolationBackend for MacOsSeatbeltRunner {
             self.identity(),
             plan.clone(),
             EnforcementAxes::all(),
+            true,
         ))
     }
 
@@ -79,6 +97,7 @@ impl IsolationBackend for MacOsSeatbeltRunner {
         Ok(Box::new(SeatbeltLaunch {
             profile: self.profile_for(plan)?,
             interpreter: interpreter_for(plan.launch_executable().as_str()),
+            environment: plan.environment().clone(),
         }))
     }
 }
@@ -251,6 +270,12 @@ mod tests {
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    /// Explicit minimal child environment for sandbox probes: only the
+    /// allowlisted basics a governed child may see (TASK-SEC-R1 R1-H2).
+    fn child_environment() -> ChildEnvironment {
+        ChildEnvironment::minimal_allowlist().expect("runner minimal allowlist")
+    }
+
     struct Case {
         root: PathBuf,
         workspace: PathBuf,
@@ -286,6 +311,7 @@ mod tests {
                 workspace,
                 ScopeId::new(executable).unwrap(),
                 runner::IsolationRequirements::new(true, true, true),
+                child_environment(),
             )
             .unwrap()
         }
@@ -406,5 +432,41 @@ mod tests {
             MacOsSeatbeltRunner::default().prepare_launch(&plan),
             Err(RunnerError::BackendUnavailable { .. })
         ));
+    }
+
+    /// TASK-SEC-R1 R1-H2 (adversarial, real sandboxed child): a poisoned
+    /// ambient environment must not reach the child through `sandbox-exec`,
+    /// which the Seatbelt profile cannot restrict by itself.
+    #[test]
+    fn r1_h2_sandboxed_child_env_cannot_see_poisoned_vars() {
+        const CANARY: &str = "RUNLITH_SEC_CANARY_AWS_SECRET_ACCESS_KEY";
+        std::env::set_var(CANARY, "poison-value");
+
+        let case = Case::new("env-isolation");
+        let backend = MacOsSeatbeltRunner::default();
+        let plan = case.plan(Path::new("/usr/bin/env"), None);
+        let output = run(&backend, &plan, &[]);
+        std::env::remove_var(CANARY);
+
+        assert!(
+            output.status.success(),
+            "sandboxed env probe failed: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let observed = String::from_utf8_lossy(&output.stdout);
+        let names: Vec<&str> = observed
+            .lines()
+            .map(|line| line.split('=').next().unwrap_or_default())
+            .collect();
+        assert!(
+            !names.contains(&CANARY),
+            "sandboxed child inherited a poisoned ambient variable: {observed}"
+        );
+        assert!(
+            names
+                .iter()
+                .all(|name| runner::CHILD_ENV_ALLOWLIST.contains(name)),
+            "sandboxed child env exposed a non-allowlisted name: {observed}"
+        );
     }
 }
