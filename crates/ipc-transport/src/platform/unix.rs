@@ -406,6 +406,10 @@ fn xdg_runtime_parent() -> Option<PathBuf> {
 }
 
 /// `${TMPDIR:-/tmp}/ai-engineering-os-$UID/` (Linux fallback).
+///
+/// Mirrors the macOS fallback: both append the current UID so that two users
+/// sharing the same temp directory get distinct runtime parents (TASK-SEC-R1
+/// R1-M4).
 #[cfg(not(target_os = "macos"))]
 fn fallback_runtime_parent() -> PathBuf {
     let tmp = std::env::var_os("TMPDIR")
@@ -413,10 +417,14 @@ fn fallback_runtime_parent() -> PathBuf {
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .unwrap_or_else(|| PathBuf::from("/tmp"));
-    tmp.join(format!("ai-engineering-os-{}", current_uid()))
+    runtime_parent_for(tmp, current_uid())
 }
 
-/// `$TMPDIR/ai-engineering-os/` with platform temp-directory fallback (macOS).
+/// `$TMPDIR/ai-engineering-os-$UID/` (macOS).
+///
+/// Appends the current UID, exactly like the Linux fallback, so that two users
+/// sharing the same temp directory never collide on the singleton daemon
+/// socket (TASK-SEC-R1 R1-M4).
 #[cfg(target_os = "macos")]
 fn macos_runtime_parent() -> PathBuf {
     let tmp = std::env::var_os("TMPDIR")
@@ -424,7 +432,17 @@ fn macos_runtime_parent() -> PathBuf {
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .unwrap_or_else(std::env::temp_dir);
-    tmp.join(APP_DIR_NAME)
+    runtime_parent_for(tmp, current_uid())
+}
+
+/// Builds the per-UID runtime directory for a given temp directory.
+///
+/// Shared by the macOS and Linux fallbacks so they produce per-user distinct
+/// paths. The XDG and override paths intentionally omit the UID because those
+/// directories are already per-user; only the shared temp fallbacks need the
+/// disambiguation.
+fn runtime_parent_for(tmp: PathBuf, uid: u32) -> PathBuf {
+    tmp.join(format!("{}-{}", APP_DIR_NAME, uid))
 }
 
 #[cfg(test)]
@@ -804,7 +822,10 @@ mod tests {
             None => unsafe { std::env::remove_var("TMPDIR") },
         }
         let endpoint = resolved.expect("resolve");
-        assert_eq!(endpoint.runtime_dir, sandbox_root.join("ai-engineering-os"));
+        assert_eq!(
+            endpoint.runtime_dir,
+            sandbox_root.join(format!("{}-{}", APP_DIR_NAME, current_uid()))
+        );
         assert_eq!(
             endpoint.socket_path.file_name().and_then(|n| n.to_str()),
             Some(SOCKET_FILE_NAME)
@@ -812,11 +833,30 @@ mod tests {
         let _ = fs::remove_dir_all(&sandbox_root);
     }
 
+    /// TASK-SEC-R1 R1-M4: two distinct UIDs must produce distinct runtime
+    /// parents so that two users sharing the same temp directory never collide
+    /// on the per-user daemon socket. Tests the shared UID-suffixing logic
+    /// directly with synthetic UIDs (platform-independent).
+    #[test]
+    fn two_synthetic_uids_get_distinct_runtime_parents() {
+        let tmp = PathBuf::from("/tmp");
+        let a = runtime_parent_for(tmp.clone(), 1000);
+        let b = runtime_parent_for(tmp, 1001);
+        assert_ne!(a, b, "UID suffix must disambiguate runtime parents");
+        assert!(
+            a.ends_with("ai-engineering-os-1000"),
+            "expected UID suffix on {a:?}"
+        );
+        assert!(
+            b.ends_with("ai-engineering-os-1001"),
+            "expected UID suffix on {b:?}"
+        );
+    }
+
     #[test]
     #[cfg(target_os = "linux")]
     fn resolve_endpoint_prefers_usable_xdg_runtime_dir() {
         let _guard = ENV_GUARD.lock().expect("env guard");
-        let sandbox_root = scratch_dir("resolvexdg");
         fs::set_permissions(&sandbox_root, fs::Permissions::from_mode(0o700)).expect("setup");
         let previous = std::env::var_os("XDG_RUNTIME_DIR");
         unsafe {
