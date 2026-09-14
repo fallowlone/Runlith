@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0073
+completed_through: TASK-0074
 current_gate: G6
-gate_status: IN_PROGRESS  # TASK-0073 shim fix merged; F-002 still open, G6 closure needs separate re-audit
+gate_status: CLOSED  # TASK-0074 independent closure re-audit: G6_CLOSED (F-002/F-003 closed, residuals accepted); G7 not started
 
 items:
   - id: TASK-0012
@@ -1322,3 +1322,35 @@ items:
     blocked_by: []
     references:
       - bins/agentctl/tests/execution_recovery.rs
+
+  - id: TASK-0074
+    gate: G6
+    title: Independent Full G6 Closure Re-Audit
+    objective: Independently re-verify every G6 acceptance criterion at
+      the post-TASK-0073 tree and report G6_CLOSED or
+      G6_REMEDIATION_REQUIRED without implementing repairs — including
+      closing F-002 by enumerating the system.sb-imported baseline and
+      re-proving the F-003/F7 remediation.
+    scope: Audit only; exact HEAD recorded; full suite re-runs,
+      auditor-owned external Seatbelt probe (deleted after capture),
+      keeper re-runs, production diff-scope check since TASK-0070.
+    exit_criteria_summary: An independent closure report exists with an
+      explicit G6 verdict (reported G6_CLOSED; G7 not started).
+    outcome: >-
+      G6_CLOSED. All matrix rows PASS: policy 44, runner 7, secrets 4,
+      audit 9+2, approvals 7, git-cli 74, F-003/F7 keepers 7/7, H7
+      fixtures 15, G5 regression green, full workspace 102 suites /
+      843 passed / 0 failed / 2 ignored, fmt + clippy clean, Windows
+      compile check clean, real-CLI smoke external-unrecognized_model.
+      F-002 enumerated (24-check probe ALL_PASS) and closed as
+      documented residual; F-003 closed. Residuals R1-R5 accepted;
+      observations O1-O3 non-blocking. Record:
+      docs/development/G6_TASK_0074_G6_CLOSURE_REAUDIT.md.
+    depends_on:
+      - TASK-0073
+    blocked_by: []
+    references:
+      - docs/development/G6_TASK_0074_G6_CLOSURE_REAUDIT.md
+      - docs/development/G6_TASK_0072_F7_TRUSTED_ANCHOR_REAUDIT.md
+      - docs/development/G6_FINAL_CLOSURE_REAUDIT.md
+      - docs/development/G6_TASK_0070_SUPPLEMENTAL_SECURITY_EVIDENCE.md
