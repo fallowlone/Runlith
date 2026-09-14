@@ -39,3 +39,4 @@ opaque_id!(PlanNodeId, "plan_node_id");
 opaque_id!(CriterionId, "criterion_id");
 opaque_id!(EvidenceRef, "evidence_ref");
 opaque_id!(PlannerAdapterId, "planner_adapter_id");
+opaque_id!(PlanningCostReceiptRef, "planning_cost_receipt_ref");

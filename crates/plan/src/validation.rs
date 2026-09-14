@@ -17,7 +17,7 @@ use crate::guardrails::{
     MAX_CHILDREN_PER_DECOMPOSITION, MAX_DECOMPOSITION_DEPTH, MAX_NODES_PER_PLAN_BRANCH,
     MAX_REVISIONS_PER_CYCLE_PER_BRANCH,
 };
-use crate::hash::decomposition_fingerprint;
+use crate::hash::{decomposition_fingerprint, verify_proposal_hash};
 use crate::ids::CriterionId;
 use crate::model::{GateUpdate, PlanChangeSet, PlanGraph};
 use crate::risk::{RiskClass, VerificationMethod};
@@ -228,6 +228,11 @@ pub fn validate_proposal(
             detail: reason.to_string(),
         });
     }
+    if !verify_proposal_hash(changeset) {
+        return ValidationOutcome::Refused(ValidationRefusal::Malformed {
+            detail: "proposal_hash does not match canonical PlanChangeSet bytes".to_owned(),
+        });
+    }
 
     // Merged vertex/edge sets. V1 runs before ref resolution per ADR order:
     // referenced-but-unknown ids are vertices here and are judged by V2.
@@ -310,6 +315,7 @@ pub fn validate_proposal(
 
     // V9 RISK-ESCALATION APPROVAL GATE.
     let risk_escalated = method_changed
+        || has_derived_update_risk_escalation(graph, changeset)
         || changeset
             .risk_delta
             .iter()
@@ -442,10 +448,10 @@ fn check_referential_integrity(
         }
     }
     for (from, to) in merged_edges {
-        if removed.contains(*from) || removed.contains(*to) {
+        if !live.contains(*from) || !live.contains(*to) {
             return Some(ValidationRefusal::DanglingRef {
                 detail: format!(
-                    "removed node keeps a surviving edge {from} -> {to} outside the removal set"
+                    "merged edge {from} -> {to} resolves outside (base ∪ added) ∖ removed"
                 ),
             });
         }
@@ -614,6 +620,25 @@ fn check_limits(
         });
     }
     None
+}
+
+/// Derives risk escalation from trusted base state plus planner-proposed
+/// node updates. V2 has already rejected unknown update targets before this
+/// helper is consulted, so planner-declared `risk_delta` cannot suppress an
+/// actual Low→High (or other upward) transition.
+fn has_derived_update_risk_escalation(graph: &PlanGraph, changeset: &PlanChangeSet) -> bool {
+    let base: BTreeMap<&str, RiskClass> = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node.risk_class))
+        .collect();
+    changeset.node_updates.iter().any(|update| {
+        let Some(to) = update.risk_class else {
+            return false;
+        };
+        base.get(update.target.as_str())
+            .is_some_and(|from| to > *from)
+    })
 }
 
 /// Returns `Some(detail)` when the escalation lacks a valid grant.

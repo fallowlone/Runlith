@@ -6,14 +6,14 @@
 use plan_domain::{
     compute_proposal_hash, decomposition_fingerprint, validate_proposal, verify_proposal_hash,
     AffectedParentCriterion, AtomicityAssessment, AtomicityBlocker, AtomicityVerdict, CriterionId,
-    EdgeAddition, EdgeRemoval, EvidenceRef, GateRef, NodeAddition, NodeUpdate, PlanBranchId,
-    PlanChangeSet, PlanGraph, PlanNode, PlanNodeId, PlanRevision, PlannerAdapterId,
-    PlannerIdentity, PlanningCostReceipt, RiskClass, RiskDelta, RiskEscalationGrant, ScopeBound,
-    ValidatedBy, ValidationContext, ValidationOutcome, VerificationMethod,
-    MAX_CHILDREN_PER_DECOMPOSITION, MAX_DECOMPOSITION_DEPTH, MAX_NODES_PER_PLAN_BRANCH,
-    MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH, MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
-    MAX_PLANNER_INPUT_TOKENS, MAX_PLANNER_OUTPUT_TOKENS, MAX_PLANNER_WALL_CLOCK_SECS,
-    MAX_REVISIONS_PER_CYCLE_PER_BRANCH,
+    EdgeAddition, EdgeRemoval, EvidenceRef, GateRef, GateUpdate, NodeAddition, NodeUpdate,
+    PlanBranchId, PlanChangeSet, PlanGraph, PlanNode, PlanNodeId, PlanRevision, PlannerAdapterId,
+    PlannerIdentity, PlanningCostReceipt, PlanningCostReceiptRef, RevisionProposedBy, RiskClass,
+    RiskDelta, RiskEscalationGrant, ScopeBound, ValidatedBy, ValidationContext, ValidationOutcome,
+    VerificationMethod, MAX_CHILDREN_PER_DECOMPOSITION, MAX_DECOMPOSITION_DEPTH,
+    MAX_NODES_PER_PLAN_BRANCH, MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
+    MAX_PLANNER_CUMULATIVE_INPUT_TOKENS, MAX_PLANNER_INPUT_TOKENS, MAX_PLANNER_OUTPUT_TOKENS,
+    MAX_PLANNER_WALL_CLOCK_SECS, MAX_REVISIONS_PER_CYCLE_PER_BRANCH,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
@@ -258,6 +258,22 @@ fn v2_referential_integrity_rejects_orphaned_edge_on_removed_node() {
     cs.edge_removals.clear();
     cs.edge_additions.clear();
     cs.proposal_hash = compute_proposal_hash(&cs);
+    assert_eq!(refusal_code(&graph, &cs, &ctx()), "DANGLING_REF");
+}
+
+#[test]
+fn v2_referential_integrity_rejects_dangling_base_edge_target() {
+    let mut graph = base_graph();
+    graph.edges = vec![(nid("b"), nid("missing"))];
+    let cs = valid_changeset();
+    assert_eq!(refusal_code(&graph, &cs, &ctx()), "DANGLING_REF");
+}
+
+#[test]
+fn v2_referential_integrity_rejects_dangling_base_edge_source() {
+    let mut graph = base_graph();
+    graph.edges = vec![(nid("missing"), nid("b"))];
+    let cs = valid_changeset();
     assert_eq!(refusal_code(&graph, &cs, &ctx()), "DANGLING_REF");
 }
 
@@ -768,6 +784,67 @@ fn v9_risk_escalation_approval_gate_non_escalating_accept_reports_no_escalation(
     }
 }
 
+#[test]
+fn v9_risk_escalation_approval_gate_derives_node_update_escalation_when_risk_delta_empty() {
+    let graph = base_graph();
+    let mut cs = valid_changeset();
+    cs.node_updates.push(NodeUpdate {
+        target: nid("b"),
+        scope: None,
+        risk_class: Some(RiskClass::High),
+        required_gate: Some(GateUpdate::Set(GateRef::new("human-review").unwrap())),
+    });
+    cs.risk_delta.clear();
+    cs.proposal_hash = compute_proposal_hash(&cs);
+
+    assert_eq!(refusal_code(&graph, &cs, &ctx()), "RISK_GATE_OPEN");
+}
+
+#[test]
+fn v9_risk_escalation_approval_gate_derives_node_update_escalation_when_risk_delta_misleading() {
+    let graph = base_graph();
+    let mut cs = valid_changeset();
+    cs.node_updates.push(NodeUpdate {
+        target: nid("b"),
+        scope: None,
+        risk_class: Some(RiskClass::High),
+        required_gate: Some(GateUpdate::Set(GateRef::new("human-review").unwrap())),
+    });
+    cs.risk_delta = vec![RiskDelta {
+        node: nid("b"),
+        from: RiskClass::High,
+        to: RiskClass::Low,
+    }];
+    cs.proposal_hash = compute_proposal_hash(&cs);
+
+    assert_eq!(refusal_code(&graph, &cs, &ctx()), "RISK_GATE_OPEN");
+}
+
+#[test]
+fn v9_risk_escalation_approval_gate_accepts_derived_node_update_with_exact_grant() {
+    let graph = base_graph();
+    let mut cs = valid_changeset();
+    cs.node_updates.push(NodeUpdate {
+        target: nid("b"),
+        scope: None,
+        risk_class: Some(RiskClass::High),
+        required_gate: Some(GateUpdate::Set(GateRef::new("human-review").unwrap())),
+    });
+    cs.risk_delta.clear();
+    cs.proposal_hash = compute_proposal_hash(&cs);
+    let mut c = ctx();
+    c.risk_grant = Some(RiskEscalationGrant {
+        proposal_hash: cs.proposal_hash.clone(),
+        expires_at_ms: 5_000,
+        consumed: false,
+    });
+
+    match validate_proposal(&graph, &cs, &c) {
+        ValidationOutcome::Accepted { risk_escalated } => assert!(risk_escalated),
+        ValidationOutcome::Refused(_) => panic!("expected accept"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Rule order: first failing rule wins (ADR-0027 §3).
 // ---------------------------------------------------------------------------
@@ -808,12 +885,67 @@ fn proposal_hash_is_deterministic_and_material_sensitive() {
     assert!(!verify_proposal_hash(&tampered));
 }
 
+#[test]
+fn proposal_hash_mismatch_is_rejected_as_malformed() {
+    let graph = base_graph();
+    let mut cs = valid_changeset();
+    cs.reason = "mutated after hashing".to_owned();
+
+    assert_eq!(refusal_code(&graph, &cs, &ctx()), "MALFORMED_PROPOSAL");
+}
+
+#[test]
+fn stale_hash_grant_cannot_authorize_mutated_proposal() {
+    let graph = base_graph();
+    let mut cs = valid_changeset();
+    cs.node_additions[0].risk_class = RiskClass::High;
+    cs.node_additions[0].required_gate = Some(GateRef::new("human-review").unwrap());
+    cs.risk_delta = vec![RiskDelta {
+        node: nid("a1"),
+        from: RiskClass::Low,
+        to: RiskClass::High,
+    }];
+    cs.proposal_hash = compute_proposal_hash(&cs);
+    let approved_hash = cs.proposal_hash.clone();
+    cs.expected_outcome = "materially mutated after approval".to_owned();
+    let mut c = ctx();
+    c.risk_grant = Some(RiskEscalationGrant {
+        proposal_hash: approved_hash,
+        expires_at_ms: 5_000,
+        consumed: false,
+    });
+
+    assert_eq!(refusal_code(&graph, &cs, &c), "MALFORMED_PROPOSAL");
+}
+
+#[test]
+fn proposal_hash_distinguishes_gate_clear_from_set_clear() {
+    let mut clear = valid_changeset();
+    clear.node_updates.push(NodeUpdate {
+        target: nid("b"),
+        scope: None,
+        risk_class: None,
+        required_gate: Some(GateUpdate::Clear),
+    });
+    clear.proposal_hash = compute_proposal_hash(&clear);
+
+    let mut set_clear = clear.clone();
+    set_clear.node_updates[0].required_gate = Some(GateUpdate::Set(GateRef::new("clear").unwrap()));
+    set_clear.proposal_hash = compute_proposal_hash(&set_clear);
+
+    assert_ne!(clear.proposal_hash, set_clear.proposal_hash);
+}
+
 // ---------------------------------------------------------------------------
 // PlanRevision provenance (ADR-0027 §4) + atomicity/planner-fault vocabulary.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn plan_revision_requires_provenance() {
+    let proposed_by = RevisionProposedBy::new(
+        identity(),
+        PlanningCostReceiptRef::new("planning-receipt-1").unwrap(),
+    );
     let rev = PlanRevision::new(
         1,
         PlanBranchId::new("branch-1").unwrap(),
@@ -821,12 +953,19 @@ fn plan_revision_requires_provenance() {
         "sha256:abc".to_owned(),
         "initial decomposition".to_owned(),
         vec![eref("attempt-A1")],
-        identity(),
+        proposed_by.clone(),
         ValidatedBy::new("reconciler-1".to_owned(), "policy-fp-1".to_owned()).unwrap(),
+        1_789_000_000_000,
     )
     .unwrap();
     assert_eq!(rev.revision_seq, 1);
     assert_eq!(rev.base_revision, 0);
+    assert_eq!(
+        rev.proposed_by.planning_cost_receipt_ref.as_str(),
+        "planning-receipt-1"
+    );
+    assert_eq!(rev.created_at, 1_789_000_000_000);
+    assert!(PlanningCostReceiptRef::new("   ").is_err());
 
     assert!(PlanRevision::new(
         1,
@@ -835,8 +974,9 @@ fn plan_revision_requires_provenance() {
         "sha256:abc".to_owned(),
         "   ".to_owned(),
         vec![eref("attempt-A1")],
-        identity(),
+        proposed_by,
         ValidatedBy::new("reconciler-1".to_owned(), "policy-fp-1".to_owned()).unwrap(),
+        1_789_000_000_000,
     )
     .is_err());
 }
