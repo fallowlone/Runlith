@@ -31,5 +31,6 @@
 | [ADR-0024](./ADR-0024-g5-provider-execution-seam.md) | G5 provider execution seam (`ExecutionPort`), first real provider, IPC v2 execution | Accepted | providers, execution seam, contract suite, ipc v2, composition root, g5 sequencing |
 | [ADR-0025](./ADR-0025-g5-post-admission-recovery.md) | G5 post-admission entry recovery path (explicit resume, pre-admission validation) | Accepted | recovery, reconciliation, resume, entry validation, ipc v2 additive, g5 sequencing |
 | [ADR-0026](./ADR-0026-g6-security-authority-and-capability-contracts.md) | G6 security authority and capability contracts | Accepted | policy, capabilities, approvals, secrets, audit, runners, g6 sequencing |
+| [ADR-0027](./ADR-0027-g7-planning-orchestration-contract.md) | G7 planning/orchestration contract (`PlannerPort`, `PlanChangeSet`, validation, revision provenance, guardrails, vocabulary reconcile, G6 follow-up re-homing) | Accepted | planning, orchestration, planner seam, plan revisions, guardrails, human decisions, g7 sequencing |
 
 Coverage register (not an ADR): [COVERAGE.md](./COVERAGE.md).
