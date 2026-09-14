@@ -20,6 +20,7 @@
   [`../privacy/DATA_FLOW_MAP.md`](../privacy/DATA_FLOW_MAP.md)
 - Development roadmap (gates): [`../../planning/roadmap.yaml`](../../planning/roadmap.yaml)
 - Near-term task queue: [`../../planning/tasks/queue.yaml`](../../planning/tasks/queue.yaml)
+- External/community research adoption notes: [`../../EXTERNAL_REPOSITORY_ADOPTION_RESEARCH.md`](../../EXTERNAL_REPOSITORY_ADOPTION_RESEARCH.md)
 
 > Changing an accepted invariant requires an ADR and explicit architecture review.
 

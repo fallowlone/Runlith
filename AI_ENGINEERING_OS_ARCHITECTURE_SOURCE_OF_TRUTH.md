@@ -7334,3 +7334,259 @@ Local models are supporting infrastructure, not a mandatory hardware
 requirement. Subscription-backed Claude/Codex/Gemini-style providers remain
 first-class high-capability workers; small local models are optional background
 or routing helpers.
+
+
+---
+
+# 105. r/AI_Agents community evidence integration — 2026-09-12
+
+Status: **roadmap direction backed by external community evidence; contracts are
+not considered implemented until their owning gate/task materializes and verifies
+them.** The source is supporting evidence, never architecture authority.
+
+This research reinforces the existing Runlith thesis: durable state, explicit
+authority, recovery, evidence, continuity and independent verification matter
+more than adding another provider-specific agent loop. It also supplies a strong
+guardrail against building an intertwined harness that cannot be dogfooded in
+small useful slices.
+
+The following decisions are integrated into the existing gates without
+reordering the active G6 queue. Full Event Sourcing remains a future selective
+direction, the Entity Graph remains conditional, and the existing Verified
+Delivery Cost definition is unchanged.
+
+## 105.1 P0 — Observed Effect / Claim Verification
+
+Verification must distinguish a model/agent statement from independently
+observed runtime evidence:
+
+```text
+AgentClaim
+  -> EvidenceRequirement
+  -> ObservedEffect
+  -> ClaimVerification
+```
+
+Examples: an agent saying that tests passed is a claim; the runtime-captured
+process exit code and artifacts are observed effects. An agent saying a file or
+Git state changed is a claim; filesystem hashes/diffs and repository state are
+observed effects. A provider/model claim may never serve as its own completion
+evidence.
+
+Roadmap owner: **G8 Verification**. Existing receipts remain useful execution
+provenance, but receipt provenance alone does not prove authorization,
+correctness or the claimed final state.
+
+## 105.2 P0 — Side-Effect Execution Protocol
+
+External side effects need a durable intent/recovery protocol because local
+transaction state cannot prove what happened in an external system after a
+crash. The planned state contract is:
+
+```text
+PREPARED
+  -> INTENT_RECORDED
+  -> EXECUTING
+       -> CONFIRMED
+       -> FAILED
+       -> AMBIGUOUS
+            -> RECONCILE
+                 -> CONFIRMED | SAFE_TO_RETRY | ESCALATE
+```
+
+`INTENT_RECORDED` carries the operation identity/idempotency material required
+for later reconciliation. `AMBIGUOUS` means the external outcome is unknown; it
+is not equivalent to `FAILED` or `NOT_EXECUTED`. Runlith must reconcile the
+actual target state before retrying any side effect that could already have
+completed. Filesystem/Git/test state can often be reconciled locally; remote
+operations use provider-specific read-back/receipt mechanisms behind ports.
+
+This protocol does **not** require full Event Sourcing in v1. Durable relational
+state plus append-oriented journals/audit and explicit reconciliation are
+sufficient for the first materialization.
+
+Roadmap owner: **G8 Verification/recovery contracts**, with **G11 daemon
+reconciliation** consuming the same semantics for unattended execution.
+
+## 105.3 P0 — Explicit execution modes and immutable ActionProposal
+
+Mutation authority must be explicit:
+
+```text
+EXPLAIN
+  -> no mutation authority
+
+PROPOSE
+  -> creates immutable ActionProposal
+  -> no mutation authority
+
+EXECUTE
+  -> consumes explicit authorization bound to that proposal
+```
+
+Planned `ActionProposal` meaning:
+
+```text
+ActionProposal
+- actor/principal
+- task_id
+- operation
+- targets
+- expected_effects
+- side_effects
+- required_capabilities
+- risk
+- evidence_plan
+- expires_at
+- proposal_hash
+```
+
+Any material proposal mutation produces a different hash and invalidates prior
+authorization. This extends the exact-bound approval principle already
+materialized in G6/TASK-0062; it does not retroactively claim that TASK-0062
+already implements the future `ActionProposal` object.
+
+Roadmap placement: **G6 security follow-up + G7 orchestration integration**.
+
+## 105.4 P0/P1 — Task-scoped Capability Leases
+
+Secrets Broker and Policy Engine remain the base. The next planned authority
+primitive is a temporary capability lease bound to a task/execution principal,
+operation/resource scope and lifetime:
+
+```text
+Task / Execution
+  -> CapabilityLease(principal, capability, resource_scope, ttl, provenance)
+  -> Policy / Broker / privileged boundary
+  -> external resource
+```
+
+A lease cannot widen parent/effective authority. Expired, malformed or
+out-of-scope use fails closed. Canonical Security Audit should record DENY
+attempts as well as successful/elevated actions because repeated denied access
+is operational/security evidence. Secret material still never enters model
+context or ordinary application state.
+
+Roadmap placement: **G6 hardening follow-up**; it does not resequence or expand
+TASK-0065 through TASK-0068.
+
+## 105.5 P1 — Bidirectional Human Handoff
+
+Human intervention must have a durable return path into the same workflow. A
+future handoff carries enough state to continue without reconstructing the task
+from chat history:
+
+```text
+HandoffPacket
+- task_goal
+- current_state
+- actions_taken
+- evidence
+- blockers
+- exact_uncertainty
+- question_for_human
+- suggested_options
+- recommended_next_action
+- ResumeToken
+```
+
+Continuation is explicit:
+
+```text
+WAITING_FOR_HUMAN
+  -> HumanDecision
+  -> RESUME | REPLAN | TAKEOVER | ABORT
+```
+
+Escalation should use consequence, uncertainty and deterministic runtime
+signals (loops, repeated tool failures, conflicting evidence, missing authority,
+irreversible operations), not an arbitrary model-confidence threshold alone.
+
+Roadmap owner: **G7 orchestration**, with provider-neutral continuity support in
+**G9**.
+
+## 105.6 P1 — Adaptive Collaboration Topology
+
+Multi-agent execution is selected from task shape instead of being always-on:
+
+```text
+high ambiguity
+  -> independent/multi-perspective planning or critique
+  -> decision convergence / plan lock
+  -> one bounded worker executes
+  -> independent reviewer/verifier when risk requires it
+```
+
+This limits context duplication, coordinator noise and provider cost while
+preserving disagreement where it adds value. RoleProfile/planning decides the
+topology from ambiguity, risk and verification needs.
+
+Roadmap owner: **G7**.
+
+## 105.7 P1 — Context Provenance Envelope
+
+Context items should carry typed provenance rather than arriving as anonymous
+text chunks. Planned envelope fields include:
+
+```text
+ContextItem
+- source / source_ref
+- observed_at
+- valid_from / valid_until
+- provenance
+- confidence / evidence quality
+- sensitivity
+- permission_scope
+- type: fact | decision | preference | policy | task_state | hypothesis
+- supersedes
+```
+
+The envelope supports freshness, permission filtering, conflict handling and
+learning/promotion decisions while preserving original evidence as authority.
+
+Roadmap owner: **G9 Context Engine + Continuity**.
+
+## 105.8 P1 — Detachment Test + Dogfood Gate
+
+Roadmap/product invariant:
+
+> **Every major capability must produce independent dogfood value before the
+> next dependent capability is required.**
+
+Detachment Test:
+
+> If the rest of Runlith were removed, is this capability still useful and
+> verifiable inside its stated boundary?
+
+This is a product/roadmap sequencing guardrail against tightly coupled subsystem
+sprawl. It does not authorize skipping security, correctness, persistence,
+recovery or verification. Promotion into the binding architecture invariant set
+would require the normal ADR/review process.
+
+## 105.9 P2 — Conditional Entity Graph
+
+Entity/relationship graph support remains optional. It should activate only
+when entity aliasing, relationship-heavy retrieval or measured retrieval quality
+justifies graph-assisted resolution:
+
+```text
+entity ambiguity / relationship-heavy query
+  -> entity resolution needed
+  -> graph-assisted resolution
+```
+
+Do not make every Task, Resource, Context item or Memory record depend on a
+graph database. Neo4j or any graph engine remains outside core requirements.
+
+Roadmap owner: **G9/G10 only if evidence justifies it**.
+
+## 105.10 KEEP — Verified Delivery Cost
+
+Community discussion around token/output compression reinforces the already
+adopted efficiency decision: lower token count alone does not prove lower
+delivery cost because retries, cache behavior, tool behavior, verification and
+human intervention can dominate the final result.
+
+**Verified Delivery Cost remains unchanged.** Reddit findings are supporting
+evidence for the existing multi-objective efficiency architecture, not a reason
+to replace its formula or optimize tokens/LOC in isolation.
