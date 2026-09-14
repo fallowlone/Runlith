@@ -149,6 +149,61 @@ fn valid_but_wrong_gitdir_pointer_redirection_is_refused() {
     );
 }
 
+/// TASK-0071 self-review regression: a forged linked-worktree-shaped
+/// metadata directory must not be able to satisfy the reverse `gitdir`
+/// check locally while redirecting `commondir` at a different repository.
+/// Git resolves refs/objects through `commondir`, so accepting that shape
+/// still redirects repository identity even though the target's `gitdir`
+/// file points back to this worktree.
+#[test]
+fn forged_linked_worktree_commondir_redirection_is_refused() {
+    let adapter = GitCli::new();
+    let fx_a = Fixture::new("identity-shim-a");
+    let fx_b = Fixture::new("identity-shim-b");
+    git(
+        &fx_b.dir,
+        &[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "identity-shim-b-marker",
+        ],
+    );
+    let b_head = fx_b.primary_head();
+    assert_ne!(
+        fx_a.base_oid, b_head,
+        "fixtures must have distinct identities"
+    );
+
+    let original = fx_a.dir.join(".git");
+    let moved = fx_a.case_dir.join("identity-shim-a-original-git");
+    std::fs::rename(&original, &moved).expect("move A's real .git directory");
+
+    let shim = fx_a.dir.join(".git-shim");
+    std::fs::create_dir(&shim).expect("create forged worktree metadata directory");
+    std::fs::write(&original, format!("gitdir: {}\n", shim.display()))
+        .expect("point A at forged metadata");
+    std::fs::write(shim.join("gitdir"), format!("{}\n", original.display()))
+        .expect("forge reverse worktree back-reference");
+    std::fs::write(
+        shim.join("commondir"),
+        format!("{}\n", fx_b.dir.join(".git").display()),
+    )
+    .expect("redirect forged metadata at B's common Git directory");
+    let b_head_ref = git(&fx_b.dir, &["symbolic-ref", "HEAD"]);
+    std::fs::write(shim.join("HEAD"), format!("ref: {b_head_ref}\n"))
+        .expect("forge linked-worktree HEAD");
+
+    let err = adapter
+        .resolve_revision(&fx_a.path_str(), "HEAD")
+        .expect_err("forged metadata must not redirect commondir to a foreign repository");
+    assert!(
+        matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
+        "got {err:?}"
+    );
+}
+
 /// TASK-0071 remediation of independent-review Finding 2 (HIGH):
 /// `worktree_status` previously called Git directly, bypassing the same
 /// `.git` metadata validation `classify_repository` performs for every other
