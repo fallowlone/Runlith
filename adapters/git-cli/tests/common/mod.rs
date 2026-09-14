@@ -16,7 +16,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use workspace::{BranchRef, ExecutionId, RepositoryRef, Revision, WorkspaceId, WorkspaceLease};
+use workspace::{
+    BranchRef, ExecutionId, GitPort, RepositoryRef, Revision, TrustedCommonGit, WorkspaceId,
+    WorkspaceLease,
+};
 
 static FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -210,4 +213,11 @@ pub fn lease_for(
 /// primary checkout); the adapter itself never creates parent directories.
 pub fn target_path(fixture: &Fixture, name: &str) -> PathBuf {
     fixture.roots.join(name)
+}
+
+/// Captures the trusted anchor for a test fixture (admission, before any hostile mutation).
+pub fn anchor_for(adapter: &git_cli::GitCli, path: &str) -> TrustedCommonGit {
+    adapter
+        .establish_trusted_anchor(path)
+        .expect("fixture anchor capture must succeed")
 }

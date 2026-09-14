@@ -737,7 +737,26 @@ fn resolve_entry_revision(
     base_revision: &str,
 ) -> Result<Revision, EntryPreflightFailure> {
     let git = git_cli::GitCli::new();
-    match git.is_repository(repository_path) {
+    // Admission preflight (trusted-deposit before provider execution):
+    // establish the anchor first via the sole anchor-free path, then bind
+    // subsequent observations to it.
+    let anchor = match git.establish_trusted_anchor(repository_path) {
+        Ok(a) => a,
+        Err(WorkspaceFailure::NotRepository { .. })
+        | Err(WorkspaceFailure::BareRepositoryUnsupported { .. }) => {
+            return Err(EntryPreflightFailure {
+                code: BusinessErrorCode::InvalidArgument,
+                message: "repository path is not a usable git repository",
+            });
+        }
+        Err(_) => {
+            return Err(EntryPreflightFailure {
+                code: BusinessErrorCode::Internal,
+                message: "execution repository precheck unavailable",
+            });
+        }
+    };
+    match git.is_repository(repository_path, &anchor) {
         Ok(true) => {}
         Ok(false)
         | Err(WorkspaceFailure::NotRepository { .. })
@@ -754,7 +773,7 @@ fn resolve_entry_revision(
             });
         }
     }
-    match git.resolve_revision(repository_path, base_revision) {
+    match git.resolve_revision(repository_path, base_revision, &anchor) {
         Ok(revision) => Ok(revision),
         Err(WorkspaceFailure::InvalidRevision { .. } | WorkspaceFailure::NotRepository { .. }) => {
             Err(EntryPreflightFailure {

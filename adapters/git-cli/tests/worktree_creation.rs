@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering as Ord};
 use git_cli::GitCli;
 use workspace::{GitPort, WorkspaceFailure, WorktreeStatus};
 
-use common::{git, lease_for, target_path, Fixture};
+use common::{anchor_for, git, lease_for, target_path, Fixture};
 
 static NONCE: AtomicU64 = AtomicU64::new(0);
 fn fx_nonce() -> u64 {
@@ -25,29 +25,32 @@ fn worktree_creation_success_verifies_identity_and_leaves_primary_untouched() {
     let adapter = GitCli::new();
     // Spaces in the fixture path prove argv handling without shell quoting.
     let fx = Fixture::new("success case");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     fx.write_tracked("sentinel.txt", b"primary-bytes-v1");
     git(&fx.dir, &["add", "sentinel.txt"]);
     git(&fx.dir, &["commit", "-q", "-m", "sentinel"]);
     let base = fx.primary_head();
     let primary_status_before = fx.primary_status();
     assert_eq!(
-        adapter.worktree_status(&fx.path_str()).unwrap(),
+        adapter.worktree_status(&fx.path_str(), &anchor).unwrap(),
         WorktreeStatus::Clean
     );
 
     // Canonical inspection before creation.
-    assert!(adapter.is_repository(&fx.path_str()).unwrap());
+    assert!(adapter.is_repository(&fx.path_str(), &anchor).unwrap());
     assert_eq!(
-        adapter.default_branch(&fx.path_str()).unwrap(),
+        adapter.default_branch(&fx.path_str(), &anchor).unwrap(),
         fx.default_ref
     );
-    let resolved = adapter.resolve_revision(&fx.path_str(), "HEAD").unwrap();
+    let resolved = adapter
+        .resolve_revision(&fx.path_str(), "HEAD", &anchor)
+        .unwrap();
     assert_eq!(resolved.as_str(), base);
 
     let target = target_path(&fx, "ws-one");
     let lease = lease_for("success", "agent/e-success", &base, "ref:ws-success");
     adapter
-        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap())
+        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap(), &anchor)
         .expect("creation must succeed");
 
     // Second worktree exists and is registered by Git (adapter-independent).
@@ -71,7 +74,7 @@ fn worktree_creation_success_verifies_identity_and_leaves_primary_untouched() {
     assert_eq!(fx.read_tracked("sentinel.txt"), b"primary-bytes-v1");
     assert_eq!(fx.primary_status(), primary_status_before);
     assert_eq!(
-        adapter.worktree_status(&fx.path_str()).unwrap(),
+        adapter.worktree_status(&fx.path_str(), &anchor).unwrap(),
         WorktreeStatus::Clean
     );
 }
@@ -80,6 +83,7 @@ fn worktree_creation_success_verifies_identity_and_leaves_primary_untouched() {
 fn managed_worktree_is_isolated_from_primary() {
     let adapter = GitCli::new();
     let fx = Fixture::new("isolation");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     fx.write_tracked("shared.txt", b"v1");
     git(&fx.dir, &["add", "shared.txt"]);
     git(&fx.dir, &["commit", "-q", "-m", "shared"]);
@@ -88,18 +92,20 @@ fn managed_worktree_is_isolated_from_primary() {
     let target = target_path(&fx, "ws-iso");
     let lease = lease_for("iso", "agent/e-iso", &base, "ref:ws-iso");
     adapter
-        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap())
+        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap(), &anchor)
         .unwrap();
 
     // No commit/merge: modify a tracked file inside the new worktree only.
     std::fs::write(target.join("shared.txt"), b"v2-managed").unwrap();
     assert_eq!(
-        adapter.worktree_status(target.to_str().unwrap()).unwrap(),
+        adapter
+            .worktree_status(target.to_str().unwrap(), &anchor)
+            .unwrap(),
         WorktreeStatus::DirtyTracked
     );
     assert_eq!(fx.read_tracked("shared.txt"), b"v1");
     assert_eq!(
-        adapter.worktree_status(&fx.path_str()).unwrap(),
+        adapter.worktree_status(&fx.path_str(), &anchor).unwrap(),
         WorktreeStatus::Clean
     );
 }
@@ -108,6 +114,7 @@ fn managed_worktree_is_isolated_from_primary() {
 fn multiple_workspaces_stay_isolated() {
     let adapter = GitCli::new();
     let fx = Fixture::new("multi");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     fx.write_tracked("f.txt", b"base");
     git(&fx.dir, &["add", "f.txt"]);
     git(&fx.dir, &["commit", "-q", "-m", "f"]);
@@ -119,23 +126,27 @@ fn multiple_workspaces_stay_isolated() {
     let la = lease_for("multi-a", "agent/e-a", &base, "ref:ws-a");
     let lb = lease_for("multi-b", "agent/e-b", &base, "ref:ws-b");
     adapter
-        .create_worktree(&la, &fx.path_str(), ta.to_str().unwrap())
+        .create_worktree(&la, &fx.path_str(), ta.to_str().unwrap(), &anchor)
         .unwrap();
     adapter
-        .create_worktree(&lb, &fx.path_str(), tb.to_str().unwrap())
+        .create_worktree(&lb, &fx.path_str(), tb.to_str().unwrap(), &anchor)
         .unwrap();
 
     std::fs::write(ta.join("f.txt"), b"edit-a").unwrap();
     assert_eq!(
-        adapter.worktree_status(ta.to_str().unwrap()).unwrap(),
+        adapter
+            .worktree_status(ta.to_str().unwrap(), &anchor)
+            .unwrap(),
         WorktreeStatus::DirtyTracked
     );
     assert_eq!(
-        adapter.worktree_status(tb.to_str().unwrap()).unwrap(),
+        adapter
+            .worktree_status(tb.to_str().unwrap(), &anchor)
+            .unwrap(),
         WorktreeStatus::Clean
     );
     assert_eq!(
-        adapter.worktree_status(&fx.path_str()).unwrap(),
+        adapter.worktree_status(&fx.path_str(), &anchor).unwrap(),
         WorktreeStatus::Clean
     );
     assert_eq!(std::fs::read(tb.join("f.txt")).unwrap(), b"base");
@@ -146,6 +157,7 @@ fn multiple_workspaces_stay_isolated() {
 fn branch_collision_fails_without_force_or_reuse() {
     let adapter = GitCli::new();
     let fx = Fixture::new("branch-collision");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
     // Pre-existing unrelated ref with different content.
     git(&fx.dir, &["branch", "agent/e-taken", &base]);
@@ -158,7 +170,7 @@ fn branch_collision_fails_without_force_or_reuse() {
     let target = target_path(&fx, "ws-collide");
     let lease = lease_for("collide", "agent/e-taken", &base, "ref:ws-collide");
     let err = adapter
-        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap())
+        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap(), &anchor)
         .expect_err("collision must fail");
     assert!(
         matches!(err, WorkspaceFailure::BranchCollision { .. }),
@@ -174,6 +186,7 @@ fn branch_collision_fails_without_force_or_reuse() {
 fn worktree_path_collision_fails_without_deletion() {
     let adapter = GitCli::new();
     let fx = Fixture::new("path-collision");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
 
     let target = target_path(&fx, "ws-blocked");
@@ -182,7 +195,7 @@ fn worktree_path_collision_fails_without_deletion() {
 
     let lease = lease_for("pathcol", "agent/e-pathcol", &base, "ref:ws-pathcol");
     let err = adapter
-        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap())
+        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap(), &anchor)
         .expect_err("occupied target must fail");
     assert!(
         matches!(err, WorkspaceFailure::WorktreeCollision { .. }),
@@ -200,10 +213,11 @@ fn worktree_path_collision_fails_without_deletion() {
 fn invalid_revision_creates_nothing() {
     let adapter = GitCli::new();
     let fx = Fixture::new("invalid-rev");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let missing_oid = "0".repeat(40);
 
     let err = adapter
-        .resolve_revision(&fx.path_str(), "does-not-exist")
+        .resolve_revision(&fx.path_str(), "does-not-exist", &anchor)
         .expect_err("bad ref must fail");
     assert!(
         matches!(err, WorkspaceFailure::InvalidRevision { .. }),
@@ -214,7 +228,7 @@ fn invalid_revision_creates_nothing() {
     let worktrees_before = fx.registered_worktrees().len();
     let lease = lease_for("badrev", "agent/e-badrev", &missing_oid, "ref:ws-badrev");
     let err = adapter
-        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap())
+        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap(), &anchor)
         .expect_err("missing commit must fail");
     assert!(
         matches!(err, WorkspaceFailure::InvalidRevision { .. }),
@@ -228,6 +242,8 @@ fn invalid_revision_creates_nothing() {
 #[test]
 fn bare_repository_fails_explicitly() {
     let adapter = GitCli::new();
+    let anchor_dummy_canon = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    let anchor = workspace::TrustedCommonGit::from_canonical_commondir(anchor_dummy_canon).unwrap();
     let dir = std::env::temp_dir().join(format!(
         "git-cli-{}-bare-{}",
         std::process::id(),
@@ -238,7 +254,7 @@ fn bare_repository_fails_explicitly() {
     let path = dir.to_string_lossy().into_owned();
 
     let err = adapter
-        .is_repository(&path)
+        .is_repository(&path, &anchor)
         .expect_err("bare must classify");
     assert!(
         matches!(err, WorkspaceFailure::BareRepositoryUnsupported { .. }),
@@ -247,7 +263,7 @@ fn bare_repository_fails_explicitly() {
     let base = "a".repeat(40);
     let lease = lease_for("bare", "agent/e-bare", &base, "ref:ws-bare");
     let err = adapter
-        .create_worktree(&lease, &path, dir.join("wt").to_str().unwrap())
+        .create_worktree(&lease, &path, dir.join("wt").to_str().unwrap(), &anchor)
         .expect_err("bare must not create");
     assert!(
         matches!(err, WorkspaceFailure::BareRepositoryUnsupported { .. }),
@@ -260,6 +276,8 @@ fn bare_repository_fails_explicitly() {
 #[test]
 fn not_repository_and_missing_paths_are_typed() {
     let adapter = GitCli::new();
+    let anchor_dummy_canon = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    let anchor = workspace::TrustedCommonGit::from_canonical_commondir(anchor_dummy_canon).unwrap();
     let dir = std::env::temp_dir().join(format!(
         "git-cli-{}-notrepo-{}",
         std::process::id(),
@@ -268,9 +286,9 @@ fn not_repository_and_missing_paths_are_typed() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.to_string_lossy().into_owned();
 
-    assert!(!adapter.is_repository(&path).unwrap());
+    assert!(!adapter.is_repository(&path, &anchor).unwrap());
     let err = adapter
-        .resolve_revision(&path, "HEAD")
+        .resolve_revision(&path, "HEAD", &anchor)
         .expect_err("normal dir must fail");
     assert!(
         matches!(err, WorkspaceFailure::NotRepository { .. }),
@@ -278,11 +296,13 @@ fn not_repository_and_missing_paths_are_typed() {
     );
 
     let missing = dir.join("no-such-dir");
-    assert!(!adapter.is_repository(missing.to_str().unwrap()).unwrap());
+    assert!(!adapter
+        .is_repository(missing.to_str().unwrap(), &anchor)
+        .unwrap());
     let base = "b".repeat(40);
     let lease = lease_for("notrepo", "agent/e-nr", &base, "ref:ws-nr");
     let err = adapter
-        .create_worktree(&lease, &path, dir.join("wt").to_str().unwrap())
+        .create_worktree(&lease, &path, dir.join("wt").to_str().unwrap(), &anchor)
         .expect_err("non-repo must not create");
     assert!(
         matches!(err, WorkspaceFailure::NotRepository { .. }),
@@ -295,6 +315,7 @@ fn not_repository_and_missing_paths_are_typed() {
 fn dirty_primary_neither_blocks_nor_gets_cleaned() {
     let adapter = GitCli::new();
     let fx = Fixture::new("dirty-primary");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     fx.write_tracked("t.txt", b"clean-v1");
     git(&fx.dir, &["add", "t.txt"]);
     git(&fx.dir, &["commit", "-q", "-m", "t"]);
@@ -307,7 +328,7 @@ fn dirty_primary_neither_blocks_nor_gets_cleaned() {
     let target = target_path(&fx, "ws-dirty");
     let lease = lease_for("dirty", "agent/e-dirty", &base, "ref:ws-dirty");
     adapter
-        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap())
+        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap(), &anchor)
         .expect("dirty primary must not block creation");
 
     assert_eq!(fx.read_tracked("t.txt"), dirty_before);
@@ -322,10 +343,11 @@ fn dirty_primary_neither_blocks_nor_gets_cleaned() {
 fn protected_branch_uses_semantics_not_literals() {
     let adapter = GitCli::new();
     let mut fx = Fixture::new("protected");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     // Non-standard default-branch name: no main/master literal involved.
     fx.rename_default("trunkline");
     assert_eq!(
-        adapter.default_branch(&fx.path_str()).unwrap(),
+        adapter.default_branch(&fx.path_str(), &anchor).unwrap(),
         "refs/heads/trunkline"
     );
     let base = fx.primary_head();
@@ -334,14 +356,14 @@ fn protected_branch_uses_semantics_not_literals() {
     let target = target_path(&fx, "ws-protected");
     let lease = lease_for("prot", "trunkline", &base, "ref:ws-prot");
     let err = adapter
-        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap())
+        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap(), &anchor)
         .expect_err("protected branch must be refused");
     assert!(
         matches!(err, WorkspaceFailure::BranchCollision { .. }),
         "expected BranchCollision naming the protection, got {err:?}"
     );
     assert!(matches!(
-        adapter.branch_exists(&fx.path_str(), &lease.branch().clone()),
+        adapter.branch_exists(&fx.path_str(), &lease.branch().clone(), &anchor),
         Ok(true)
     ));
     assert_eq!(fx.registered_worktrees().len(), worktrees_before);
@@ -352,38 +374,47 @@ fn protected_branch_uses_semantics_not_literals() {
 fn repository_inspection_reports_canonical_fields() {
     let adapter = GitCli::new();
     let fx = Fixture::new("inspect");
+    let anchor = anchor_for(&adapter, &fx.path_str());
 
-    assert!(adapter.is_repository(&fx.path_str()).unwrap());
+    assert!(adapter.is_repository(&fx.path_str(), &anchor).unwrap());
     let sub = fx.dir.join("sub");
     std::fs::create_dir_all(&sub).unwrap();
-    assert!(adapter.is_repository(sub.to_str().unwrap()).unwrap());
+    assert!(adapter
+        .is_repository(sub.to_str().unwrap(), &anchor)
+        .unwrap());
 
-    let head = adapter.resolve_revision(&fx.path_str(), "HEAD").unwrap();
+    let head = adapter
+        .resolve_revision(&fx.path_str(), "HEAD", &anchor)
+        .unwrap();
     assert_eq!(head.as_str(), fx.base_oid);
     // Short OID input still resolves to the immutable full OID.
     let short = &fx.base_oid[..12];
     assert_eq!(
         adapter
-            .resolve_revision(&fx.path_str(), short)
+            .resolve_revision(&fx.path_str(), short, &anchor)
             .unwrap()
             .as_str(),
         fx.base_oid
     );
     assert_eq!(
-        adapter.default_branch(&fx.path_str()).unwrap(),
+        adapter.default_branch(&fx.path_str(), &anchor).unwrap(),
         fx.default_ref
     );
     let present = workspace::BranchRef::new(fx.default_ref.clone()).unwrap();
-    assert!(adapter.branch_exists(&fx.path_str(), &present).unwrap());
+    assert!(adapter
+        .branch_exists(&fx.path_str(), &present, &anchor)
+        .unwrap());
     let absent = workspace::BranchRef::new("refs/heads/no-such-branch-here").unwrap();
-    assert!(!adapter.branch_exists(&fx.path_str(), &absent).unwrap());
+    assert!(!adapter
+        .branch_exists(&fx.path_str(), &absent, &anchor)
+        .unwrap());
     assert_eq!(
-        adapter.worktree_status(&fx.path_str()).unwrap(),
+        adapter.worktree_status(&fx.path_str(), &anchor).unwrap(),
         WorktreeStatus::Clean
     );
     assert_eq!(
         adapter
-            .worktree_status(fx.dir.join("missing-wt").to_str().unwrap())
+            .worktree_status(fx.dir.join("missing-wt").to_str().unwrap(), &anchor)
             .unwrap(),
         WorktreeStatus::Missing
     );

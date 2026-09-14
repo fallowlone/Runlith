@@ -26,7 +26,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use workspace::{WorkspaceFailure, WorkspaceLease, WorktreeStatus};
+use workspace::{TrustedCommonGit, WorkspaceFailure, WorkspaceLease, WorktreeStatus};
 
 use crate::observe;
 use crate::runner::{
@@ -48,12 +48,13 @@ pub fn create_worktree(
     lease: &WorkspaceLease,
     repository_path: &str,
     worktree_path: &str,
+    expected: &TrustedCommonGit,
 ) -> Result<(), WorkspaceFailure> {
     let target_abs =
         absolutize(worktree_path).map_err(|_| WorkspaceFailure::WorktreeCollision {
             detail: bounded_detail("git-cli: invalid worktree target path".to_owned()),
         })?;
-    let root = observe::repository_root(executable, repository_path)?;
+    let root = observe::repository_root(executable, repository_path, expected)?;
 
     let base_oid = lease.base_revision().as_str().to_owned();
     prove_base_revision(executable, &root, &base_oid)?;
@@ -64,7 +65,7 @@ pub fn create_worktree(
     // Protected/default branch first so the refusal names the protection;
     // indeterminate metadata does not block (fixtures always set the
     // canonical origin/HEAD, so protection stays exercised).
-    match observe::default_branch(executable, root_to_str(&root)?) {
+    match observe::default_branch(executable, root_to_str(&root)?, expected) {
         Ok(default_ref) => {
             if default_ref == managed {
                 return Err(WorkspaceFailure::BranchCollision {
@@ -81,7 +82,7 @@ pub fn create_worktree(
 
     // Branch collision: any pre-existing ref collides. Ownership can never
     // be proven in TASK-0041 (no durable store), so reuse is always refused.
-    if observe::branch_exists(executable, root_to_str(&root)?, lease.branch())? {
+    if observe::branch_exists(executable, root_to_str(&root)?, lease.branch(), expected)? {
         return Err(WorkspaceFailure::BranchCollision {
             detail: bounded_detail(format!(
                 "git-cli: managed branch {managed} already exists with unproven ownership; \
@@ -92,7 +93,7 @@ pub fn create_worktree(
 
     check_target_path(&root, &target_abs)?;
 
-    let baseline = observe_primary(executable, &root)?;
+    let baseline = observe_primary(executable, &root, expected)?;
 
     // The single Git-native mutation: exact base commit + new managed
     // branch + separate worktree. `--` separates the explicit path from
@@ -118,6 +119,7 @@ pub fn create_worktree(
             &target_abs,
             lease.branch(),
             &add,
+            expected,
         ));
     }
 
@@ -129,6 +131,7 @@ pub fn create_worktree(
         &base_oid,
         &managed,
         &baseline,
+        expected,
     )
 }
 
@@ -139,17 +142,18 @@ pub fn attach_worktree(
     lease: &WorkspaceLease,
     repository_path: &str,
     worktree_path: &str,
+    expected: &TrustedCommonGit,
 ) -> Result<(), WorkspaceFailure> {
     let target_abs =
         absolutize(worktree_path).map_err(|_| WorkspaceFailure::WorktreeCollision {
             detail: bounded_detail("git-cli: invalid worktree target path".to_owned()),
         })?;
-    let root = observe::repository_root(executable, repository_path)?;
+    let root = observe::repository_root(executable, repository_path, expected)?;
     let base_oid = lease.base_revision().as_str().to_owned();
     prove_base_revision(executable, &root, &base_oid)?;
     check_branch_argv_safety(lease)?;
 
-    if !observe::branch_exists(executable, root_to_str(&root)?, lease.branch())? {
+    if !observe::branch_exists(executable, root_to_str(&root)?, lease.branch(), expected)? {
         return Err(WorkspaceFailure::BranchCollision {
             detail: bounded_detail(format!(
                 "git-cli: managed branch {} disappeared before recovery",
@@ -172,7 +176,7 @@ pub fn attach_worktree(
         });
     }
     if let Some(holder) =
-        observe::worktree_for_branch(executable, root_to_str(&root)?, lease.branch())?
+        observe::worktree_for_branch(executable, root_to_str(&root)?, lease.branch(), expected)?
     {
         return Err(WorkspaceFailure::WorktreeCollision {
             detail: bounded_detail(format!(
@@ -183,7 +187,7 @@ pub fn attach_worktree(
     }
 
     check_target_path(&root, &target_abs)?;
-    let baseline = observe_primary(executable, &root)?;
+    let baseline = observe_primary(executable, &root, expected)?;
     let target_arg = target_abs.clone().into_os_string();
     let add = run_git(
         executable,
@@ -203,6 +207,7 @@ pub fn attach_worktree(
             &target_abs,
             lease.branch(),
             &add,
+            expected,
         ));
     }
 
@@ -214,6 +219,7 @@ pub fn attach_worktree(
         &base_oid,
         lease.branch().as_str(),
         &baseline,
+        expected,
     )
 }
 
@@ -282,7 +288,11 @@ fn check_target_path(root: &Path, target: &Path) -> Result<(), WorkspaceFailure>
 }
 
 /// Observes the coordinating checkout before mutation.
-fn observe_primary(executable: &OsStr, root: &Path) -> Result<PrimaryBaseline, WorkspaceFailure> {
+fn observe_primary(
+    executable: &OsStr,
+    root: &Path,
+    expected: &TrustedCommonGit,
+) -> Result<PrimaryBaseline, WorkspaceFailure> {
     let (head_out, head_oid) = run_git_text(executable, root, &["rev-parse", "HEAD"])?;
     if !head_out.status.success() || head_oid.is_empty() {
         return Err(backend_failure(
@@ -296,7 +306,7 @@ fn observe_primary(executable: &OsStr, root: &Path) -> Result<PrimaryBaseline, W
         None
     };
     let root_str = root_to_str(root)?;
-    let status = observe::worktree_status(executable, root_str)?;
+    let status = observe::worktree_status(executable, root_str, expected)?;
     Ok(PrimaryBaseline {
         head_oid,
         head_ref,
@@ -312,9 +322,11 @@ fn mutation_failure(
     target: &Path,
     managed: &workspace::BranchRef,
     add_output: &std::process::Output,
+    expected: &TrustedCommonGit,
 ) -> WorkspaceFailure {
     let root_str = root.to_string_lossy().into_owned();
-    let branch_now = observe::branch_exists(executable, &root_str, managed).unwrap_or(true);
+    let branch_now =
+        observe::branch_exists(executable, &root_str, managed, expected).unwrap_or(true);
     let registered_now = worktree_registered(executable, root, target).unwrap_or(true);
     WorkspaceFailure::CheckoutFailed {
         detail: bounded_detail(format!(
@@ -336,6 +348,7 @@ fn verify_postconditions(
     base_oid: &str,
     managed: &str,
     baseline: &PrimaryBaseline,
+    expected: &TrustedCommonGit,
 ) -> Result<(), WorkspaceFailure> {
     let partial = |what: &str| WorkspaceFailure::CheckoutFailed {
         detail: bounded_detail(format!(
@@ -383,7 +396,7 @@ fn verify_postconditions(
         return Err(partial("primary checkout was moved by creation"));
     }
     let root_str = root_to_str(root).map_err(|_| partial("primary root unreadable"))?;
-    let after_status = observe::worktree_status(executable, root_str)
+    let after_status = observe::worktree_status(executable, root_str, expected)
         .map_err(|_| partial("primary status unreadable"))?;
     if after_status != baseline.status {
         return Err(partial("primary checkout status changed during creation"));

@@ -6,12 +6,13 @@ mod common;
 use git_cli::GitCli;
 use workspace::{GitPort, WorkspaceFailure, WorktreeStatus};
 
-use common::{git, lease_for, target_path, Fixture};
+use common::{anchor_for, git, lease_for, target_path, Fixture};
 
 #[test]
 fn hostile_git_metadata_is_rejected_before_git_discovery() {
     let adapter = GitCli::new();
     let fx = Fixture::new("git-metadata-hostile");
+    let anchor = anchor_for(&adapter, &fx.path_str());
 
     let original = fx.dir.join(".git");
     let moved = fx.case_dir.join("real-git-dir");
@@ -22,7 +23,7 @@ fn hostile_git_metadata_is_rejected_before_git_discovery() {
     #[cfg(unix)]
     {
         let err = adapter
-            .is_repository(&fx.path_str())
+            .is_repository(&fx.path_str(), &anchor)
             .expect_err(".git symlink metadata must fail closed");
         assert!(matches!(err, WorkspaceFailure::GitBackendFailure { .. }));
     }
@@ -32,13 +33,14 @@ fn hostile_git_metadata_is_rejected_before_git_discovery() {
 fn malicious_git_pointer_target_is_rejected() {
     let adapter = GitCli::new();
     let fx = Fixture::new("git-pointer-hostile");
+    let anchor = anchor_for(&adapter, &fx.path_str());
 
     std::fs::remove_dir_all(fx.dir.join(".git")).expect("remove git dir");
     std::fs::write(fx.dir.join(".git"), "gitdir: /path/that/does/not/exist\n")
         .expect("write pointer");
 
     let err = adapter
-        .is_repository(&fx.path_str())
+        .is_repository(&fx.path_str(), &anchor)
         .expect_err("unavailable gitdir target must fail closed");
     assert!(matches!(err, WorkspaceFailure::GitBackendFailure { .. }));
 }
@@ -47,6 +49,7 @@ fn malicious_git_pointer_target_is_rejected() {
 fn git_extension_execution_surfaces_are_disabled() {
     let adapter = GitCli::new();
     let fx = Fixture::new("git-extension-surfaces");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let marker = fx.case_dir.join("extension-marker");
 
     // These values would execute helper commands with an unguarded Git
@@ -64,7 +67,7 @@ fn git_extension_execution_surfaces_are_disabled() {
     .expect("write hostile config");
 
     adapter
-        .is_repository(&fx.path_str())
+        .is_repository(&fx.path_str(), &anchor)
         .expect("hostile config must not execute extensions");
     assert!(!marker.exists(), "git extension must not execute helper");
 }
@@ -82,6 +85,7 @@ fn git_extension_execution_surfaces_are_disabled() {
 fn worktree_status_production_path_disables_fsmonitor_execution() {
     let adapter = GitCli::new();
     let fx = Fixture::new("fsmonitor-production-path");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let marker = fx.case_dir.join("fsmonitor-marker");
 
     std::fs::write(
@@ -91,11 +95,302 @@ fn worktree_status_production_path_disables_fsmonitor_execution() {
     .expect("write hostile fsmonitor config");
 
     adapter
-        .worktree_status(&fx.path_str())
+        .worktree_status(&fx.path_str(), &anchor)
         .expect("hostile fsmonitor config must not break worktree_status");
     assert!(
         !marker.exists(),
         "core.fsmonitor helper must not execute via worktree_status"
+    );
+}
+
+/// Independent TASK-0071 re-review regression for the broader F-003 helper
+/// surface named by the threat model. `git status` runs clean/process
+/// filters while comparing tracked working-tree content. Repository-local
+/// filter commands are therefore just as capable of crossing the confined
+/// provider -> Trusted Host Git boundary as `core.fsmonitor` unless the
+/// adapter neutralizes them before the production status invocation.
+#[test]
+fn worktree_status_production_path_disables_clean_filter_execution() {
+    let adapter = GitCli::new();
+    let fx = Fixture::new("clean-filter-production-path");
+    let anchor = anchor_for(&adapter, &fx.path_str());
+    let marker = fx.case_dir.join("clean-filter-marker");
+
+    std::fs::write(
+        fx.dir.join(".gitattributes"),
+        "tracked.txt filter=hostile\n",
+    )
+    .expect("write filter attributes");
+    std::fs::write(fx.dir.join("tracked.txt"), "before\n").expect("write tracked file");
+    git(&fx.dir, &["add", ".gitattributes", "tracked.txt"]);
+    git(&fx.dir, &["commit", "-q", "-m", "seed-filtered-file"]);
+
+    git(
+        &fx.dir,
+        &[
+            "config",
+            "filter.hostile.clean",
+            &format!("touch {}", marker.display()),
+        ],
+    );
+    // Keep the byte length unchanged so Git cannot classify the path from
+    // stat data alone and must compare content through the configured clean
+    // filter. This is what makes the keeper exercise the executable surface.
+    std::fs::write(fx.dir.join("tracked.txt"), "after!\n").expect("modify tracked file");
+
+    let err = adapter
+        .worktree_status(&fx.path_str(), &anchor)
+        .expect_err("repository-defined clean filter must fail closed");
+    assert!(
+        matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
+        "got {err:?}"
+    );
+    assert!(
+        !marker.exists(),
+        "repository clean filter must not execute via Trusted Host worktree_status"
+    );
+}
+
+/// A repository-local include can import helper commands from any file the
+/// trusted host can read, so validating only direct `filter.*` keys leaves a
+/// trivial bypass. Includes are refused before normal repository operations.
+#[test]
+fn worktree_status_refuses_repository_config_include_before_helper_execution() {
+    let adapter = GitCli::new();
+    let fx = Fixture::new("config-include-production-path");
+    let anchor = anchor_for(&adapter, &fx.path_str());
+    let marker = fx.case_dir.join("included-filter-marker");
+    let included = fx.case_dir.join("included.gitconfig");
+
+    std::fs::write(
+        fx.dir.join(".gitattributes"),
+        "tracked.txt filter=hostile\n",
+    )
+    .expect("write filter attributes");
+    std::fs::write(fx.dir.join("tracked.txt"), "before\n").expect("write tracked file");
+    git(&fx.dir, &["add", ".gitattributes", "tracked.txt"]);
+    git(
+        &fx.dir,
+        &["commit", "-q", "-m", "seed-included-filter-file"],
+    );
+    std::fs::write(
+        &included,
+        format!(
+            "[filter \"hostile\"]\n\tclean = touch {}\n",
+            marker.display()
+        ),
+    )
+    .expect("write included hostile config");
+    git(
+        &fx.dir,
+        &[
+            "config",
+            "include.path",
+            included.to_str().expect("utf8 path"),
+        ],
+    );
+    std::fs::write(fx.dir.join("tracked.txt"), "after!\n").expect("modify tracked file");
+
+    let err = adapter
+        .worktree_status(&fx.path_str(), &anchor)
+        .expect_err("repository config includes must fail closed");
+    assert!(
+        matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
+        "got {err:?}"
+    );
+    assert!(
+        !marker.exists(),
+        "included repository helper must not execute via Trusted Host worktree_status"
+    );
+}
+
+/// Repository-local `core.worktree` can redirect commands that appear to run
+/// in an authorized checkout so they instead inspect a different host path.
+/// Trusted Host Git must reject that redirection before `git status` (or any
+/// other repository operation) follows it.
+#[test]
+fn worktree_status_refuses_core_worktree_redirection() {
+    let adapter = GitCli::new();
+    let fx = Fixture::new("core-worktree-redirection");
+    let anchor = anchor_for(&adapter, &fx.path_str());
+    let redirected = fx.case_dir.join("redirected-worktree");
+    std::fs::create_dir_all(&redirected).expect("create redirected worktree path");
+    std::fs::write(redirected.join("tracked.txt"), "redirected\n")
+        .expect("write redirected worktree content");
+
+    git(
+        &fx.dir,
+        &[
+            "config",
+            "core.worktree",
+            redirected.to_str().expect("utf8 redirected path"),
+        ],
+    );
+
+    let err = adapter
+        .worktree_status(&fx.path_str(), &anchor)
+        .expect_err("repository-local core.worktree redirection must fail closed");
+    assert!(
+        matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
+        "got {err:?}"
+    );
+}
+
+/// Repository-local `core.gitProxy` can route Git network operations through
+/// an attacker-controlled helper. Trusted Host Git must reject it before any
+/// repository operation follows it.
+#[test]
+fn worktree_status_refuses_core_gitproxy_redirection() {
+    let adapter = GitCli::new();
+    let fx = Fixture::new("core-gitproxy-redirection");
+    let anchor = anchor_for(&adapter, &fx.path_str());
+
+    git(&fx.dir, &["config", "core.gitProxy", "touch-marker-evil"]);
+
+    let err = adapter
+        .worktree_status(&fx.path_str(), &anchor)
+        .expect_err("repository-local core.gitProxy must fail closed");
+    assert!(
+        matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
+        "got {err:?}"
+    );
+}
+
+/// Repository-local `core.sshCommand` can route Git transport through an
+/// attacker-controlled command. Trusted Host Git must reject it before any
+/// repository operation follows it.
+#[test]
+fn worktree_status_refuses_core_sshcommand_redirection() {
+    let adapter = GitCli::new();
+    let fx = Fixture::new("core-sshcommand-redirection");
+    let anchor = anchor_for(&adapter, &fx.path_str());
+
+    git(&fx.dir, &["config", "core.sshCommand", "touch-marker-evil"]);
+
+    let err = adapter
+        .worktree_status(&fx.path_str(), &anchor)
+        .expect_err("repository-local core.sshCommand must fail closed");
+    assert!(
+        matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
+        "got {err:?}"
+    );
+}
+
+/// Repository-local `core.hooksPath` can redirect hook execution to an
+/// attacker-controlled directory. Trusted Host Git must reject it before any
+/// repository operation follows it.
+#[test]
+fn worktree_status_refuses_core_hookspath_redirection() {
+    let adapter = GitCli::new();
+    let fx = Fixture::new("core-hookspath-redirection");
+    let anchor = anchor_for(&adapter, &fx.path_str());
+
+    git(&fx.dir, &["config", "core.hooksPath", "/tmp/evil-hooks"]);
+
+    let err = adapter
+        .worktree_status(&fx.path_str(), &anchor)
+        .expect_err("repository-local core.hooksPath must fail closed");
+    assert!(
+        matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
+        "got {err:?}"
+    );
+}
+
+/// When Git's `extensions.worktreeConfig` feature is enabled, executable
+/// helper definitions may live in the linked worktree's separate
+/// `config.worktree`. The boundary must preserve benign linked worktrees and
+/// inspect that extra config scope before any normal Git operation.
+#[test]
+fn linked_worktree_config_scope_is_supported_and_scanned() {
+    let adapter = GitCli::new();
+    let fx = Fixture::new("linked-worktree-config-scope");
+    let anchor = anchor_for(&adapter, &fx.path_str());
+    let target = fx.roots.join("linked-config");
+    let target_str = target.to_string_lossy().into_owned();
+    let marker = fx.case_dir.join("worktree-config-marker");
+
+    git(&fx.dir, &["config", "extensions.worktreeConfig", "true"]);
+    git(
+        &fx.dir,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked-config-scope",
+            &target_str,
+            "HEAD",
+        ],
+    );
+
+    assert_eq!(
+        adapter
+            .worktree_status(&target_str, &anchor)
+            .expect("benign config.worktree support must remain usable"),
+        WorktreeStatus::Clean
+    );
+
+    git(
+        &target,
+        &[
+            "config",
+            "--worktree",
+            "filter.hostile.clean",
+            &format!("touch {}", marker.display()),
+        ],
+    );
+    let err = adapter
+        .worktree_status(&target_str, &anchor)
+        .expect_err("executable per-worktree filter config must fail closed");
+    assert!(
+        matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
+        "got {err:?}"
+    );
+    assert!(!marker.exists(), "per-worktree helper must not execute");
+}
+
+/// Repository discovery accepts paths inside a worktree, so metadata
+/// validation must follow Git's ancestor discovery semantics as well. If it
+/// checks only `<input>/.git`, a nested path bypasses the root `.git`
+/// validation and Git can still follow hostile metadata from the parent.
+#[test]
+fn nested_repository_paths_do_not_bypass_git_metadata_validation() {
+    let adapter = GitCli::new();
+    let fx_a = Fixture::new("nested-identity-redirect-a");
+    let anchor_a = anchor_for(&adapter, &fx_a.path_str());
+    let fx_b = Fixture::new("nested-identity-redirect-b");
+    git(
+        &fx_b.dir,
+        &[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "nested-identity-b-marker",
+        ],
+    );
+    let b_head = fx_b.primary_head();
+    assert_ne!(
+        fx_a.base_oid, b_head,
+        "fixtures must have distinct identities"
+    );
+
+    let nested = fx_a.dir.join("nested/path");
+    std::fs::create_dir_all(&nested).expect("create nested repository path");
+    std::fs::remove_dir_all(fx_a.dir.join(".git")).expect("remove A's real .git directory");
+    std::fs::write(
+        fx_a.dir.join(".git"),
+        format!("gitdir: {}\n", fx_b.dir.join(".git").display()),
+    )
+    .expect("redirect A's root .git at B's metadata");
+
+    let nested_str = nested.to_string_lossy().into_owned();
+    let err = adapter
+        .resolve_revision(&nested_str, "HEAD", &anchor_a)
+        .expect_err("nested discovery must validate the repository root metadata");
+    assert!(
+        matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
+        "got {err:?}"
     );
 }
 
@@ -110,6 +405,7 @@ fn worktree_status_production_path_disables_fsmonitor_execution() {
 fn valid_but_wrong_gitdir_pointer_redirection_is_refused() {
     let adapter = GitCli::new();
     let fx_a = Fixture::new("identity-redirect-a");
+    let anchor_a = anchor_for(&adapter, &fx_a.path_str());
     let fx_b = Fixture::new("identity-redirect-b");
     // `Fixture::new`'s initial empty commit can collide in OID with another
     // fixture created in the same second (identical tree, message, and
@@ -133,7 +429,7 @@ fn valid_but_wrong_gitdir_pointer_redirection_is_refused() {
     .expect("redirect A's .git at B's real, valid metadata");
 
     let err = adapter
-        .is_repository(&fx_a.path_str())
+        .is_repository(&fx_a.path_str(), &anchor_a)
         .expect_err("a valid-but-foreign gitdir target must fail closed");
     assert!(
         matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
@@ -141,7 +437,7 @@ fn valid_but_wrong_gitdir_pointer_redirection_is_refused() {
     );
 
     let err = adapter
-        .resolve_revision(&fx_a.path_str(), "HEAD")
+        .resolve_revision(&fx_a.path_str(), "HEAD", &anchor_a)
         .expect_err("resolve_revision must not resolve identity through a foreign redirect");
     assert!(
         matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
@@ -159,6 +455,7 @@ fn valid_but_wrong_gitdir_pointer_redirection_is_refused() {
 fn forged_linked_worktree_commondir_redirection_is_refused() {
     let adapter = GitCli::new();
     let fx_a = Fixture::new("identity-shim-a");
+    let anchor_a = anchor_for(&adapter, &fx_a.path_str());
     let fx_b = Fixture::new("identity-shim-b");
     git(
         &fx_b.dir,
@@ -196,8 +493,60 @@ fn forged_linked_worktree_commondir_redirection_is_refused() {
         .expect("forge linked-worktree HEAD");
 
     let err = adapter
-        .resolve_revision(&fx_a.path_str(), "HEAD")
+        .resolve_revision(&fx_a.path_str(), "HEAD", &anchor_a)
         .expect_err("forged metadata must not redirect commondir to a foreign repository");
+    assert!(
+        matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
+        "got {err:?}"
+    );
+}
+
+/// Independent re-review BLOCKER: a self-consistent linked-worktree shape is
+/// still attacker-forgeable when both the fake common repository and its
+/// `worktrees/<id>` metadata live in provider-writable storage. Reverse
+/// `gitdir`, `commondir`, and structural ownership all look legitimate, so
+/// self-consistency alone cannot establish trusted repository identity.
+#[test]
+fn fully_forged_linked_worktree_identity_in_provider_writable_sibling_is_refused() {
+    let adapter = GitCli::new();
+    let fx_a = Fixture::new("fully-forged-identity-a");
+    let anchor_a = anchor_for(&adapter, &fx_a.path_str());
+
+    let original = fx_a.dir.join(".git");
+    let original_backup = fx_a.case_dir.join("fully-forged-a-original-git");
+    std::fs::rename(&original, &original_backup).expect("move A's real .git directory");
+
+    // Model a provider-owned support/scratch root: writable by the confined
+    // provider but outside the managed worktree itself. A containment-only
+    // rule therefore cannot authenticate repository identity.
+    let forged_repo = fx_a.case_dir.join("provider-scratch/attacker-repo");
+    std::fs::create_dir_all(&forged_repo).expect("create forged repository");
+    git(&forged_repo, &["init", "-q"]);
+    git(
+        &forged_repo,
+        &["commit", "-q", "--allow-empty", "-m", "attacker-identity"],
+    );
+    let forged_head = git(&forged_repo, &["rev-parse", "HEAD"]);
+    assert_ne!(
+        fx_a.base_oid, forged_head,
+        "forged repository must have a distinct identity"
+    );
+
+    let common = forged_repo.join(".git");
+    let metadata = common.join("worktrees/forged-a");
+    std::fs::create_dir_all(&metadata).expect("create forged linked-worktree metadata");
+    std::fs::write(&original, format!("gitdir: {}\n", metadata.display()))
+        .expect("point A at forged linked-worktree metadata");
+    std::fs::write(metadata.join("gitdir"), format!("{}\n", original.display()))
+        .expect("forge reverse gitdir");
+    std::fs::write(metadata.join("commondir"), "../..\n").expect("forge commondir");
+    let forged_head_ref = git(&forged_repo, &["symbolic-ref", "HEAD"]);
+    std::fs::write(metadata.join("HEAD"), format!("ref: {forged_head_ref}\n"))
+        .expect("forge linked-worktree HEAD");
+
+    let err = adapter
+        .resolve_revision(&fx_a.path_str(), "HEAD", &anchor_a)
+        .expect_err("attacker-forged linked-worktree identity must fail closed");
     assert!(
         matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
         "got {err:?}"
@@ -215,6 +564,7 @@ fn worktree_status_refuses_symlinked_and_redirected_git_metadata() {
     let adapter = GitCli::new();
 
     let fx = Fixture::new("worktree-status-symlink-hostile");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let original = fx.dir.join(".git");
     let moved = fx.case_dir.join("real-git-dir");
     std::fs::rename(&original, &moved).expect("move git metadata");
@@ -222,7 +572,7 @@ fn worktree_status_refuses_symlinked_and_redirected_git_metadata() {
     {
         std::os::unix::fs::symlink(&moved, &original).expect("create .git symlink");
         let err = adapter
-            .worktree_status(&fx.path_str())
+            .worktree_status(&fx.path_str(), &anchor)
             .expect_err(".git symlink metadata must fail closed via worktree_status");
         assert!(
             matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
@@ -231,6 +581,7 @@ fn worktree_status_refuses_symlinked_and_redirected_git_metadata() {
     }
 
     let fx_a = Fixture::new("worktree-status-redirect-a");
+    let anchor_a = anchor_for(&adapter, &fx_a.path_str());
     let fx_b = Fixture::new("worktree-status-redirect-b");
     std::fs::remove_dir_all(fx_a.dir.join(".git")).expect("remove A's real .git directory");
     std::fs::write(
@@ -239,7 +590,7 @@ fn worktree_status_refuses_symlinked_and_redirected_git_metadata() {
     )
     .expect("redirect A's .git at B's real, valid metadata");
     let err = adapter
-        .worktree_status(&fx_a.path_str())
+        .worktree_status(&fx_a.path_str(), &anchor_a)
         .expect_err("redirected .git metadata must not silently produce status evidence");
     assert!(
         matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
@@ -255,6 +606,7 @@ fn worktree_status_refuses_symlinked_and_redirected_git_metadata() {
 fn shell_metachar_branch_names_stay_literal_argv() {
     let adapter = GitCli::new();
     let fx = Fixture::new("injection");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
     let entries_before = fixture_entry_names(&fx);
 
@@ -274,7 +626,7 @@ fn shell_metachar_branch_names_stay_literal_argv() {
             &format!("ref:ws-inj-{tag}"),
         );
         adapter
-            .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap())
+            .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap(), &anchor)
             .unwrap_or_else(|e| panic!("literal branch {short} must succeed, got {e:?}"));
         let full = format!("refs/heads/{short}");
         assert!(fx.ref_exists(&full), "exact ref {full} must exist");
@@ -307,6 +659,7 @@ fn shell_metachar_branch_names_stay_literal_argv() {
 fn dash_led_branch_is_rejected_before_spawn() {
     let adapter = GitCli::new();
     let fx = Fixture::new("dashled");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
 
     // Domain shape is valid (prefix, no spaces/..), so this reaches the
@@ -314,7 +667,7 @@ fn dash_led_branch_is_rejected_before_spawn() {
     let lease = lease_for("dash", "-evil", &base, "ref:ws-dash");
     let target = target_path(&fx, "ws-dash");
     let err = adapter
-        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap())
+        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap(), &anchor)
         .expect_err("dash-led branch must be refused");
     assert!(
         matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
@@ -334,6 +687,7 @@ fn space_branch_is_rejected_by_domain_validation() {
 fn paths_with_spaces_unicode_and_metachars_work_literally() {
     let adapter = GitCli::new();
     let fx = Fixture::new("sp ace-ünicode-日本語");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
 
     for (tag, name) in [
@@ -349,7 +703,7 @@ fn paths_with_spaces_unicode_and_metachars_work_literally() {
             &format!("ref:ws-paths-{tag}"),
         );
         adapter
-            .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap())
+            .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap(), &anchor)
             .unwrap_or_else(|e| panic!("unusual path {name} must work literally, got {e:?}"));
         assert_eq!(git(&target, &["rev-parse", "HEAD"]), base);
     }
@@ -359,12 +713,13 @@ fn paths_with_spaces_unicode_and_metachars_work_literally() {
 fn target_inside_primary_checkout_is_refused() {
     let adapter = GitCli::new();
     let fx = Fixture::new("nested");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
 
     let nested = fx.dir.join("nested-wt");
     let lease = lease_for("nested", "agent/e-nested", &base, "ref:ws-nested");
     let err = adapter
-        .create_worktree(&lease, &fx.path_str(), nested.to_str().unwrap())
+        .create_worktree(&lease, &fx.path_str(), nested.to_str().unwrap(), &anchor)
         .expect_err("nested target must be refused");
     assert!(
         matches!(err, WorkspaceFailure::WorktreeCollision { .. }),
@@ -379,9 +734,11 @@ fn missing_git_executable_is_typed_not_panic() {
     let adapter = GitCli::with_executable("/nonexistent/git-binary-for-task0041-test");
     let dir = std::env::temp_dir();
     let path = dir.to_string_lossy().into_owned();
+    let canon = std::fs::canonicalize(&dir).unwrap();
+    let anchor = workspace::TrustedCommonGit::from_canonical_commondir(canon).unwrap();
 
     let err = adapter
-        .is_repository(&path)
+        .is_repository(&path, &anchor)
         .expect_err("missing git must fail");
     assert!(
         matches!(err, WorkspaceFailure::GitBackendFailure { .. }),
@@ -399,6 +756,7 @@ fn diff_and_removal_are_implemented_safely() {
     // diff/cleanup matrices live in `diff_cleanup.rs`.
     let adapter = GitCli::new();
     let fx = Fixture::new("implemented");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
     let target = target_path(&fx, "ws-implemented");
     let lease = lease_for(
@@ -408,7 +766,7 @@ fn diff_and_removal_are_implemented_safely() {
         "ref:ws-implemented",
     );
     adapter
-        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap())
+        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap(), &anchor)
         .unwrap();
 
     // Read-only diff on a clean worktree: empty layers, base authoritative.
@@ -420,7 +778,7 @@ fn diff_and_removal_are_implemented_safely() {
         &base,
         target.to_str().unwrap(),
     );
-    let evidence = adapter.compute_diff(&real_lease).unwrap();
+    let evidence = adapter.compute_diff(&real_lease, &anchor).unwrap();
     assert_eq!(evidence.diff.base_revision.as_str(), base);
     assert!(evidence.diff.committed.is_empty());
     assert!(evidence.diff.working.is_empty());
@@ -430,7 +788,7 @@ fn diff_and_removal_are_implemented_safely() {
     // `remove_worktree` (branch teardown is the separate `remove_branch`
     // step, exercised in `diff_cleanup.rs`).
     adapter
-        .remove_worktree(&real_lease, target.to_str().unwrap())
+        .remove_worktree(&real_lease, target.to_str().unwrap(), &anchor)
         .unwrap();
     assert!(!target.exists());
     assert!(
@@ -443,24 +801,31 @@ fn diff_and_removal_are_implemented_safely() {
 fn detached_head_and_file_paths_observe_as_invalid() {
     let adapter = GitCli::new();
     let fx = Fixture::new("invalid-status");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
     let target = target_path(&fx, "ws-detach");
     let lease = lease_for("detach", "agent/e-detach", &base, "ref:ws-detach");
     adapter
-        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap())
+        .create_worktree(&lease, &fx.path_str(), target.to_str().unwrap(), &anchor)
         .unwrap();
 
     git(&target, &["checkout", "-q", "--detach", "HEAD"]);
     assert_eq!(
-        adapter.worktree_status(target.to_str().unwrap()).unwrap(),
+        adapter
+            .worktree_status(target.to_str().unwrap(), &anchor)
+            .unwrap(),
         WorktreeStatus::Invalid,
         "detached managed worktree must observe Invalid, never silently continue"
     );
 
     let file = fx.dir.join("plain-file.txt");
     std::fs::write(&file, b"x").unwrap();
+    // File paths observe Invalid without anchor enforcement (no .git chain);
+    // use the same anchor: missing .git entry skips anchor comparison.
     assert_eq!(
-        adapter.worktree_status(file.to_str().unwrap()).unwrap(),
+        adapter
+            .worktree_status(file.to_str().unwrap(), &anchor)
+            .unwrap(),
         WorktreeStatus::Invalid
     );
 }
