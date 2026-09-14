@@ -21,6 +21,7 @@
 //! orchestration interpretation — exactly like FakeAgent success — and
 //! only the independent evaluation path can complete a Task.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -156,6 +157,16 @@ impl ClaudeExecutor {
         self.environment
             .as_ref()
             .map(ProviderEnvironment::isolation_support_write_roots)
+            .map_err(Clone::clone)
+    }
+
+    /// The exact explicit child environment this execution would install,
+    /// for the Runner to plan and enforce (TASK-SEC-R1 R1-H2). Values stay
+    /// composition-resolved directories; no ambient variable is read here.
+    pub fn child_environment(&self) -> Result<Vec<(OsString, OsString)>, String> {
+        self.environment
+            .as_ref()
+            .map(ProviderEnvironment::child_environment)
             .map_err(Clone::clone)
     }
 

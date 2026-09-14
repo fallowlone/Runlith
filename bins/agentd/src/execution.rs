@@ -67,7 +67,7 @@ use policy::{
     Capability, CompiledPolicy, EffectiveCapabilities, FileScope, PolicyLayer, PolicyOutcome,
     PolicyRequest, PolicyRule, RequestOrigin, RequestedCapabilities, ScopeId,
 };
-use runner::{IsolationBackend, IsolationRequirements};
+use runner::{ChildEnvironment, IsolationBackend, IsolationRequirements};
 
 /// Wall-clock bound for one production provider execution. Matches the
 /// adapter default: the daemon does not invent its own timeout policy.
@@ -348,10 +348,28 @@ impl scheduler::ExecutionPort for SecuredClaudeExecutor {
                 detail: format!("G6 runtime backend setup refused: {detail}"),
             }
         })?;
+        // The child environment is planned, not inherited: the provider's
+        // explicit composition-resolved set becomes part of the isolation
+        // plan and is installed by the backend after clearing the ambient
+        // environment (TASK-SEC-R1 R1-H2).
+        let environment = self
+            .inner
+            .child_environment()
+            .map_err(|detail| scheduler::ExecutionProblem::Failed {
+                detail: format!("G6 provider environment refused: {detail}"),
+            })
+            .and_then(|pairs| {
+                ChildEnvironment::from_explicit(pairs).map_err(|error| {
+                    scheduler::ExecutionProblem::Failed {
+                        detail: format!("G6 child environment refused: {error}"),
+                    }
+                })
+            })?;
         let spec = ProcessSecuritySpec::new(
             launch.workspace.clone(),
             launch.executable.clone(),
             IsolationRequirements::new(true, true, true),
+            environment.clone(),
             provider_claude::CLAUDE_PROVIDER_REF,
         );
         let prepared_launch = runner::prepare_process_launch(
@@ -360,6 +378,7 @@ impl scheduler::ExecutionPort for SecuredClaudeExecutor {
             launch.workspace.clone(),
             launch.executable.clone(),
             IsolationRequirements::new(true, true, true),
+            environment,
         )
         .map_err(|error| scheduler::ExecutionProblem::Failed {
             detail: format!("G6 runtime launch preparation refused: {error}"),

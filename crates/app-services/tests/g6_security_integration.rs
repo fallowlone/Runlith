@@ -12,7 +12,7 @@ use policy::{
     Capability, CompiledPolicy, EffectiveCapabilities, FileScope, HumanDecision, PolicyLayer,
     PolicyOutcome, PolicyRequest, PolicyRule, RequestOrigin, RequestedCapabilities, ScopeId,
 };
-use runner::IsolationRequirements;
+use runner::{ChildEnvironment, IsolationRequirements};
 use secrets::{
     SecretBackend, SecretBackendError, SecretBinding, SecretBindingId, SecretDelivery,
     SecretDeliveryError, SecretDeliveryTarget, SecretRef, SecretsBroker,
@@ -21,6 +21,21 @@ use security_audit::{SecurityAuditEvent, SecurityAuditOutcome, SecurityAuditSubj
 use storage_sqlite::{SqliteStore, StorageError};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Explicit minimal child environment for the Runner boundary fixtures.
+fn child_environment() -> ChildEnvironment {
+    ChildEnvironment::from_explicit([
+        (
+            std::ffi::OsString::from("PATH"),
+            std::ffi::OsString::from("/usr/bin:/bin"),
+        ),
+        (
+            std::ffi::OsString::from("HOME"),
+            std::ffi::OsString::from("/home/tester"),
+        ),
+    ])
+    .unwrap()
+}
 
 struct TestDb(PathBuf);
 
@@ -106,6 +121,7 @@ fn policy_runner_and_audit_form_one_trusted_launch_boundary() {
                 "ws-1",
                 ScopeId::new("claude").unwrap(),
                 IsolationRequirements::trusted_host(),
+                child_environment(),
                 "claude-code",
             ),
             move || {
@@ -154,6 +170,7 @@ fn unsupported_isolation_fails_closed_before_privileged_operation() {
                 "ws-1",
                 ScopeId::new("claude").unwrap(),
                 IsolationRequirements::new(true, false, false),
+                child_environment(),
                 "claude-code",
             ),
             move || {
@@ -248,6 +265,7 @@ fn runner_revalidates_exact_process_target_adjacent_to_operation() {
                 "ws-1",
                 ScopeId::new("sh").unwrap(),
                 IsolationRequirements::trusted_host(),
+                child_environment(),
                 "claude-code",
             ),
             move || {

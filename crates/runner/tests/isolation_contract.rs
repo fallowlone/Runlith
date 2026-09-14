@@ -1,10 +1,12 @@
 use std::cell::Cell;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use policy::{Capability, EffectiveCapabilities, FileScope, ScopeId};
 use runner::{
-    enforce_process_operation, BackendIdentity, EnforcementAxes, EnforcementReport,
-    IsolationBackend, IsolationPlan, IsolationRequirements, Platform, RunnerError, RunnerKind,
+    enforce_process_operation, prepare_process_launch, BackendIdentity, ChildEnvironment,
+    EnforcementAxes, EnforcementReport, IsolationBackend, IsolationPlan, IsolationRequirements,
+    Platform, RunnerError, RunnerKind,
 };
 
 fn file_read(workspace: &str, root: &str) -> Capability {
@@ -17,6 +19,15 @@ fn file_write(workspace: &str, root: &str) -> Capability {
 
 fn scope(value: &str) -> ScopeId {
     ScopeId::new(value).unwrap()
+}
+
+/// Explicit, minimal child environment used by these contract fixtures.
+fn environment() -> ChildEnvironment {
+    ChildEnvironment::from_explicit([
+        (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        (OsString::from("HOME"), OsString::from("/home/tester")),
+    ])
+    .unwrap()
 }
 
 fn effective() -> EffectiveCapabilities {
@@ -36,6 +47,7 @@ struct FixedBackend {
     identity: BackendIdentity,
     enforced: EnforcementAxes,
     report_plan: Option<IsolationPlan>,
+    env_isolated: bool,
 }
 
 impl FixedBackend {
@@ -48,6 +60,7 @@ impl FixedBackend {
             },
             enforced,
             report_plan: None,
+            env_isolated: true,
         }
     }
 }
@@ -62,6 +75,7 @@ impl IsolationBackend for FixedBackend {
             self.identity,
             self.report_plan.clone().unwrap_or_else(|| plan.clone()),
             self.enforced,
+            self.env_isolated,
         ))
     }
 }
@@ -91,6 +105,7 @@ fn compiles_only_runner_owned_effective_authority() {
         "ws-1",
         scope("cargo"),
         IsolationRequirements::new(true, true, true),
+        environment(),
     )
     .unwrap();
 
@@ -131,6 +146,7 @@ fn exact_process_authority_is_rechecked_before_backend_or_operation() {
         "ws-1",
         scope("node"),
         IsolationRequirements::new(true, true, true),
+        environment(),
         |_| called.set(true),
     );
 
@@ -156,6 +172,7 @@ fn cross_workspace_filesystem_authority_fails_closed() {
             "ws-1",
             scope("cargo"),
             IsolationRequirements::new(true, false, false),
+            environment(),
             |_| (),
         ),
         Err(RunnerError::WorkspaceScopeMismatch { .. })
@@ -174,6 +191,7 @@ fn filesystem_network_and_process_enforcement_are_independent() {
             "ws-1",
             scope("cargo"),
             IsolationRequirements::new(true, true, true),
+            environment(),
             |_| called.set(true),
         ),
         Err(RunnerError::InsufficientEnforcement { .. })
@@ -186,6 +204,7 @@ fn filesystem_network_and_process_enforcement_are_independent() {
         "ws-1",
         scope("cargo"),
         IsolationRequirements::new(true, false, true),
+        environment(),
         |_| called.set(true),
     );
     assert!(result.is_ok());
@@ -199,6 +218,7 @@ fn stale_or_widened_backend_report_cannot_authorize_operation() {
         "ws-1",
         scope("rustc"),
         IsolationRequirements::new(true, true, true),
+        environment(),
     )
     .unwrap();
     let backend = FixedBackend {
@@ -214,6 +234,7 @@ fn stale_or_widened_backend_report_cannot_authorize_operation() {
             "ws-1",
             scope("cargo"),
             IsolationRequirements::new(true, true, true),
+            environment(),
             |_| called.set(true),
         ),
         Err(RunnerError::StaleEnforcementReport)
@@ -232,6 +253,7 @@ fn operation_runs_only_after_exact_enforcement_report() {
         "ws-1",
         scope("cargo"),
         IsolationRequirements::new(true, true, true),
+        environment(),
         |plan| {
             called.set(true);
             plan.launch_executable().as_str().to_owned()
@@ -252,6 +274,7 @@ fn unavailable_backend_fails_closed_without_running_operation() {
         "ws-1",
         scope("cargo"),
         IsolationRequirements::new(true, false, false),
+        environment(),
         |_| called.set(true),
     );
 
@@ -262,4 +285,115 @@ fn unavailable_backend_fails_closed_without_running_operation() {
         })
     );
     assert!(!called.get());
+}
+
+/// TASK-SEC-R1 R1-H2: a backend that cannot prove child environment isolation
+/// must never authorize the launch, even when every other axis is proven.
+#[test]
+fn r1_h2_report_without_env_isolation_fails_verification() {
+    let backend = FixedBackend {
+        env_isolated: false,
+        ..FixedBackend::new(EnforcementAxes::all())
+    };
+    let called = Cell::new(false);
+
+    assert_eq!(
+        enforce_process_operation(
+            &backend,
+            &effective(),
+            "ws-1",
+            scope("cargo"),
+            IsolationRequirements::new(true, true, true),
+            environment(),
+            |_| called.set(true),
+        ),
+        Err(RunnerError::EnvironmentNotIsolated)
+    );
+    assert!(!called.get());
+
+    assert_eq!(
+        prepare_process_launch(
+            &backend,
+            &effective(),
+            "ws-1",
+            scope("cargo"),
+            IsolationRequirements::trusted_host(),
+            environment(),
+        )
+        .err(),
+        Some(RunnerError::EnvironmentNotIsolated)
+    );
+}
+
+/// TASK-SEC-R1 R1-H2: the plan carries the complete explicit child environment
+/// and nothing else; the environment is data, not inheritance.
+#[test]
+fn r1_h2_plan_carries_only_the_explicit_child_environment() {
+    let plan = IsolationPlan::compile(
+        &effective(),
+        "ws-1",
+        scope("cargo"),
+        IsolationRequirements::trusted_host(),
+        environment(),
+    )
+    .unwrap();
+
+    let pairs: Vec<_> = plan
+        .environment()
+        .vars()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![
+            ("HOME".to_owned(), "/home/tester".to_owned()),
+            ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+        ]
+    );
+    assert!(plan.environment().contains("PATH"));
+    assert!(!plan.environment().contains("AWS_SECRET_ACCESS_KEY"));
+}
+
+/// TASK-SEC-R1 R1-H2: ambient-shaped names cannot be smuggled into a plan, so
+/// a composition mistake cannot turn inheritance back on.
+#[test]
+fn r1_h2_poisoned_or_duplicate_env_names_refuse_to_compile() {
+    assert_eq!(
+        ChildEnvironment::from_explicit([(
+            OsString::from("AWS_SECRET_ACCESS_KEY"),
+            OsString::from("poison"),
+        )])
+        .err(),
+        Some(RunnerError::EnvironmentNameNotAllowed {
+            name: "AWS_SECRET_ACCESS_KEY".to_owned(),
+        })
+    );
+    assert_eq!(
+        ChildEnvironment::from_explicit([
+            (OsString::from("PATH"), OsString::from("/usr/bin")),
+            (OsString::from("PATH"), OsString::from("/attacker/bin")),
+        ])
+        .err(),
+        Some(RunnerError::DuplicateEnvironmentName {
+            name: "PATH".to_owned(),
+        })
+    );
+
+    // The runner's own minimal allowlist resolves only allowlisted ambient
+    // names: PATH/HOME/TMPDIR plus locale.
+    let minimal = ChildEnvironment::minimal_allowlist().unwrap();
+    for (name, _) in minimal.vars() {
+        assert!(
+            runner::CHILD_ENV_ALLOWLIST
+                .iter()
+                .any(|allowed| name.as_os_str() == OsStr::new(allowed)),
+            "minimal allowlist leaked {name:?}"
+        );
+    }
 }

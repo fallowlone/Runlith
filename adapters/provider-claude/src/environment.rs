@@ -109,41 +109,77 @@ impl ProviderEnvironment {
     /// provider/plugin variables are intentionally not inherited.
     pub(crate) fn apply(&self, command: &mut Command) {
         command.env_clear();
-        command.env("PATH", &self.path);
-        if let Some(home) = &self.home {
-            command.env("HOME", home);
+        for (name, value) in self.resolved_pairs() {
+            command.env(name, value);
         }
-        command.env("PWD", &self.workdir);
-        command.env("XDG_CONFIG_HOME", &self.xdg_config_home);
-        command.env("XDG_DATA_HOME", &self.xdg_data_home);
-        command.env("XDG_STATE_HOME", &self.xdg_state_home);
-        command.env("XDG_CACHE_HOME", &self.xdg_cache_home);
-        command.env("CLAUDE_CODE_TMPDIR", &self.scratch_dir);
-        command.env("TMPDIR", &self.scratch_dir);
-        command.env("TMP", &self.scratch_dir);
-        command.env("TEMP", &self.scratch_dir);
+    }
 
+    /// The exact explicit variable set a governed child receives, as
+    /// composition-resolved name/value pairs (TASK-SEC-R1 R1-H2).
+    ///
+    /// The Runner plans this set as the enforced child environment so the
+    /// provider no longer owns the only copy of the policy: whatever a
+    /// governed child sees is visible to the isolation plan and can be
+    /// asserted against it.
+    #[must_use]
+    pub fn child_environment(&self) -> Vec<(OsString, OsString)> {
+        self.resolved_pairs()
+    }
+
+    fn resolved_pairs(&self) -> Vec<(OsString, OsString)> {
+        let mut pairs: Vec<(OsString, OsString)> = Vec::new();
+        pairs.push((OsString::from("PATH"), self.path.clone()));
+        if let Some(home) = &self.home {
+            pairs.push((OsString::from("HOME"), home.clone()));
+        }
+        pairs.push((OsString::from("PWD"), self.workdir.as_os_str().to_owned()));
+        for (name, value) in [
+            ("XDG_CONFIG_HOME", &self.xdg_config_home),
+            ("XDG_DATA_HOME", &self.xdg_data_home),
+            ("XDG_STATE_HOME", &self.xdg_state_home),
+            ("XDG_CACHE_HOME", &self.xdg_cache_home),
+        ] {
+            pairs.push((OsString::from(name), value.as_os_str().to_owned()));
+        }
+        pairs.push((
+            OsString::from("CLAUDE_CODE_TMPDIR"),
+            self.scratch_dir.as_os_str().to_owned(),
+        ));
+        for name in ["TMPDIR", "TMP", "TEMP"] {
+            pairs.push((
+                OsString::from(name),
+                self.scratch_dir.as_os_str().to_owned(),
+            ));
+        }
         for name in ["LANG", "LC_ALL", "LC_CTYPE"] {
             if let Some(value) = non_empty_env(name) {
-                command.env(name, value);
+                pairs.push((OsString::from(name), value));
             }
         }
 
         #[cfg(windows)]
         {
             if let Some(profile) = &self.user_profile {
-                command.env("USERPROFILE", profile);
+                pairs.push((OsString::from("USERPROFILE"), profile.clone()));
             }
             if let Some(root) = &self.system_root {
-                command.env("SystemRoot", root);
-                command.env("WINDIR", root);
+                pairs.push((OsString::from("SystemRoot"), root.clone()));
+                pairs.push((OsString::from("WINDIR"), root.clone()));
             }
             if let Some(path_ext) = &self.path_ext {
-                command.env("PATHEXT", path_ext);
+                pairs.push((OsString::from("PATHEXT"), path_ext.clone()));
             }
-            command.env("APPDATA", &self.xdg_config_home);
-            command.env("LOCALAPPDATA", &self.xdg_cache_home);
+            pairs.push((
+                OsString::from("APPDATA"),
+                self.xdg_config_home.as_os_str().to_owned(),
+            ));
+            pairs.push((
+                OsString::from("LOCALAPPDATA"),
+                self.xdg_cache_home.as_os_str().to_owned(),
+            ));
         }
+
+        pairs
     }
 
     #[must_use]
