@@ -16,6 +16,7 @@
 use crate::failure::WorkspaceFailure;
 use crate::ids::WorkspaceId;
 use crate::lease::{LeaseLifecycle, WorkspaceLease};
+use crate::trusted::TrustedCommonGit;
 use agent_runtime::ExecutionId;
 use task_domain::{ProjectId, TaskId};
 
@@ -108,6 +109,27 @@ pub trait WorkspaceStore {
     /// when the id exists, the execution already owns a lease, or the
     /// owning execution is absent.
     fn insert_allocated_lease(&mut self, lease: &WorkspaceLease) -> Result<(), WorkspaceFailure>;
+
+    /// Persists an `Allocated` lease intent together with its trusted
+    /// common-Git anchor in one short SQLite transaction (no Git subprocess
+    /// inside, INV-145). Git observations must precede this call. No journal
+    /// event for the anchor.
+    fn insert_allocated_lease_with_anchor(
+        &mut self,
+        lease: &WorkspaceLease,
+        anchor: &TrustedCommonGit,
+        captured_at_millis: u64,
+    ) -> Result<(), WorkspaceFailure>;
+
+    /// Reads the durable trusted anchor for `id`, validating absolute,
+    /// NUL-free, canonicalize-compatible form. Invalid rows fail closed as
+    /// `GitBackendFailure` (never backfilled from current FS). `None` means
+    /// no sidecar row (pre-existing lease, machine move, loss) — callers
+    /// must fail closed until re-admission with a new lease.
+    fn get_trusted_anchor(
+        &self,
+        id: &WorkspaceId,
+    ) -> Result<Option<TrustedCommonGit>, WorkspaceFailure>;
 
     /// Records verified Git consistency (`Allocated → Ready`) together
     /// with the authoritative `workspace.created` fact in one atomic

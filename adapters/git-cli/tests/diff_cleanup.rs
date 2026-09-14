@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use git_cli::GitCli;
 use workspace::{DiffChangeKind, GitPort, WorkspaceFailure, WorktreeStatus};
 
-use common::{git, lease_for, target_path, Fixture};
+use common::{anchor_for, git, lease_for, target_path, Fixture};
 
 fn lease_at(
     tag: &str,
@@ -43,6 +43,7 @@ fn worktree_branch(target: &std::path::Path) -> String {
 fn diff_clean_worktree_is_empty_with_authoritative_base() {
     let adapter = GitCli::new();
     let fx = Fixture::new("diff-clean");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
     let target = target_path(&fx, "ws-diff-clean");
     adapter
@@ -50,15 +51,18 @@ fn diff_clean_worktree_is_empty_with_authoritative_base() {
             &lease_for("dc-clean", "agent/e-dc-clean", &base, "ref:unused"),
             &fx.path_str(),
             target.to_str().unwrap(),
+            &anchor,
         )
         .unwrap();
     let lease = lease_at("dc-clean", "agent/e-dc-clean", &base, &target);
 
     let before_head = worktree_head(&target);
     let before_branch = worktree_branch(&target);
-    let before_status = adapter.worktree_status(target.to_str().unwrap()).unwrap();
+    let before_status = adapter
+        .worktree_status(target.to_str().unwrap(), &anchor)
+        .unwrap();
 
-    let evidence = adapter.compute_diff(&lease).unwrap();
+    let evidence = adapter.compute_diff(&lease, &anchor).unwrap();
     assert_eq!(evidence.diff.base_revision.as_str(), base);
     assert_eq!(evidence.diff.head_revision.as_ref().unwrap().as_str(), base);
     assert!(!evidence.diff.has_working_tree_changes);
@@ -72,7 +76,9 @@ fn diff_clean_worktree_is_empty_with_authoritative_base() {
     assert_eq!(worktree_head(&target), before_head);
     assert_eq!(worktree_branch(&target), before_branch);
     assert_eq!(
-        adapter.worktree_status(target.to_str().unwrap()).unwrap(),
+        adapter
+            .worktree_status(target.to_str().unwrap(), &anchor)
+            .unwrap(),
         before_status
     );
     assert_eq!(fx.primary_head(), base);
@@ -82,6 +88,7 @@ fn diff_clean_worktree_is_empty_with_authoritative_base() {
 fn diff_detects_tracked_unstaged_modification() {
     let adapter = GitCli::new();
     let fx = Fixture::new("diff-tracked");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     fx.write_tracked("tracked.txt", b"v1");
     git(&fx.dir, &["add", "tracked.txt"]);
     git(&fx.dir, &["commit", "-q", "-m", "tracked"]);
@@ -92,12 +99,13 @@ fn diff_detects_tracked_unstaged_modification() {
             &lease_for("dc-tr", "agent/e-dc-tr", &base, "ref:unused"),
             &fx.path_str(),
             target.to_str().unwrap(),
+            &anchor,
         )
         .unwrap();
     std::fs::write(target.join("tracked.txt"), b"v2-managed").unwrap();
 
     let lease = lease_at("dc-tr", "agent/e-dc-tr", &base, &target);
-    let evidence = adapter.compute_diff(&lease).unwrap();
+    let evidence = adapter.compute_diff(&lease, &anchor).unwrap();
     assert!(evidence.diff.has_working_tree_changes);
     assert_eq!(evidence.diff.status, WorktreeStatus::DirtyTracked);
     assert!(evidence.diff.committed.is_empty());
@@ -117,6 +125,7 @@ fn diff_detects_tracked_unstaged_modification() {
 fn diff_detects_staged_change() {
     let adapter = GitCli::new();
     let fx = Fixture::new("diff-staged");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
     let target = target_path(&fx, "ws-diff-staged");
     adapter
@@ -124,13 +133,14 @@ fn diff_detects_staged_change() {
             &lease_for("dc-st", "agent/e-dc-st", &base, "ref:unused"),
             &fx.path_str(),
             target.to_str().unwrap(),
+            &anchor,
         )
         .unwrap();
     std::fs::write(target.join("staged-new.txt"), b"staged-bytes").unwrap();
     git(&target, &["add", "staged-new.txt"]);
 
     let lease = lease_at("dc-st", "agent/e-dc-st", &base, &target);
-    let evidence = adapter.compute_diff(&lease).unwrap();
+    let evidence = adapter.compute_diff(&lease, &anchor).unwrap();
     assert!(evidence.diff.has_working_tree_changes);
     assert_eq!(evidence.diff.status, WorktreeStatus::DirtyTracked);
     assert!(
@@ -148,6 +158,7 @@ fn diff_detects_staged_change() {
 fn diff_detects_untracked_file() {
     let adapter = GitCli::new();
     let fx = Fixture::new("diff-untracked");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
     let target = target_path(&fx, "ws-diff-untracked");
     adapter
@@ -155,12 +166,13 @@ fn diff_detects_untracked_file() {
             &lease_for("dc-un", "agent/e-dc-un", &base, "ref:unused"),
             &fx.path_str(),
             target.to_str().unwrap(),
+            &anchor,
         )
         .unwrap();
     std::fs::write(target.join("output-evidence.txt"), b"untracked-bytes").unwrap();
 
     let lease = lease_at("dc-un", "agent/e-dc-un", &base, &target);
-    let evidence = adapter.compute_diff(&lease).unwrap();
+    let evidence = adapter.compute_diff(&lease, &anchor).unwrap();
     assert!(evidence.diff.has_working_tree_changes);
     assert_eq!(evidence.diff.status, WorktreeStatus::DirtyUntracked);
     assert!(
@@ -178,6 +190,7 @@ fn diff_detects_untracked_file() {
 fn diff_detects_deleted_tracked_file() {
     let adapter = GitCli::new();
     let fx = Fixture::new("diff-deleted");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     fx.write_tracked("doomed.txt", b"bye");
     git(&fx.dir, &["add", "doomed.txt"]);
     git(&fx.dir, &["commit", "-q", "-m", "doomed"]);
@@ -188,12 +201,13 @@ fn diff_detects_deleted_tracked_file() {
             &lease_for("dc-del", "agent/e-dc-del", &base, "ref:unused"),
             &fx.path_str(),
             target.to_str().unwrap(),
+            &anchor,
         )
         .unwrap();
     std::fs::remove_file(target.join("doomed.txt")).unwrap();
 
     let lease = lease_at("dc-del", "agent/e-dc-del", &base, &target);
-    let evidence = adapter.compute_diff(&lease).unwrap();
+    let evidence = adapter.compute_diff(&lease, &anchor).unwrap();
     assert!(evidence.diff.has_working_tree_changes);
     assert!(
         evidence
@@ -210,6 +224,7 @@ fn diff_detects_deleted_tracked_file() {
 fn diff_represents_head_advanced_from_base() {
     let adapter = GitCli::new();
     let fx = Fixture::new("diff-head");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     fx.write_tracked("base.txt", b"base");
     git(&fx.dir, &["add", "base.txt"]);
     git(&fx.dir, &["commit", "-q", "-m", "base"]);
@@ -220,6 +235,7 @@ fn diff_represents_head_advanced_from_base() {
             &lease_for("dc-head", "agent/e-dc-head", &base, "ref:unused"),
             &fx.path_str(),
             target.to_str().unwrap(),
+            &anchor,
         )
         .unwrap();
     // Execution work as a real commit on the managed branch.
@@ -230,7 +246,7 @@ fn diff_represents_head_advanced_from_base() {
     assert_ne!(head, base);
 
     let lease = lease_at("dc-head", "agent/e-dc-head", &base, &target);
-    let evidence = adapter.compute_diff(&lease).unwrap();
+    let evidence = adapter.compute_diff(&lease, &anchor).unwrap();
     // The baseline stays the original recorded revision, not the new HEAD.
     assert_eq!(evidence.diff.base_revision.as_str(), base);
     assert_eq!(evidence.diff.head_revision.as_ref().unwrap().as_str(), head);
@@ -250,6 +266,7 @@ fn diff_represents_head_advanced_from_base() {
 fn diff_reports_renames_where_git_reports_them() {
     let adapter = GitCli::new();
     let fx = Fixture::new("diff-rename");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     // Large similar body so rename detection fires.
     let body = "rename-similarity-body\n".repeat(40);
     std::fs::write(fx.dir.join("original.txt"), body.as_bytes()).unwrap();
@@ -262,13 +279,14 @@ fn diff_reports_renames_where_git_reports_them() {
             &lease_for("dc-ren", "agent/e-dc-ren", &base, "ref:unused"),
             &fx.path_str(),
             target.to_str().unwrap(),
+            &anchor,
         )
         .unwrap();
     git(&target, &["mv", "original.txt", "renamed.txt"]);
     git(&target, &["commit", "-q", "-m", "rename"]);
 
     let lease = lease_at("dc-ren", "agent/e-dc-ren", &base, &target);
-    let evidence = adapter.compute_diff(&lease).unwrap();
+    let evidence = adapter.compute_diff(&lease, &anchor).unwrap();
     assert!(
         evidence
             .diff
@@ -284,6 +302,7 @@ fn diff_reports_renames_where_git_reports_them() {
 fn diff_is_scoped_to_the_requested_workspace() {
     let adapter = GitCli::new();
     let fx = Fixture::new("diff-scope");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     fx.write_tracked("shared.txt", b"base");
     git(&fx.dir, &["add", "shared.txt"]);
     git(&fx.dir, &["commit", "-q", "-m", "shared"]);
@@ -295,6 +314,7 @@ fn diff_is_scoped_to_the_requested_workspace() {
             &lease_for("dc-sa", "agent/e-dc-sa", &base, "ref:unused"),
             &fx.path_str(),
             ta.to_str().unwrap(),
+            &anchor,
         )
         .unwrap();
     adapter
@@ -302,6 +322,7 @@ fn diff_is_scoped_to_the_requested_workspace() {
             &lease_for("dc-sb", "agent/e-dc-sb", &base, "ref:unused"),
             &fx.path_str(),
             tb.to_str().unwrap(),
+            &anchor,
         )
         .unwrap();
     std::fs::write(ta.join("shared.txt"), b"edit-a").unwrap();
@@ -311,8 +332,8 @@ fn diff_is_scoped_to_the_requested_workspace() {
 
     let la = lease_at("dc-sa", "agent/e-dc-sa", &base, &ta);
     let lb = lease_at("dc-sb", "agent/e-dc-sb", &base, &tb);
-    let ea = adapter.compute_diff(&la).unwrap();
-    let eb = adapter.compute_diff(&lb).unwrap();
+    let ea = adapter.compute_diff(&la, &anchor).unwrap();
+    let eb = adapter.compute_diff(&lb, &anchor).unwrap();
     assert!(ea.diff.working.iter().any(|e| e.path == "shared.txt"));
     assert!(!ea.diff.working.iter().any(|e| e.path == "only-b.txt"));
     assert!(eb.diff.working.iter().any(|e| e.path == "only-b.txt"));
@@ -324,6 +345,7 @@ fn diff_is_scoped_to_the_requested_workspace() {
 fn diff_handles_spaces_and_unicode_paths() {
     let adapter = GitCli::new();
     let fx = Fixture::new("diff-ünicode paths");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
     let target = target_path(&fx, "ws with spaces-日本語");
     adapter
@@ -331,13 +353,14 @@ fn diff_handles_spaces_and_unicode_paths() {
             &lease_for("dc-sp", "agent/e-dc-sp", &base, "ref:unused"),
             &fx.path_str(),
             target.to_str().unwrap(),
+            &anchor,
         )
         .unwrap();
     std::fs::write(target.join("file with spaces.txt"), b"sp").unwrap();
     std::fs::write(target.join("ユニコード.txt"), b"uni").unwrap();
 
     let lease = lease_at("dc-sp", "agent/e-dc-sp", &base, &target);
-    let evidence = adapter.compute_diff(&lease).unwrap();
+    let evidence = adapter.compute_diff(&lease, &anchor).unwrap();
     assert_eq!(evidence.diff.status, WorktreeStatus::DirtyUntracked);
     assert!(
         evidence
@@ -363,10 +386,13 @@ fn diff_handles_spaces_and_unicode_paths() {
 fn diff_on_absent_or_detached_worktree_fails_typed() {
     let adapter = GitCli::new();
     let fx = Fixture::new("diff-missing");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
     let missing = target_path(&fx, "ws-never-created");
     let lease = lease_at("dc-miss", "agent/e-dc-miss", &base, &missing);
-    let err = adapter.compute_diff(&lease).expect_err("absent must fail");
+    let err = adapter
+        .compute_diff(&lease, &anchor)
+        .expect_err("absent must fail");
     assert!(
         matches!(err, WorkspaceFailure::WorktreeMissing { .. }),
         "got {err:?}"
@@ -378,12 +404,13 @@ fn diff_on_absent_or_detached_worktree_fails_typed() {
             &lease_for("dc-det", "agent/e-dc-det", &base, "ref:unused"),
             &fx.path_str(),
             target.to_str().unwrap(),
+            &anchor,
         )
         .unwrap();
     git(&target, &["checkout", "-q", "--detach", "HEAD"]);
     let lease = lease_at("dc-det", "agent/e-dc-det", &base, &target);
     let err = adapter
-        .compute_diff(&lease)
+        .compute_diff(&lease, &anchor)
         .expect_err("detached must fail");
     assert!(
         matches!(err, WorkspaceFailure::CheckoutFailed { .. }),
@@ -397,6 +424,7 @@ fn diff_on_absent_or_detached_worktree_fails_typed() {
 fn clean_worktree_removes_then_branch_deletes() {
     let adapter = GitCli::new();
     let fx = Fixture::new("remove-clean");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
     let target = target_path(&fx, "ws-remove-clean");
     adapter
@@ -404,12 +432,13 @@ fn clean_worktree_removes_then_branch_deletes() {
             &lease_for("rm-clean", "agent/e-rm-clean", &base, "ref:unused"),
             &fx.path_str(),
             target.to_str().unwrap(),
+            &anchor,
         )
         .unwrap();
     let lease = lease_at("rm-clean", "agent/e-rm-clean", &base, &target);
 
     adapter
-        .remove_worktree(&lease, target.to_str().unwrap())
+        .remove_worktree(&lease, target.to_str().unwrap(), &anchor)
         .unwrap();
     assert!(!target.exists());
     assert!(!fx
@@ -419,7 +448,9 @@ fn clean_worktree_removes_then_branch_deletes() {
     assert!(fx.ref_exists("refs/heads/agent/e-rm-clean"));
 
     let branch = workspace::BranchRef::new("refs/heads/agent/e-rm-clean").unwrap();
-    adapter.remove_branch(&fx.path_str(), &branch).unwrap();
+    adapter
+        .remove_branch(&fx.path_str(), &branch, &anchor)
+        .unwrap();
     assert!(!fx.ref_exists("refs/heads/agent/e-rm-clean"));
 }
 
@@ -432,6 +463,7 @@ fn dirty_worktrees_are_preserved_without_force() {
         ("untracked", "untracked"),
     ] {
         let fx = Fixture::new(&format!("remove-dirty-{tag}"));
+        let anchor = anchor_for(&adapter, &fx.path_str());
         fx.write_tracked("keep.txt", b"v1");
         git(&fx.dir, &["add", "keep.txt"]);
         git(&fx.dir, &["commit", "-q", "-m", "keep"]);
@@ -442,6 +474,7 @@ fn dirty_worktrees_are_preserved_without_force() {
                 &lease_for("rm-d", "agent/e-rm-d", &base, "ref:unused"),
                 &fx.path_str(),
                 target.to_str().unwrap(),
+                &anchor,
             )
             .unwrap();
         match setup {
@@ -459,7 +492,7 @@ fn dirty_worktrees_are_preserved_without_force() {
         };
         let lease = lease_at("rm-d", "agent/e-rm-d", &base, &target);
         let err = adapter
-            .remove_worktree(&lease, target.to_str().unwrap())
+            .remove_worktree(&lease, target.to_str().unwrap(), &anchor)
             .expect_err("dirty removal must refuse");
         assert!(
             matches!(
@@ -484,6 +517,7 @@ fn dirty_worktrees_are_preserved_without_force() {
 fn branch_mismatch_and_detached_head_fail_closed() {
     let adapter = GitCli::new();
     let fx = Fixture::new("remove-mismatch");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
     let target = target_path(&fx, "ws-mismatch");
     adapter
@@ -491,12 +525,13 @@ fn branch_mismatch_and_detached_head_fail_closed() {
             &lease_for("rm-mm", "agent/e-rm-mm", &base, "ref:unused"),
             &fx.path_str(),
             target.to_str().unwrap(),
+            &anchor,
         )
         .unwrap();
     git(&target, &["checkout", "-q", "--detach", "HEAD"]);
     let lease = lease_at("rm-mm", "agent/e-rm-mm", &base, &target);
     let err = adapter
-        .remove_worktree(&lease, target.to_str().unwrap())
+        .remove_worktree(&lease, target.to_str().unwrap(), &anchor)
         .expect_err("detached must fail closed");
     assert!(
         matches!(
@@ -512,6 +547,7 @@ fn branch_mismatch_and_detached_head_fail_closed() {
 fn unmerged_branch_survives_non_forced_deletion() {
     let adapter = GitCli::new();
     let fx = Fixture::new("remove-unmerged");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     fx.write_tracked("f.txt", b"base");
     git(&fx.dir, &["add", "f.txt"]);
     git(&fx.dir, &["commit", "-q", "-m", "f"]);
@@ -522,6 +558,7 @@ fn unmerged_branch_survives_non_forced_deletion() {
             &lease_for("rm-un", "agent/e-rm-un", &base, "ref:unused"),
             &fx.path_str(),
             target.to_str().unwrap(),
+            &anchor,
         )
         .unwrap();
     // Unique commit on the managed branch (clean worktree afterwards).
@@ -531,12 +568,12 @@ fn unmerged_branch_survives_non_forced_deletion() {
     let lease = lease_at("rm-un", "agent/e-rm-un", &base, &target);
 
     adapter
-        .remove_worktree(&lease, target.to_str().unwrap())
+        .remove_worktree(&lease, target.to_str().unwrap(), &anchor)
         .unwrap();
     assert!(!target.exists());
     let branch = workspace::BranchRef::new("refs/heads/agent/e-rm-un").unwrap();
     let err = adapter
-        .remove_branch(&fx.path_str(), &branch)
+        .remove_branch(&fx.path_str(), &branch, &anchor)
         .expect_err("unmerged branch must survive");
     assert!(
         matches!(err, WorkspaceFailure::CleanupUnsafe { .. }),
@@ -549,10 +586,11 @@ fn unmerged_branch_survives_non_forced_deletion() {
 fn default_branch_is_never_deleted() {
     let adapter = GitCli::new();
     let mut fx = Fixture::new("remove-default");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     fx.rename_default("trunkline");
     let branch = workspace::BranchRef::new("refs/heads/trunkline").unwrap();
     let err = adapter
-        .remove_branch(&fx.path_str(), &branch)
+        .remove_branch(&fx.path_str(), &branch, &anchor)
         .expect_err("default must survive");
     assert!(
         matches!(err, WorkspaceFailure::CleanupUnsafe { .. }),
@@ -565,9 +603,10 @@ fn default_branch_is_never_deleted() {
 fn absent_branch_deletion_is_idempotent() {
     let adapter = GitCli::new();
     let fx = Fixture::new("remove-absent");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let branch = workspace::BranchRef::new("refs/heads/agent/e-never-existed").unwrap();
     let err = adapter
-        .remove_branch(&fx.path_str(), &branch)
+        .remove_branch(&fx.path_str(), &branch, &anchor)
         .expect_err("absent must signal idempotency");
     assert!(
         matches!(err, WorkspaceFailure::AlreadyAbsent),
@@ -579,6 +618,7 @@ fn absent_branch_deletion_is_idempotent() {
 fn removal_leaves_siblings_and_primary_untouched() {
     let adapter = GitCli::new();
     let fx = Fixture::new("remove-isolation");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     fx.write_tracked("f.txt", b"base");
     git(&fx.dir, &["add", "f.txt"]);
     git(&fx.dir, &["commit", "-q", "-m", "f"]);
@@ -590,6 +630,7 @@ fn removal_leaves_siblings_and_primary_untouched() {
             &lease_for("rm-ia", "agent/e-rm-ia", &base, "ref:unused"),
             &fx.path_str(),
             ta.to_str().unwrap(),
+            &anchor,
         )
         .unwrap();
     adapter
@@ -597,6 +638,7 @@ fn removal_leaves_siblings_and_primary_untouched() {
             &lease_for("rm-ib", "agent/e-rm-ib", &base, "ref:unused"),
             &fx.path_str(),
             tb.to_str().unwrap(),
+            &anchor,
         )
         .unwrap();
     std::fs::write(tb.join("f.txt"), b"edit-b").unwrap();
@@ -604,14 +646,20 @@ fn removal_leaves_siblings_and_primary_untouched() {
     let primary_before = fx.read_tracked("f.txt");
 
     let la = lease_at("rm-ia", "agent/e-rm-ia", &base, &ta);
-    adapter.remove_worktree(&la, ta.to_str().unwrap()).unwrap();
+    adapter
+        .remove_worktree(&la, ta.to_str().unwrap(), &anchor)
+        .unwrap();
     let branch_a = workspace::BranchRef::new("refs/heads/agent/e-rm-ia").unwrap();
-    adapter.remove_branch(&fx.path_str(), &branch_a).unwrap();
+    adapter
+        .remove_branch(&fx.path_str(), &branch_a, &anchor)
+        .unwrap();
 
     assert!(!ta.exists());
     assert_eq!(std::fs::read(tb.join("f.txt")).unwrap(), sibling_before);
     assert_eq!(
-        adapter.worktree_status(tb.to_str().unwrap()).unwrap(),
+        adapter
+            .worktree_status(tb.to_str().unwrap(), &anchor)
+            .unwrap(),
         WorktreeStatus::DirtyTracked
     );
     assert!(fx.ref_exists("refs/heads/agent/e-rm-ib"));
@@ -625,6 +673,7 @@ fn removal_leaves_siblings_and_primary_untouched() {
 fn is_registered_worktree_binds_lease_to_calling_repository() {
     let adapter = GitCli::new();
     let fx = Fixture::new("reg-bind");
+    let anchor = anchor_for(&adapter, &fx.path_str());
     let base = fx.primary_head();
     let target = target_path(&fx, "ws-reg-bind");
     adapter
@@ -632,20 +681,26 @@ fn is_registered_worktree_binds_lease_to_calling_repository() {
             &lease_for("reg-bind", "agent/e-reg-bind", &base, "ref:unused"),
             &fx.path_str(),
             target.to_str().unwrap(),
+            &anchor,
         )
         .unwrap();
     let target_str = target.to_str().unwrap();
     // Own repository positively registers the worktree.
     assert!(adapter
-        .is_registered_worktree(&fx.path_str(), target_str)
+        .is_registered_worktree(&fx.path_str(), target_str, &anchor)
         .unwrap());
     // An unrelated valid repository does not — the F1 wrong-repo shape.
+    // Uses that repository's own anchor so the check validates its view;
+    // a lease-bound anchor for the true repository would fail closed as
+    // GitBackendFailure here (proven by F7 keepers), which the service also
+    // treats as binding refusal.
     let other = Fixture::new("reg-bind-other");
+    let anchor_other = anchor_for(&adapter, &other.path_str());
     assert!(!adapter
-        .is_registered_worktree(&other.path_str(), target_str)
+        .is_registered_worktree(&other.path_str(), target_str, &anchor_other)
         .unwrap());
     // Backend errors fail closed, never as assumed-absent.
     assert!(adapter
-        .is_registered_worktree("/no/such/repo", target_str)
+        .is_registered_worktree("/no/such/repo", target_str, &anchor)
         .is_err());
 }

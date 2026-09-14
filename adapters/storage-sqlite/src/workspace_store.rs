@@ -11,8 +11,8 @@
 
 use rusqlite::{params, OptionalExtension};
 use workspace::{
-    ExecutionId, LeaseLifecycle, WorkspaceFailure, WorkspaceId, WorkspaceJournalEvidence,
-    WorkspaceLease, WorkspaceLeaseSnapshot, WorkspaceStore,
+    ExecutionId, LeaseLifecycle, TrustedCommonGit, WorkspaceFailure, WorkspaceId,
+    WorkspaceJournalEvidence, WorkspaceLease, WorkspaceLeaseSnapshot, WorkspaceStore,
 };
 
 use crate::error::StorageError;
@@ -499,6 +499,136 @@ impl WorkspaceStore for crate::task_store::SqliteStore {
                 ))
             })?;
         Ok(())
+    }
+
+    fn insert_allocated_lease_with_anchor(
+        &mut self,
+        lease: &WorkspaceLease,
+        anchor: &TrustedCommonGit,
+        captured_at_millis: u64,
+    ) -> Result<(), WorkspaceFailure> {
+        if lease.lifecycle() != LeaseLifecycle::Allocated {
+            return Err(WorkspaceFailure::StorageFailure {
+                detail: format!(
+                    "lease {} is not an Allocated intent; only intents are inserted",
+                    lease.id()
+                ),
+            });
+        }
+        // u64 millis are always non-negative; SQLite CHECK enforces >= 0.
+        let anchor_text = anchor.as_str()?.to_owned();
+        if self.load_lease_row(lease.id())?.is_some() {
+            return Err(WorkspaceFailure::StorageFailure {
+                detail: format!("workspace lease {} already exists", lease.id()),
+            });
+        }
+        if self.get_workspace_for_execution(lease.owner())?.is_some() {
+            return Err(WorkspaceFailure::StorageFailure {
+                detail: format!("execution {} already owns a workspace lease", lease.owner()),
+            });
+        }
+        let owner_exists: bool = self
+            .connection()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM executions WHERE id = ?1)",
+                params![lease.owner().as_str()],
+                |row| row.get(0),
+            )
+            .map_err(storage_failure)?;
+        if !owner_exists {
+            return Err(WorkspaceFailure::StorageFailure {
+                detail: format!(
+                    "owning execution {} does not exist for lease {}",
+                    lease.owner(),
+                    lease.id()
+                ),
+            });
+        }
+        self.claim_managed_branch(lease.branch().as_str(), lease.owner(), "lease")?;
+        if let Some(owner) = self
+            .find_lease_owner_in_repository(lease.repository().as_str(), lease.branch().as_str())?
+        {
+            if owner != *lease.owner() {
+                return Err(WorkspaceFailure::BranchCollision {
+                    detail: format!(
+                        "managed branch {} is already owned by execution {} in repository {}; refusing reuse",
+                        lease.branch().as_str(),
+                        owner.as_str(),
+                        lease.repository().as_str()
+                    ),
+                });
+            }
+        }
+        let snapshot = lease.snapshot();
+        let transaction = self
+            .connection_mut()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_failure)?;
+        transaction
+            .execute(
+                "INSERT INTO workspace_leases
+                 (workspace_id, execution_id, repository_ref, base_revision,
+                  branch_ref, worktree_ref, lifecycle)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    snapshot.workspace_id,
+                    snapshot.execution_id,
+                    snapshot.repository_ref,
+                    snapshot.base_revision,
+                    snapshot.branch_ref,
+                    snapshot.worktree_ref,
+                    snapshot.lifecycle,
+                ],
+            )
+            .map_err(|error| {
+                storage_failure(crate::error::map_constraint(
+                    error,
+                    "insert workspace lease",
+                ))
+            })?;
+        let captured_at: i64 =
+            i64::try_from(captured_at_millis).map_err(|_| WorkspaceFailure::StorageFailure {
+                detail: "anchor capture time out of range".to_owned(),
+            })?;
+        transaction
+            .execute(
+                "INSERT INTO workspace_trusted_anchor
+                 (workspace_id, canonical_commondir, captured_at_millis, capture_provenance)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    snapshot.workspace_id,
+                    anchor_text,
+                    captured_at,
+                    "workspace-application-service/allocate_workspace",
+                ],
+            )
+            .map_err(|error| {
+                storage_failure(crate::error::map_constraint(error, "insert trusted anchor"))
+            })?;
+        transaction.commit().map_err(storage_failure)?;
+        Ok(())
+    }
+
+    fn get_trusted_anchor(
+        &self,
+        id: &WorkspaceId,
+    ) -> Result<Option<TrustedCommonGit>, WorkspaceFailure> {
+        let row: Option<String> = self
+            .connection()
+            .query_row(
+                "SELECT canonical_commondir FROM workspace_trusted_anchor WHERE workspace_id = ?1",
+                params![id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_failure)?;
+        let Some(canonical) = row else {
+            return Ok(None);
+        };
+        match TrustedCommonGit::restore(&canonical) {
+            Ok(anchor) => Ok(Some(anchor)),
+            Err(e) => Err(e),
+        }
     }
 
     fn mark_lease_ready(

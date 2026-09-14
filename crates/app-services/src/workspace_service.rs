@@ -37,8 +37,9 @@ use agent_runtime::ExecutionId;
 use storage_sqlite::{SqliteStore, StorageError};
 use task_domain::{ProjectId, TaskId};
 use workspace::{
-    DiffEvidence, GitPort, LeaseLifecycle, RepositoryRef, WorkspaceEventKind, WorkspaceFailure,
-    WorkspaceId, WorkspaceJournalEvidence, WorkspaceLease, WorkspaceStore, WorktreeStatus,
+    DiffEvidence, GitPort, LeaseLifecycle, RepositoryRef, TrustedCommonGit, WorkspaceEventKind,
+    WorkspaceFailure, WorkspaceId, WorkspaceJournalEvidence, WorkspaceLease, WorkspaceStore,
+    WorktreeStatus,
 };
 
 use crate::clock::{format_rfc3339, Clock, SystemClock};
@@ -226,6 +227,22 @@ pub struct WorkspaceService<G: GitPort, C: Clock = SystemClock> {
 }
 
 impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
+    /// Loads the durable trusted anchor, failing closed when absent.
+    /// No backfill from current FS: missing rows (pre-existing lease,
+    /// machine move, loss) refuse every bound operation until re-admission
+    /// with a new lease.
+    fn load_anchor(&self, id: &WorkspaceId) -> Result<TrustedCommonGit, WorkspaceFailure> {
+        match self.store.get_trusted_anchor(id)? {
+            Some(anchor) => Ok(anchor),
+            None => Err(WorkspaceFailure::GitBackendFailure {
+                detail: format!(
+                    "lease {} has no trusted Git anchor; re-admission with a new lease is required",
+                    id.as_str()
+                ),
+            }),
+        }
+    }
+
     fn classify_lease_identity(
         &self,
         lease: &WorkspaceLease,
@@ -328,7 +345,8 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
                     detail: format!("lease {} does not exist for diff", id.as_str()),
                 })?;
         self.validate_managed_path(&lease)?;
-        let evidence = self.git.compute_diff(&lease)?;
+        let anchor = self.load_anchor(lease.id())?;
+        let evidence = self.git.compute_diff(&lease, &anchor)?;
         if evidence.diff.base_revision != *lease.base_revision() {
             return Err(WorkspaceFailure::StorageFailure {
                 detail: format!(
@@ -406,6 +424,7 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         self.validate_cleanup_repository(&lease, repository_path)?;
         self.reject_live_owner(&lease)?;
         self.reject_protected_branch(&lease, repository_path)?;
+        let anchor = self.load_anchor(lease.id())?;
 
         // Dirtiness before CleanupPending: a dirty Ready lease stays Ready.
         // Lease-to-repository binding (TASK-0046, G4 finding F1) is proven
@@ -418,7 +437,7 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         // - absent worktree + Ready → drift error (read-only, no binding
         //   claim needed, nothing mutated);
         // - unusable worktree → inspection error, unchanged behavior.
-        match self.git.worktree_status(lease.worktree_ref())? {
+        match self.git.worktree_status(lease.worktree_ref(), &anchor)? {
             WorktreeStatus::Clean => {
                 self.validate_worktree_binding(&lease, repository_path)?;
             }
@@ -508,6 +527,7 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         lease: &WorkspaceLease,
         repository_path: &str,
     ) -> Result<CleanedWorkspace, WorkspaceFailure> {
+        let anchor = self.load_anchor(lease.id())?;
         if !self
             .store
             .has_workspace_event(lease.id(), WorkspaceEventKind::Removed)?
@@ -527,7 +547,7 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         // a wrong-repo `AlreadyRemoved` can no longer mask a leak created
         // by this service. A leaked branch in the true repository still
         // surfaces loudly as `CheckoutFailed` corruption below.
-        match self.git.worktree_status(lease.worktree_ref())? {
+        match self.git.worktree_status(lease.worktree_ref(), &anchor)? {
             WorktreeStatus::Missing => {}
             _ => {
                 return Err(WorkspaceFailure::CheckoutFailed {
@@ -539,7 +559,10 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
                 });
             }
         }
-        if self.git.branch_exists(repository_path, lease.branch())? {
+        if self
+            .git
+            .branch_exists(repository_path, lease.branch(), &anchor)?
+        {
             return Err(WorkspaceFailure::CheckoutFailed {
                 detail: format!(
                     "lease {} is Removed but its managed branch still exists; \
@@ -566,10 +589,11 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         worktree_known_absent: bool,
     ) -> Result<CleanedWorkspace, WorkspaceFailure> {
         debug_assert_eq!(lease.lifecycle(), LeaseLifecycle::CleanupPending);
+        let anchor = self.load_anchor(lease.id())?;
         if !worktree_known_absent {
             // TOCTOU re-check immediately before destruction: preflight
             // cleanliness may have changed since the entry check.
-            match self.git.worktree_status(lease.worktree_ref())? {
+            match self.git.worktree_status(lease.worktree_ref(), &anchor)? {
                 WorktreeStatus::Clean => {}
                 WorktreeStatus::DirtyTracked | WorktreeStatus::DirtyUntracked => {
                     return Err(WorkspaceFailure::WorktreeDirty {
@@ -592,13 +616,16 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
             // Re-validate ownership immediately before the mutation: the
             // persisted path is not permission by itself.
             self.validate_managed_path(lease)?;
-            match self.git.remove_worktree(lease, lease.worktree_ref()) {
+            match self
+                .git
+                .remove_worktree(lease, lease.worktree_ref(), &anchor)
+            {
                 Ok(()) => {}
                 Err(WorkspaceFailure::WorktreeMissing { .. })
                 | Err(WorkspaceFailure::AlreadyAbsent) => {}
                 Err(other) => return Err(other),
             }
-            match self.git.worktree_status(lease.worktree_ref())? {
+            match self.git.worktree_status(lease.worktree_ref(), &anchor)? {
                 WorktreeStatus::Missing => {}
                 WorktreeStatus::DirtyTracked | WorktreeStatus::DirtyUntracked => {
                     return Err(WorkspaceFailure::WorktreeDirty {
@@ -623,13 +650,22 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         // preserved (`CleanupUnsafe`): the lease stays `CleanupPending`
         // with no event — worktree gone, branch evidence kept for future
         // delivery, never force-deleted.
-        if self.git.branch_exists(repository_path, lease.branch())? {
-            match self.git.remove_branch(repository_path, lease.branch()) {
+        if self
+            .git
+            .branch_exists(repository_path, lease.branch(), &anchor)?
+        {
+            match self
+                .git
+                .remove_branch(repository_path, lease.branch(), &anchor)
+            {
                 Ok(()) => {}
                 Err(WorkspaceFailure::AlreadyAbsent) => {}
                 Err(other) => return Err(other),
             }
-            if self.git.branch_exists(repository_path, lease.branch())? {
+            if self
+                .git
+                .branch_exists(repository_path, lease.branch(), &anchor)?
+            {
                 return Err(WorkspaceFailure::CleanupUnsafe {
                     detail: format!(
                         "lease {} branch {} preserved; refusing to discard its commits",
@@ -641,7 +677,7 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         }
         // Finalization gate: both Git resources must be in their
         // contract-defined absent state before `workspace.removed`.
-        match self.git.worktree_status(lease.worktree_ref())? {
+        match self.git.worktree_status(lease.worktree_ref(), &anchor)? {
             WorktreeStatus::Missing => {}
             _ => {
                 return Err(WorkspaceFailure::GitBackendFailure {
@@ -652,7 +688,10 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
                 });
             }
         }
-        if self.git.branch_exists(repository_path, lease.branch())? {
+        if self
+            .git
+            .branch_exists(repository_path, lease.branch(), &anchor)?
+        {
             return Err(WorkspaceFailure::CleanupUnsafe {
                 detail: format!(
                     "lease {} branch {} still present; refusing finalization",
@@ -776,12 +815,13 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         lease: &WorkspaceLease,
         repository_path: &str,
     ) -> Result<(), WorkspaceFailure> {
+        let anchor = self.load_anchor(lease.id())?;
         if repository_path.trim().is_empty() {
             return Err(WorkspaceFailure::NotRepository {
                 detail: "workspace cleanup requires a repository path".to_owned(),
             });
         }
-        if !self.git.is_repository(repository_path)? {
+        if !self.git.is_repository(repository_path, &anchor)? {
             return Err(WorkspaceFailure::NotRepository {
                 detail: format!("workspace cleanup path is not a repository: {repository_path}"),
             });
@@ -798,7 +838,7 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
             // spelling for the nesting comparison.
             let primary_canon = self
                 .git
-                .resolve_revision(repository_path, "HEAD")
+                .resolve_revision(repository_path, "HEAD", &anchor)
                 .ok()
                 .and_then(|_| std::fs::canonicalize(&repo_canon).ok())
                 .unwrap_or(repo_canon);
@@ -842,9 +882,10 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         lease: &WorkspaceLease,
         repository_path: &str,
     ) -> Result<(), WorkspaceFailure> {
+        let anchor = self.load_anchor(lease.id())?;
         if !self
             .git
-            .is_registered_worktree(repository_path, lease.worktree_ref())?
+            .is_registered_worktree(repository_path, lease.worktree_ref(), &anchor)?
         {
             return Err(WorkspaceFailure::OwnershipMismatch {
                 detail: format!(
@@ -870,9 +911,10 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         lease: &WorkspaceLease,
         repository_path: &str,
     ) -> Result<(), WorkspaceFailure> {
+        let anchor = self.load_anchor(lease.id())?;
         match self
             .git
-            .resolve_revision(repository_path, lease.base_revision().as_str())
+            .resolve_revision(repository_path, lease.base_revision().as_str(), &anchor)
         {
             Ok(resolved) if resolved == *lease.base_revision() => Ok(()),
             _ => Err(WorkspaceFailure::OwnershipMismatch {
@@ -907,7 +949,8 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         lease: &WorkspaceLease,
         repository_path: &str,
     ) -> Result<(), WorkspaceFailure> {
-        match self.git.default_branch(repository_path) {
+        let anchor = self.load_anchor(lease.id())?;
+        match self.git.default_branch(repository_path, &anchor) {
             Ok(default_ref) => {
                 if default_ref == lease.branch().as_str() {
                     return Err(WorkspaceFailure::CleanupUnsafe {
@@ -978,7 +1021,15 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
                 detail: "workspace allocation requires a repository path".to_owned(),
             });
         }
-        if !self.git.is_repository(&request.repository_path)? {
+        // Trusted admission capture (trusted-deposit before provider
+        // execution): establish the anchor first via the sole anchor-free
+        // path, then bind every subsequent observation to it. Git
+        // observations precede the single short SQLite transaction below
+        // (INV-145: no SQLite transaction spans a Git subprocess).
+        let anchor = self
+            .git
+            .establish_trusted_anchor(&request.repository_path)?;
+        if !self.git.is_repository(&request.repository_path, &anchor)? {
             return Err(WorkspaceFailure::NotRepository {
                 detail: format!(
                     "workspace allocation path is not a repository: {}",
@@ -986,9 +1037,9 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
                 ),
             });
         }
-        let base = self
-            .git
-            .resolve_revision(&request.repository_path, &request.base_revision)?;
+        let base =
+            self.git
+                .resolve_revision(&request.repository_path, &request.base_revision, &anchor)?;
         let now = self.clock.now_millis();
         self.op_counter += 1;
         let id = WorkspaceId::new(format!(
@@ -1021,7 +1072,8 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
             target_text.to_owned(),
         )
         .map_err(domain_failure)?;
-        self.store.insert_allocated_lease(&lease)?;
+        self.store
+            .insert_allocated_lease_with_anchor(&lease, &anchor, now)?;
         Ok(lease)
     }
 
@@ -1087,8 +1139,9 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
                 lease.worktree_ref().to_owned()
             }
         };
+        let anchor = self.load_anchor(lease.id())?;
         self.git
-            .create_worktree(lease, repository_path, &target_text)?;
+            .create_worktree(lease, repository_path, &target_text, &anchor)?;
         Ok(())
     }
 
@@ -1118,7 +1171,8 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
                 ),
             });
         }
-        self.verify_git_consistent(&lease, repository_path)?;
+        let anchor = self.load_anchor(lease.id())?;
+        self.verify_git_consistent(&lease, repository_path, &anchor)?;
         let execution = self
             .store
             .get_execution(lease.owner())
@@ -1167,10 +1221,11 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         request: &WorkspaceRequest,
     ) -> Result<EnsuredWorkspace, WorkspaceFailure> {
         self.validate_request_against_lease(&lease, request)?;
+        let anchor = self.load_anchor(lease.id())?;
         match lease.lifecycle() {
             LeaseLifecycle::Allocated => {
                 if self
-                    .verify_git_consistent(&lease, &request.repository_path)
+                    .verify_git_consistent(&lease, &request.repository_path, &anchor)
                     .is_ok()
                 {
                     // Crash-B shape: Git did the work, finalization never
@@ -1220,7 +1275,7 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
                 }
                 // Drift never recreates: a vanished or changed Ready
                 // workspace may hold agent work — fail explicitly.
-                self.verify_git_consistent(&lease, &request.repository_path)?;
+                self.verify_git_consistent(&lease, &request.repository_path, &anchor)?;
                 Ok(EnsuredWorkspace {
                     lease,
                     outcome: EnsureOutcome::AlreadyReady,
@@ -1251,18 +1306,22 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         &self,
         lease: &WorkspaceLease,
         repository_path: &str,
+        anchor: &TrustedCommonGit,
     ) -> Result<(), WorkspaceFailure> {
         let inconsistent = |detail: String| WorkspaceFailure::CheckoutFailed { detail };
-        if !self.git.branch_exists(repository_path, lease.branch())? {
+        if !self
+            .git
+            .branch_exists(repository_path, lease.branch(), anchor)?
+        {
             return Err(inconsistent(format!(
                 "managed branch {} absent for lease {}",
                 lease.branch().as_str(),
                 lease.id().as_str()
             )));
         }
-        let at_branch = self
-            .git
-            .resolve_revision(repository_path, lease.branch().as_str())?;
+        let at_branch =
+            self.git
+                .resolve_revision(repository_path, lease.branch().as_str(), anchor)?;
         if at_branch != *lease.base_revision() {
             return Err(inconsistent(format!(
                 "managed branch {} points at {} for lease {}, expected base {}",
@@ -1272,7 +1331,9 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
                 lease.base_revision().as_str()
             )));
         }
-        let at_worktree = self.git.resolve_revision(lease.worktree_ref(), "HEAD")?;
+        let at_worktree = self
+            .git
+            .resolve_revision(lease.worktree_ref(), "HEAD", anchor)?;
         if at_worktree != *lease.base_revision() {
             return Err(inconsistent(format!(
                 "worktree HEAD is {} for lease {}, expected base {}",
@@ -1281,7 +1342,7 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
                 lease.base_revision().as_str()
             )));
         }
-        match self.git.worktree_status(lease.worktree_ref())? {
+        match self.git.worktree_status(lease.worktree_ref(), anchor)? {
             workspace::WorktreeStatus::Clean
             | workspace::WorktreeStatus::DirtyTracked
             | workspace::WorktreeStatus::DirtyUntracked => Ok(()),
@@ -1309,10 +1370,11 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
             return Ok(());
         };
         self.validate_request_against_lease(&lease, request)?;
+        let anchor = self.load_anchor(lease.id())?;
         match lease.lifecycle() {
             LeaseLifecycle::Allocated => {
                 if self
-                    .verify_git_consistent(&lease, &request.repository_path)
+                    .verify_git_consistent(&lease, &request.repository_path, &anchor)
                     .is_ok()
                     || self.prove_branch_only_recovery(&lease, request)?
                     || !self.side_effects_present(&lease, &request.repository_path)
@@ -1339,7 +1401,7 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
                         ),
                     });
                 }
-                self.verify_git_consistent(&lease, &request.repository_path)
+                self.verify_git_consistent(&lease, &request.repository_path, &anchor)
             }
             LeaseLifecycle::CleanupPending => Err(WorkspaceFailure::StorageFailure {
                 detail: format!(
@@ -1371,9 +1433,10 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
                 ),
             });
         }
-        let requested_base = self
-            .git
-            .resolve_revision(&request.repository_path, &request.base_revision)?;
+        let anchor = self.load_anchor(lease.id())?;
+        let requested_base =
+            self.git
+                .resolve_revision(&request.repository_path, &request.base_revision, &anchor)?;
         if requested_base != *lease.base_revision() {
             return Err(WorkspaceFailure::OwnershipMismatch {
                 detail: format!(
@@ -1397,12 +1460,13 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         lease: &WorkspaceLease,
         request: &WorkspaceRequest,
     ) -> Result<bool, WorkspaceFailure> {
+        let anchor = self.load_anchor(lease.id())?;
         if self.classify_lease_identity(lease)? == PersistedManagedIdentityFormat::Legacy {
             return Ok(false);
         }
         if !self
             .git
-            .branch_exists(&request.repository_path, lease.branch())?
+            .branch_exists(&request.repository_path, lease.branch(), &anchor)?
         {
             return Ok(false);
         }
@@ -1481,9 +1545,11 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         }
 
         self.validate_history_binding(lease, &request.repository_path)?;
-        let branch_tip = self
-            .git
-            .resolve_revision(&request.repository_path, lease.branch().as_str())?;
+        let branch_tip = self.git.resolve_revision(
+            &request.repository_path,
+            lease.branch().as_str(),
+            &anchor,
+        )?;
         if branch_tip != *lease.base_revision() {
             return Err(WorkspaceFailure::CheckoutFailed {
                 detail: format!(
@@ -1517,10 +1583,11 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
                 });
             }
         }
-        if self
-            .git
-            .is_registered_worktree(&request.repository_path, lease.worktree_ref())?
-        {
+        if self.git.is_registered_worktree(
+            &request.repository_path,
+            lease.worktree_ref(),
+            &anchor,
+        )? {
             return Err(WorkspaceFailure::OwnershipMismatch {
                 detail: format!(
                     "lease {} target path is already registered; branch-only recovery does not guess ownership",
@@ -1528,9 +1595,9 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
                 ),
             });
         }
-        if let Some(holder) = self
-            .git
-            .worktree_for_branch(&request.repository_path, lease.branch())?
+        if let Some(holder) =
+            self.git
+                .worktree_for_branch(&request.repository_path, lease.branch(), &anchor)?
         {
             return Err(WorkspaceFailure::OwnershipMismatch {
                 detail: format!(
@@ -1550,8 +1617,13 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         if !self.prove_branch_only_recovery(lease, request)? {
             return Ok(None);
         }
-        self.git
-            .attach_worktree(lease, &request.repository_path, lease.worktree_ref())?;
+        let anchor = self.load_anchor(lease.id())?;
+        self.git.attach_worktree(
+            lease,
+            &request.repository_path,
+            lease.worktree_ref(),
+            &anchor,
+        )?;
         let ready = self.finalize_ready(lease.id(), &request.repository_path)?;
         Ok(Some(EnsuredWorkspace {
             lease: ready,
@@ -1563,15 +1635,18 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
     /// only "branch absent AND target absent" counts as untouched. Backend
     /// errors and unusable states count as present (fail-closed direction).
     fn side_effects_present(&self, lease: &WorkspaceLease, repository_path: &str) -> bool {
+        let Ok(anchor) = self.load_anchor(lease.id()) else {
+            return true;
+        };
         let branch_present = self
             .git
-            .branch_exists(repository_path, lease.branch())
+            .branch_exists(repository_path, lease.branch(), &anchor)
             .unwrap_or(true);
         if branch_present {
             return true;
         }
         self.git
-            .worktree_status(lease.worktree_ref())
+            .worktree_status(lease.worktree_ref(), &anchor)
             .map(|s| s != workspace::WorktreeStatus::Missing)
             .unwrap_or(true)
     }

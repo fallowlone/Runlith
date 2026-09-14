@@ -25,16 +25,20 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use workspace::{BranchRef, WorkspaceFailure, WorkspaceLease, WorktreeStatus};
+use workspace::{BranchRef, TrustedCommonGit, WorkspaceFailure, WorkspaceLease, WorktreeStatus};
 
 use crate::observe::{self, worktree_registered};
-use crate::runner::{absolutize, backend_failure, bounded_detail, run_git, stderr_excerpt};
+use crate::runner::{
+    absolutize, backend_failure, bounded_detail, run_git, stderr_excerpt,
+    validate_repository_boundary,
+};
 
 /// Removes the lease's worktree registration without force.
 pub fn remove_worktree(
     executable: &OsStr,
     lease: &WorkspaceLease,
     worktree_path: &str,
+    expected: &TrustedCommonGit,
 ) -> Result<(), WorkspaceFailure> {
     let target_abs =
         absolutize(worktree_path).map_err(|_| WorkspaceFailure::OwnershipMismatch {
@@ -61,10 +65,14 @@ pub fn remove_worktree(
             )),
         });
     }
+    // Same repository-identity check as every other Git entry point: this
+    // function goes on to call Git directly (`attached_branch`,
+    // `discover_primary`, the removal mutation itself) against this path.
+    validate_repository_boundary(executable, &target_abs, expected)?;
     // Dirtiness pre-check: ordinary cleanup never destroys uncommitted or
     // untracked work. Git's own non-forced refusal below is the second
     // boundary (TOCTOU); this pre-check gives the typed dirty signal.
-    match observe::worktree_status(executable, worktree_path)? {
+    match observe::worktree_status(executable, worktree_path, expected)? {
         WorktreeStatus::Clean => {}
         WorktreeStatus::DirtyTracked | WorktreeStatus::DirtyUntracked => {
             return Err(WorkspaceFailure::WorktreeDirty {
@@ -160,6 +168,7 @@ pub fn remove_branch(
     executable: &OsStr,
     repository_path: &str,
     branch: &BranchRef,
+    expected: &TrustedCommonGit,
 ) -> Result<(), WorkspaceFailure> {
     if branch.short_name().starts_with('-') {
         return Err(backend_failure(format!(
@@ -169,16 +178,20 @@ pub fn remove_branch(
     let abs = absolutize(repository_path).map_err(|_| WorkspaceFailure::NotRepository {
         detail: bounded_detail("git-cli: invalid repository path for branch removal".to_owned()),
     })?;
-    let root = observe::repository_root(executable, abs.to_str().unwrap_or(repository_path))?;
+    let root = observe::repository_root(
+        executable,
+        abs.to_str().unwrap_or(repository_path),
+        expected,
+    )?;
     let root_str = root.to_str().ok_or_else(|| {
         backend_failure("git-cli: repository root is not UTF-8; refusing branch removal")
     })?;
     // Idempotent absent: already gone with consistent ownership view.
-    if !observe::branch_exists(executable, root_str, branch)? {
+    if !observe::branch_exists(executable, root_str, branch, expected)? {
         return Err(WorkspaceFailure::AlreadyAbsent);
     }
     // Protected/default branch is never deleted.
-    match observe::default_branch(executable, root_str) {
+    match observe::default_branch(executable, root_str, expected) {
         Ok(default_ref) => {
             if default_ref == branch.as_str() {
                 return Err(WorkspaceFailure::CleanupUnsafe {
@@ -212,7 +225,7 @@ pub fn remove_branch(
             )),
         });
     }
-    if observe::branch_exists(executable, root_str, branch)? {
+    if observe::branch_exists(executable, root_str, branch, expected)? {
         return Err(backend_failure(format!(
             "git-cli: branch still present after deletion for {branch}"
         )));

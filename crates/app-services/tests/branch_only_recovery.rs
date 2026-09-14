@@ -573,8 +573,11 @@ fn second_crash_after_existing_branch_attachment_is_reconciled() {
 
     // First recovery reached the Git mutation but the daemon dies before
     // `Allocated -> Ready` + workspace.created can commit.
+    let anchor = GitCli::new()
+        .establish_trusted_anchor(&env.repo_path())
+        .expect("anchor");
     GitCli::new()
-        .attach_worktree(&lease, &env.repo_path(), lease.worktree_ref())
+        .attach_worktree(&lease, &env.repo_path(), lease.worktree_ref(), &anchor)
         .expect("continue existing branch");
     assert_eq!(
         env.workspace_service()
