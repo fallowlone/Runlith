@@ -20,15 +20,17 @@
 
 use std::ffi::OsStr;
 use std::fs;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::thread;
 
 use workspace::{TrustedCommonGit, WorkspaceFailure, WorkspaceLease};
 
 /// Backend identity surfaced via `GitPort::backend_ref` (never branched on).
 pub const BACKEND_REF: &str = "git-cli";
 
-/// Upper bound for any captured Git stdout. Commands in this adapter are
+/// Upper bound for each captured Git output stream. Commands in this adapter are
 /// expected to return identifiers or small metadata; absurdly large output
 /// is rejected instead of becoming an unbounded in-memory payload.
 pub const MAX_GIT_OUTPUT_BYTES: usize = 1024 * 1024;
@@ -633,8 +635,11 @@ pub fn run_git<A: AsRef<OsStr>>(
         .env("GIT_PAGER", "cat")
         .env("PAGER", "cat")
         .env("GIT_EDITOR", ":")
-        .env("GIT_SEQUENCE_EDITOR", ":");
-    let output = command.output().map_err(|e| {
+        .env("GIT_SEQUENCE_EDITOR", ":")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             backend_failure(format!(
                 "git-cli: cannot spawn git executable (unavailable?) or working directory vanished: {e}"
@@ -643,13 +648,98 @@ pub fn run_git<A: AsRef<OsStr>>(
             backend_failure(format!("git-cli: cannot spawn git: {e}"))
         }
     })?;
-    if output.stdout.len() > MAX_GIT_OUTPUT_BYTES {
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| backend_failure("git-cli: spawned Git child has no stdout capture pipe"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| backend_failure("git-cli: spawned Git child has no stderr capture pipe"))?;
+    let stdout_handle = thread::spawn(move || read_bounded(stdout, MAX_GIT_OUTPUT_BYTES));
+    let stderr_handle = thread::spawn(move || read_bounded(stderr, MAX_GIT_OUTPUT_BYTES));
+
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_handle.join();
+            let _ = stderr_handle.join();
+            return Err(backend_failure(format!(
+                "git-cli: cannot wait for git process: {error}"
+            )));
+        }
+    };
+    let stdout = join_capture(stdout_handle, "stdout")?;
+    let stderr = join_capture(stderr_handle, "stderr")?;
+
+    if stdout.overflowed {
         return Err(backend_failure(format!(
-            "git-cli: git output exceeded {} bytes; refusing unbounded payload",
+            "git-cli: git stdout exceeded {} bytes; refusing unbounded payload",
             MAX_GIT_OUTPUT_BYTES
         )));
     }
-    Ok(output)
+    if stderr.overflowed {
+        return Err(backend_failure(format!(
+            "git-cli: git stderr exceeded {} bytes; refusing unbounded payload",
+            MAX_GIT_OUTPUT_BYTES
+        )));
+    }
+
+    Ok(Output {
+        status,
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
+    })
+}
+
+#[derive(Debug)]
+struct BoundedCapture {
+    bytes: Vec<u8>,
+    overflowed: bool,
+}
+
+/// Drains a child stream to EOF while retaining at most `bound` bytes.
+///
+/// Continuing to drain after the bound is crossed prevents a chatty child
+/// from blocking forever on a full pipe, while the retained buffer stays
+/// strictly bounded in memory.
+fn read_bounded(mut reader: impl Read, bound: usize) -> io::Result<BoundedCapture> {
+    let mut bytes = Vec::with_capacity(bound.min(8192));
+    let mut overflowed = false;
+    let mut chunk = [0u8; 8192];
+
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        let remaining = bound.saturating_sub(bytes.len());
+        let keep = read.min(remaining);
+        bytes.extend_from_slice(&chunk[..keep]);
+        if keep < read {
+            overflowed = true;
+        }
+    }
+
+    Ok(BoundedCapture { bytes, overflowed })
+}
+
+fn join_capture(
+    handle: thread::JoinHandle<io::Result<BoundedCapture>>,
+    stream: &'static str,
+) -> Result<BoundedCapture, WorkspaceFailure> {
+    match handle.join() {
+        Ok(Ok(captured)) => Ok(captured),
+        Ok(Err(error)) => Err(backend_failure(format!(
+            "git-cli: cannot read git {stream}: {error}"
+        ))),
+        Err(_) => Err(backend_failure(format!(
+            "git-cli: git {stream} capture worker panicked"
+        ))),
+    }
 }
 
 /// Runs Git and returns trimmed stdout, enforcing the small-metadata bound.
@@ -868,6 +958,7 @@ pub fn check_branch_argv_safety(lease: &WorkspaceLease) -> Result<(), WorkspaceF
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
     fn detail_is_bounded() {
@@ -898,5 +989,14 @@ mod tests {
         assert!(!path_strictly_inside(&parent, &parent));
         assert!(!path_strictly_inside(&parent, &PathBuf::from("/other")));
         assert!(!path_strictly_inside(&parent, &PathBuf::from("/r2")));
+    }
+
+    #[test]
+    fn git_capture_retains_only_the_configured_bound() {
+        let payload = vec![b'x'; MAX_GIT_OUTPUT_BYTES * 2];
+        let captured = read_bounded(Cursor::new(payload), MAX_GIT_OUTPUT_BYTES).unwrap();
+
+        assert!(captured.overflowed);
+        assert_eq!(captured.bytes.len(), MAX_GIT_OUTPUT_BYTES);
     }
 }
