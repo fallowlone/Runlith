@@ -68,6 +68,8 @@ enum ProposalCase {
     InvalidScope,
     PolicyWeakening,
     OversizedTokenReceipt,
+    UpdateRemovedNode,
+    DropRemovedCriteria,
     StaleBase(u64),
 }
 
@@ -184,6 +186,23 @@ impl TestPlanner {
                     PlanningCostReceipt::new(MAX_PLANNER_INPUT_TOKENS + 1, 1, 1, "test".to_owned())
                         .expect("oversized receipt remains representable evidence");
             }
+            ProposalCase::UpdateRemovedNode => {
+                let target = PlanNodeId::new(format!("node-{}", input.base_plan_revision))
+                    .expect("derived existing node id");
+                proposal.node_updates.push(plan_domain::NodeUpdate {
+                    target: target.clone(),
+                    scope: None,
+                    risk_class: None,
+                    required_gate: None,
+                });
+                proposal.node_removals.push(target);
+            }
+            ProposalCase::DropRemovedCriteria => {
+                let target = PlanNodeId::new(format!("node-{}", input.base_plan_revision))
+                    .expect("derived existing node id");
+                proposal.node_removals.push(target);
+                proposal.coverage_map.clear();
+            }
             ProposalCase::Valid | ProposalCase::InvalidHash | ProposalCase::StaleBase(_) => {}
         }
 
@@ -192,6 +211,55 @@ impl TestPlanner {
             proposal.proposal_hash = "0".repeat(64);
         }
         proposal
+    }
+}
+
+struct ConcurrentAdvancePlanner {
+    path: PathBuf,
+}
+
+impl PlannerPort for ConcurrentAdvancePlanner {
+    fn assess_atomicity(
+        &self,
+        input: AtomicityRequest,
+    ) -> Result<AtomicityAssessment, PlannerFault> {
+        TestPlanner::new(ProposalCase::Valid).assess_atomicity(input)
+    }
+
+    fn propose_decomposition(
+        &self,
+        input: DecompositionRequest,
+    ) -> Result<PlanChangeSet, PlannerFault> {
+        let mut writer =
+            PlanningService::open(&self.path, FixedClock(FIXED_MILLIS)).expect("concurrent writer");
+        let mut writer_cycle = PlanningCycle::new();
+        let committed = writer
+            .propose_decomposition(
+                &TestPlanner::new(ProposalCase::Valid),
+                &mut writer_cycle,
+                &branch(),
+                request("concurrent-writer"),
+                &policy(false),
+            )
+            .expect("concurrent revision");
+        assert!(matches!(committed, PlanningProposalOutcome::Accepted(_)));
+
+        let mut forged = input;
+        forged.base_plan_revision = forged.base_plan_revision.saturating_add(1);
+        Ok(TestPlanner::new(ProposalCase::Valid).proposal(&forged))
+    }
+
+    fn propose_replan(&self, input: ReplanRequest) -> Result<PlanChangeSet, PlannerFault> {
+        let request = DecompositionRequest {
+            parent_task_ref: input.branch_root_ref,
+            base_plan_revision: input.base_plan_revision,
+            acceptance_criteria_refs: vec![],
+            scope_bound: input.scope_bound,
+            evidence_refs: input.triggering_evidence_refs,
+            depth_remaining: input.depth_remaining,
+            budget_remaining: input.budget_remaining,
+        };
+        self.propose_decomposition(request)
     }
 }
 
@@ -327,6 +395,12 @@ fn valid_proposal_validates_and_persists_one_revision() {
         store.get_plan_graph(&branch(), 1).expect("graph"),
         Some(accepted.graph().clone())
     );
+    assert_eq!(
+        store
+            .get_plan_cost_receipt(&accepted.revision().proposed_by.planning_cost_receipt_ref)
+            .expect("receipt read"),
+        Some(accepted.planning_cost_receipt().clone())
+    );
 }
 
 #[test]
@@ -363,6 +437,44 @@ fn stale_base_uses_canonical_stored_head_and_never_persists() {
 }
 
 #[test]
+fn concurrent_head_advance_refuses_stale_graph_even_if_proposal_claims_new_head() {
+    let db = TestDb::new("concurrent-head");
+    let mut service = db.service();
+    seed_head(&mut service, 1);
+    let planner = ConcurrentAdvancePlanner {
+        path: db.path.clone(),
+    };
+    let mut cycle = PlanningCycle::new();
+
+    let outcome = service
+        .propose_decomposition(
+            &planner,
+            &mut cycle,
+            &branch(),
+            request("outer-proposal"),
+            &policy(false),
+        )
+        .expect("concurrent head movement is a typed refusal");
+
+    match outcome {
+        PlanningProposalOutcome::Refused(ValidationRefusal::StaleBase { expected, observed }) => {
+            assert_eq!(expected, 2);
+            assert_eq!(observed, 1);
+        }
+        other => panic!("expected STALE_BASE after concurrent writer, got {other:?}"),
+    }
+    let store = db.store();
+    assert_eq!(store.get_plan_head(&branch()).unwrap(), Some(2));
+    assert!(store.get_plan_revision(&branch(), 3).unwrap().is_none());
+    let graph = store
+        .get_plan_graph(&branch(), 2)
+        .unwrap()
+        .expect("concurrent writer graph remains canonical");
+    assert!(graph.nodes.iter().any(|node| node.id.as_str() == "node-2"));
+    assert!(!graph.nodes.iter().any(|node| node.id.as_str() == "node-3"));
+}
+
+#[test]
 fn malformed_and_invalid_proposals_refuse_before_persistence() {
     let cases = [
         (ProposalCase::Cyclic, "CYCLIC_PROPOSAL"),
@@ -391,6 +503,70 @@ fn malformed_and_invalid_proposals_refuse_before_persistence() {
         }
         assert_no_plan_persisted(&db);
     }
+}
+
+#[test]
+fn update_and_removal_of_same_node_is_typed_refusal_never_panic_or_persistence() {
+    let db = TestDb::new("update-removed-node");
+    let mut service = db.service();
+    seed_head(&mut service, 1);
+    let planner = TestPlanner::new(ProposalCase::UpdateRemovedNode);
+    let mut cycle = PlanningCycle::new();
+
+    let outcome = service
+        .propose_decomposition(
+            &planner,
+            &mut cycle,
+            &branch(),
+            request("update-removed-node"),
+            &policy(false),
+        )
+        .expect("update/removal overlap must be a typed refusal");
+
+    match outcome {
+        PlanningProposalOutcome::Refused(ValidationRefusal::DanglingRef { detail }) => {
+            assert!(detail.contains("removed by the same changeset"));
+        }
+        other => panic!("expected DANGLING_REF, got {other:?}"),
+    }
+    assert_eq!(service.store().get_plan_head(&branch()).unwrap(), Some(1));
+    assert!(service
+        .store()
+        .get_plan_revision(&branch(), 2)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn removing_criterion_bearing_node_requires_derived_v3_coverage() {
+    let db = TestDb::new("removed-criterion");
+    let mut service = db.service();
+    seed_head(&mut service, 1);
+    let planner = TestPlanner::new(ProposalCase::DropRemovedCriteria);
+    let mut cycle = PlanningCycle::new();
+
+    let outcome = service
+        .propose_decomposition(
+            &planner,
+            &mut cycle,
+            &branch(),
+            request("drop-existing-criterion"),
+            &policy(false),
+        )
+        .expect("criterion loss must be a typed refusal");
+
+    match outcome {
+        PlanningProposalOutcome::Refused(ValidationRefusal::CriterionDropped { detail }) => {
+            assert!(detail.contains("criterion-child-1"));
+        }
+        other => panic!("expected CRITERION_DROPPED, got {other:?}"),
+    }
+    assert_eq!(service.store().get_plan_head(&branch()).unwrap(), Some(1));
+    assert!(service
+        .store()
+        .get_plan_revision(&branch(), 2)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -440,6 +616,54 @@ fn planner_call_budget_is_hard_and_prevents_ninth_call() {
         MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH as usize
     );
     assert_no_plan_persisted(&db);
+}
+
+#[test]
+fn provider_failure_consumes_conservative_budget_without_fabricating_usage_evidence() {
+    let db = TestDb::new("provider-failure-budget");
+    let mut service = db.service();
+    let planner = FakePlanner::for_scenario(FakePlannerScenario::ProviderFailure);
+    let mut cycle = PlanningCycle::new();
+
+    for expected_calls in 1..=MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH {
+        let error = service
+            .propose_decomposition(
+                &planner,
+                &mut cycle,
+                &branch(),
+                request("provider-failure"),
+                &policy(false),
+            )
+            .expect_err("provider failure remains explicit");
+        assert!(matches!(error, PlanningServiceError::Planner(_)));
+        assert_eq!(cycle.calls_made(), expected_calls);
+        assert_eq!(
+            cycle.cumulative_input_tokens(),
+            expected_calls.saturating_mul(MAX_PLANNER_INPUT_TOKENS)
+        );
+    }
+
+    let stopped = service
+        .propose_decomposition(
+            &planner,
+            &mut cycle,
+            &branch(),
+            request("provider-failure"),
+            &policy(false),
+        )
+        .expect("ninth attempt is stopped before provider call");
+    assert!(matches!(
+        stopped,
+        PlanningProposalOutcome::GuardrailTripped(_)
+    ));
+    assert_eq!(
+        planner.call_count(),
+        MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH as usize
+    );
+    assert_eq!(
+        cycle.cumulative_input_tokens(),
+        MAX_PLANNER_CUMULATIVE_INPUT_TOKENS
+    );
 }
 
 #[test]

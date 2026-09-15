@@ -170,11 +170,12 @@ impl ClaudePlanner {
         }
         let input_tokens = outcome
             .usage
-            .input_tokens
+            .total_input_tokens()
             .and_then(|value| u32::try_from(value).ok())
             .ok_or_else(|| PlannerFault::ProviderFailure {
-                typed_cause: "claude planner input-token usage is missing or out of range"
-                    .to_owned(),
+                typed_cause:
+                    "claude planner total input-token usage is missing, overflowed, or out of range"
+                        .to_owned(),
             })?;
         let output_tokens = outcome
             .usage
@@ -682,7 +683,8 @@ fn proposal_prompt(input: ProposalPromptInput<'_>) -> String {
             "method is automated-test|independent-review|security-check|human-approval; ",
             "risk_class is low|medium|high|critical; required_gate is string|null. ",
             "node_updates entries: {{target,scope:null|[...],risk_class:null|string,required_gate:null|{{set:string}}|{{clear:true}}}}. ",
-            "edges are {{from,to}}. risk_delta entries are {{node,from,to}}. ",
+            "edges are {{from,to}} and mean from MUST complete before to may run. ",
+            "risk_delta entries are {{node,from,to}}. ",
             "budget_delta is {{planning_cost_movement:signed_integer,expected_execution_cost_movement:signed_integer}}. ",
             "coverage_map is an object parent_criterion->[child_criteria]. ",
             "Echo the supplied base_plan_revision exactly. Keep every scope inside scope_bound and keep the proposal bounded."

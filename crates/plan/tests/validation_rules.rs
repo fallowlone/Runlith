@@ -242,6 +242,20 @@ fn v2_referential_integrity_rejects_unknown_update_target() {
 }
 
 #[test]
+fn v2_referential_integrity_rejects_update_of_node_removed_by_same_changeset() {
+    let graph = base_graph();
+    let mut cs = valid_changeset();
+    cs.node_updates.push(NodeUpdate {
+        target: nid("a"),
+        scope: None,
+        risk_class: None,
+        required_gate: None,
+    });
+    cs.proposal_hash = compute_proposal_hash(&cs);
+    assert_eq!(refusal_code(&graph, &cs, &ctx()), "DANGLING_REF");
+}
+
+#[test]
 fn v2_referential_integrity_rejects_unknown_removal_target() {
     let graph = base_graph();
     let mut cs = valid_changeset();

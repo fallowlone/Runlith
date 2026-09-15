@@ -25,6 +25,7 @@ pub fn run_planner_port_contract(planners: &ContractPlanners<'_>) {
     atomicity_is_proposal_only_data(planners.valid);
     decomposition_is_bounded_untrusted_data(planners.valid);
     replan_is_branch_scoped_bounded_data(planners.valid);
+    guardrail_faults_are_typed_before_proposal(planners.valid);
     provider_failure_is_typed(planners.failure);
     malformed_never_becomes_a_valid_proposal(planners.malformed);
 }
@@ -146,6 +147,29 @@ fn provider_failure_is_typed(planner: &dyn PlannerPort) {
         matches!(error, PlannerFault::ProviderFailure { .. }),
         "provider/planner failure must stay typed, got {error:?}"
     );
+}
+
+fn guardrail_faults_are_typed_before_proposal(planner: &dyn PlannerPort) {
+    let mut depth = contract_decomposition_request();
+    depth.depth_remaining = 0;
+    assert!(matches!(
+        planner.propose_decomposition(depth),
+        Err(PlannerFault::DepthExhausted)
+    ));
+
+    let mut call_budget = contract_decomposition_request();
+    call_budget.budget_remaining.calls_remaining = 0;
+    assert!(matches!(
+        planner.propose_decomposition(call_budget),
+        Err(PlannerFault::BudgetExhausted)
+    ));
+
+    let mut token_budget = contract_replan_request();
+    token_budget.budget_remaining.input_tokens_remaining = 0;
+    assert!(matches!(
+        planner.propose_replan(token_budget),
+        Err(PlannerFault::BudgetExhausted)
+    ));
 }
 
 fn malformed_never_becomes_a_valid_proposal(planner: &dyn PlannerPort) {

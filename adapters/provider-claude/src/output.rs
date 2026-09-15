@@ -144,6 +144,12 @@ fn parse_usage(json: &Json) -> UsageSample {
     };
     UsageSample::reported(
         usage.get("input_tokens").and_then(|v| v.as_u64()),
+        usage
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_u64()),
+        usage
+            .get("cache_read_input_tokens")
+            .and_then(|v| v.as_u64()),
         usage.get("output_tokens").and_then(|v| v.as_u64()),
     )
 }
@@ -179,6 +185,17 @@ mod tests {
             (parsed.usage.input_tokens, parsed.usage.output_tokens),
             (Some(12), Some(34))
         );
+        assert_eq!(parsed.usage.total_input_tokens(), Some(12));
+    }
+
+    #[test]
+    fn cache_usage_is_preserved_and_counts_toward_total_input() {
+        let doc = r#"{"type":"result","subtype":"success","is_error":false,"result":"x","session_id":"s-1","usage":{"input_tokens":5,"cache_creation_input_tokens":40000,"cache_read_input_tokens":600000,"output_tokens":7}}"#;
+        let parsed = parse_provider_output(doc).unwrap();
+        assert_eq!(parsed.usage.input_tokens, Some(5));
+        assert_eq!(parsed.usage.cache_creation_input_tokens, Some(40_000));
+        assert_eq!(parsed.usage.cache_read_input_tokens, Some(600_000));
+        assert_eq!(parsed.usage.total_input_tokens(), Some(640_005));
     }
 
     #[test]
