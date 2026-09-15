@@ -185,11 +185,11 @@ fn journal_evidence(seq: u64) -> PlanCommitJournalEvidence {
 }
 
 #[test]
-fn fresh_database_reaches_schema_12() {
+fn fresh_database_reaches_schema_13() {
     let db = TestDb::new("schema");
     let store = db.open();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 12);
-    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 13);
+    assert_eq!(store.schema_version().unwrap(), 13);
 }
 
 #[test]
@@ -282,7 +282,7 @@ fn v11_database_migrates_preserving_g2_g3_g5_g6_data_and_starts_with_empty_plan(
     }
 
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(store.schema_version().unwrap(), 13);
     let history = store.list_events_ordered().unwrap();
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].seq, 1);

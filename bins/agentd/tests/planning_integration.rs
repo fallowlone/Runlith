@@ -81,6 +81,37 @@ impl ExecutionPort for DeterministicExecutor {
     }
 }
 
+struct CountingExecutor {
+    calls: AtomicUsize,
+}
+
+impl CountingExecutor {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl ExecutionPort for CountingExecutor {
+    fn provider_ref(&self) -> ProviderRef {
+        ProviderRef::new("agentd-planning-counting-fixture").expect("provider ref")
+    }
+
+    fn execute(&self, work: &WorkItem) -> Result<WorkEvidence, ExecutionProblem> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(WorkEvidence {
+            summary: format!("fixture executed {}", work.task_id.as_str()),
+            evidence_ref: format!("fixture:{}", work.attempt_id.as_str()),
+            partial: false,
+        })
+    }
+}
+
 fn seed_ready_task(orchestration: &mut OrchestrationService<FixedClock>) -> TaskId {
     let project_id = ProjectId::new("P-PLANNING").expect("project id");
     orchestration
@@ -102,6 +133,41 @@ fn seed_ready_task(orchestration: &mut OrchestrationService<FixedClock>) -> Task
         .mark_ready(task.id())
         .expect("mark ready");
     task.id().clone()
+}
+
+fn seed_ready_chain_tasks(
+    orchestration: &mut OrchestrationService<FixedClock>,
+) -> (TaskId, TaskId) {
+    let project_id = ProjectId::new("P-PLANNING-CHAIN").expect("project id");
+    orchestration
+        .tasks_mut()
+        .create_project(
+            &Project::new(project_id.clone(), "planning chain fixture".to_owned()).unwrap(),
+        )
+        .expect("create project");
+    let first = Task::draft(
+        TaskId::new("step-a").expect("task id"),
+        project_id.clone(),
+        "first planned step".to_owned(),
+    )
+    .expect("draft first task");
+    let second = Task::draft(
+        TaskId::new("step-b").expect("task id"),
+        project_id,
+        "dependent planned step".to_owned(),
+    )
+    .expect("draft second task");
+    for task in [&first, &second] {
+        orchestration
+            .tasks_mut()
+            .create_task(task)
+            .expect("create task");
+        orchestration
+            .tasks_mut()
+            .mark_ready(task.id())
+            .expect("mark ready");
+    }
+    (first.id().clone(), second.id().clone())
 }
 
 #[test]
@@ -198,6 +264,89 @@ fn agentd_composes_planning_validation_persistence_execution_and_bounded_replan(
         .expect("read task")
         .expect("task exists");
     assert_eq!(task.state(), TaskState::RetryReady);
+}
+
+#[test]
+fn plan_dependency_direction_runs_predecessor_before_successor() {
+    let db = TestDb::new();
+    let mut orchestration =
+        OrchestrationService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("orchestration");
+    let mut planning = PlanningService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("planning");
+    let (first, second) = seed_ready_chain_tasks(&mut orchestration);
+    let branch = PlanBranchId::new("task-0078-plan-chain").expect("branch");
+    let planner = FakePlanner::for_scenario(FakePlannerScenario::DependencyChain);
+    let executor = CountingExecutor::new();
+    let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
+    let mut cycle = PlanningCycle::new();
+    let scope = ScopeBound::new(vec!["repo:src".to_owned()]).expect("scope");
+    let policy = PlanningPolicyContext {
+        scope_bound: scope.clone(),
+        baseline_risk: RiskClass::Low,
+        affected_parent_criteria: vec![AffectedParentCriterion {
+            id: CriterionId::new("criterion-root").expect("criterion"),
+            method: VerificationMethod::AutomatedTest,
+        }],
+        parent_task_ref: "TASK-0078-CHAIN".to_owned(),
+        lineage_fingerprints: vec![],
+        risk_grant: None,
+        policy_fingerprint: "policy:agentd-plan-chain".to_owned(),
+    };
+    let request = DecompositionRequest {
+        parent_task_ref: "caller-value-is-overwritten".to_owned(),
+        base_plan_revision: u64::MAX,
+        acceptance_criteria_refs: vec![],
+        scope_bound: scope,
+        evidence_refs: vec![EvidenceRef::new("fixture:chain").expect("evidence")],
+        depth_remaining: 4,
+        budget_remaining: PlanningBudget {
+            calls_remaining: MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
+            input_tokens_remaining: MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
+        },
+    };
+
+    let outcome = orchestration
+        .schedule_with_planning(
+            &mut planning,
+            &planner,
+            &mut cycle,
+            &branch,
+            request,
+            policy,
+            &second,
+            OrchestrationIds {
+                execution_id: ExecutionId::new("E-PLANNING-CHAIN").expect("execution id"),
+                attempt_id: AttemptId::new("A-PLANNING-CHAIN").expect("attempt id"),
+            },
+            &executor,
+            &evaluator,
+        )
+        .expect("dependent task is held by plan readiness");
+
+    match outcome {
+        PlannedOrchestrationOutcome::WaitingOnPlanDependency { plan, blocking } => {
+            assert_eq!(blocking, vec![first.clone()]);
+            assert_eq!(
+                plan.predecessor_task_ids(&first)
+                    .expect("first plan node")
+                    .expect("first represented"),
+                Vec::<TaskId>::new()
+            );
+            assert_eq!(
+                plan.predecessor_task_ids(&second)
+                    .expect("second plan node")
+                    .expect("second represented"),
+                vec![first]
+            );
+        }
+        other => panic!("expected plan dependency wait, got {other:?}"),
+    }
+    assert_eq!(executor.calls(), 0, "successor must not execute early");
+    let successor = orchestration
+        .tasks()
+        .get_task(&second)
+        .expect("read successor")
+        .expect("successor exists");
+    assert_eq!(successor.state(), TaskState::Ready);
 }
 
 #[cfg(target_os = "macos")]

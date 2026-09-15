@@ -22,6 +22,7 @@ mod event;
 mod journal_store;
 mod migration;
 mod path_security;
+mod plan_cost_store;
 mod plan_store;
 mod runtime_store;
 mod secret_store;

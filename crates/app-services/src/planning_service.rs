@@ -11,10 +11,10 @@ use std::fmt;
 use std::path::Path;
 
 use plan_domain::{
-    call_within_envelope, decomposition_fingerprint, l3_no_progress_tripped, merged_graph_has_leaf,
-    validate_proposal, AffectedParentCriterion, AtomicityBlocker, DecompositionRequest,
-    EvidenceRef, GateUpdate, GuardrailTrip, PlanBranchId, PlanChangeSet, PlanDomainError,
-    PlanGraph, PlanNode, PlanRevision, PlannerFault, PlannerPort, PlanningBudget,
+    call_within_envelope, compute_proposal_hash, decomposition_fingerprint, l3_no_progress_tripped,
+    merged_graph_has_leaf, validate_proposal, AffectedParentCriterion, AtomicityBlocker,
+    DecompositionRequest, EvidenceRef, GateUpdate, GuardrailTrip, PlanBranchId, PlanChangeSet,
+    PlanDomainError, PlanGraph, PlanNode, PlanRevision, PlannerFault, PlannerPort, PlanningBudget,
     PlanningCostReceipt, PlanningCostReceiptRef, ReplanRequest, RevisionProposedBy, RiskClass,
     RiskEscalationGrant, ScopeBound, ValidatedBy, ValidationContext, ValidationOutcome,
     ValidationRefusal, MAX_DECOMPOSITION_DEPTH, MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
@@ -23,7 +23,7 @@ use plan_domain::{
 };
 use scheduler::{ExecutionPort, OrchestrationOutcome};
 use storage_sqlite::{PlanCommitJournalEvidence, SqliteStore, StorageError};
-use task_domain::TaskId;
+use task_domain::{TaskId, TaskState};
 
 use crate::clock::{format_rfc3339, Clock, SystemClock};
 use crate::error::ServiceError;
@@ -102,6 +102,12 @@ impl PlanningCycle {
     }
 
     fn pre_call_guardrail(&self) -> Option<GuardrailTrip> {
+        if l3_no_progress_tripped(self.consecutive_rejections) {
+            return Some(GuardrailTrip::new(
+                "no-progress",
+                u64::from(self.consecutive_rejections),
+            ));
+        }
         if self.revisions_accepted >= MAX_REVISIONS_PER_CYCLE_PER_BRANCH {
             return Some(GuardrailTrip::new(
                 "revisions-per-cycle",
@@ -125,6 +131,20 @@ impl PlanningCycle {
 
     fn start_call(&mut self) {
         self.calls_made = self.calls_made.saturating_add(1);
+    }
+
+    /// A provider failure may happen after spend but before a typed receipt
+    /// can cross `PlannerPort` (for example malformed provider output). The
+    /// stable fault taxonomy carries no usage evidence, so charge one full
+    /// per-call input allowance conservatively. This is budget reservation,
+    /// not fabricated measurement; exact receipts are recorded only when the
+    /// provider supplied them.
+    fn charge_unreceipted_provider_failure(&mut self) {
+        let remaining =
+            MAX_PLANNER_CUMULATIVE_INPUT_TOKENS.saturating_sub(self.cumulative_input_tokens);
+        self.cumulative_input_tokens = self
+            .cumulative_input_tokens
+            .saturating_add(remaining.min(MAX_PLANNER_INPUT_TOKENS));
     }
 
     fn observe_receipt(&mut self, receipt: &PlanningCostReceipt) -> Option<GuardrailTrip> {
@@ -212,13 +232,33 @@ impl AcceptedPlanRevision {
         &self.planning_cost_receipt
     }
 
-    /// Scheduler gate: the selected Task must be represented by a leaf in the
-    /// accepted graph. Canonical Task readiness/policy still run afterwards.
-    #[must_use]
-    pub fn allows_leaf_task(&self, task_id: &TaskId) -> bool {
+    /// Returns the Plan predecessors that must complete before `task_id` can
+    /// become RUNNABLE. Plan edges are ordered `from -> to`, where `from`
+    /// must precede `to`; canonical Task readiness/policy still run after
+    /// this derived Plan gate.
+    pub fn predecessor_task_ids(
+        &self,
+        task_id: &TaskId,
+    ) -> Result<Option<Vec<TaskId>>, PlanningServiceError> {
         let id = task_id.as_str();
-        self.graph.nodes.iter().any(|node| node.id.as_str() == id)
-            && !self.graph.edges.iter().any(|(from, _)| from.as_str() == id)
+        if !self.graph.nodes.iter().any(|node| node.id.as_str() == id) {
+            return Ok(None);
+        }
+
+        let mut predecessors = BTreeSet::new();
+        for (from, to) in &self.graph.edges {
+            if to.as_str() != id {
+                continue;
+            }
+            let predecessor = TaskId::new(from.as_str().to_owned()).map_err(|error| {
+                PlanningServiceError::InvalidContext(format!(
+                    "plan predecessor {} is not a valid Task id: {error}",
+                    from.as_str()
+                ))
+            })?;
+            predecessors.insert(predecessor);
+        }
+        Ok(Some(predecessors.into_iter().collect()))
     }
 }
 
@@ -291,10 +331,6 @@ impl<C: Clock> PlanningService<C> {
         &self.store
     }
 
-    pub fn store_mut(&mut self) -> &mut SqliteStore {
-        &mut self.store
-    }
-
     pub fn propose_decomposition(
         &mut self,
         planner: &impl PlannerPort,
@@ -329,9 +365,14 @@ impl<C: Clock> PlanningService<C> {
         cycle.start_call();
         let proposal = match planner.propose_decomposition(request) {
             Ok(proposal) => proposal,
-            Err(fault) => return planner_fault_outcome(fault),
+            Err(fault) => {
+                if matches!(fault, PlannerFault::ProviderFailure { .. }) {
+                    cycle.charge_unreceipted_provider_failure();
+                }
+                return planner_fault_outcome(fault);
+            }
         };
-        self.validate_persist_proposal(cycle, branch, base_graph, proposal, policy)
+        self.validate_persist_proposal(cycle, branch, head, base_graph, proposal, policy)
     }
 
     pub fn propose_replan(
@@ -363,9 +404,14 @@ impl<C: Clock> PlanningService<C> {
         cycle.start_call();
         let proposal = match planner.propose_replan(request) {
             Ok(proposal) => proposal,
-            Err(fault) => return planner_fault_outcome(fault),
+            Err(fault) => {
+                if matches!(fault, PlannerFault::ProviderFailure { .. }) {
+                    cycle.charge_unreceipted_provider_failure();
+                }
+                return planner_fault_outcome(fault);
+            }
         };
-        self.validate_persist_proposal(cycle, branch, base_graph, proposal, policy)
+        self.validate_persist_proposal(cycle, branch, head, base_graph, proposal, policy)
     }
 
     fn load_base(&self, branch: &PlanBranchId) -> Result<(u64, PlanGraph), PlanningServiceError> {
@@ -385,12 +431,39 @@ impl<C: Clock> PlanningService<C> {
         &mut self,
         cycle: &mut PlanningCycle,
         branch: &PlanBranchId,
+        trusted_base_head: u64,
         base_graph: PlanGraph,
         proposal: PlanChangeSet,
         policy: &PlanningPolicyContext,
     ) -> Result<PlanningProposalOutcome, PlanningServiceError> {
+        // Cost evidence is durable independently of proposal acceptance. The
+        // content-derived ref is trusted computation over the parsed proposal;
+        // a malformed/tampered proposal can be refused later without erasing
+        // the spend already incurred to obtain it.
+        let receipt_ref = PlanningCostReceiptRef::new(format!(
+            "planning-receipt:{}",
+            compute_proposal_hash(&proposal)
+        ))?;
+        self.store
+            .record_plan_cost_receipt(&receipt_ref, &proposal.planning_cost_receipt)?;
         if let Some(trip) = cycle.observe_receipt(&proposal.planning_cost_receipt) {
             return Ok(PlanningProposalOutcome::GuardrailTripped(trip));
+        }
+
+        // The provider call is deliberately outside storage transactions.
+        // Re-check the exact head that owns `base_graph` before interpreting
+        // provider output. A fresh durable head paired with this older graph
+        // would turn V8 into an unsafe implicit rebase.
+        let durable_head = self.store.get_plan_head(branch)?.unwrap_or(0);
+        if durable_head != trusted_base_head {
+            return proposal_refusal(
+                cycle,
+                &proposal,
+                ValidationRefusal::StaleBase {
+                    expected: durable_head,
+                    observed: trusted_base_head,
+                },
+            );
         }
 
         let depth_after_merge = merged_depth(&base_graph, &proposal);
@@ -398,16 +471,16 @@ impl<C: Clock> PlanningService<C> {
         lineage.extend(cycle.lineage_fingerprints.iter().cloned());
         lineage.sort();
         lineage.dedup();
+        let affected_parent_criteria =
+            affected_criteria_for_proposal(&base_graph, &proposal, policy)?;
         let validation = ValidationContext {
-            // V8 is an optimistic-concurrency guard. The validator must see
-            // the actual durable head, not a value derived from the
-            // untrusted proposal. Persisting after a stale proposal has been
-            // checked is still atomic in TASK-0077, but refusal belongs here
-            // before any mutation attempt.
-            branch_head: self.store.get_plan_head(branch)?.unwrap_or(0),
+            // V8 validates against the exact snapshot supplied to the
+            // planner. A later durable-head check below detects a concurrent
+            // writer without pairing a fresh head with this stale graph.
+            branch_head: trusted_base_head,
             scope_bound: policy.scope_bound.clone(),
             baseline_risk: policy.baseline_risk,
-            affected_parent_criteria: policy.affected_parent_criteria.clone(),
+            affected_parent_criteria,
             depth_after_merge,
             revisions_accepted_this_cycle: cycle.revisions_accepted,
             parent_task_ref: policy.parent_task_ref.clone(),
@@ -433,6 +506,21 @@ impl<C: Clock> PlanningService<C> {
             ValidationOutcome::Accepted { .. } => {}
         }
 
+        // Catch a writer that won after the first head check but before graph
+        // materialization. Storage repeats the same CAS inside BEGIN
+        // IMMEDIATE, closing the final race before commit.
+        let durable_head = self.store.get_plan_head(branch)?.unwrap_or(0);
+        if durable_head != trusted_base_head {
+            return proposal_refusal(
+                cycle,
+                &proposal,
+                ValidationRefusal::StaleBase {
+                    expected: durable_head,
+                    observed: trusted_base_head,
+                },
+            );
+        }
+
         let resulting_graph = apply_validated_changeset(&base_graph, &proposal)?;
         if !graph_has_leaf(&resulting_graph) {
             return Ok(PlanningProposalOutcome::GuardrailTripped(
@@ -440,13 +528,11 @@ impl<C: Clock> PlanningService<C> {
             ));
         }
 
-        let revision_seq = proposal.base_plan_revision.saturating_add(1);
-        let receipt_ref =
-            PlanningCostReceiptRef::new(format!("planning-receipt:{}", proposal.proposal_hash))?;
+        let revision_seq = trusted_base_head.saturating_add(1);
         let revision = PlanRevision::new(
             revision_seq,
             branch.clone(),
-            proposal.base_plan_revision,
+            trusted_base_head,
             proposal.proposal_hash.clone(),
             proposal.reason.clone(),
             proposal.source_evidence_refs.clone(),
@@ -463,19 +549,28 @@ impl<C: Clock> PlanningService<C> {
                 .source_evidence_refs
                 .first()
                 .map(|value| value.as_str().to_owned())
-                .unwrap_or_else(|| {
-                    format!(
-                        "plan:{}:base:{}",
-                        branch.as_str(),
-                        proposal.base_plan_revision
-                    )
-                }),
+                .unwrap_or_else(|| format!("plan:{}:base:{}", branch.as_str(), trusted_base_head)),
             occurred_at: format_rfc3339(self.clock.now_millis()),
             provenance: PLAN_PROVENANCE.to_owned(),
         };
 
-        self.store
-            .commit_plan_revision(&proposal, &revision, &resulting_graph, &evidence)?;
+        match self
+            .store
+            .commit_plan_revision(&proposal, &revision, &resulting_graph, &evidence)
+        {
+            Ok(_) => {}
+            Err(StorageError::PlanStale { found, .. }) => {
+                return proposal_refusal(
+                    cycle,
+                    &proposal,
+                    ValidationRefusal::StaleBase {
+                        expected: found,
+                        observed: trusted_base_head,
+                    },
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
         let fingerprint = decomposition_fingerprint(&policy.parent_task_ref, &proposal);
         cycle.record_acceptance(fingerprint);
         Ok(PlanningProposalOutcome::Accepted(Box::new(
@@ -486,6 +581,59 @@ impl<C: Clock> PlanningService<C> {
             },
         )))
     }
+}
+
+fn proposal_refusal(
+    cycle: &mut PlanningCycle,
+    proposal: &PlanChangeSet,
+    refusal: ValidationRefusal,
+) -> Result<PlanningProposalOutcome, PlanningServiceError> {
+    if cycle.record_rejection(&proposal.source_evidence_refs) {
+        return Ok(PlanningProposalOutcome::GuardrailTripped(
+            GuardrailTrip::new("no-progress", 2),
+        ));
+    }
+    Ok(PlanningProposalOutcome::Refused(refusal))
+}
+
+fn affected_criteria_for_proposal(
+    base_graph: &PlanGraph,
+    proposal: &PlanChangeSet,
+    policy: &PlanningPolicyContext,
+) -> Result<Vec<AffectedParentCriterion>, PlanningServiceError> {
+    let removed: BTreeSet<&str> = proposal
+        .node_removals
+        .iter()
+        .map(|node| node.as_str())
+        .collect();
+    let mut affected = BTreeMap::<String, AffectedParentCriterion>::new();
+
+    for criterion in &policy.affected_parent_criteria {
+        affected.insert(criterion.id.as_str().to_owned(), criterion.clone());
+    }
+    for node in &base_graph.nodes {
+        if !removed.contains(node.id.as_str()) {
+            continue;
+        }
+        for criterion in &node.criteria {
+            let candidate = AffectedParentCriterion {
+                id: criterion.id.clone(),
+                method: criterion.method,
+            };
+            if let Some(existing) = affected.get(candidate.id.as_str()) {
+                if existing.method != candidate.method {
+                    return Err(PlanningServiceError::InvalidContext(format!(
+                        "criterion {} has conflicting verification methods in policy and durable plan",
+                        candidate.id.as_str()
+                    )));
+                }
+            } else {
+                affected.insert(candidate.id.as_str().to_owned(), candidate);
+            }
+        }
+    }
+
+    Ok(affected.into_values().collect())
 }
 
 fn validate_policy_context(policy: &PlanningPolicyContext) -> Result<(), PlanningServiceError> {
@@ -639,9 +787,12 @@ fn apply_validated_changeset(
         .map(|node| (node.id.as_str().to_owned(), node.clone()))
         .collect();
     for update in &proposal.node_updates {
-        let node = nodes
-            .get_mut(update.target.as_str())
-            .expect("V2 accepted update target must exist");
+        let node = nodes.get_mut(update.target.as_str()).ok_or_else(|| {
+            PlanDomainError::InvalidInput(format!(
+                "validated changeset update target {} is not live after removals",
+                update.target.as_str()
+            ))
+        })?;
         if let Some(scope) = &update.scope {
             node.scope = scope.clone();
         }
@@ -704,6 +855,13 @@ fn graph_has_leaf(graph: &PlanGraph) -> bool {
 pub enum PlannedOrchestrationOutcome {
     /// Initial proposal was refused/blocked before scheduler execution.
     PlanningStopped(PlanningProposalOutcome),
+    /// The selected plan node exists but one or more Plan predecessors have
+    /// not reached canonical Task COMPLETED state yet. No Task claim,
+    /// Execution, Attempt, or provider invocation has happened.
+    WaitingOnPlanDependency {
+        plan: Box<AcceptedPlanRevision>,
+        blocking: Vec<TaskId>,
+    },
     /// Accepted revision gated execution. A failed/rejected execution may
     /// have produced exactly one bounded replan attempt from fresh evidence.
     Executed {
@@ -757,15 +915,43 @@ impl<C: Clock> OrchestrationService<C> {
             PlanningProposalOutcome::Accepted(accepted) => accepted,
             stopped => return Ok(PlannedOrchestrationOutcome::PlanningStopped(stopped)),
         };
-        if !accepted.allows_leaf_task(task_id) {
+        let Some(predecessors) = accepted
+            .predecessor_task_ids(task_id)
+            .map_err(PlannedOrchestrationError::Planning)?
+        else {
             return Err(PlannedOrchestrationError::Planning(
                 PlanningServiceError::InvalidContext(format!(
-                    "task {} is not a leaf of accepted plan {}:{}",
+                    "task {} is not represented by accepted plan {}:{}",
                     task_id.as_str(),
                     accepted.revision.plan_branch_id.as_str(),
                     accepted.revision.revision_seq
                 )),
             ));
+        };
+
+        let mut blocking = Vec::new();
+        for predecessor in predecessors {
+            let task = self
+                .tasks()
+                .get_task(&predecessor)
+                .map_err(PlannedOrchestrationError::Orchestration)?
+                .ok_or_else(|| {
+                    PlannedOrchestrationError::Planning(PlanningServiceError::InvalidContext(
+                        format!(
+                            "plan predecessor {} has no canonical Task",
+                            predecessor.as_str()
+                        ),
+                    ))
+                })?;
+            if task.state() != TaskState::Completed {
+                blocking.push(predecessor);
+            }
+        }
+        if !blocking.is_empty() {
+            return Ok(PlannedOrchestrationOutcome::WaitingOnPlanDependency {
+                plan: accepted,
+                blocking,
+            });
         }
 
         let execution = self

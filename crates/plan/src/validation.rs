@@ -416,6 +416,14 @@ fn check_referential_integrity(
                 ),
             });
         }
+        if removed.contains(update.target.as_str()) {
+            return Some(ValidationRefusal::DanglingRef {
+                detail: format!(
+                    "update target {} is removed by the same changeset",
+                    update.target.as_str()
+                ),
+            });
+        }
     }
     for removal in &removed {
         if !base.contains(*removal) {

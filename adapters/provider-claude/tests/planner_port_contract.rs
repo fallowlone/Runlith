@@ -183,3 +183,20 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"%s","ses
         other => panic!("expected provider failure, got {other:?}"),
     }
 }
+
+#[test]
+fn cached_input_tokens_count_toward_the_planner_budget() {
+    let case = Case::named("cached-usage");
+    let script = valid_fixture_body().replace(
+        r#""usage":{"input_tokens":100,"output_tokens":100}"#,
+        r#""usage":{"input_tokens":5,"cache_creation_input_tokens":40000,"cache_read_input_tokens":600000,"output_tokens":100}"#,
+    );
+    assert_ne!(script, valid_fixture_body(), "fixture usage replacement");
+    let fixture = case.fixture("cached-usage.sh", &script);
+    let planner = planner_for(&fixture, &case);
+
+    let error = planner
+        .propose_decomposition(contract_decomposition_request())
+        .expect_err("cached input must participate in the 32k per-call envelope");
+    assert!(matches!(error, PlannerFault::BudgetExhausted));
+}

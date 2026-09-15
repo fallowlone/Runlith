@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex};
 
 use plan_domain::{
     compute_proposal_hash, AtomicityAssessment, AtomicityRequest, AtomicityVerdict, BudgetDelta,
-    CriterionDecl, CriterionId, DecompositionRequest, EvidenceRef, NodeAddition, PlanChangeSet,
-    PlanNodeId, PlanScope, PlannerAdapterId, PlannerFault, PlannerIdentity, PlannerPort,
-    PlanningCostReceipt, ReplanRequest, RiskClass, VerificationMethod,
+    CriterionDecl, CriterionId, DecompositionRequest, EdgeAddition, EvidenceRef, NodeAddition,
+    PlanChangeSet, PlanNodeId, PlanScope, PlannerAdapterId, PlannerFault, PlannerIdentity,
+    PlannerPort, PlanningCostReceipt, ReplanRequest, RiskClass, VerificationMethod,
     MAX_CHILDREN_PER_DECOMPOSITION,
 };
 
@@ -23,6 +23,7 @@ pub enum FakePlannerScenario {
     ProviderFailure,
     GuardrailFanOut,
     StaleBase,
+    DependencyChain,
 }
 
 /// Deterministic provider-neutral planner double.
@@ -79,6 +80,8 @@ impl FakePlanner {
     fn proposal_for_decomposition(&self, input: &DecompositionRequest) -> PlanChangeSet {
         let fan_out = if self.scenario == FakePlannerScenario::GuardrailFanOut {
             MAX_CHILDREN_PER_DECOMPOSITION + 1
+        } else if self.scenario == FakePlannerScenario::DependencyChain {
+            2
         } else {
             1
         };
@@ -99,8 +102,13 @@ impl FakePlanner {
             let child_criterion =
                 CriterionId::new(format!("{}-child-{index}", parent_criterion.as_str()))
                     .expect("derived criterion");
+            let node_id = if self.scenario == FakePlannerScenario::DependencyChain {
+                if index == 0 { "step-a" } else { "step-b" }.to_owned()
+            } else {
+                format!("planned-child-{index}")
+            };
             additions.push(NodeAddition {
-                id: PlanNodeId::new(format!("planned-child-{index}")).expect("derived node id"),
+                id: PlanNodeId::new(node_id).expect("derived node id"),
                 scope: PlanScope::new(vec![scope_root.clone()]).expect("request scope"),
                 criteria: vec![CriterionDecl::new(
                     child_criterion.clone(),
@@ -111,6 +119,14 @@ impl FakePlanner {
             });
             child_ids.push(child_criterion);
         }
+        let edge_additions = if self.scenario == FakePlannerScenario::DependencyChain {
+            vec![EdgeAddition {
+                from: PlanNodeId::new("step-a").expect("static node id"),
+                to: PlanNodeId::new("step-b").expect("static node id"),
+            }]
+        } else {
+            vec![]
+        };
         let mut proposal = PlanChangeSet {
             base_plan_revision: if self.scenario == FakePlannerScenario::StaleBase {
                 input.base_plan_revision.saturating_add(1)
@@ -122,7 +138,7 @@ impl FakePlanner {
             node_additions: additions,
             node_updates: vec![],
             node_removals: vec![],
-            edge_additions: vec![],
+            edge_additions,
             edge_removals: vec![],
             expected_outcome: "validated child work becomes available".to_owned(),
             risk_delta: vec![],
