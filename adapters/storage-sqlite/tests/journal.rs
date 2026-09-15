@@ -8,6 +8,9 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use storage_sqlite::{
     EventId, EventType, JournalEvent, NewJournalEvent, SqliteStore, StorageError,
     EVENT_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSION,
@@ -38,7 +41,11 @@ impl TestDb {
     }
 
     fn raw(&self) -> rusqlite::Connection {
-        rusqlite::Connection::open(&self.path).expect("raw fixture connection")
+        let connection = rusqlite::Connection::open(&self.path).expect("raw fixture connection");
+        #[cfg(unix)]
+        std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))
+            .expect("secure raw sqlite fixture");
+        connection
     }
 }
 

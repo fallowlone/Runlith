@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use policy::Capability;
 use storage_sqlite::{
     AuditCapability, NewSecurityAuditRecord, SecurityAuditAuthor, SecurityAuditEvent,
@@ -32,7 +35,11 @@ impl TestDb {
     }
 
     fn raw(&self) -> rusqlite::Connection {
-        rusqlite::Connection::open(&self.path).unwrap()
+        let connection = rusqlite::Connection::open(&self.path).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))
+            .expect("secure raw sqlite fixture");
+        connection
     }
 }
 

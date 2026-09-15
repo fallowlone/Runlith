@@ -12,7 +12,7 @@ use policy::{
     CompiledPolicy, EffectiveCapabilities, PolicyContractError, PolicyDecision, PolicyEngine,
     PolicyOutcome, PolicyRequest, ScopeId,
 };
-use runner::{IsolationBackend, IsolationRequirements, RunnerError};
+use runner::{ChildEnvironment, IsolationBackend, IsolationRequirements, RunnerError};
 use secrets::{
     SecretBackend, SecretBindingId, SecretBrokerError, SecretDelivery, SecretDeliveryTarget,
     SecretMetadataStore, SecretsBroker,
@@ -65,6 +65,7 @@ pub struct ProcessSecuritySpec {
     workspace: String,
     executable: ScopeId,
     requirements: IsolationRequirements,
+    environment: ChildEnvironment,
     provider: String,
 }
 
@@ -74,12 +75,14 @@ impl ProcessSecuritySpec {
         workspace: impl Into<String>,
         executable: ScopeId,
         requirements: IsolationRequirements,
+        environment: ChildEnvironment,
         provider: impl Into<String>,
     ) -> Self {
         Self {
             workspace: workspace.into(),
             executable,
             requirements,
+            environment,
             provider: provider.into(),
         }
     }
@@ -302,6 +305,7 @@ impl<C: Clock + Clone> G6SecurityService<C> {
             spec.workspace.clone(),
             spec.executable.clone(),
             spec.requirements,
+            spec.environment.clone(),
             |_plan| -> Result<Result<T, E>, G6SecurityError> {
                 self.append(NewSecurityAuditRecord {
                     event: SecurityAuditEvent::IsolationEnforcement,

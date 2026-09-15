@@ -150,7 +150,11 @@ impl ClaudeConfig {
     pub fn with_resume_session(mut self, session: impl Into<String>) -> Result<Self, String> {
         let session = session.into();
         let trimmed = session.trim();
-        if trimmed.is_empty() || trimmed.len() > 256 || trimmed.contains('\0') {
+        if trimmed.is_empty()
+            || trimmed.len() > 256
+            || trimmed.contains('\0')
+            || trimmed.starts_with('-')
+        {
             return Err("claude resume session must be non-blank bounded text".to_owned());
         }
         self.resume_session = Some(trimmed.to_owned());
@@ -269,6 +273,9 @@ mod tests {
         assert!(ClaudeConfig::default().with_resume_session("").is_err());
         assert!(ClaudeConfig::default()
             .with_resume_session("x".repeat(257))
+            .is_err());
+        assert!(ClaudeConfig::default()
+            .with_resume_session("--dangerous-provider-flag")
             .is_err());
         let ok = ClaudeConfig::default()
             .with_resume_session("550e8400-e29b-41d4-a716-446655440000")

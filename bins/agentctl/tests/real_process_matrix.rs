@@ -18,6 +18,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 const TEST_RUNTIME_ENV: &str = "AI_ENGINEERING_OS_RUNTIME_DIR";
+const TEST_DATA_ENV: &str = "AI_ENGINEERING_OS_DATA_DIR";
 
 fn workspace_bin(name: &str) -> PathBuf {
     let mut dir = std::env::current_exe().expect("test executable path");
@@ -37,6 +38,7 @@ fn agentctl_bin() -> PathBuf {
 fn agentctl(args: &[&str]) -> std::process::Output {
     Command::new(agentctl_bin())
         .env(TEST_RUNTIME_ENV, test_runtime_parent())
+        .env(TEST_DATA_ENV, test_data_parent())
         .args(args)
         .output()
         .expect("run agentctl")
@@ -44,6 +46,10 @@ fn agentctl(args: &[&str]) -> std::process::Output {
 
 fn test_runtime_parent() -> PathBuf {
     PathBuf::from(format!("/tmp/rl0069-{}", std::process::id()))
+}
+
+fn test_data_parent() -> PathBuf {
+    test_runtime_parent().join("data")
 }
 
 fn canonical_socket() -> PathBuf {
@@ -89,6 +95,7 @@ fn wait_ping_ok() {
 fn spawn_daemon() -> Child {
     Command::new(agentd_bin())
         .env(TEST_RUNTIME_ENV, test_runtime_parent())
+        .env(TEST_DATA_ENV, test_data_parent())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -115,6 +122,7 @@ fn wait_child_exit(child: &mut Child, budget: Duration) -> Option<i32> {
 fn g1_real_process_matrix() {
     let _ = std::fs::remove_dir_all(test_runtime_parent());
     std::fs::create_dir_all(test_runtime_parent()).expect("create test runtime parent");
+    std::fs::create_dir_all(test_data_parent()).expect("create test data parent");
 
     // Phase 0 — prescribed precondition: no test daemon running. If a live
     // daemon owns the endpoint, shut it down through the product flow.

@@ -72,7 +72,7 @@ fn real_claude_smoke_replies_with_marker() {
     let config = ClaudeConfig::default()
         .with_timeout(Duration::from_secs(180))
         .expect("smoke timeout");
-    let executor = ClaudeExecutor::bind(
+    let executor = ClaudeExecutor::bind_trusted_host(
         config,
         "Do not use any tools. Reply with exactly: G5_SMOKE_OK and nothing else.",
         workdir.clone(),

@@ -82,7 +82,7 @@ fn executor_for(fixture: &Path, workdir: &Path, timeout: Duration) -> ClaudeExec
         .unwrap()
         .with_timeout(timeout)
         .unwrap();
-    ClaudeExecutor::bind(
+    ClaudeExecutor::bind_trusted_host(
         config,
         "fixture prompt",
         workdir.to_path_buf(),
@@ -148,7 +148,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"h7 isola
         .with_timeout(Duration::from_secs(10))
         .unwrap();
     let environment_base = case.environment_base();
-    let executor = ClaudeExecutor::bind(
+    let executor = ClaudeExecutor::bind_trusted_host(
         config,
         "fixture prompt",
         workdir.clone(),
@@ -191,7 +191,7 @@ fn provider_environment_inside_worktree_fails_before_spawn() {
         .unwrap()
         .with_timeout(Duration::from_secs(10))
         .unwrap();
-    let executor = ClaudeExecutor::bind(
+    let executor = ClaudeExecutor::bind_trusted_host(
         config,
         "fixture prompt",
         workdir.clone(),
@@ -395,7 +395,7 @@ fn prompt_with_shell_metacharacters_stays_argv_safe() {
         .unwrap()
         .with_timeout(Duration::from_secs(10))
         .unwrap();
-    let executor = ClaudeExecutor::bind(
+    let executor = ClaudeExecutor::bind_trusted_host(
         config,
         hostile,
         case.workdir().to_path_buf(),
@@ -443,7 +443,7 @@ fn daemon_grandchild_holding_pipes_does_not_block_finalization() {
         .unwrap()
         .with_capture_grace(grace)
         .unwrap();
-    let executor = ClaudeExecutor::bind(
+    let executor = ClaudeExecutor::bind_trusted_host(
         config,
         "fixture prompt",
         case.workdir().to_path_buf(),
@@ -504,7 +504,7 @@ fn preset_cancel_flag_spawns_no_child() {
         .unwrap()
         .with_timeout(Duration::from_secs(60))
         .unwrap();
-    let executor = ClaudeExecutor::bind(
+    let executor = ClaudeExecutor::bind_trusted_host(
         config,
         "fixture prompt",
         workdir.to_path_buf(),
@@ -540,7 +540,7 @@ fn external_cancel_flag_signals_the_owned_tree() {
         .unwrap()
         .with_timeout(Duration::from_secs(60))
         .unwrap();
-    let executor = ClaudeExecutor::bind(
+    let executor = ClaudeExecutor::bind_trusted_host(
         config,
         "fixture prompt",
         workdir.to_path_buf(),

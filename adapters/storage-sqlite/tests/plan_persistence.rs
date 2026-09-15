@@ -4,6 +4,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use plan_domain::{
     compute_proposal_hash, BudgetDelta, CriterionDecl, CriterionId, EdgeAddition, EvidenceRef,
     GateRef, NodeAddition, PlanBranchId, PlanChangeSet, PlanGraph, PlanNode, PlanNodeId,
@@ -38,7 +41,11 @@ impl TestDb {
     }
 
     fn raw(&self) -> rusqlite::Connection {
-        rusqlite::Connection::open(&self.path).unwrap()
+        let connection = rusqlite::Connection::open(&self.path).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))
+            .expect("secure raw sqlite fixture");
+        connection
     }
 }
 
