@@ -15,7 +15,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
@@ -591,7 +591,16 @@ impl SandboxedLaunch {
     /// the verified plan; the returned [`SandboxedCommand`] is the only
     /// spawnable form of that child.
     pub fn bind(&self, spec: CommandSpec) -> Result<SandboxedCommand, RunnerError> {
+        let requested = spec.program().to_str();
+        if requested != Some(self.report.plan.launch_executable().as_str()) {
+            return Err(RunnerError::ProcessNotAuthorized {
+                executable: spec.program().to_string_lossy().into_owned(),
+            });
+        }
         let recipe = self.backend.sandbox(&self.report.plan, &spec)?;
+        if recipe.environment() != self.report.plan.environment().vars() {
+            return Err(RunnerError::EnvironmentNotIsolated);
+        }
         Ok(SandboxedCommand {
             plan: self.report.plan.clone(),
             recipe,
@@ -680,8 +689,51 @@ impl SandboxedCommand {
         wire(&mut SpawnWiring {
             command: &mut command,
         });
+        validate_spawn_cwd(&self.plan, &mut command)?;
         command.spawn()
     }
+}
+
+fn validate_spawn_cwd(plan: &IsolationPlan, command: &mut Command) -> std::io::Result<()> {
+    let cwd = command.get_current_dir().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "runner requires an explicit working directory inside the prepared workspace",
+        )
+    })?;
+    let workspace = Path::new(plan.workspace());
+    if !workspace.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "runner refused a working directory for a non-absolute workspace",
+        ));
+    }
+    let canonical_workspace = std::fs::canonicalize(workspace).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "runner could not revalidate the workspace before spawn",
+        )
+    })?;
+    if canonical_workspace != workspace {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "runner workspace identity changed before spawn",
+        ));
+    }
+    let canonical_cwd = std::fs::canonicalize(cwd).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "runner could not revalidate the working directory before spawn",
+        )
+    })?;
+    if !canonical_cwd.starts_with(&canonical_workspace) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "runner refused a working directory outside the prepared workspace",
+        ));
+    }
+    command.current_dir(canonical_cwd);
+    Ok(())
 }
 
 /// Narrow wiring handle for an already-sandboxed command. It deliberately

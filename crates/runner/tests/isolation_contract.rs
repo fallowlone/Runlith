@@ -52,6 +52,7 @@ struct FixedBackend {
     env_isolated: bool,
     sandbox_calls: Arc<AtomicUsize>,
     recipe_program: Option<OsString>,
+    recipe_environment: Option<Vec<(OsString, OsString)>>,
 }
 
 impl FixedBackend {
@@ -67,6 +68,7 @@ impl FixedBackend {
             env_isolated: true,
             sandbox_calls: Arc::new(AtomicUsize::new(0)),
             recipe_program: None,
+            recipe_environment: None,
         }
     }
 }
@@ -91,12 +93,16 @@ impl IsolationBackend for FixedBackend {
         spec: &CommandSpec,
     ) -> Result<LaunchRecipe, RunnerError> {
         self.sandbox_calls.fetch_add(1, Ordering::SeqCst);
+        let environment = self
+            .recipe_environment
+            .clone()
+            .unwrap_or_else(|| plan.environment().vars().to_vec());
         Ok(LaunchRecipe::new(
             self.recipe_program
                 .clone()
                 .unwrap_or_else(|| spec.program().to_owned()),
             spec.args().iter().cloned(),
-            plan.environment().vars().to_vec(),
+            environment,
         ))
     }
 }
@@ -363,16 +369,22 @@ fn r1_h2_report_without_env_isolation_fails_verification() {
 /// recipe's plan environment.
 #[test]
 fn r1_h1_spawn_route_is_backend_owned() {
+    let root =
+        std::env::temp_dir().join(format!("runlith-runner-r1-h1-route-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let workspace = root.canonicalize().unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let backend = FixedBackend {
         sandbox_calls: Arc::clone(&calls),
         recipe_program: Some(OsString::from("/usr/bin/env")),
         ..FixedBackend::new(EnforcementAxes::all())
     };
+    let effective = EffectiveCapabilities::new(vec![Capability::process("cargo").unwrap()]);
     let launch = prepare_process_launch(
         Arc::new(backend),
-        &effective(),
-        "ws-1",
+        &effective,
+        workspace.to_string_lossy().into_owned(),
         scope("cargo"),
         IsolationRequirements::trusted_host(),
         environment(),
@@ -383,7 +395,7 @@ fn r1_h1_spawn_route_is_backend_owned() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     let sandboxed = launch
         .bind(CommandSpec::new(
-            OsString::from("/usr/bin/false"),
+            OsString::from("cargo"),
             [OsString::from("must-not-run")],
         ))
         .expect("backend recipe");
@@ -416,21 +428,172 @@ fn r1_h1_spawn_route_is_backend_owned() {
 
     let child = sandboxed
         .spawn(|wire| {
-            wire.stdout(std::process::Stdio::piped())
+            wire.current_dir(&workspace)
+                .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .stdin(std::process::Stdio::null());
         })
         .expect("spawn through the backend-owned recipe");
     let output = child.wait_with_output().expect("wait for child");
     // `/usr/bin/env must-not-run` is what actually ran: `env` reports 127 for a
-    // command it cannot find, while the caller's requested `/usr/bin/false`
-    // would have reported 1. The backend's recipe decided the program.
+    // command it cannot find. The authorized target was `cargo`, but the
+    // backend's sandbox recipe decided the actual wrapper program.
     assert_eq!(
         output.status.code(),
         Some(127),
         "spawned program was not the backend recipe program: {:?}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn r1_h1_bind_rejects_a_different_process_target() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let backend = FixedBackend {
+        sandbox_calls: Arc::clone(&calls),
+        ..FixedBackend::new(EnforcementAxes::all())
+    };
+    let launch = prepare_process_launch(
+        Arc::new(backend),
+        &effective(),
+        "ws-1",
+        scope("cargo"),
+        IsolationRequirements::trusted_host(),
+        environment(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        launch.bind(CommandSpec::new(OsString::from("rustc"), [])),
+        Err(RunnerError::ProcessNotAuthorized { .. })
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn r1_h1_bind_rejects_backend_environment_expansion() {
+    let mut expanded = environment().vars().to_vec();
+    expanded.push((OsString::from("RUNLITH_R1_CANARY"), OsString::from("leak")));
+    let backend = FixedBackend {
+        recipe_environment: Some(expanded),
+        ..FixedBackend::new(EnforcementAxes::all())
+    };
+    let launch = prepare_process_launch(
+        Arc::new(backend),
+        &effective(),
+        "ws-1",
+        scope("cargo"),
+        IsolationRequirements::trusted_host(),
+        environment(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        launch.bind(CommandSpec::new(OsString::from("cargo"), [])),
+        Err(RunnerError::EnvironmentNotIsolated)
+    ));
+}
+
+#[test]
+fn r1_h1_spawn_rejects_missing_working_directory() {
+    let root = std::env::temp_dir().join(format!(
+        "runlith-runner-r1-h1-no-cwd-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let workspace = root.canonicalize().unwrap();
+    let effective = EffectiveCapabilities::new(vec![Capability::process("/usr/bin/true").unwrap()]);
+    let launch = prepare_process_launch(
+        Arc::new(FixedBackend::new(EnforcementAxes::all())),
+        &effective,
+        workspace.to_string_lossy().into_owned(),
+        scope("/usr/bin/true"),
+        IsolationRequirements::trusted_host(),
+        environment(),
+    )
+    .unwrap();
+    let sandboxed = launch
+        .bind(CommandSpec::new(OsString::from("/usr/bin/true"), []))
+        .unwrap();
+
+    let error = sandboxed.spawn(|_| {}).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn r1_h1_spawn_rejects_cwd_outside_the_prepared_workspace() {
+    let root =
+        std::env::temp_dir().join(format!("runlith-runner-r1-h1-cwd-{}", std::process::id()));
+    let workspace = root.join("workspace");
+    let outside = root.join("outside");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+    let effective = EffectiveCapabilities::new(vec![Capability::process("/usr/bin/true").unwrap()]);
+    let launch = prepare_process_launch(
+        Arc::new(FixedBackend::new(EnforcementAxes::all())),
+        &effective,
+        workspace.to_string_lossy().into_owned(),
+        scope("/usr/bin/true"),
+        IsolationRequirements::trusted_host(),
+        environment(),
+    )
+    .unwrap();
+    let sandboxed = launch
+        .bind(CommandSpec::new(OsString::from("/usr/bin/true"), []))
+        .unwrap();
+
+    let error = sandboxed
+        .spawn(|wire| {
+            wire.current_dir(&outside);
+        })
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn r1_h1_spawn_rejects_cwd_symlink_escape() {
+    use std::os::unix::fs::symlink;
+
+    let root = std::env::temp_dir().join(format!(
+        "runlith-runner-r1-h1-cwd-symlink-{}",
+        std::process::id()
+    ));
+    let workspace = root.join("workspace");
+    let outside = root.join("outside");
+    let escape = workspace.join("escape");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    symlink(&outside, &escape).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+    let effective = EffectiveCapabilities::new(vec![Capability::process("/usr/bin/true").unwrap()]);
+    let launch = prepare_process_launch(
+        Arc::new(FixedBackend::new(EnforcementAxes::all())),
+        &effective,
+        workspace.to_string_lossy().into_owned(),
+        scope("/usr/bin/true"),
+        IsolationRequirements::trusted_host(),
+        environment(),
+    )
+    .unwrap();
+    let sandboxed = launch
+        .bind(CommandSpec::new(OsString::from("/usr/bin/true"), []))
+        .unwrap();
+
+    let error = sandboxed
+        .spawn(|wire| {
+            wire.current_dir(&escape);
+        })
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 /// TASK-SEC-R1 R1-H2: the plan carries the complete explicit child environment
