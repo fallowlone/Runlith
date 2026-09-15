@@ -77,7 +77,7 @@ fn seed_execution(store: &mut SqliteStore, task: &Task, exec_id: &str) -> Execut
     let event = NewJournalEvent {
         event_type: EventType::ExecutionCreated,
         task_id: Some(task.id().clone()),
-        project_id: task.project_id().clone(),
+        project_id: Some(task.project_id().clone()),
         from_state: None,
         to_state: None,
         reason: None,
@@ -91,6 +91,7 @@ fn seed_execution(store: &mut SqliteStore, task: &Task, exec_id: &str) -> Execut
         workspace_id: None,
         from_workspace_state: None,
         to_workspace_state: None,
+        plan_revision: None,
     };
     store
         .create_execution_with_event(&execution, &event)
@@ -261,7 +262,7 @@ fn ready_transition_commits_state_and_created_event_atomically() {
         .unwrap();
     assert_eq!(created.event_version, EVENT_SCHEMA_VERSION);
     assert_eq!(created.fact.task_id.as_ref().unwrap().as_str(), "T-1");
-    assert_eq!(created.fact.project_id.as_str(), "P-1");
+    assert_eq!(created.fact.project_id.as_ref().unwrap().as_str(), "P-1");
     assert_eq!(created.fact.execution_id.as_ref().unwrap().as_str(), "E-1");
     assert_eq!(created.fact.workspace_id.as_ref().unwrap().as_str(), "ws-1");
     assert!(created.fact.attempt_id.is_none());
@@ -752,7 +753,7 @@ fn v4_database_with_g2_g3_data_migrates_preserving_everything() {
             .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 11);
+    assert_eq!(store.schema_version().unwrap(), 12);
 
     // Every historical fact survives verbatim: seq, ids, types, versions,
     // scopes, outcomes, states, correlation/causation, timestamps,
@@ -883,7 +884,7 @@ fn v5_database_with_lease_migrates_to_v7_preserving_everything() {
             .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 11);
+    assert_eq!(store.schema_version().unwrap(), 12);
 
     // Execution with its still-open attempt survived.
     let execution = store

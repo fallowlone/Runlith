@@ -9,6 +9,7 @@
 use std::fmt;
 
 use agent_runtime::{AttemptId, ExecutionId};
+use plan_domain::{EvidenceRef, PlanBranchId, RevisionProposedBy, ValidatedBy};
 use task_domain::{ProjectId, TaskId, TaskState};
 use workspace::{LeaseLifecycle, WorkspaceId};
 
@@ -49,6 +50,7 @@ pub enum EventType {
     AttemptConcluded,
     WorkspaceCreated,
     WorkspaceRemoved,
+    PlanRevisionCommitted,
 }
 
 impl EventType {
@@ -73,12 +75,13 @@ impl EventType {
             Self::AttemptConcluded => "attempt.concluded",
             Self::WorkspaceCreated => "workspace.created",
             Self::WorkspaceRemoved => "workspace.removed",
+            Self::PlanRevisionCommitted => "plan.revision_committed",
         }
     }
 
     /// Every canonical type, for exhaustive tests.
     #[must_use]
-    pub const fn all() -> [Self; 17] {
+    pub const fn all() -> [Self; 18] {
         [
             Self::MarkedReady,
             Self::Claimed,
@@ -97,6 +100,7 @@ impl EventType {
             Self::AttemptConcluded,
             Self::WorkspaceCreated,
             Self::WorkspaceRemoved,
+            Self::PlanRevisionCommitted,
         ]
     }
 
@@ -129,6 +133,12 @@ impl EventType {
         matches!(self, Self::WorkspaceCreated | Self::WorkspaceRemoved)
     }
 
+    /// Whether this fact is scoped to one immutable Plan revision.
+    #[must_use]
+    pub const fn is_plan_scoped(self) -> bool {
+        matches!(self, Self::PlanRevisionCommitted)
+    }
+
     /// Strict decode: unknown names are corruption, never a default.
     pub fn parse(raw: &str) -> StorageResult<Self> {
         Ok(match raw {
@@ -149,6 +159,7 @@ impl EventType {
             "attempt.concluded" => Self::AttemptConcluded,
             "workspace.created" => Self::WorkspaceCreated,
             "workspace.removed" => Self::WorkspaceRemoved,
+            "plan.revision_committed" => Self::PlanRevisionCommitted,
             other => {
                 return Err(StorageError::Corrupt(format!(
                     "unknown persisted event type {other:?}"
@@ -156,6 +167,21 @@ impl EventType {
             }
         })
     }
+}
+
+/// Bounded typed payload for `plan.revision_committed`.
+///
+/// Full Plan nodes and edges are deliberately absent: they live only in the
+/// normalized Plan store. This payload preserves revision identity and audit
+/// provenance required by ADR-0027 §4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanRevisionJournalPayload {
+    pub plan_branch_id: PlanBranchId,
+    pub revision_seq: u64,
+    pub changeset_hash: String,
+    pub caused_by: Vec<EvidenceRef>,
+    pub proposed_by: RevisionProposedBy,
+    pub validated_by: ValidatedBy,
 }
 
 impl fmt::Display for EventType {
@@ -307,8 +333,9 @@ pub struct NewJournalEvent {
     pub event_type: EventType,
     /// Task the fact is about; `None` only for `project.created`.
     pub task_id: Option<TaskId>,
-    /// Project the fact belongs to; always required.
-    pub project_id: ProjectId,
+    /// Project the fact belongs to. `None` only for plan-scoped facts whose
+    /// canonical identity is a Plan branch rather than a Task/Project.
+    pub project_id: Option<ProjectId>,
     /// Lifecycle state before the mutation; `None` for
     /// `project.created` and for every runtime fact. Task-state
     /// semantics only — Attempt outcomes never live here.
@@ -351,6 +378,9 @@ pub struct NewJournalEvent {
     /// Lease lifecycle after the mutation; `Some` only for workspace
     /// facts. Shares the persisted to_state column the same way.
     pub to_workspace_state: Option<LeaseLifecycle>,
+    /// Plan-specific typed payload. Present exactly for
+    /// `plan.revision_committed`; absent for every historical event family.
+    pub plan_revision: Option<PlanRevisionJournalPayload>,
 }
 
 /// A committed journal record: the accepted fact plus its stable identity.

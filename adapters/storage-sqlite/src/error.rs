@@ -38,6 +38,16 @@ pub enum StorageError {
         /// State actually stored.
         found: String,
     },
+    /// A Plan revision was validated against a branch head that is no
+    /// longer current. Storage never rebases or advances such a proposal.
+    PlanStale {
+        /// Plan branch whose durable head moved.
+        branch: String,
+        /// Revision the accepted proposal was validated against.
+        expected: u64,
+        /// Durable branch head observed inside the write transaction.
+        found: u64,
+    },
 }
 
 impl fmt::Display for StorageError {
@@ -69,6 +79,14 @@ impl fmt::Display for StorageError {
                     "stale write for task {task}: validated against {expected}, stored state is {found}"
                 )
             }
+            Self::PlanStale {
+                branch,
+                expected,
+                found,
+            } => write!(
+                f,
+                "stale plan write for branch {branch}: validated against revision {expected}, durable head is {found}"
+            ),
         }
     }
 }

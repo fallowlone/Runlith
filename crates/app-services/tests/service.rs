@@ -328,7 +328,7 @@ fn project_creation_commits_project_created_event() {
     assert_eq!(event.fact.task_id, None);
     assert_eq!(event.fact.from_state, None);
     assert_eq!(event.fact.to_state, None);
-    assert_eq!(event.fact.project_id.as_str(), "P-1");
+    assert_eq!(event.fact.project_id.as_ref().unwrap().as_str(), "P-1");
     assert_eq!(event.fact.occurred_at, FIXED_STAMP);
     assert!(
         event

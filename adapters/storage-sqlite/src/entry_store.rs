@@ -39,8 +39,8 @@ use task_domain::{Task, TaskId, TaskState};
 use crate::error::StorageError;
 use crate::error::StorageResult;
 use crate::event::{EventType, JournalEvent, NewJournalEvent};
+use crate::journal_store::{insert_journal_event, require_envelope};
 use crate::runtime_store::require_execution_created_envelope;
-use crate::task_store::{insert_journal_event, require_envelope};
 
 /// The durable facts for one execution-entry admission. Everything here is
 /// already domain-validated by the trusted application services (Task
@@ -571,7 +571,7 @@ fn require_lifecycle_envelope(
             "entry admission requires a {expected_type} event"
         )));
     }
-    if event.task_id.as_ref() != Some(task_id) || event.project_id != *project_id {
+    if event.task_id.as_ref() != Some(task_id) || event.project_id.as_ref() != Some(project_id) {
         return Err(StorageError::ConstraintViolation(
             "entry admission event references a different task or project than the state write"
                 .to_owned(),

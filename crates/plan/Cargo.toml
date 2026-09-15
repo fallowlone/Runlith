@@ -1,0 +1,11 @@
+[package]
+name = "plan-domain"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "plan_domain"
+path = "src/lib.rs"
+
+[dependencies]
+sha2 = "0.10"
