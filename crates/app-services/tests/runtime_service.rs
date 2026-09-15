@@ -110,7 +110,10 @@ fn full_runtime_flow_commits_canonical_scoped_history() {
     assert_eq!(created.event.fact.event_type, EventType::ExecutionCreated);
     assert_eq!(created.event.event_version, 1);
     assert_eq!(created.event.fact.task_id, Some(task_id.clone()));
-    assert_eq!(created.event.fact.project_id.as_str(), "P-1");
+    assert_eq!(
+        created.event.fact.project_id.as_ref().unwrap().as_str(),
+        "P-1"
+    );
     assert_eq!(
         created.event.fact.execution_id.as_ref().unwrap().as_str(),
         "E-1"
@@ -178,7 +181,7 @@ fn full_runtime_flow_commits_canonical_scoped_history() {
     );
     // Every runtime fact carries the derived project scope.
     for event in &history[2..] {
-        assert_eq!(event.fact.project_id.as_str(), "P-1");
+        assert_eq!(event.fact.project_id.as_ref().unwrap().as_str(), "P-1");
         assert_eq!(event.fact.task_id, Some(task_id.clone()));
         assert_eq!(event.fact.execution_id.as_ref().unwrap().as_str(), "E-1");
     }

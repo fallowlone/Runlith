@@ -73,7 +73,7 @@ fn new_event(
     NewJournalEvent {
         event_type,
         task_id: Some(task.id().clone()),
-        project_id: task.project_id().clone(),
+        project_id: Some(task.project_id().clone()),
         from_state: Some(from),
         to_state: Some(to),
         reason: None,
@@ -87,6 +87,7 @@ fn new_event(
         workspace_id: None,
         from_workspace_state: None,
         to_workspace_state: None,
+        plan_revision: None,
     }
 }
 
@@ -108,8 +109,8 @@ fn journal_len(store: &SqliteStore) -> usize {
 fn fresh_database_reaches_current_schema() {
     let db = TestDb::new("fresh-current");
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 11);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 11);
+    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 12);
     assert!(store.list_events_ordered().unwrap().is_empty());
 }
 
@@ -143,7 +144,7 @@ fn v1_database_with_data_migrates_preserving_state() {
             .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 11);
+    assert_eq!(store.schema_version().unwrap(), 12);
     let task = store
         .get_task(&TaskId::new("T-1").unwrap())
         .unwrap()
@@ -161,7 +162,7 @@ fn current_schema_reopen_is_a_no_op() {
         ready_task_via_store(&mut store);
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 11);
+    assert_eq!(store.schema_version().unwrap(), 12);
     assert!(store
         .get_task(&TaskId::new("T-1").unwrap())
         .unwrap()
@@ -177,7 +178,7 @@ fn future_version_rejected_after_current() {
     db.raw().execute_batch("PRAGMA user_version = 99").unwrap();
     match SqliteStore::open(&db.path) {
         Err(StorageError::UnsupportedSchemaVersion { found, supported }) => {
-            assert_eq!((found, supported), (99, 11));
+            assert_eq!((found, supported), (99, 12));
         }
         _ => panic!("expected UnsupportedSchemaVersion, open must fail closed"),
     }
@@ -236,7 +237,7 @@ fn v2_journal_rows_survive_migration_to_current() {
             .unwrap();
     }
     let mut store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 11);
+    assert_eq!(store.schema_version().unwrap(), 12);
     // Every existing row survives verbatim: seq, identity, type, refs,
     // states, payload, and provenance.
     let history = store.list_events_ordered().unwrap();
@@ -245,7 +246,7 @@ fn v2_journal_rows_survive_migration_to_current() {
     assert_eq!(history[0].id.to_string(), "evt-1");
     assert_eq!(history[0].fact.event_type, EventType::MarkedReady);
     assert_eq!(history[0].fact.task_id.as_ref().unwrap().as_str(), "T-1");
-    assert_eq!(history[0].fact.project_id.as_str(), "P-1");
+    assert_eq!(history[0].fact.project_id.as_ref().unwrap().as_str(), "P-1");
     assert_eq!(history[0].fact.from_state, Some(TaskState::Draft));
     assert_eq!(history[0].fact.to_state, Some(TaskState::Ready));
     assert_eq!(
@@ -285,7 +286,7 @@ fn v2_journal_rows_survive_migration_to_current() {
             &NewJournalEvent {
                 event_type: EventType::ProjectCreated,
                 task_id: None,
-                project_id: ProjectId::new("P-2").unwrap(),
+                project_id: Some(ProjectId::new("P-2").unwrap()),
                 from_state: None,
                 to_state: None,
                 reason: None,
@@ -299,6 +300,7 @@ fn v2_journal_rows_survive_migration_to_current() {
                 workspace_id: None,
                 from_workspace_state: None,
                 to_workspace_state: None,
+                plan_revision: None,
             },
         )
         .unwrap();
@@ -345,7 +347,7 @@ fn creation_mutations_are_atomic_with_their_events() {
             &NewJournalEvent {
                 event_type: EventType::ProjectCreated,
                 task_id: None,
-                project_id: ProjectId::new("P-1").unwrap(),
+                project_id: Some(ProjectId::new("P-1").unwrap()),
                 from_state: None,
                 to_state: None,
                 reason: None,
@@ -359,6 +361,7 @@ fn creation_mutations_are_atomic_with_their_events() {
                 workspace_id: None,
                 from_workspace_state: None,
                 to_workspace_state: None,
+                plan_revision: None,
             },
         )
         .unwrap();
@@ -370,7 +373,7 @@ fn creation_mutations_are_atomic_with_their_events() {
             &NewJournalEvent {
                 event_type: EventType::TaskCreated,
                 task_id: Some(TaskId::new("T-1").unwrap()),
-                project_id: ProjectId::new("P-1").unwrap(),
+                project_id: Some(ProjectId::new("P-1").unwrap()),
                 from_state: Some(TaskState::Draft),
                 to_state: Some(TaskState::Draft),
                 reason: None,
@@ -384,6 +387,7 @@ fn creation_mutations_are_atomic_with_their_events() {
                 workspace_id: None,
                 from_workspace_state: None,
                 to_workspace_state: None,
+                plan_revision: None,
             },
         )
         .unwrap();
@@ -394,7 +398,7 @@ fn creation_mutations_are_atomic_with_their_events() {
     let bad = NewJournalEvent {
         event_type: EventType::TaskCreated,
         task_id: Some(TaskId::new("T-OTHER").unwrap()),
-        project_id: ProjectId::new("P-1").unwrap(),
+        project_id: Some(ProjectId::new("P-1").unwrap()),
         from_state: Some(TaskState::Draft),
         to_state: Some(TaskState::Draft),
         reason: None,
@@ -408,6 +412,7 @@ fn creation_mutations_are_atomic_with_their_events() {
         workspace_id: None,
         from_workspace_state: None,
         to_workspace_state: None,
+        plan_revision: None,
     };
     assert!(store.create_task_with_event(&other, &bad).is_err());
     assert!(store
@@ -431,7 +436,7 @@ fn dependency_mutation_is_atomic_with_its_event() {
             &NewJournalEvent {
                 event_type: EventType::DependencyAdded,
                 task_id: Some(TaskId::new("T-1").unwrap()),
-                project_id: ProjectId::new("P-1").unwrap(),
+                project_id: Some(ProjectId::new("P-1").unwrap()),
                 from_state: Some(TaskState::Ready),
                 to_state: Some(TaskState::Ready),
                 reason: None,
@@ -445,6 +450,7 @@ fn dependency_mutation_is_atomic_with_its_event() {
                 workspace_id: None,
                 from_workspace_state: None,
                 to_workspace_state: None,
+                plan_revision: None,
             },
         )
         .unwrap();
@@ -460,7 +466,7 @@ fn dependency_mutation_is_atomic_with_its_event() {
     let dup = NewJournalEvent {
         event_type: EventType::DependencyAdded,
         task_id: Some(TaskId::new("T-1").unwrap()),
-        project_id: ProjectId::new("P-1").unwrap(),
+        project_id: Some(ProjectId::new("P-1").unwrap()),
         from_state: Some(TaskState::Ready),
         to_state: Some(TaskState::Ready),
         reason: None,
@@ -474,6 +480,7 @@ fn dependency_mutation_is_atomic_with_its_event() {
         workspace_id: None,
         from_workspace_state: None,
         to_workspace_state: None,
+        plan_revision: None,
     };
     assert!(store
         .add_dependency_with_event(
@@ -891,6 +898,14 @@ fn table_layout_matches_the_accepted_contract() {
             "attempt_id",
             "attempt_outcome",
             "workspace_id",
+            "plan_branch_id",
+            "plan_revision_seq",
+            "plan_changeset_hash",
+            "plan_planner_adapter_id",
+            "plan_model_ref",
+            "plan_planning_cost_receipt_ref",
+            "plan_validated_service_id",
+            "plan_policy_fingerprint",
         ]
     );
     assert_eq!(
@@ -920,7 +935,7 @@ fn journal_event_facts_have_no_secret_fields() {
         fact: NewJournalEvent {
             event_type: EventType::Submitted,
             task_id: Some(TaskId::new("T-1").unwrap()),
-            project_id: ProjectId::new("P-1").unwrap(),
+            project_id: Some(ProjectId::new("P-1").unwrap()),
             from_state: Some(TaskState::Running),
             to_state: Some(TaskState::Submitted),
             reason: Some("diff + tests".into()),
@@ -934,6 +949,7 @@ fn journal_event_facts_have_no_secret_fields() {
             workspace_id: None,
             from_workspace_state: None,
             to_workspace_state: None,
+            plan_revision: None,
         },
     };
     let debug = format!("{event:?}");
