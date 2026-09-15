@@ -19,7 +19,7 @@ use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
 use crate::error::{map_constraint, StorageError, StorageResult};
 use crate::event::{AttemptOutcome, EventType, JournalEvent, NewJournalEvent};
-use crate::task_store::insert_journal_event;
+use crate::journal_store::{insert_journal_event, require_envelope};
 
 impl crate::task_store::SqliteStore {
     // -- reads ----------------------------------------------------------
@@ -384,7 +384,7 @@ pub(crate) fn require_execution_created_envelope(
     }
     if event.execution_id.as_ref() != Some(execution.id())
         || event.task_id.as_ref() != Some(execution.task_id())
-        || event.project_id != *project_id
+        || event.project_id.as_ref() != Some(project_id)
     {
         return Err(StorageError::ConstraintViolation(
             "execution.created event references a different execution, task, or project \
@@ -403,7 +403,7 @@ pub(crate) fn require_execution_created_envelope(
                 .to_owned(),
         ));
     }
-    super::task_store::require_envelope(event)
+    require_envelope(event)
 }
 
 /// Validates that `event` is the `attempt.created` evidence for exactly
@@ -431,7 +431,7 @@ fn require_attempt_created_envelope(
             "attempt.created event must not carry an outcome or Task lifecycle states".to_owned(),
         ));
     }
-    super::task_store::require_envelope(event)
+    require_envelope(event)
 }
 
 /// Validates that `event` is the `attempt.concluded` evidence recording
@@ -462,5 +462,5 @@ fn require_attempt_concluded_envelope(
                 .to_owned(),
         ));
     }
-    super::task_store::require_envelope(event)
+    require_envelope(event)
 }

@@ -1082,7 +1082,7 @@ fn workspace_events_carry_exact_scope_and_ordering() {
     assert_eq!(facts[0].event_version, 1);
     assert_eq!(facts[1].event_version, 1);
     for fact in &facts {
-        assert_eq!(fact.fact.project_id, project_id);
+        assert_eq!(fact.fact.project_id.as_ref(), Some(&project_id));
         assert_eq!(fact.fact.task_id.as_ref(), Some(&task_id));
         assert_eq!(fact.fact.execution_id.as_ref(), Some(&exec));
         assert!(

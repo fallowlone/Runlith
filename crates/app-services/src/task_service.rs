@@ -346,7 +346,7 @@ impl<C: Clock> TaskService<C> {
         let event = NewJournalEvent {
             event_type,
             task_id: Some(next.id().clone()),
-            project_id: next.project_id().clone(),
+            project_id: Some(next.project_id().clone()),
             from_state: Some(from),
             to_state: Some(to),
             reason,
@@ -366,6 +366,7 @@ impl<C: Clock> TaskService<C> {
             workspace_id: None,
             from_workspace_state: None,
             to_workspace_state: None,
+            plan_revision: None,
         };
         Ok(PlannedTransition { task: next, event })
     }
@@ -390,7 +391,7 @@ impl<C: Clock> TaskService<C> {
         NewJournalEvent {
             event_type,
             task_id,
-            project_id,
+            project_id: Some(project_id),
             from_state,
             to_state,
             reason,
@@ -406,6 +407,7 @@ impl<C: Clock> TaskService<C> {
             workspace_id: None,
             from_workspace_state: None,
             to_workspace_state: None,
+            plan_revision: None,
         }
     }
 }

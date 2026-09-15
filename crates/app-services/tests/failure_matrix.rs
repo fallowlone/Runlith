@@ -1568,9 +1568,9 @@ fn event_journal_agrees_with_relational_state_and_reads_create_nothing() {
             );
         }
     }
-    // No evaluator-specific event type exists: the closed 15-type codec
-    // covers everything observed.
-    assert_eq!(EventType::all().len(), 17);
+    // No evaluator-specific event type exists: the closed canonical codec
+    // covers everything observed, including the independent G7 Plan fact.
+    assert_eq!(EventType::all().len(), 18);
 
     // Reads create no events.
     let before = service
@@ -1944,7 +1944,7 @@ fn non_ready_states_invoke_nothing_and_create_no_runtime_facts() {
 fn no_scenario_expands_the_durable_taxonomy() {
     // Closed vocabularies stay closed across the whole matrix.
     assert_eq!(TaskState::all().len(), 12);
-    assert_eq!(EventType::all().len(), 17);
+    assert_eq!(EventType::all().len(), 18);
     assert_eq!(storage_sqlite::AttemptOutcome::all().len(), 4);
     assert_eq!(FakeScenario::all().len(), 11);
 
@@ -1989,8 +1989,8 @@ fn no_scenario_expands_the_durable_taxonomy() {
         }
         // Schema version is asserted structurally by the storage adapter
         // (SUPPORTED_SCHEMA_VERSION); the closed workload-bearing migration
-        // sequence (0001..0011) is proven by the storage census tests.
-        assert_eq!(storage_sqlite::SUPPORTED_SCHEMA_VERSION, 11);
+        // sequence (0001..0012) is proven by the storage census tests.
+        assert_eq!(storage_sqlite::SUPPORTED_SCHEMA_VERSION, 12);
     }
 }
 
