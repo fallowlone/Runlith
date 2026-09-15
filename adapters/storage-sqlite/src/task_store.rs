@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use task_domain::{validate_acyclic, Project, ProjectId, Task, TaskId, TaskSnapshot, TaskState};
 
 use crate::error::{map_constraint, StorageError, StorageResult};
@@ -24,6 +24,7 @@ use crate::journal_store::{
     list_events_ordered as list_journal_events_ordered, require_envelope,
 };
 use crate::migration::{migrate, schema_version, verify_foreign_keys};
+use crate::path_security::{prepare_database_path, verify_database_path};
 
 /// SQLite-backed durable store. Owns one connection to an explicit file;
 /// tests use test-owned temporary files, never a user database.
@@ -35,8 +36,13 @@ impl SqliteStore {
     /// Opens (creating if absent) the database at `path`, enables and
     /// verifies foreign keys, and applies pending migrations.
     pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
-        let mut connection = Connection::open(path.as_ref())?;
-        connection.execute_batch("PRAGMA foreign_keys = ON")?;
+        let prepared = prepare_database_path(path.as_ref())?;
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        let mut connection = Connection::open_with_flags(prepared.path(), flags)?;
+        verify_database_path(&prepared)?;
+        connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA temp_store = MEMORY;")?;
         // Bounded lock patience (TASK-0047, G5): the daemon serves
         // concurrent connections (control dispatch, background provider
         // runs, status reads) on separate connections over one file.
@@ -54,6 +60,7 @@ impl SqliteStore {
         connection.busy_timeout(std::time::Duration::from_secs(30))?;
         verify_foreign_keys(&connection)?;
         migrate(&mut connection)?;
+        verify_database_path(&prepared)?;
         Ok(Self { connection })
     }
 
