@@ -1,0 +1,14 @@
+[package]
+name = "fake-planner"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "fake_planner"
+path = "src/lib.rs"
+
+[dependencies]
+plan-domain = { path = "../../crates/plan" }
+
+[dev-dependencies]
+planner-contract = { path = "../../crates/planner-contract" }

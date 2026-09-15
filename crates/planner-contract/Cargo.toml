@@ -1,0 +1,11 @@
+[package]
+name = "planner-contract"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "planner_contract"
+path = "src/lib.rs"
+
+[dependencies]
+plan-domain = { path = "../plan" }

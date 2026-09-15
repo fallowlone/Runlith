@@ -18,6 +18,7 @@ ipc-control = { path = "../../crates/ipc-control" }
 ipc-transport = { path = "../../crates/ipc-transport" }
 provider-claude = { path = "../../adapters/provider-claude" }
 policy = { path = "../../crates/policy" }
+plan-domain = { path = "../../crates/plan" }
 runner = { path = "../../crates/runner" }
 runner-native = { path = "../../adapters/runner-native" }
 runner-macos-seatbelt = { path = "../../adapters/runner-macos-seatbelt" }
@@ -31,6 +32,8 @@ workspace = { path = "../../crates/workspace" }
 app-services = { path = "../../crates/app-services" }
 agent-runtime = { path = "../../crates/agent-runtime" }
 bytes = "1"
+fake-evaluator = { path = "../../adapters/fake-evaluator" }
+fake-planner = { path = "../../adapters/fake-planner" }
 git-cli = { path = "../../adapters/git-cli" }
 prost = "0.14.4"
 storage-sqlite = { path = "../../adapters/storage-sqlite" }

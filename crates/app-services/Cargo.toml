@@ -16,12 +16,14 @@ scheduler = { path = "../scheduler" }
 evaluation = { path = "../evaluation" }
 policy = { path = "../policy" }
 runner = { path = "../runner" }
+plan-domain = { path = "../plan" }
 security-audit = { path = "../security-audit" }
 secrets = { path = "../secrets" }
 sha2 = "0.10"
 
 [dev-dependencies]
 fake-agent = { path = "../../adapters/fake-agent" }
+fake-planner = { path = "../../adapters/fake-planner" }
 fake-evaluator = { path = "../../adapters/fake-evaluator" }
 git-cli = { path = "../../adapters/git-cli" }
 provider-claude = { path = "../../adapters/provider-claude" }

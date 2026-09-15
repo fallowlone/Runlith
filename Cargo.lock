@@ -46,10 +46,13 @@ dependencies = [
  "app-services",
  "bytes",
  "evaluation",
+ "fake-evaluator",
+ "fake-planner",
  "git-cli",
  "ipc-contracts",
  "ipc-control",
  "ipc-transport",
+ "plan-domain",
  "policy",
  "prost",
  "provider-claude",
@@ -86,7 +89,9 @@ dependencies = [
  "evaluation",
  "fake-agent",
  "fake-evaluator",
+ "fake-planner",
  "git-cli",
+ "plan-domain",
  "policy",
  "provider-claude",
  "runner",
@@ -572,6 +577,14 @@ name = "fake-evaluator"
 version = "0.1.0"
 dependencies = [
  "evaluation",
+]
+
+[[package]]
+name = "fake-planner"
+version = "0.1.0"
+dependencies = [
+ "plan-domain",
+ "planner-contract",
 ]
 
 [[package]]
@@ -1086,6 +1099,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "planner-contract"
+version = "0.1.0"
+dependencies = [
+ "plan-domain",
+]
+
+[[package]]
 name = "policy"
 version = "0.1.0"
 dependencies = [
@@ -1259,6 +1279,8 @@ version = "0.1.0"
 dependencies = [
  "agent-runtime",
  "execution-contract",
+ "plan-domain",
+ "planner-contract",
  "runner",
  "scheduler",
  "task-domain",
