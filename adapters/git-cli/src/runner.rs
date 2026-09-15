@@ -18,7 +18,7 @@
 //! (`add`, `list`), and `status`. `fetch`/`pull`/`push`/`clone`/`ls-remote`
 //! appear nowhere as executed commands.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
@@ -622,7 +622,7 @@ pub fn run_git<A: AsRef<OsStr>>(
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("PATH", git_child_path(executable))
         // Do not inherit host Git configuration locations. Repository-local
         // configuration is still handled by explicit `-c` policy above and
         // remains an area guarded by the metadata identity work in TASK-0071.
@@ -693,6 +693,19 @@ pub fn run_git<A: AsRef<OsStr>>(
         stdout: stdout.bytes,
         stderr: stderr.bytes,
     })
+}
+
+fn git_child_path(executable: &OsStr) -> OsString {
+    let executable = Path::new(executable);
+    if executable.is_absolute() {
+        return executable
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::as_os_str)
+            .map(OsStr::to_os_string)
+            .unwrap_or_default();
+    }
+    std::env::var_os("PATH").unwrap_or_default()
 }
 
 #[derive(Debug)]
@@ -998,5 +1011,13 @@ mod tests {
 
         assert!(captured.overflowed);
         assert_eq!(captured.bytes.len(), MAX_GIT_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn absolute_git_executable_does_not_reinject_ambient_path() {
+        assert_eq!(
+            git_child_path(OsStr::new("/opt/runlith/bin/git")),
+            OsString::from("/opt/runlith/bin")
+        );
     }
 }

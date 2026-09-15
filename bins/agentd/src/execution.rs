@@ -39,6 +39,7 @@
 //! explicitly deferred.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -261,6 +262,9 @@ pub struct ExecutionComposition {
     db_path: PathBuf,
     cancels: CancelRegistry,
     tracker: provider_claude::LiveProcessTracker,
+    /// Canonical Git executable resolved once when the daemon composition is
+    /// built. A poisoned later PATH cannot redirect privileged Git work.
+    git_executable: Result<PathBuf, String>,
     /// Composition-owned provider executable override. `None` resolves
     /// `claude` via `PATH`; `Some` points at an explicit binary (tests
     /// inject fixture doubles). Never client-supplied — no IPC field
@@ -270,13 +274,15 @@ pub struct ExecutionComposition {
 }
 
 impl ExecutionComposition {
-    /// Builds the composition for one database. No I/O: the managed
-    /// workspace root is ensured per `run` (fail fast, before mutation).
+    /// Builds the composition for one database and resolves the trusted Git
+    /// executable once. The managed workspace root is still ensured per
+    /// `run` (fail fast, before mutation).
     pub fn new(db_path: PathBuf, provider_executable: Option<PathBuf>) -> Self {
         Self {
             db_path,
             cancels: CancelRegistry::fresh(),
             tracker: provider_claude::LiveProcessTracker::fresh(),
+            git_executable: resolve_git_executable(),
             provider_executable,
         }
     }
@@ -286,6 +292,24 @@ impl ExecutionComposition {
     pub fn db_path(&self) -> &Path {
         &self.db_path
     }
+
+    fn git_cli(&self) -> Result<git_cli::GitCli, String> {
+        self.git_executable
+            .as_ref()
+            .map(|path| git_cli::GitCli::with_executable(path.clone()))
+            .map_err(Clone::clone)
+    }
+}
+
+fn resolve_git_executable() -> Result<PathBuf, String> {
+    let executable = provider_claude::find_on_path(OsStr::new("git"))
+        .ok_or_else(|| "git executable not found on PATH".to_owned())?;
+    let executable = std::fs::canonicalize(executable)
+        .map_err(|_| "git executable cannot be canonicalized".to_owned())?;
+    if !executable.is_file() {
+        return Err("git executable is not a regular file".to_owned());
+    }
+    Ok(executable)
 }
 
 /// Shared handle type for the serve loop.
@@ -649,7 +673,8 @@ fn run_background_inner(
         OrchestrationService::open(&composition.db_path, app_services::SystemClock)
             .map_err(|error| format!("open orchestration: {error}"))?;
     let root = ensure_managed_root(&composition.db_path)?;
-    let git = git_cli::GitCli::new()
+    let git = composition
+        .git_cli()?
         .with_liveness(Arc::new(composition.tracker.clone()) as Arc<dyn workspace::OwnerLiveness>);
     let mut workspace =
         WorkspaceService::open(&composition.db_path, git, root, app_services::SystemClock)
@@ -752,10 +777,10 @@ struct EntryPreflightFailure {
 }
 
 fn resolve_entry_revision(
+    git: &git_cli::GitCli,
     repository_path: &str,
     base_revision: &str,
 ) -> Result<Revision, EntryPreflightFailure> {
-    let git = git_cli::GitCli::new();
     // Admission preflight (trusted-deposit before provider execution):
     // establish the anchor first via the sole anchor-free path, then bind
     // subsequent observations to it.
@@ -889,7 +914,16 @@ fn start_run(
     // failures are synchronously detectable (read-only Git) and must
     // refuse here — never as a stranded RUNNING entry in the background
     // (TASK-0054, G5 B-RS boundary B′).
-    if let Err(failure) = resolve_entry_revision(&req.repository_path, &base_revision) {
+    let git = match composition.git_cli() {
+        Ok(git) => git,
+        Err(_) => {
+            return (
+                exec_error(BusinessErrorCode::Internal, "git executable unavailable"),
+                None,
+            );
+        }
+    };
+    if let Err(failure) = resolve_entry_revision(&git, &req.repository_path, &base_revision) {
         return (exec_error(failure.code, failure.message), None);
     }
 
@@ -1148,7 +1182,16 @@ fn resume_run(
     // resolve in the supplied repository (wrong-repository paths fail
     // closed here); an explicitly supplied revision must resolve to that
     // same recorded base (bases are immutable).
-    let resolved = match resolve_entry_revision(&req.repository_path, &base_revision) {
+    let git = match composition.git_cli() {
+        Ok(git) => git,
+        Err(_) => {
+            return (
+                exec_error(BusinessErrorCode::Internal, "git executable unavailable"),
+                None,
+            );
+        }
+    };
+    let resolved = match resolve_entry_revision(&git, &req.repository_path, &base_revision) {
         Ok(revision) => revision,
         Err(failure) => return (exec_error(failure.code, failure.message), None),
     };
@@ -1178,7 +1221,7 @@ fn resume_run(
     // between this check and execution remain fail-closed.
     let workspace_preflight = match WorkspaceService::open(
         &composition.db_path,
-        git_cli::GitCli::new(),
+        git,
         resume_root,
         app_services::SystemClock,
     ) {
