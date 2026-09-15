@@ -102,12 +102,16 @@ fn r1_h2_child_env_cannot_see_poisoned_vars() {
         (OsString::from("HOME"), OsString::from("/home/tester")),
     ])
     .unwrap();
+    let workdir = std::env::current_dir()
+        .expect("test current dir")
+        .canonicalize()
+        .expect("canonical test current dir");
     let env_authority =
         EffectiveCapabilities::new(vec![Capability::process("/usr/bin/env").unwrap()]);
     let launch = prepare_process_launch(
         Arc::new(NativeRunner),
         &env_authority,
-        "ws-1",
+        workdir.to_string_lossy().into_owned(),
         ScopeId::new("/usr/bin/env").unwrap(),
         IsolationRequirements::trusted_host(),
         environment,
@@ -122,7 +126,8 @@ fn r1_h2_child_env_cannot_see_poisoned_vars() {
         .expect("bind sandboxed recipe");
     let child = sandboxed
         .spawn(|wire| {
-            wire.stdin(Stdio::null())
+            wire.current_dir(&workdir)
+                .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
         })

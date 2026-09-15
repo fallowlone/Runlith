@@ -449,9 +449,18 @@ fn build_provider_launch_security(
 ) -> Result<ProviderLaunchSecurity, String> {
     let workspace = Path::new(lease.worktree_ref())
         .canonicalize()
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| lease.worktree_ref().to_owned());
-    let executable = ScopeId::new(executable.to_string_lossy().into_owned())
+        .map_err(|_| "provider launch workspace cannot be canonicalized".to_owned())?;
+    if !workspace.is_dir() {
+        return Err("provider launch workspace is not a directory".to_owned());
+    }
+    let workspace = workspace
+        .to_str()
+        .ok_or_else(|| "provider launch workspace is not valid UTF-8".to_owned())?
+        .to_owned();
+    let executable = executable
+        .to_str()
+        .ok_or_else(|| "provider launch executable is not valid UTF-8".to_owned())?;
+    let executable = ScopeId::new(executable.to_owned())
         .map_err(|error| format!("provider launch executable scope: {error}"))?;
     let capabilities = vec![
         Capability::FilesystemRead(
@@ -1992,6 +2001,44 @@ mod tests {
             error.detail().contains("no automated verifier"),
             "got {:?}",
             error.detail()
+        );
+    }
+
+    #[test]
+    fn provider_launch_security_rejects_unresolvable_workspace() {
+        let sandbox = Sandbox::named("g6-unresolvable-workspace");
+        let task = task_domain::Task::draft(
+            task_domain::TaskId::new("T-1").unwrap(),
+            task_domain::ProjectId::new("P-1").unwrap(),
+            "objective",
+        )
+        .unwrap();
+        let missing_workspace = sandbox.dir.join("missing-worktree");
+        let lease = workspace::WorkspaceLease::allocate(
+            workspace::WorkspaceId::new("WS-1").unwrap(),
+            workspace::RepositoryRef::new("repo-local:g6-unresolvable").unwrap(),
+            ExecutionId::new("E-1").unwrap(),
+            workspace::Revision::new("a".repeat(40)).unwrap(),
+            workspace::BranchRef::new("refs/heads/task-sec-r1").unwrap(),
+            missing_workspace.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+        let work = scheduler::WorkItem {
+            task_id: task_domain::TaskId::new("T-1").unwrap(),
+            execution_id: ExecutionId::new("E-1").unwrap(),
+            attempt_id: agent_runtime::AttemptId::new("A-1").unwrap(),
+        };
+
+        let result = build_provider_launch_security(
+            &task,
+            &lease,
+            &work,
+            std::ffi::OsStr::new("/usr/bin/true"),
+        );
+        assert!(result.is_err(), "unresolvable workspace must fail closed");
+        assert!(
+            result.err().unwrap().contains("provider launch workspace"),
+            "failure should identify the bounded launch-workspace refusal"
         );
     }
 
