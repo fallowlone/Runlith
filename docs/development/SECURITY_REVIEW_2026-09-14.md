@@ -249,5 +249,3 @@ transport defect.
 3. M-2 + M-3 (0600 DB, HMAC-keyed audit chain).
 4. M-1 (second factor for approval/shutdown; needs ADR decision).
 5. M-4, M-5, M-6, M-7, then LOW items.
-
-
