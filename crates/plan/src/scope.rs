@@ -111,6 +111,25 @@ impl ScopeBound {
             roots: parse_sorted_unique(roots)?,
         })
     }
+
+    /// Returns the normalized canonical roots used by this bound.
+    ///
+    /// Planner adapters need a value representation to serialize the
+    /// authorized bound into provider input. Returning owned strings keeps
+    /// the domain independent of any filesystem handle or adapter type.
+    #[must_use]
+    pub fn roots(&self) -> Vec<String> {
+        self.roots
+            .iter()
+            .map(|root| {
+                format!(
+                    "{}:{}",
+                    root.workspace,
+                    root.path.as_os_str().to_string_lossy()
+                )
+            })
+            .collect()
+    }
 }
 
 impl PlanScope {

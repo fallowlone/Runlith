@@ -38,6 +38,7 @@ pub mod approval;
 pub mod data_dir;
 pub mod dispatch;
 pub mod execution;
+pub mod planning;
 
 pub use data_dir::{resolve_data_dir, resolve_database_path};
 

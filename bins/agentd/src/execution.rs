@@ -80,13 +80,12 @@ pub const CAPTURE_GRACE: Duration = Duration::from_secs(5);
 
 const PROVIDER_LAUNCH_REQUESTER: &str = "agent-runtime";
 
-fn production_runner_backend(
-    provider: &provider_claude::ClaudeExecutor,
+pub(crate) fn production_runner_backend(
+    support_read: Vec<PathBuf>,
+    support_write: Vec<PathBuf>,
 ) -> Result<Arc<dyn IsolationBackend>, String> {
     #[cfg(target_os = "macos")]
     {
-        let support_read = provider.isolation_support_read_roots()?;
-        let support_write = provider.isolation_support_write_roots()?;
         Ok(Arc::new(
             runner_macos_seatbelt::MacOsSeatbeltRunner::with_support_roots(
                 support_read,
@@ -97,7 +96,7 @@ fn production_runner_backend(
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = provider;
+        let _ = (support_read, support_write);
         Ok(Arc::new(runner_native::NativeRunner))
     }
 }
@@ -299,6 +298,30 @@ impl ExecutionComposition {
             .map(|path| git_cli::GitCli::with_executable(path.clone()))
             .map_err(Clone::clone)
     }
+
+    pub(crate) fn resolved_provider_executable(&self) -> Result<PathBuf, String> {
+        let executable = self
+            .provider_executable
+            .clone()
+            .or_else(|| provider_claude::find_on_path(std::ffi::OsStr::new("claude")))
+            .ok_or_else(|| {
+                "provider unavailable: claude executable not found on PATH".to_owned()
+            })?;
+        let executable = std::fs::canonicalize(&executable).map_err(|error| {
+            format!(
+                "provider executable cannot be canonicalized ({}): {error}",
+                executable.display()
+            )
+        })?;
+        if !executable.is_file() {
+            return Err("provider executable is not a regular file".to_owned());
+        }
+        Ok(executable)
+    }
+
+    pub(crate) fn provider_environment_base(&self) -> Result<PathBuf, String> {
+        provider_environment_base(&self.db_path)
+    }
 }
 
 fn resolve_git_executable() -> Result<PathBuf, String> {
@@ -325,12 +348,108 @@ struct SecuredClaudeExecutor {
     launch: Result<ProviderLaunchSecurity, String>,
 }
 
-struct ProviderLaunchSecurity {
+pub(crate) struct ProviderLaunchSecurity {
     request: PolicyRequest,
     parent: EffectiveCapabilities,
     policy: CompiledPolicy,
     workspace: String,
     executable: ScopeId,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ProviderWorkspaceAccess {
+    ReadOnly,
+    ReadWrite,
+}
+
+pub(crate) struct ProviderLaunchContext<'a> {
+    pub(crate) task_id: &'a str,
+    pub(crate) execution_id: Option<String>,
+    pub(crate) attempt_id: Option<String>,
+    pub(crate) operation_id: String,
+    pub(crate) requester: &'a str,
+    pub(crate) workspace: &'a Path,
+    pub(crate) executable: &'a std::ffi::OsStr,
+    pub(crate) workspace_access: ProviderWorkspaceAccess,
+}
+
+pub(crate) struct PreparedProviderLaunch {
+    security: G6SecurityService<app_services::SystemClock>,
+    operation: PrivilegedOperation,
+    backend: Arc<dyn IsolationBackend>,
+    effective: EffectiveCapabilities,
+    spec: ProcessSecuritySpec,
+    launch: Arc<runner::SandboxedLaunch>,
+}
+
+impl PreparedProviderLaunch {
+    pub(crate) fn invoke<T, E>(
+        mut self,
+        invoke: impl FnOnce(Arc<runner::SandboxedLaunch>) -> Result<T, E>,
+    ) -> Result<Result<T, E>, String> {
+        let launch = Arc::clone(&self.launch);
+        self.security
+            .enforce_process_operation(
+                &self.operation,
+                self.backend.as_ref(),
+                &self.effective,
+                &self.spec,
+                || invoke(launch),
+            )
+            .map_err(|error| format!("G6 security boundary refused provider launch: {error}"))
+    }
+}
+
+pub(crate) fn prepare_provider_launch(
+    db_path: &Path,
+    launch: &ProviderLaunchSecurity,
+    support_read: Vec<PathBuf>,
+    support_write: Vec<PathBuf>,
+    environment_pairs: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+) -> Result<PreparedProviderLaunch, String> {
+    let mut security = G6SecurityService::open(db_path, app_services::SystemClock)
+        .map_err(|error| format!("G6 security boundary refused provider launch: {error}"))?;
+    let authorization = security
+        .authorize(&launch.request, &launch.parent, &launch.policy, u64::MAX)
+        .map_err(|error| format!("G6 security boundary refused provider launch: {error}"))?;
+    let effective = match authorization {
+        G6Authorization::Authorized { effective, .. } => effective,
+        G6Authorization::ApprovalRequired { .. } => {
+            return Err("G6 approval required before provider launch".to_owned());
+        }
+        G6Authorization::Denied { .. } => {
+            return Err("G6 policy denied provider launch".to_owned());
+        }
+    };
+    let operation = PrivilegedOperation::from_policy_request(&launch.request);
+    let backend = production_runner_backend(support_read, support_write)?;
+    let environment = ChildEnvironment::from_explicit(environment_pairs)
+        .map_err(|error| format!("G6 child environment refused: {error}"))?;
+    let spec = ProcessSecuritySpec::new(
+        launch.workspace.clone(),
+        launch.executable.clone(),
+        IsolationRequirements::new(true, true, true),
+        environment.clone(),
+        provider_claude::CLAUDE_PROVIDER_REF,
+    );
+    let prepared_launch = runner::prepare_process_launch(
+        Arc::clone(&backend),
+        &effective,
+        launch.workspace.clone(),
+        launch.executable.clone(),
+        IsolationRequirements::new(true, true, true),
+        environment,
+    )
+    .map_err(|error| format!("G6 runtime launch preparation refused: {error}"))?;
+
+    Ok(PreparedProviderLaunch {
+        security,
+        operation,
+        backend,
+        effective,
+        spec,
+        launch: Arc::new(prepared_launch),
+    })
 }
 
 impl scheduler::ExecutionPort for SecuredClaudeExecutor {
@@ -348,80 +467,39 @@ impl scheduler::ExecutionPort for SecuredClaudeExecutor {
                 .map_err(|detail| scheduler::ExecutionProblem::Failed {
                     detail: format!("G6 provider launch setup refused: {detail}"),
                 })?;
-        let mut security = G6SecurityService::open(&self.db_path, app_services::SystemClock)
-            .map_err(security_execution_problem)?;
-        let authorization = security
-            .authorize(&launch.request, &launch.parent, &launch.policy, u64::MAX)
-            .map_err(security_execution_problem)?;
-        let effective = match authorization {
-            G6Authorization::Authorized { effective, .. } => effective,
-            G6Authorization::ApprovalRequired { .. } => {
-                return Err(scheduler::ExecutionProblem::Failed {
-                    detail: "G6 approval required before provider launch".to_owned(),
-                });
-            }
-            G6Authorization::Denied { .. } => {
-                return Err(scheduler::ExecutionProblem::Failed {
-                    detail: "G6 policy denied provider launch".to_owned(),
-                });
-            }
-        };
-        let operation = PrivilegedOperation::from_policy_request(&launch.request);
-        let backend = production_runner_backend(&self.inner).map_err(|detail| {
-            scheduler::ExecutionProblem::Failed {
+        let support_read = self
+            .inner
+            .isolation_support_read_roots()
+            .map_err(|detail| scheduler::ExecutionProblem::Failed {
                 detail: format!("G6 runtime backend setup refused: {detail}"),
+            })?;
+        let support_write = self
+            .inner
+            .isolation_support_write_roots()
+            .map_err(|detail| scheduler::ExecutionProblem::Failed {
+                detail: format!("G6 runtime backend setup refused: {detail}"),
+            })?;
+        let environment = self.inner.child_environment().map_err(|detail| {
+            scheduler::ExecutionProblem::Failed {
+                detail: format!("G6 provider environment refused: {detail}"),
             }
         })?;
-        // The child environment is planned, not inherited: the provider's
-        // explicit composition-resolved set becomes part of the isolation
-        // plan and is installed by the backend after clearing the ambient
-        // environment (TASK-SEC-R1 R1-H2).
-        let environment = self
-            .inner
-            .child_environment()
-            .map_err(|detail| scheduler::ExecutionProblem::Failed {
-                detail: format!("G6 provider environment refused: {detail}"),
-            })
-            .and_then(|pairs| {
-                ChildEnvironment::from_explicit(pairs).map_err(|error| {
-                    scheduler::ExecutionProblem::Failed {
-                        detail: format!("G6 child environment refused: {error}"),
-                    }
-                })
-            })?;
-        let spec = ProcessSecuritySpec::new(
-            launch.workspace.clone(),
-            launch.executable.clone(),
-            IsolationRequirements::new(true, true, true),
-            environment.clone(),
-            provider_claude::CLAUDE_PROVIDER_REF,
-        );
-        let prepared_launch = runner::prepare_process_launch(
-            Arc::clone(&backend),
-            &effective,
-            launch.workspace.clone(),
-            launch.executable.clone(),
-            IsolationRequirements::new(true, true, true),
+        let prepared = prepare_provider_launch(
+            &self.db_path,
+            launch,
+            support_read,
+            support_write,
             environment,
         )
-        .map_err(|error| scheduler::ExecutionProblem::Failed {
-            detail: format!("G6 runtime launch preparation refused: {error}"),
-        })?;
-        let provider = self
-            .inner
-            .clone()
-            .with_sandboxed_launch(Arc::new(prepared_launch));
-        security
-            .enforce_process_operation(&operation, backend.as_ref(), &effective, &spec, || {
-                provider.execute(work)
+        .map_err(|detail| scheduler::ExecutionProblem::Failed { detail })?;
+        prepared
+            .invoke(|prepared_launch| {
+                self.inner
+                    .clone()
+                    .with_sandboxed_launch(prepared_launch)
+                    .execute(work)
             })
-            .map_err(security_execution_problem)?
-    }
-}
-
-fn security_execution_problem(error: app_services::G6SecurityError) -> scheduler::ExecutionProblem {
-    scheduler::ExecutionProblem::Failed {
-        detail: format!("G6 security boundary refused provider launch: {error}"),
+            .map_err(|detail| scheduler::ExecutionProblem::Failed { detail })?
     }
 }
 
@@ -447,7 +525,27 @@ fn build_provider_launch_security(
     work: &scheduler::WorkItem,
     executable: &std::ffi::OsStr,
 ) -> Result<ProviderLaunchSecurity, String> {
-    let workspace = Path::new(lease.worktree_ref())
+    build_provider_launch_security_for_context(ProviderLaunchContext {
+        task_id: task.id().as_str(),
+        execution_id: Some(work.execution_id.to_string()),
+        attempt_id: Some(work.attempt_id.to_string()),
+        operation_id: format!(
+            "provider.launch:{}:{}",
+            work.execution_id.as_str(),
+            work.attempt_id.as_str()
+        ),
+        requester: PROVIDER_LAUNCH_REQUESTER,
+        workspace: Path::new(lease.worktree_ref()),
+        executable,
+        workspace_access: ProviderWorkspaceAccess::ReadWrite,
+    })
+}
+
+pub(crate) fn build_provider_launch_security_for_context(
+    context: ProviderLaunchContext<'_>,
+) -> Result<ProviderLaunchSecurity, String> {
+    let workspace = context
+        .workspace
         .canonicalize()
         .map_err(|_| "provider launch workspace cannot be canonicalized".to_owned())?;
     if !workspace.is_dir() {
@@ -457,40 +555,35 @@ fn build_provider_launch_security(
         .to_str()
         .ok_or_else(|| "provider launch workspace is not valid UTF-8".to_owned())?
         .to_owned();
-    let executable = executable
+    let executable = context
+        .executable
         .to_str()
         .ok_or_else(|| "provider launch executable is not valid UTF-8".to_owned())?;
     let executable = ScopeId::new(executable.to_owned())
         .map_err(|error| format!("provider launch executable scope: {error}"))?;
-    let capabilities = vec![
-        Capability::FilesystemRead(
-            FileScope::new(&workspace, ".")
-                .map_err(|error| format!("provider launch read scope: {error}"))?,
-        ),
-        Capability::FilesystemWrite(
+    let mut capabilities = vec![Capability::FilesystemRead(
+        FileScope::new(&workspace, ".")
+            .map_err(|error| format!("provider launch read scope: {error}"))?,
+    )];
+    if matches!(context.workspace_access, ProviderWorkspaceAccess::ReadWrite) {
+        capabilities.push(Capability::FilesystemWrite(
             FileScope::new(&workspace, ".")
                 .map_err(|error| format!("provider launch write scope: {error}"))?,
-        ),
+        ));
+    }
+    capabilities.extend([
         Capability::ProcessExecute(executable.clone()),
         Capability::NetworkAccess(
             ScopeId::new(runner::NETWORK_SCOPE_OUTBOUND_TCP_443)
                 .map_err(|error| format!("provider launch network scope: {error}"))?,
         ),
-    ];
+    ]);
     let requested = RequestedCapabilities::new(capabilities.clone());
     let request = PolicyRequest::new(
-        format!(
-            "provider.launch:{}:{}",
-            work.execution_id.as_str(),
-            work.attempt_id.as_str()
-        ),
-        PROVIDER_LAUNCH_REQUESTER,
-        RequestOrigin::new(
-            task.id().as_str(),
-            Some(work.execution_id.to_string()),
-            Some(work.attempt_id.to_string()),
-        )
-        .map_err(|error| format!("provider launch origin: {error}"))?,
+        context.operation_id,
+        context.requester,
+        RequestOrigin::new(context.task_id, context.execution_id, context.attempt_id)
+            .map_err(|error| format!("provider launch origin: {error}"))?,
         requested,
     )
     .map_err(|error| format!("provider launch request: {error}"))?;
@@ -689,21 +782,11 @@ fn run_background_inner(
         WorkspaceService::open(&composition.db_path, git, root, app_services::SystemClock)
             .map_err(|error| format!("open workspace service: {error}"))?;
     let tracker = composition.tracker.clone();
-    let executable = composition
-        .provider_executable
-        .clone()
-        .or_else(|| provider_claude::find_on_path(std::ffi::OsStr::new("claude")))
-        .ok_or_else(|| "provider unavailable: claude executable not found on PATH".to_owned())?;
-    let executable = std::fs::canonicalize(&executable).map_err(|error| {
-        format!(
-            "provider executable cannot be canonicalized ({}): {error}",
-            executable.display()
-        )
-    })?;
+    let executable = composition.resolved_provider_executable()?;
     let db_path = composition.db_path.clone();
     let security_work = work.clone();
     let cancel = cancel.clone();
-    let environment_base = provider_environment_base(&composition.db_path)?;
+    let environment_base = composition.provider_environment_base()?;
     orchestration
         .continue_workspace_cycle(
             &mut workspace,

@@ -53,6 +53,10 @@ pub struct ClaudeOutcome {
     pub usage: UsageSample,
     /// Opaque provider session reference (evidence only).
     pub session_ref: String,
+    /// Full capture-bounded provider result retained inside this adapter for
+    /// structured consumers such as the proposal-only planner. Ordinary
+    /// execution continues to expose only the bounded evidence summary.
+    pub(crate) provider_result: String,
 }
 
 /// One bound Claude execution: config plus the attempt's prompt and
@@ -190,6 +194,12 @@ impl ClaudeExecutor {
         &self.workdir
     }
 
+    /// Exact configured executable identity used by Runner authorization.
+    #[must_use]
+    pub fn executable(&self) -> &std::ffi::OsStr {
+        self.config.executable()
+    }
+
     /// Narrow provider-owned paths required by the concrete OS sandbox.
     /// Environment preparation has already validated the runtime root before
     /// these paths are exposed to the composition layer.
@@ -231,13 +241,21 @@ impl ClaudeExecutor {
     }
 
     fn run(&self) -> Result<ClaudeOutcome, ClaudeFailure> {
+        self.run_prompt(&self.prompt)
+    }
+
+    /// Executes one bounded provider call through the same attached launch
+    /// path as ordinary execution, but with caller-supplied provider input.
+    /// This is crate-visible so the Claude Planner adapter can reuse the G5/G6
+    /// process seam without inventing a synthetic Task/Execution/Attempt.
+    pub(crate) fn run_prompt(&self, prompt: &str) -> Result<ClaudeOutcome, ClaudeFailure> {
         let environment =
             self.environment
                 .as_ref()
                 .map_err(|detail| ClaudeFailure::EnvironmentIsolation {
                     detail: bounded_detail(detail.clone()),
                 })?;
-        let argv = build_argv(&self.config, &self.prompt);
+        let argv = build_argv(&self.config, prompt);
         let outcome = spawn_and_supervise(
             ProcessInvocation {
                 executable: self.config.executable(),
@@ -341,6 +359,7 @@ fn canonical_outcome(parsed: &ParsedOutput, max_summary: usize) -> ClaudeOutcome
         },
         usage: parsed.usage.clone(),
         session_ref: parsed.session_ref.clone(),
+        provider_result: parsed.result_text.clone(),
     }
 }
 

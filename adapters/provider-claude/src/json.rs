@@ -77,6 +77,40 @@ impl Json {
             _ => None,
         }
     }
+
+    /// Reads a signed integer value when it is finite, integral, and fits.
+    #[must_use]
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Self::Num(n)
+                if n.is_finite()
+                    && n.fract() == 0.0
+                    && *n >= i64::MIN as f64
+                    && *n <= i64::MAX as f64 =>
+            {
+                Some(*n as i64)
+            }
+            _ => None,
+        }
+    }
+
+    /// Borrows an array value.
+    #[must_use]
+    pub fn as_array(&self) -> Option<&[Json]> {
+        match self {
+            Self::Arr(values) => Some(values),
+            _ => None,
+        }
+    }
+
+    /// Borrows an object value as insertion-ordered key/value pairs.
+    #[must_use]
+    pub fn as_object(&self) -> Option<&[(String, Json)]> {
+        match self {
+            Self::Obj(values) => Some(values),
+            _ => None,
+        }
+    }
 }
 
 /// Parser failure: input is not usable JSON.
