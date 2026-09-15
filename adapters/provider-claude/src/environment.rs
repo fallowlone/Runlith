@@ -200,15 +200,17 @@ impl ProviderEnvironment {
     /// Provider-owned paths the OS sandbox may read in addition to the task
     /// workspace. The real HOME contribution is limited to Claude's explicit
     /// authentication anchor rather than the whole user profile.
-    #[must_use]
-    pub fn isolation_support_read_roots(&self) -> Vec<PathBuf> {
+    pub fn isolation_support_read_roots(&self) -> Result<Vec<PathBuf>, String> {
         let mut roots = vec![self.runtime_root.clone()];
         if let Some(home) = &self.home {
             let home = PathBuf::from(home);
-            roots.push(home.join(".claude"));
-            roots.push(home.join(".claude.json"));
+            for candidate in [home.join(".claude"), home.join(".claude.json")] {
+                if let Some(candidate) = existing_optional_support_root(candidate)? {
+                    roots.push(candidate);
+                }
+            }
         }
-        roots
+        Ok(roots)
     }
 
     /// Provider-writable sandbox support is limited to the isolated runtime
@@ -225,6 +227,14 @@ fn non_empty_env(name: &str) -> Option<OsString> {
 
 fn required_env(name: &str) -> Result<OsString, String> {
     non_empty_env(name).ok_or_else(|| format!("provider environment requires {name}"))
+}
+
+fn existing_optional_support_root(path: PathBuf) -> Result<Option<PathBuf>, String> {
+    match fs::symlink_metadata(&path) {
+        Ok(_) => Ok(Some(path)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err("provider authentication support path cannot be inspected".to_owned()),
+    }
 }
 
 fn private_child(parent: &Path, name: &str) -> Result<PathBuf, String> {

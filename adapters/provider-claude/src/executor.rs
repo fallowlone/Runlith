@@ -196,8 +196,8 @@ impl ClaudeExecutor {
     pub fn isolation_support_read_roots(&self) -> Result<Vec<PathBuf>, String> {
         self.environment
             .as_ref()
-            .map(ProviderEnvironment::isolation_support_read_roots)
-            .map_err(Clone::clone)
+            .map_err(Clone::clone)?
+            .isolation_support_read_roots()
     }
 
     pub fn isolation_support_write_roots(&self) -> Result<Vec<PathBuf>, String> {
