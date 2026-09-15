@@ -5,9 +5,11 @@
 //! TASK-0019. One request in flight per connection is the G1 model, but
 //! sequencing is not implemented here.
 
-use std::future::poll_fn;
+use std::future::{poll_fn, Future};
 use std::io;
 use std::pin::Pin;
+use std::task::Poll;
+use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use futures_core::Stream;
@@ -30,6 +32,7 @@ use crate::{TransportError, FRAME_IO_TIMEOUT, MAX_FRAME_BYTES};
 #[derive(Debug)]
 pub struct ControlFrameCodec {
     inner: LengthDelimitedCodec,
+    frame_in_progress: bool,
 }
 
 impl ControlFrameCodec {
@@ -42,6 +45,7 @@ impl ControlFrameCodec {
             .max_frame_length(MAX_FRAME_BYTES);
         Self {
             inner: builder.new_codec(),
+            frame_in_progress: false,
         }
     }
 
@@ -49,6 +53,10 @@ impl ControlFrameCodec {
     #[must_use]
     pub fn max_frame_bytes(&self) -> usize {
         self.inner.max_frame_length()
+    }
+
+    fn frame_in_progress(&self) -> bool {
+        self.frame_in_progress
     }
 }
 
@@ -80,13 +88,27 @@ impl Decoder for ControlFrameCodec {
     type Error = TransportError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        match self
+        if !src.is_empty() {
+            self.frame_in_progress = true;
+        }
+        let decoded = self
             .inner
             .decode(src)
-            .map_err(|error| map_decode_error(src, error))?
-        {
-            Some(frame) if frame.is_empty() => Err(TransportError::EmptyFrame),
-            frame => Ok(frame),
+            .map_err(|error| map_decode_error(src, error));
+        match decoded {
+            Err(error) => {
+                self.frame_in_progress = false;
+                Err(error)
+            }
+            Ok(Some(frame)) if frame.is_empty() => {
+                self.frame_in_progress = false;
+                Err(TransportError::EmptyFrame)
+            }
+            Ok(Some(frame)) => {
+                self.frame_in_progress = false;
+                Ok(Some(frame))
+            }
+            Ok(None) => Ok(None),
         }
     }
 }
@@ -112,15 +134,37 @@ where
         }
     }
 
-    /// Reads exactly one frame, bounded by
+    /// Reads exactly one frame. Healthy idle time before the next frame is
+    /// unbounded; once any frame bytes arrive, completion is bounded by
     /// [`FRAME_IO_TIMEOUT`](crate::FRAME_IO_TIMEOUT).
     pub async fn read_frame(&mut self) -> Result<BytesMut, TransportError> {
-        let item = time::timeout(
-            FRAME_IO_TIMEOUT,
-            poll_fn(|cx| Pin::new(&mut self.inner).poll_next(cx)),
-        )
-        .await
-        .map_err(|_| TransportError::timeout())?;
+        self.read_frame_with_timeout(FRAME_IO_TIMEOUT).await
+    }
+
+    async fn read_frame_with_timeout(
+        &mut self,
+        frame_io_timeout: Duration,
+    ) -> Result<BytesMut, TransportError> {
+        let mut frame_deadline: Option<Pin<Box<time::Sleep>>> = None;
+        let item = poll_fn(|cx| {
+            match Pin::new(&mut self.inner).poll_next(cx) {
+                Poll::Ready(item) => return Poll::Ready(Ok(item)),
+                Poll::Pending => {}
+            }
+
+            if !self.inner.codec().frame_in_progress() {
+                frame_deadline = None;
+                return Poll::Pending;
+            }
+
+            let deadline =
+                frame_deadline.get_or_insert_with(|| Box::pin(time::sleep(frame_io_timeout)));
+            match deadline.as_mut().poll(cx) {
+                Poll::Ready(()) => Poll::Ready(Err(TransportError::timeout())),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await?;
         match item {
             Some(frame) => frame,
             None => Err(TransportError::MalformedFrame(
@@ -199,6 +243,7 @@ fn map_decode_error(prefix: &[u8], error: io::Error) -> TransportError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt;
 
     fn codec() -> ControlFrameCodec {
         ControlFrameCodec::new()
@@ -319,5 +364,40 @@ mod tests {
             Err(TransportError::MalformedFrame(_)) => {}
             other => panic!("expected MalformedFrame, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn idle_connection_waits_for_next_frame_without_timing_out() {
+        let (left, right) = tokio::io::duplex(64);
+        let mut writer = FramedTransport::new(left);
+        let mut reader = FramedTransport::new(right);
+        let frame_timeout = Duration::from_millis(25);
+
+        let read = tokio::spawn(async move { reader.read_frame_with_timeout(frame_timeout).await });
+        time::sleep(frame_timeout * 2).await;
+        writer
+            .write_frame(Bytes::from_static(b"after-idle"))
+            .await
+            .expect("write after idle");
+
+        let frame = read.await.expect("reader task").expect("read after idle");
+        assert_eq!(&frame[..], b"after-idle");
+    }
+
+    #[tokio::test]
+    async fn incomplete_frame_still_hits_the_frame_deadline() {
+        let (mut writer, right) = tokio::io::duplex(64);
+        writer
+            .write_all(&8_u32.to_be_bytes())
+            .await
+            .expect("write frame prefix");
+        let mut reader = FramedTransport::new(right);
+
+        assert!(matches!(
+            reader
+                .read_frame_with_timeout(Duration::from_millis(25))
+                .await,
+            Err(TransportError::Timeout { .. })
+        ));
     }
 }
