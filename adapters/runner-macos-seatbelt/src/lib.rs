@@ -188,7 +188,9 @@ fn workspace_root(workspace: &Path, root: &Path) -> Result<PathBuf, RunnerError>
 }
 
 fn canonical_support_root(path: &Path) -> Result<PathBuf, RunnerError> {
-    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = std::fs::canonicalize(path).map_err(|_| RunnerError::BackendUnavailable {
+        backend: "macOS Seatbelt support root cannot be canonicalized",
+    })?;
     checked_absolute(&path)?;
     Ok(path)
 }
@@ -489,6 +491,18 @@ mod tests {
                 Path::new("/usr/bin/true"),
                 Some("example.com")
             ),
+            Err(RunnerError::BackendUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn missing_support_root_fails_closed() {
+        let case = Case::new("missing-support-root");
+        let missing = case.root.join("missing-provider-support");
+        let backend = MacOsSeatbeltRunner::with_support_roots(vec![missing], Vec::new());
+
+        assert!(matches!(
+            prepare(&backend, &case, Path::new("/usr/bin/true"), None),
             Err(RunnerError::BackendUnavailable { .. })
         ));
     }
