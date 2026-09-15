@@ -107,7 +107,7 @@ fn base_event(
     NewJournalEvent {
         event_type,
         task_id: Some(task.id().clone()),
-        project_id: task.project_id().clone(),
+        project_id: Some(task.project_id().clone()),
         from_state: None,
         to_state: None,
         reason: None,
@@ -121,6 +121,7 @@ fn base_event(
         workspace_id: None,
         from_workspace_state: None,
         to_workspace_state: None,
+        plan_revision: None,
     }
 }
 
@@ -134,8 +135,8 @@ fn journal_len(store: &SqliteStore) -> usize {
 fn fresh_database_reaches_current_schema() {
     let db = TestDb::new("fresh-current");
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 11);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 11);
+    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 12);
     assert!(store.list_events_ordered().unwrap().is_empty());
     assert!(store
         .get_execution(&ExecutionId::new("MISSING").unwrap())
@@ -164,7 +165,7 @@ fn current_schema_reopen_is_a_no_op() {
             .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 11);
+    assert_eq!(store.schema_version().unwrap(), 12);
     assert!(store
         .get_execution(&ExecutionId::new("E-1").unwrap())
         .unwrap()
@@ -205,7 +206,7 @@ fn v3_database_with_g2_data_migrates_preserving_everything() {
             .unwrap();
     }
     let mut store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 11);
+    assert_eq!(store.schema_version().unwrap(), 12);
     // History decodes unchanged through the current codec.
     let history = store.list_events_ordered().unwrap();
     assert_eq!(history.len(), 2);
@@ -244,7 +245,7 @@ fn v3_database_with_g2_data_migrates_preserving_everything() {
     let task_event = NewJournalEvent {
         event_type: EventType::Claimed,
         task_id: Some(TaskId::new("T-1").unwrap()),
-        project_id: ProjectId::new("P-1").unwrap(),
+        project_id: Some(ProjectId::new("P-1").unwrap()),
         from_state: Some(task_domain::TaskState::Ready),
         to_state: Some(task_domain::TaskState::Claimed),
         reason: None,
@@ -258,6 +259,7 @@ fn v3_database_with_g2_data_migrates_preserving_everything() {
         workspace_id: None,
         from_workspace_state: None,
         to_workspace_state: None,
+        plan_revision: None,
     };
     let mut live = task.clone();
     live.claim().unwrap();

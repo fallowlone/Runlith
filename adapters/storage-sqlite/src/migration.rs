@@ -1,13 +1,13 @@
 //! Deterministic checked-in migrations with an explicit schema version.
 //!
 //! Versioning uses SQLite `PRAGMA user_version`: 0 means a fresh database,
-//! 11 is the supported version (`0001_task_core.sql`, then
+//! 12 is the supported version (`0001_task_core.sql`, then
 //! `0002_event_journal.sql`, then `0003_event_scope.sql`, then
 //! `0004_runtime_core.sql`, then `0005_workspace_leases.sql`, then
 //! `0006_attempt_reservations.sql`, then
 //! `0007_managed_identity_reservations.sql`, then `0008_approvals.sql`, then
 //! `0009_secret_refs.sql`, then `0010_security_audit.sql`, then
-//! `0011_workspace_trusted_anchor.sql`). Newer
+//! `0011_workspace_trusted_anchor.sql`, then `0012_plan_persistence.sql`). Newer
 //! versions fail closed; re-opening the current version is a no-op (never
 //! destructively re-applied). Executing migrations inside one SQLite
 //! transaction is storage consistency only — not TASK-0024 event atomicity.
@@ -17,7 +17,7 @@ use rusqlite::Connection;
 use crate::error::{StorageError, StorageResult};
 
 /// Schema version this adapter understands.
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 11;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 12;
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_task_core.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_event_journal.sql");
@@ -30,6 +30,7 @@ const MIGRATION_0008: &str = include_str!("../migrations/0008_approvals.sql");
 const MIGRATION_0009: &str = include_str!("../migrations/0009_secret_refs.sql");
 const MIGRATION_0010: &str = include_str!("../migrations/0010_security_audit.sql");
 const MIGRATION_0011: &str = include_str!("../migrations/0011_workspace_trusted_anchor.sql");
+const MIGRATION_0012: &str = include_str!("../migrations/0012_plan_persistence.sql");
 
 /// Applies pending migrations to `connection`, which must already have
 /// `PRAGMA foreign_keys = ON`. Migrations run in order inside one SQLite
@@ -123,7 +124,12 @@ pub(crate) fn migrate(connection: &mut Connection) -> StorageResult<u32> {
             StorageError::Migration(format!("0011_workspace_trusted_anchor.sql failed: {error}"))
         })?;
     }
-    transaction.execute_batch("PRAGMA user_version = 11")?;
+    if current < 12 {
+        transaction.execute_batch(MIGRATION_0012).map_err(|error| {
+            StorageError::Migration(format!("0012_plan_persistence.sql failed: {error}"))
+        })?;
+    }
+    transaction.execute_batch("PRAGMA user_version = 12")?;
     transaction.commit()?;
     Ok(SUPPORTED_SCHEMA_VERSION)
 }

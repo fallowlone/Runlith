@@ -498,5 +498,9 @@ fn stranded_scan_lists_only_pre_attempt_entries() {
         );
     }
     let kinds: Vec<EventType> = EventType::all().to_vec();
-    assert_eq!(kinds.len(), 17, "no new event types for recovery");
+    assert_eq!(
+        kinds.len(),
+        18,
+        "recovery adds no event types beyond the canonical taxonomy"
+    );
 }

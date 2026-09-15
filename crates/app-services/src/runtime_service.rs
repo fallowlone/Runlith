@@ -285,7 +285,7 @@ impl<C: Clock> RuntimeService<C> {
         NewJournalEvent {
             event_type,
             task_id: Some(task_id),
-            project_id,
+            project_id: Some(project_id),
             // Task lifecycle columns stay Task-only: always null here.
             from_state: None,
             to_state: None,
@@ -301,6 +301,7 @@ impl<C: Clock> RuntimeService<C> {
             workspace_id: None,
             from_workspace_state: None,
             to_workspace_state: None,
+            plan_revision: None,
         }
     }
 }

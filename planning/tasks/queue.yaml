@@ -1460,6 +1460,31 @@ items:
     exit_criteria_summary: Plan structure survives restarts with
       provenance intact; every revision carries reason and evidence
       refs; workspace green.
+    outcome: >-
+      Added schema v12 Plan persistence in storage-sqlite: branch heads,
+      immutable PlanRevision provenance, normalized revision graph snapshots
+      (nodes, scopes, criteria, edges), and ordered evidence refs reconstruct
+      through TASK-0076 domain types after restart. Revision/state writes and
+      the bounded typed plan.revision_committed Event Journal fact commit in
+      one BEGIN IMMEDIATE transaction; event/state injection tests prove both
+      half-commit directions roll back. Durable head checks enforce genesis
+      1/0 sequencing and reject stale same-head writers without auto-rebase;
+      reconstruction fails closed on lineage and graph corruption. Plan event
+      reconstruction also verifies canonical SHA-256 format and exact
+      reason/hash/evidence/planner/receipt/validator provenance against the
+      referenced PlanRevision, refusing any durable journal/canonical drift.
+      Event Journal persistence/codec was extracted from task_store.rs into a
+      single internal journal_store boundary; task_store.rs is 851 LOC and all
+      Task/runtime/workspace/Plan producers still share one journal write path.
+      Migration coverage proves a populated v11 database preserves G2/G3/G5/G6
+      state, journal/audit identities, approvals, secret metadata and trusted
+      workspace anchors while Plan tables start empty. Event payload stores
+      revision/audit provenance only; full Plan graph remains owned by Plan
+      storage. Plan persistence regression coverage is 13/13 green; fmt,
+      storage-sqlite and workspace clippy -D warnings, storage-sqlite tests,
+      cargo test --workspace and git diff --check are green. Existing
+      authenticated real-Claude smoke tests remain opt-in/ignored. G7 remains
+      IN_PROGRESS.
     depends_on:
       - TASK-0076
     blocked_by: []
