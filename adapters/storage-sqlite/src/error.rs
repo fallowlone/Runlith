@@ -24,6 +24,9 @@ pub enum StorageError {
     Corrupt(String),
     /// Stored content passed SQL decoding but failed domain validation.
     DomainReconstruction(String),
+    /// The durable database path or one of its SQLite sidecars is unsafe to
+    /// trust. Storage never repairs an existing object in this state.
+    UnsafePath(String),
     /// A write would persist a graph the domain rejects (self-edge,
     /// duplicate, cross-project, or cycle). Checked before touching SQL.
     InvalidGraph(String),
@@ -66,6 +69,7 @@ impl fmt::Display for StorageError {
             Self::DomainReconstruction(detail) => {
                 write!(f, "domain reconstruction failure: {detail}")
             }
+            Self::UnsafePath(detail) => write!(f, "unsafe sqlite path: {detail}"),
             Self::InvalidGraph(detail) => {
                 write!(f, "invalid graph: {detail}")
             }

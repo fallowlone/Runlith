@@ -8,6 +8,9 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use storage_sqlite::{SqliteStore, StorageError, SUPPORTED_SCHEMA_VERSION};
 use task_domain::{Project, ProjectId, Task, TaskId, TaskState};
 
@@ -63,6 +66,15 @@ fn stored_project(store: &mut SqliteStore, id: &str) -> Project {
     store.create_project(&project).unwrap();
     project
 }
+
+#[cfg(unix)]
+fn secure_raw_fixture(path: &std::path::Path) {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .expect("secure raw sqlite fixture");
+}
+
+#[cfg(not(unix))]
+fn secure_raw_fixture(_path: &std::path::Path) {}
 
 // -- migration ----------------------------------------------------------
 
@@ -469,6 +481,7 @@ fn unknown_persisted_state_is_corruption() {
             )
             .unwrap();
     }
+    secure_raw_fixture(&db.path);
     let store = db.open();
     match store.get_task(&TaskId::new("T-1").unwrap()) {
         Err(StorageError::Corrupt(_)) => {}
@@ -495,6 +508,7 @@ fn invalid_persisted_identifiers_fail_reconstruction() {
             )
             .unwrap();
     }
+    secure_raw_fixture(&db.path);
     let store = db.open();
     // Blank stored project id cannot rebuild a validated ProjectId.
     assert!(store.list_projects().is_err());
@@ -527,6 +541,7 @@ fn broken_reference_without_fk_fails_explicitly() {
             )
             .unwrap();
     }
+    secure_raw_fixture(&db.path);
     let store = db.open();
     // The row references a project that does not exist: the adapter must
     // fail explicitly rather than hand back a task in a phantom project.
