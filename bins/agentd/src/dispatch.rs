@@ -335,6 +335,19 @@ pub(crate) fn map_error(error: &ServiceError) -> (BusinessErrorCode, String) {
                     truncate_id(found)
                 ),
             ),
+            StorageError::PlanStale {
+                branch,
+                expected,
+                found,
+            } => (
+                BusinessErrorCode::StaleState,
+                format!(
+                    "plan branch {} changed concurrently: expected revision {}, found {}",
+                    truncate_id(branch),
+                    expected,
+                    found
+                ),
+            ),
             StorageError::Corrupt(_)
             | StorageError::DomainReconstruction(_)
             | StorageError::UnsupportedSchemaVersion { .. } => (

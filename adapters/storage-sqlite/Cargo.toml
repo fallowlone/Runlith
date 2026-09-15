@@ -13,6 +13,7 @@ agent-runtime = { path = "../../crates/agent-runtime" }
 workspace = { path = "../../crates/workspace" }
 secrets = { path = "../../crates/secrets" }
 security-audit = { path = "../../crates/security-audit" }
+plan-domain = { path = "../../crates/plan" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha2 = "0.10"
 
