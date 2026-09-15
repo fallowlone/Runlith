@@ -354,7 +354,7 @@ pub(crate) fn map_error(error: &ServiceError) -> (BusinessErrorCode, String) {
                 BusinessErrorCode::CorruptState,
                 "stored data failed validation".to_owned(),
             ),
-            StorageError::Sqlite(_) | StorageError::Migration(_) => (
+            StorageError::Sqlite(_) | StorageError::Migration(_) | StorageError::UnsafePath(_) => (
                 BusinessErrorCode::Internal,
                 "internal storage failure".to_owned(),
             ),
@@ -583,6 +583,16 @@ mod tests {
                 assert!(!error.message.contains("SELECT"));
             }
             other => panic!("expected CORRUPT_STATE, got {other:?}"),
+        }
+        let unsafe_path = error_response(ServiceError::Storage(StorageError::UnsafePath(
+            "/tmp/attacker/state.sqlite3 is a symlink".to_owned(),
+        )));
+        match unsafe_path.payload {
+            Some(task_core_response::Payload::Error(error)) => {
+                assert_eq!(error.code, BusinessErrorCode::Internal as i32);
+                assert_eq!(error.message, "internal storage failure");
+            }
+            other => panic!("expected INTERNAL, got {other:?}"),
         }
     }
 
