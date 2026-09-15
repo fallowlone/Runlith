@@ -5,10 +5,19 @@
 //! requirements and checks them immediately before a privileged process
 //! operation. It owns no policy rules, approvals, provider behavior,
 //! environment construction, persistence, or concrete sandbox mechanism.
+//!
+//! The child environment is *not* constructed here (that stays with the
+//! provider/composition owner), but it is *enforced* here: a plan carries the
+//! complete explicit child environment ([`ChildEnvironment`]) and every backend
+//! clears the ambient environment before installing it, so an ambient
+//! credential can never reach a governed child by inheritance (TASK-SEC-R1
+//! R1-H2).
 
+use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use policy::{Capability, EffectiveCapabilities, ScopeId};
 
@@ -16,6 +25,116 @@ use policy::{Capability, EffectiveCapabilities, ScopeId};
 /// Seatbelt backend. Scope text matches the actual OS primitive: any remote
 /// TCP destination on port 443, with all other remote ports denied.
 pub const NETWORK_SCOPE_OUTBOUND_TCP_443: &str = "tcp:443";
+
+/// Names a governed child may receive. Everything outside this list is
+/// unreachable for a Runner-launched process: the child environment is
+/// explicit data, never inheritance. Provider runtime redirection names are
+/// allowlisted because they always carry composition-resolved directories
+/// (private runtime/scratch roots), never ambient values.
+pub const CHILD_ENV_ALLOWLIST: &[&str] = &[
+    // Process/runtime basics.
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "PWD",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    // Provider runtime redirection (explicit private directories).
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    "XDG_CACHE_HOME",
+    "CLAUDE_CODE_TMPDIR",
+    "TMP",
+    "TEMP",
+    // Windows process basics.
+    "USERPROFILE",
+    "SystemRoot",
+    "WINDIR",
+    "PATHEXT",
+    "APPDATA",
+    "LOCALAPPDATA",
+];
+
+/// Complete, explicit child environment for one isolation plan.
+///
+/// The value is plain data resolved by trusted composition (provider
+/// environment preparation or the runner's own minimal allowlist). It is
+/// never populated by implicit inheritance, and backends install exactly
+/// these pairs after clearing the ambient environment.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ChildEnvironment {
+    vars: Vec<(OsString, OsString)>,
+}
+
+impl ChildEnvironment {
+    /// Empty environment: the child starts with no variables at all.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self { vars: Vec::new() }
+    }
+
+    /// Builds an explicit environment from already-resolved pairs.
+    ///
+    /// Fails closed on any name outside [`CHILD_ENV_ALLOWLIST`], on empty
+    /// names, and on duplicate names, so an ambient secret cannot be smuggled
+    /// into a plan by a composition mistake.
+    pub fn from_explicit(
+        vars: impl IntoIterator<Item = (OsString, OsString)>,
+    ) -> Result<Self, RunnerError> {
+        let mut collected: Vec<(OsString, OsString)> = Vec::new();
+        for (name, value) in vars {
+            if name.is_empty() || !CHILD_ENV_ALLOWLIST.iter().any(|allowed| *allowed == name) {
+                return Err(RunnerError::EnvironmentNameNotAllowed {
+                    name: name.to_string_lossy().into_owned(),
+                });
+            }
+            if collected
+                .iter()
+                .any(|(existing, _)| existing.as_os_str() == name.as_os_str())
+            {
+                return Err(RunnerError::DuplicateEnvironmentName {
+                    name: name.to_string_lossy().into_owned(),
+                });
+            }
+            collected.push((name, value));
+        }
+        collected.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(Self { vars: collected })
+    }
+
+    /// Resolves the runner's own minimal allowlist (PATH, HOME, TMPDIR and
+    /// locale) from current process state. Only allowlisted names are read;
+    /// missing names are simply absent.
+    pub fn minimal_allowlist() -> Result<Self, RunnerError> {
+        let mut vars: Vec<(OsString, OsString)> = Vec::new();
+        for name in ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE"] {
+            if let Some(value) = std::env::var_os(name).filter(|value| !value.is_empty()) {
+                vars.push((OsString::from(name), value));
+            }
+        }
+        Self::from_explicit(vars)
+    }
+
+    /// Sorted, de-duplicated explicit pairs.
+    #[must_use]
+    pub fn vars(&self) -> &[(OsString, OsString)] {
+        &self.vars
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.vars.is_empty()
+    }
+
+    #[must_use]
+    pub fn contains(&self, name: impl AsRef<OsStr>) -> bool {
+        self.vars
+            .iter()
+            .any(|(existing, _)| existing.as_os_str() == name.as_ref())
+    }
+}
 
 /// Runner implementations accepted by the architecture. Only Native is
 /// implemented by TASK-0064; Container remains a replaceable future backend,
@@ -160,6 +279,10 @@ pub struct BackendIdentity {
 
 /// Deterministic isolation plan compiled only from current effective authority
 /// plus non-authorizing isolation requirements.
+///
+/// The plan carries the complete explicit child environment. It is enforced,
+/// not inherited: backends clear the ambient environment and install exactly
+/// [`IsolationPlan::environment`] before the child exists.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IsolationPlan {
     workspace: String,
@@ -169,6 +292,7 @@ pub struct IsolationPlan {
     process_executables: Vec<ScopeId>,
     network_destinations: Vec<ScopeId>,
     requirements: IsolationRequirements,
+    environment: ChildEnvironment,
 }
 
 impl IsolationPlan {
@@ -180,6 +304,7 @@ impl IsolationPlan {
         workspace: impl Into<String>,
         launch_executable: ScopeId,
         requirements: IsolationRequirements,
+        environment: ChildEnvironment,
     ) -> Result<Self, RunnerError> {
         let workspace = checked_workspace(workspace.into())?;
         let launch_capability = Capability::ProcessExecute(launch_executable.clone());
@@ -230,6 +355,7 @@ impl IsolationPlan {
             process_executables,
             network_destinations,
             requirements,
+            environment,
         })
     }
 
@@ -267,25 +393,43 @@ impl IsolationPlan {
     pub const fn requirements(&self) -> IsolationRequirements {
         self.requirements
     }
+
+    /// The complete explicit child environment this plan enforces.
+    #[must_use]
+    pub const fn environment(&self) -> &ChildEnvironment {
+        &self.environment
+    }
 }
 
 /// Evidence returned by a trusted backend after it has applied restrictions.
 /// The report is tied to the exact plan so stale/widened reports cannot be
 /// reused for another process operation.
+///
+/// `env_isolated` is a distinct, always-required axis (TASK-SEC-R1 R1-H2): a
+/// backend may only claim it after it actually cleared the ambient environment
+/// and installed the plan's explicit child environment. Filesystem, network and
+/// process axes never imply it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnforcementReport {
     backend: BackendIdentity,
     plan: IsolationPlan,
     enforced: EnforcementAxes,
+    env_isolated: bool,
 }
 
 impl EnforcementReport {
     #[must_use]
-    pub fn new(backend: BackendIdentity, plan: IsolationPlan, enforced: EnforcementAxes) -> Self {
+    pub fn new(
+        backend: BackendIdentity,
+        plan: IsolationPlan,
+        enforced: EnforcementAxes,
+        env_isolated: bool,
+    ) -> Self {
         Self {
             backend,
             plan,
             enforced,
+            env_isolated,
         }
     }
 
@@ -298,31 +442,107 @@ impl EnforcementReport {
     pub const fn enforced(&self) -> EnforcementAxes {
         self.enforced
     }
+
+    /// Whether the backend cleared the ambient environment and installed
+    /// exactly the plan's explicit child environment.
+    #[must_use]
+    pub const fn env_isolated(&self) -> bool {
+        self.env_isolated
+    }
+}
+
+/// Non-spawnable description of the child process a caller wants to launch
+/// (TASK-SEC-R1 R1-H1).
+///
+/// It carries only a program and argv: no `std::process::Command`, no
+/// environment and no `spawn`. The only way to turn it into a running child is
+/// [`SandboxedLaunch::bind`], which asks the isolation backend to install its
+/// restrictions first. There is therefore no un-sandboxed command object a
+/// caller could spawn by forgetting a step.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandSpec {
+    program: OsString,
+    args: Vec<OsString>,
+}
+
+impl CommandSpec {
+    #[must_use]
+    pub fn new(program: impl Into<OsString>, args: impl IntoIterator<Item = OsString>) -> Self {
+        Self {
+            program: program.into(),
+            args: args.into_iter().collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn program(&self) -> &OsStr {
+        &self.program
+    }
+
+    #[must_use]
+    pub fn args(&self) -> &[OsString] {
+        &self.args
+    }
+}
+
+/// Exact, already-restricted launch recipe produced by an isolation backend.
+///
+/// Plain data: it can be cloned, inspected and audited, but it has no spawn
+/// method of its own. Only [`SandboxedCommand`] can start the child.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LaunchRecipe {
+    program: OsString,
+    args: Vec<OsString>,
+    environment: Vec<(OsString, OsString)>,
+}
+
+impl LaunchRecipe {
+    #[must_use]
+    pub fn new(
+        program: impl Into<OsString>,
+        args: impl IntoIterator<Item = OsString>,
+        environment: impl IntoIterator<Item = (OsString, OsString)>,
+    ) -> Self {
+        Self {
+            program: program.into(),
+            args: args.into_iter().collect(),
+            environment: environment.into_iter().collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn program(&self) -> &OsStr {
+        &self.program
+    }
+
+    #[must_use]
+    pub fn args(&self) -> &[OsString] {
+        &self.args
+    }
+
+    #[must_use]
+    pub fn environment(&self) -> &[(OsString, OsString)] {
+        &self.environment
+    }
 }
 
 /// Replaceable backend boundary. Implementations must report only restrictions
 /// actually installed for the supplied exact plan.
-pub trait IsolationBackend {
+///
+/// `sandbox` is the backend-owned launch path: it installs the backend's
+/// restrictions for the exact plan *and* returns the resulting recipe. A
+/// backend that cannot restrict a launch must refuse here instead of returning
+/// an unrestricted recipe.
+pub trait IsolationBackend: Send + Sync {
     fn identity(&self) -> BackendIdentity;
 
     fn enforce(&self, plan: &IsolationPlan) -> Result<EnforcementReport, RunnerError>;
 
-    fn prepare_launch(
+    fn sandbox(
         &self,
         plan: &IsolationPlan,
-    ) -> Result<Box<dyn PreparedLaunch + Send + Sync>, RunnerError> {
-        let _ = plan;
-        Err(RunnerError::BackendUnavailable {
-            backend: "launch handoff unavailable",
-        })
-    }
-}
-
-/// Prepared child-process launch handoff. The backend that reports
-/// enforcement owns the launch mutation, so providers cannot bypass the
-/// runtime boundary with a raw `Command::spawn`.
-pub trait PreparedLaunch {
-    fn apply(&self, command: &mut Command);
+        spec: &CommandSpec,
+    ) -> Result<LaunchRecipe, RunnerError>;
 }
 
 /// Enforces the current exact authority and then performs the privileged
@@ -334,27 +554,223 @@ pub fn enforce_process_operation<T>(
     workspace: impl Into<String>,
     executable: ScopeId,
     requirements: IsolationRequirements,
+    environment: ChildEnvironment,
     operation: impl FnOnce(&IsolationPlan) -> T,
 ) -> Result<T, RunnerError> {
-    let plan = IsolationPlan::compile(effective, workspace, executable, requirements)?;
+    let plan = IsolationPlan::compile(effective, workspace, executable, requirements, environment)?;
     let report = backend.enforce(&plan)?;
     verify_report(backend.identity(), &plan, &report)?;
     Ok(operation(&plan))
 }
 
-/// Installs and returns the exact launch handoff for a verified plan.
-/// Providers must carry this object into the real child spawn.
+/// Verified launch context for one governed process operation (TASK-SEC-R1
+/// R1-H1).
+///
+/// It exists only after a backend produced enforcement evidence that was
+/// verified against the exact plan, and it carries that backend. Callers can
+/// therefore not reach a spawnable command without the backend that owns the
+/// restrictions.
+#[derive(Clone)]
+pub struct SandboxedLaunch {
+    report: EnforcementReport,
+    backend: Arc<dyn IsolationBackend>,
+}
+
+impl SandboxedLaunch {
+    #[must_use]
+    pub fn plan(&self) -> &IsolationPlan {
+        &self.report.plan
+    }
+
+    #[must_use]
+    pub fn backend(&self) -> BackendIdentity {
+        self.report.backend
+    }
+
+    /// Binds an exact program/argv. The backend installs its restrictions for
+    /// the verified plan; the returned [`SandboxedCommand`] is the only
+    /// spawnable form of that child.
+    pub fn bind(&self, spec: CommandSpec) -> Result<SandboxedCommand, RunnerError> {
+        let requested = spec.program().to_str();
+        if requested != Some(self.report.plan.launch_executable().as_str()) {
+            return Err(RunnerError::ProcessNotAuthorized {
+                executable: spec.program().to_string_lossy().into_owned(),
+            });
+        }
+        let recipe = self.backend.sandbox(&self.report.plan, &spec)?;
+        if recipe.environment() != self.report.plan.environment().vars() {
+            return Err(RunnerError::EnvironmentNotIsolated);
+        }
+        Ok(SandboxedCommand {
+            plan: self.report.plan.clone(),
+            recipe,
+        })
+    }
+}
+
+impl fmt::Debug for SandboxedLaunch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SandboxedLaunch")
+            .field("backend", &self.report.backend)
+            .field("plan", &self.report.plan)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Compiles the plan, verifies enforcement evidence, and returns the verified
+/// launch context. The returned [`SandboxedLaunch`] is the only route to a
+/// spawnable child; callers must carry it into the real spawn instead of
+/// keeping a pre-sandbox command of their own.
 pub fn prepare_process_launch(
-    backend: &dyn IsolationBackend,
+    backend: Arc<dyn IsolationBackend>,
     effective: &EffectiveCapabilities,
     workspace: impl Into<String>,
     executable: ScopeId,
     requirements: IsolationRequirements,
-) -> Result<Box<dyn PreparedLaunch + Send + Sync>, RunnerError> {
-    let plan = IsolationPlan::compile(effective, workspace, executable, requirements)?;
+    environment: ChildEnvironment,
+) -> Result<SandboxedLaunch, RunnerError> {
+    let plan = IsolationPlan::compile(effective, workspace, executable, requirements, environment)?;
     let report = backend.enforce(&plan)?;
     verify_report(backend.identity(), &plan, &report)?;
-    backend.prepare_launch(&plan)
+    Ok(SandboxedLaunch {
+        report,
+        backend: Arc::clone(&backend),
+    })
+}
+
+/// The only spawnable form of a Runner-governed child command.
+///
+/// It is produced exclusively by [`SandboxedLaunch::bind`] (backend-owned
+/// restrictions already installed) and exposes a narrow wiring surface: cwd,
+/// stdio and process group. Program, argv and environment cannot be rewritten
+/// here, and no raw `Command` escapes.
+#[derive(Clone, Debug)]
+pub struct SandboxedCommand {
+    plan: IsolationPlan,
+    recipe: LaunchRecipe,
+}
+
+impl SandboxedCommand {
+    #[must_use]
+    pub fn plan(&self) -> &IsolationPlan {
+        &self.plan
+    }
+
+    #[must_use]
+    pub fn program(&self) -> &OsStr {
+        self.recipe.program()
+    }
+
+    #[must_use]
+    pub fn args(&self) -> &[OsString] {
+        self.recipe.args()
+    }
+
+    /// Environment installed by the backend: cleared ambient state plus
+    /// exactly the plan's explicit pairs.
+    #[must_use]
+    pub fn environment(&self) -> &[(OsString, OsString)] {
+        self.recipe.environment()
+    }
+
+    /// Spawns the already-sandboxed child. `wire` may only adjust process
+    /// wiring (working directory, stdio, process group).
+    pub fn spawn(
+        &self,
+        wire: impl FnOnce(&mut SpawnWiring<'_>),
+    ) -> Result<std::process::Child, std::io::Error> {
+        let mut command = Command::new(self.recipe.program());
+        command.args(self.recipe.args());
+        command.env_clear();
+        for (name, value) in self.recipe.environment() {
+            command.env(name, value);
+        }
+        wire(&mut SpawnWiring {
+            command: &mut command,
+        });
+        validate_spawn_cwd(&self.plan, &mut command)?;
+        command.spawn()
+    }
+}
+
+fn validate_spawn_cwd(plan: &IsolationPlan, command: &mut Command) -> std::io::Result<()> {
+    let cwd = command.get_current_dir().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "runner requires an explicit working directory inside the prepared workspace",
+        )
+    })?;
+    let workspace = Path::new(plan.workspace());
+    if !workspace.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "runner refused a working directory for a non-absolute workspace",
+        ));
+    }
+    let canonical_workspace = std::fs::canonicalize(workspace).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "runner could not revalidate the workspace before spawn",
+        )
+    })?;
+    if canonical_workspace != workspace {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "runner workspace identity changed before spawn",
+        ));
+    }
+    let canonical_cwd = std::fs::canonicalize(cwd).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "runner could not revalidate the working directory before spawn",
+        )
+    })?;
+    if !canonical_cwd.starts_with(&canonical_workspace) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "runner refused a working directory outside the prepared workspace",
+        ));
+    }
+    command.current_dir(canonical_cwd);
+    Ok(())
+}
+
+/// Narrow wiring handle for an already-sandboxed command. It deliberately
+/// exposes no spawn, no program/argv rewrite and no environment mutation.
+pub struct SpawnWiring<'a> {
+    command: &'a mut Command,
+}
+
+impl SpawnWiring<'_> {
+    pub fn current_dir(&mut self, dir: &std::path::Path) -> &mut Self {
+        self.command.current_dir(dir);
+        self
+    }
+
+    pub fn stdin(&mut self, configuration: std::process::Stdio) -> &mut Self {
+        self.command.stdin(configuration);
+        self
+    }
+
+    pub fn stdout(&mut self, configuration: std::process::Stdio) -> &mut Self {
+        self.command.stdout(configuration);
+        self
+    }
+
+    pub fn stderr(&mut self, configuration: std::process::Stdio) -> &mut Self {
+        self.command.stderr(configuration);
+        self
+    }
+
+    /// Own process group for the sandboxed child (unix), so timeout/cancel
+    /// paths can kill the whole tree.
+    #[cfg(unix)]
+    pub fn process_group(&mut self, process_group: i32) -> &mut Self {
+        use std::os::unix::process::CommandExt;
+        self.command.process_group(process_group);
+        self
+    }
 }
 
 fn verify_report(
@@ -374,6 +790,11 @@ fn verify_report(
             required,
             enforced: report.enforced,
         });
+    }
+    // Child environment isolation is mandatory on every path: a backend that
+    // cannot prove it cleared the ambient environment must not launch.
+    if !report.env_isolated {
+        return Err(RunnerError::EnvironmentNotIsolated);
     }
     Ok(())
 }
@@ -417,6 +838,18 @@ pub enum RunnerError {
         required: EnforcementAxes,
         enforced: EnforcementAxes,
     },
+    /// A plan tried to install a child-environment name outside
+    /// [`CHILD_ENV_ALLOWLIST`].
+    EnvironmentNameNotAllowed {
+        name: String,
+    },
+    /// A plan carried the same child-environment name twice.
+    DuplicateEnvironmentName {
+        name: String,
+    },
+    /// The backend could not prove it cleared the ambient environment and
+    /// installed exactly the plan's explicit child environment.
+    EnvironmentNotIsolated,
 }
 
 impl fmt::Display for RunnerError {
@@ -451,6 +884,21 @@ impl fmt::Display for RunnerError {
                 write!(
                     formatter,
                     "isolation backend cannot prove required restrictions"
+                )
+            }
+            Self::EnvironmentNameNotAllowed { name } => {
+                write!(
+                    formatter,
+                    "child environment name is not allowlisted: {name}"
+                )
+            }
+            Self::DuplicateEnvironmentName { name } => {
+                write!(formatter, "duplicate child environment name: {name}")
+            }
+            Self::EnvironmentNotIsolated => {
+                write!(
+                    formatter,
+                    "isolation backend cannot prove child environment isolation"
                 )
             }
         }

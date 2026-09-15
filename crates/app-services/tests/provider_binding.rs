@@ -450,7 +450,7 @@ mod unix {
                         .expect("fixture exe")
                         .with_timeout(Duration::from_secs(30))
                         .expect("timeout");
-                    ClaudeExecutor::bind(
+                    ClaudeExecutor::bind_trusted_host(
                         config,
                         prompt,
                         lease.worktree_ref().to_owned(),
@@ -543,7 +543,7 @@ mod unix {
                         .expect("fixture exe")
                         .with_timeout(Duration::from_secs(30))
                         .expect("timeout");
-                    ClaudeExecutor::bind(
+                    ClaudeExecutor::bind_trusted_host(
                         config,
                         prompt,
                         lease.worktree_ref().to_owned(),

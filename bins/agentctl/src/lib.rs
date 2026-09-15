@@ -933,17 +933,22 @@ where
 
 /// Resolves the sibling `agentd` executable next to the running `agentctl`.
 /// Pure and unit-tested; tests inject explicit paths instead.
-#[must_use]
-pub fn daemon_executable_next_to(current_exe: &Path) -> PathBuf {
+pub fn daemon_executable_next_to(current_exe: &Path) -> io::Result<PathBuf> {
     let name = if cfg!(windows) {
         "agentd.exe"
     } else {
         "agentd"
     };
-    match current_exe.parent() {
-        Some(dir) if !dir.as_os_str().is_empty() => dir.join(name),
-        _ => PathBuf::from(name),
-    }
+    let dir = current_exe
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "agentctl executable has no parent directory for sibling agentd",
+            )
+        })?;
+    Ok(dir.join(name))
 }
 
 /// Spawns the daemon executable directly: no shell, no command strings,
@@ -959,7 +964,7 @@ pub fn spawn_daemon(exe: &Path) -> io::Result<Child> {
 /// Spawns the installed sibling `agentd` next to this `agentctl`.
 pub fn spawn_sibling_daemon() -> io::Result<Child> {
     let current = std::env::current_exe()?;
-    spawn_daemon(&daemon_executable_next_to(&current))
+    spawn_daemon(&daemon_executable_next_to(&current)?)
 }
 
 /// Resolves the canonical production endpoint (Unix).
@@ -1163,13 +1168,10 @@ mod tests {
     #[test]
     fn daemon_executable_resolution_is_explicit_and_testable() {
         assert_eq!(
-            daemon_executable_next_to(Path::new("/foo/bar/agentctl")),
+            daemon_executable_next_to(Path::new("/foo/bar/agentctl")).unwrap(),
             PathBuf::from("/foo/bar/agentd")
         );
-        assert_eq!(
-            daemon_executable_next_to(Path::new("agentctl")),
-            PathBuf::from("agentd")
-        );
+        assert!(daemon_executable_next_to(Path::new("agentctl")).is_err());
         let _ = TEST_COUNTER.fetch_add(0, Ordering::SeqCst);
     }
 

@@ -21,11 +21,12 @@
 //! orchestration interpretation — exactly like FakeAgent success — and
 //! only the independent evaluation path can complete a Task.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent_runtime::ProviderRef;
-use runner::PreparedLaunch;
+use runner::SandboxedLaunch;
 use scheduler::{ExecutionPort, ExecutionProblem, WorkEvidence, WorkItem};
 
 use crate::argv::build_argv;
@@ -33,7 +34,9 @@ use crate::config::{bounded_detail, ClaudeConfig};
 use crate::environment::ProviderEnvironment;
 use crate::failure::{looks_like_auth_failure, ClaudeFailure};
 use crate::output::{parse_provider_output, ParsedOutput};
-use crate::process::{spawn_and_supervise, CancelFlag, ChildOutcome, ProcessInvocation};
+use crate::process::{
+    spawn_and_supervise, CancelFlag, ChildOutcome, ProcessInvocation, ProviderLaunch,
+};
 use crate::tracker::LiveProcessTracker;
 use crate::usage::UsageSample;
 use crate::CLAUDE_PROVIDER_REF;
@@ -63,7 +66,7 @@ pub struct ClaudeExecutor {
     environment: Result<ProviderEnvironment, String>,
     tracker: Option<LiveProcessTracker>,
     cancel: CancelFlag,
-    launch: Option<Arc<dyn PreparedLaunch + Send + Sync>>,
+    launch: ProviderLaunch,
 }
 
 impl ClaudeExecutor {
@@ -72,11 +75,54 @@ impl ClaudeExecutor {
     /// existence as a directory is enforced fail-closed at execute time,
     /// so a workspace torn down between construction and execution fails
     /// instead of falling back anywhere).
+    ///
+    /// The executor starts with no Runner sandbox attached and therefore
+    /// refuses to spawn (TASK-SEC-R1 R1-H1). Production composition attaches
+    /// one with [`Self::with_sandboxed_launch`]; the explicit unmanaged
+    /// supervisor used by provider contract tests is
+    /// [`Self::bind_trusted_host`].
     pub fn bind(
         config: ClaudeConfig,
         prompt: impl Into<String>,
         workdir: impl Into<PathBuf>,
         environment_base: impl Into<PathBuf>,
+    ) -> Result<Self, String> {
+        Self::bind_with_launch(
+            config,
+            prompt,
+            workdir,
+            environment_base,
+            ProviderLaunch::Unattached,
+        )
+    }
+
+    /// Binds one execution that will run under the trusted-host supervisor:
+    /// no Runner sandbox is attached and the provider spawns the configured
+    /// executable itself. This is an explicit trust decision for provider
+    /// contract tests and trusted-host development runs — never the
+    /// production G6 path, which goes through
+    /// [`Self::with_sandboxed_launch`].
+    pub fn bind_trusted_host(
+        config: ClaudeConfig,
+        prompt: impl Into<String>,
+        workdir: impl Into<PathBuf>,
+        environment_base: impl Into<PathBuf>,
+    ) -> Result<Self, String> {
+        Self::bind_with_launch(
+            config,
+            prompt,
+            workdir,
+            environment_base,
+            ProviderLaunch::TrustedHost,
+        )
+    }
+
+    fn bind_with_launch(
+        config: ClaudeConfig,
+        prompt: impl Into<String>,
+        workdir: impl Into<PathBuf>,
+        environment_base: impl Into<PathBuf>,
+        launch: ProviderLaunch,
     ) -> Result<Self, String> {
         let prompt = prompt.into();
         if prompt.trim().is_empty() {
@@ -98,7 +144,7 @@ impl ClaudeExecutor {
             environment,
             tracker: None,
             cancel: CancelFlag::fresh(),
-            launch: None,
+            launch,
         })
     }
 
@@ -122,11 +168,13 @@ impl ClaudeExecutor {
         self
     }
 
-    /// Binds the exact runtime launch handoff installed by the Runner.
-    /// Provider execution cannot create an unrestricted child after this.
+    /// Attaches the verified Runner launch (TASK-SEC-R1 R1-H1). The provider
+    /// child can then only be spawned through the backend-installed sandbox
+    /// recipe: there is no pre-sandbox command the provider could spawn by
+    /// forgetting a step.
     #[must_use]
-    pub fn with_prepared_launch(mut self, launch: Arc<dyn PreparedLaunch + Send + Sync>) -> Self {
-        self.launch = Some(launch);
+    pub fn with_sandboxed_launch(mut self, launch: Arc<SandboxedLaunch>) -> Self {
+        self.launch = ProviderLaunch::Sandboxed(launch);
         self
     }
 
@@ -148,14 +196,24 @@ impl ClaudeExecutor {
     pub fn isolation_support_read_roots(&self) -> Result<Vec<PathBuf>, String> {
         self.environment
             .as_ref()
-            .map(ProviderEnvironment::isolation_support_read_roots)
-            .map_err(Clone::clone)
+            .map_err(Clone::clone)?
+            .isolation_support_read_roots()
     }
 
     pub fn isolation_support_write_roots(&self) -> Result<Vec<PathBuf>, String> {
         self.environment
             .as_ref()
             .map(ProviderEnvironment::isolation_support_write_roots)
+            .map_err(Clone::clone)
+    }
+
+    /// The exact explicit child environment this execution would install,
+    /// for the Runner to plan and enforce (TASK-SEC-R1 R1-H2). Values stay
+    /// composition-resolved directories; no ambient variable is read here.
+    pub fn child_environment(&self) -> Result<Vec<(OsString, OsString)>, String> {
+        self.environment
+            .as_ref()
+            .map(ProviderEnvironment::child_environment)
             .map_err(Clone::clone)
     }
 
@@ -186,7 +244,7 @@ impl ClaudeExecutor {
                 argv: &argv,
                 workdir: &self.workdir,
                 environment,
-                launch: self.launch.as_deref(),
+                launch: &self.launch,
             },
             &self.cancel,
             self.config.timeout(),
