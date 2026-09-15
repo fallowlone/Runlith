@@ -129,6 +129,25 @@ impl PlanScope {
             .all(|child| bound.roots.iter().any(|parent| parent.contains(child)))
     }
 
+    /// Returns the normalized canonical roots used by this scope.
+    ///
+    /// This is a value-level representation for durable adapters and
+    /// diagnostics; callers receive owned strings and no filesystem handle
+    /// or mutation authority.
+    #[must_use]
+    pub fn roots(&self) -> Vec<String> {
+        self.roots
+            .iter()
+            .map(|root| {
+                format!(
+                    "{}:{}",
+                    root.workspace,
+                    root.path.as_os_str().to_string_lossy()
+                )
+            })
+            .collect()
+    }
+
     pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&(self.roots.len() as u64).to_be_bytes());

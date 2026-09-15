@@ -15,14 +15,13 @@ use std::path::Path;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use task_domain::{validate_acyclic, Project, ProjectId, Task, TaskId, TaskSnapshot, TaskState};
 
-use agent_runtime::{AttemptId, ExecutionId};
-
-use workspace::{LeaseLifecycle, WorkspaceId};
-
 use crate::error::{map_constraint, StorageError, StorageResult};
-use crate::event::{
-    decode_state, AttemptOutcome, EventId, EventType, JournalEvent, NewJournalEvent,
-    EVENT_SCHEMA_VERSION,
+use crate::event::{decode_state, EventId, EventType, JournalEvent, NewJournalEvent};
+use crate::journal_store::{
+    get_event as get_journal_event, insert_journal_event,
+    list_events_for_project as list_journal_events_for_project,
+    list_events_for_task as list_journal_events_for_task,
+    list_events_ordered as list_journal_events_ordered, require_envelope,
 };
 use crate::migration::{migrate, schema_version, verify_foreign_keys};
 
@@ -465,7 +464,9 @@ impl SqliteStore {
                 "lifecycle transition cannot carry a runtime event".to_owned(),
             ));
         }
-        if event.task_id.as_ref() != Some(task_id) || event.project_id != *next.project_id() {
+        if event.task_id.as_ref() != Some(task_id)
+            || event.project_id.as_ref() != Some(next.project_id())
+        {
             return Err(StorageError::ConstraintViolation(
                 "lifecycle event references a different task or project than the state write"
                     .to_owned(),
@@ -508,33 +509,12 @@ impl SqliteStore {
 
     /// Reads one journal record by identity, or `None` when absent.
     pub fn get_event(&self, id: &EventId) -> StorageResult<Option<JournalEvent>> {
-        let row: Option<JournalRow> = self
-            .connection
-            .query_row(
-                "SELECT seq, event_type, event_version, task_id, project_id,
-                        from_state, to_state, reason, correlation_id,
-                        causation_id, occurred_at, provenance,
-                        execution_id, attempt_id, attempt_outcome,
-                        workspace_id
-                 FROM event_journal WHERE seq = ?1",
-                params![id.seq()],
-                JournalRow::read,
-            )
-            .optional()?;
-        row.map(decode_journal_row).transpose()
+        get_journal_event(&self.connection, id)
     }
 
     /// Lists a task's journal records in commit order.
     pub fn list_events_for_task(&self, task_id: &TaskId) -> StorageResult<Vec<JournalEvent>> {
-        self.list_events(
-            "SELECT seq, event_type, event_version, task_id, project_id,
-                    from_state, to_state, reason, correlation_id,
-                    causation_id, occurred_at, provenance,
-                    execution_id, attempt_id, attempt_outcome,
-                    workspace_id
-             FROM event_journal WHERE task_id = ?1 ORDER BY seq",
-            params![task_id.as_str()],
-        )
+        list_journal_events_for_task(&self.connection, task_id)
     }
 
     /// Lists a project's journal records in commit order.
@@ -542,42 +522,12 @@ impl SqliteStore {
         &self,
         project_id: &ProjectId,
     ) -> StorageResult<Vec<JournalEvent>> {
-        self.list_events(
-            "SELECT seq, event_type, event_version, task_id, project_id,
-                    from_state, to_state, reason, correlation_id,
-                    causation_id, occurred_at, provenance,
-                    execution_id, attempt_id, attempt_outcome,
-                    workspace_id
-             FROM event_journal WHERE project_id = ?1 ORDER BY seq",
-            params![project_id.as_str()],
-        )
+        list_journal_events_for_project(&self.connection, project_id)
     }
 
     /// Traverses the whole journal in commit order (oldest first).
     pub fn list_events_ordered(&self) -> StorageResult<Vec<JournalEvent>> {
-        self.list_events(
-            "SELECT seq, event_type, event_version, task_id, project_id,
-                    from_state, to_state, reason, correlation_id,
-                    causation_id, occurred_at, provenance,
-                    execution_id, attempt_id, attempt_outcome,
-                    workspace_id
-             FROM event_journal ORDER BY seq",
-            [],
-        )
-    }
-
-    fn list_events(
-        &self,
-        sql: &str,
-        params: impl rusqlite::Params,
-    ) -> StorageResult<Vec<JournalEvent>> {
-        let mut statement = self.connection.prepare(sql)?;
-        let rows = statement.query_map(params, JournalRow::read)?;
-        let mut events = Vec::new();
-        for row in rows {
-            events.push(decode_journal_row(row?)?);
-        }
-        Ok(events)
+        list_journal_events_ordered(&self.connection)
     }
 
     // -- internals ------------------------------------------------------
@@ -737,465 +687,6 @@ struct TaskRow {
     risk: Option<String>,
 }
 
-struct JournalRow {
-    seq: i64,
-    event_type: String,
-    event_version: u32,
-    task_id: Option<String>,
-    project_id: String,
-    from_state: Option<String>,
-    to_state: Option<String>,
-    reason: Option<String>,
-    correlation_id: String,
-    causation_id: String,
-    occurred_at: String,
-    provenance: String,
-    execution_id: Option<String>,
-    attempt_id: Option<String>,
-    attempt_outcome: Option<String>,
-    workspace_id: Option<String>,
-}
-
-impl JournalRow {
-    fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
-        Ok(Self {
-            seq: row.get(0)?,
-            event_type: row.get(1)?,
-            event_version: row.get(2)?,
-            task_id: row.get(3)?,
-            project_id: row.get(4)?,
-            from_state: row.get(5)?,
-            to_state: row.get(6)?,
-            reason: row.get(7)?,
-            correlation_id: row.get(8)?,
-            causation_id: row.get(9)?,
-            occurred_at: row.get(10)?,
-            provenance: row.get(11)?,
-            execution_id: row.get(12)?,
-            attempt_id: row.get(13)?,
-            attempt_outcome: row.get(14)?,
-            workspace_id: row.get(15)?,
-        })
-    }
-}
-
-/// Typed decode of one journal row. Unknown types/versions are corruption;
-/// ids and states go through the same strict validation as task rows.
-/// Scope is re-checked on read: a task-scoped row with a NULL task or a
-/// project-scoped row with a task reference is corruption, never a default.
-fn decode_journal_row(row: JournalRow) -> StorageResult<JournalEvent> {
-    if row.event_version != EVENT_SCHEMA_VERSION {
-        return Err(StorageError::Corrupt(format!(
-            "unsupported persisted event version {} for journal seq {}",
-            row.event_version, row.seq
-        )));
-    }
-    let event_type = EventType::parse(&row.event_type)?;
-    let task_id = row
-        .task_id
-        .map(|id| {
-            TaskId::new(id).map_err(|error| {
-                StorageError::DomainReconstruction(format!("journal task reference: {error}"))
-            })
-        })
-        .transpose()?;
-    let project_id = ProjectId::new(row.project_id).map_err(|error| {
-        StorageError::DomainReconstruction(format!("journal project reference: {error}"))
-    })?;
-    // The shared state columns carry exactly one vocabulary per row:
-    // lease lifecycle names on workspace rows, Task names (or NULL) on
-    // every other row. Each column is consumed once into its pair.
-    let (from_state, from_workspace_state) = match (&event_type, row.from_state) {
-        (event_type, Some(raw)) if event_type.is_workspace_scoped() => (
-            None,
-            Some(LeaseLifecycle::parse(&raw).map_err(|_| {
-                StorageError::Corrupt(format!(
-                    "journal seq {} stores unknown lease lifecycle {raw:?}",
-                    row.seq
-                ))
-            })?),
-        ),
-        (_, raw) => (
-            raw.map(|state| {
-                decode_state(&state).map_err(|_| {
-                    StorageError::Corrupt(format!(
-                        "journal seq {} stores unknown from_state {state:?}",
-                        row.seq
-                    ))
-                })
-            })
-            .transpose()?,
-            None,
-        ),
-    };
-    let (to_state, to_workspace_state) = match (&event_type, row.to_state) {
-        (event_type, Some(raw)) if event_type.is_workspace_scoped() => (
-            None,
-            Some(LeaseLifecycle::parse(&raw).map_err(|_| {
-                StorageError::Corrupt(format!(
-                    "journal seq {} stores unknown lease lifecycle {raw:?}",
-                    row.seq
-                ))
-            })?),
-        ),
-        (_, raw) => (
-            raw.map(|state| {
-                decode_state(&state).map_err(|_| {
-                    StorageError::Corrupt(format!(
-                        "journal seq {} stores unknown to_state {state:?}",
-                        row.seq
-                    ))
-                })
-            })
-            .transpose()?,
-            None,
-        ),
-    };
-    let execution_id = row
-        .execution_id
-        .map(|id| {
-            ExecutionId::new(id).map_err(|error| {
-                StorageError::DomainReconstruction(format!("journal execution reference: {error}"))
-            })
-        })
-        .transpose()?;
-    let attempt_id = row
-        .attempt_id
-        .map(|id| {
-            AttemptId::new(id).map_err(|error| {
-                StorageError::DomainReconstruction(format!("journal attempt reference: {error}"))
-            })
-        })
-        .transpose()?;
-    let attempt_outcome = row
-        .attempt_outcome
-        .map(|raw| AttemptOutcome::parse(&raw))
-        .transpose()?;
-    let workspace_id = row
-        .workspace_id
-        .map(|id| {
-            WorkspaceId::new(id).map_err(|error| {
-                StorageError::DomainReconstruction(format!("journal workspace reference: {error}"))
-            })
-        })
-        .transpose()?;
-    if event_type.is_project_scoped() {
-        if task_id.is_some()
-            || from_state.is_some()
-            || to_state.is_some()
-            || execution_id.is_some()
-            || attempt_id.is_some()
-            || attempt_outcome.is_some()
-            || workspace_id.is_some()
-            || from_workspace_state.is_some()
-            || to_workspace_state.is_some()
-        {
-            return Err(StorageError::Corrupt(format!(
-                "journal seq {} stores a project-scoped event with task, runtime, or workspace scope",
-                row.seq
-            )));
-        }
-    } else if event_type.is_runtime_scoped() {
-        decode_runtime_scope(
-            row.seq,
-            &event_type,
-            &task_id,
-            &from_state,
-            &to_state,
-            &execution_id,
-            &attempt_id,
-            &attempt_outcome,
-        )?;
-        if workspace_id.is_some() || from_workspace_state.is_some() || to_workspace_state.is_some()
-        {
-            return Err(StorageError::Corrupt(format!(
-                "journal seq {} stores a runtime event with workspace scope",
-                row.seq
-            )));
-        }
-    } else if event_type.is_workspace_scoped() {
-        decode_workspace_scope(
-            row.seq,
-            &event_type,
-            &task_id,
-            &execution_id,
-            &workspace_id,
-            &attempt_id,
-            &attempt_outcome,
-            &from_workspace_state,
-            &to_workspace_state,
-        )?;
-        if from_state.is_some() || to_state.is_some() {
-            return Err(StorageError::Corrupt(format!(
-                "journal seq {} stores a workspace event with Task lifecycle states",
-                row.seq
-            )));
-        }
-    } else if task_id.is_none()
-        || from_state.is_none()
-        || to_state.is_none()
-        || execution_id.is_some()
-        || attempt_id.is_some()
-        || attempt_outcome.is_some()
-        || workspace_id.is_some()
-        || from_workspace_state.is_some()
-        || to_workspace_state.is_some()
-    {
-        return Err(StorageError::Corrupt(format!(
-            "journal seq {} stores a task-scoped event without task scope or with runtime/workspace scope",
-            row.seq
-        )));
-    }
-    Ok(JournalEvent {
-        id: EventId::parse(&format!("evt-{}", row.seq))?,
-        seq: row.seq,
-        event_version: row.event_version,
-        fact: NewJournalEvent {
-            event_type,
-            task_id,
-            project_id,
-            from_state,
-            to_state,
-            reason: row.reason,
-            correlation_id: row.correlation_id,
-            causation_id: row.causation_id,
-            occurred_at: row.occurred_at,
-            provenance: row.provenance,
-            execution_id,
-            attempt_id,
-            attempt_outcome,
-            workspace_id,
-            from_workspace_state,
-            to_workspace_state,
-        },
-    })
-}
-
-/// Read-path mirror of the ADR-0022 scope matrix: each runtime family
-/// carries exactly its scope. `from_state`/`to_state` stay Task-only,
-/// so any Task state on a runtime row is corruption, not data.
-#[allow(clippy::too_many_arguments)]
-fn decode_runtime_scope(
-    seq: i64,
-    event_type: &EventType,
-    task_id: &Option<TaskId>,
-    from_state: &Option<TaskState>,
-    to_state: &Option<TaskState>,
-    execution_id: &Option<ExecutionId>,
-    attempt_id: &Option<AttemptId>,
-    attempt_outcome: &Option<AttemptOutcome>,
-) -> StorageResult<()> {
-    let corrupt =
-        |detail: &str| StorageError::Corrupt(format!("journal seq {seq} stores {detail}"));
-    if task_id.is_none() || from_state.is_some() || to_state.is_some() {
-        return Err(corrupt(
-            "a runtime event without task scope or with Task lifecycle states",
-        ));
-    }
-    let valid = execution_id.is_some()
-        && match event_type {
-            EventType::ExecutionCreated => attempt_id.is_none() && attempt_outcome.is_none(),
-            EventType::AttemptCreated => attempt_id.is_some() && attempt_outcome.is_none(),
-            EventType::AttemptConcluded => attempt_id.is_some() && attempt_outcome.is_some(),
-            _ => false,
-        };
-    if !valid {
-        return Err(corrupt(&format!(
-            "runtime event {event_type} with invalid scope for its family"
-        )));
-    }
-    Ok(())
-}
-
-/// Read-path mirror of the ADR-0023 §9 scope matrix: each workspace
-/// family carries project + task + execution + workspace scope, no attempt
-/// scope, no Task lifecycle states, and exactly its contract-fixed lease
-/// lifecycle pair.
-#[allow(clippy::too_many_arguments)]
-fn decode_workspace_scope(
-    seq: i64,
-    event_type: &EventType,
-    task_id: &Option<TaskId>,
-    execution_id: &Option<ExecutionId>,
-    workspace_id: &Option<WorkspaceId>,
-    attempt_id: &Option<AttemptId>,
-    attempt_outcome: &Option<AttemptOutcome>,
-    from_workspace_state: &Option<LeaseLifecycle>,
-    to_workspace_state: &Option<LeaseLifecycle>,
-) -> StorageResult<()> {
-    use workspace::WorkspaceEventKind;
-    let expected = match event_type {
-        EventType::WorkspaceCreated => WorkspaceEventKind::Created.transition(),
-        EventType::WorkspaceRemoved => WorkspaceEventKind::Removed.transition(),
-        _ => {
-            return Err(StorageError::Corrupt(format!(
-                "journal seq {seq} stores non-workspace event {event_type} in workspace scope decode"
-            )));
-        }
-    };
-    let valid = task_id.is_some()
-        && execution_id.is_some()
-        && workspace_id.is_some()
-        && attempt_id.is_none()
-        && attempt_outcome.is_none()
-        && *from_workspace_state == Some(expected.0)
-        && *to_workspace_state == Some(expected.1);
-    if !valid {
-        return Err(StorageError::Corrupt(format!(
-            "journal seq {seq} stores workspace event {event_type} with invalid scope for its family"
-        )));
-    }
-    Ok(())
-}
-
-/// Envelope invariants the schema requires (non-blank correlation and
-/// causation) are checked before touching SQL so a violation never becomes
-/// a half-written transaction.
-pub(crate) fn require_envelope(event: &NewJournalEvent) -> StorageResult<()> {
-    if event.correlation_id.trim().is_empty() {
-        return Err(StorageError::ConstraintViolation(
-            "journal event requires a non-blank correlation_id".to_owned(),
-        ));
-    }
-    if event.causation_id.trim().is_empty() {
-        return Err(StorageError::ConstraintViolation(
-            "journal event requires a non-blank causation_id".to_owned(),
-        ));
-    }
-    if event.occurred_at.trim().is_empty() {
-        return Err(StorageError::ConstraintViolation(
-            "journal event requires an occurred_at timestamp".to_owned(),
-        ));
-    }
-    if event.provenance.trim().is_empty() {
-        return Err(StorageError::ConstraintViolation(
-            "journal event requires provenance".to_owned(),
-        ));
-    }
-    require_scope(event)
-}
-
-/// Scope coherence between an event's type and its references, mirroring
-/// the migration-0003/migration-0004/migration-0005 CHECKs:
-/// `project.created` carries no task scope at all (never a fake or
-/// sentinel id); G2 task/dependency/lifecycle facts carry full Task scope
-/// and no runtime or workspace scope; runtime facts follow the ADR-0022
-/// matrix (execution scope, attempt scope for attempt facts, outcome only
-/// on conclusion, never Task lifecycle states, never workspace scope);
-/// workspace facts follow the ADR-0023 §9 matrix (full Task scope minus
-/// Task states, plus execution and workspace scope, never attempt scope,
-/// lease lifecycle in the workspace-state fields). Checked before
-/// touching SQL.
-fn require_scope(event: &NewJournalEvent) -> StorageResult<()> {
-    if event.event_type.is_project_scoped() {
-        if event.task_id.is_some()
-            || event.from_state.is_some()
-            || event.to_state.is_some()
-            || event.execution_id.is_some()
-            || event.attempt_id.is_some()
-            || event.attempt_outcome.is_some()
-            || event.workspace_id.is_some()
-            || event.from_workspace_state.is_some()
-            || event.to_workspace_state.is_some()
-        {
-            return Err(StorageError::ConstraintViolation(
-                "project-scoped journal event must not carry task, runtime, or workspace scope"
-                    .to_owned(),
-            ));
-        }
-    } else if event.event_type.is_runtime_scoped() {
-        require_runtime_scope(event)?;
-    } else if event.event_type.is_workspace_scoped() {
-        require_workspace_scope(event)?;
-    } else if event.task_id.is_none()
-        || event.from_state.is_none()
-        || event.to_state.is_none()
-        || event.execution_id.is_some()
-        || event.attempt_id.is_some()
-        || event.attempt_outcome.is_some()
-        || event.workspace_id.is_some()
-        || event.from_workspace_state.is_some()
-        || event.to_workspace_state.is_some()
-    {
-        return Err(StorageError::ConstraintViolation(
-            "task-scoped journal event requires task_id, from_state, and to_state \
-             and must not carry runtime or workspace scope"
-                .to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-/// ADR-0022 scope matrix enforcement on the write path: each runtime
-/// type carries exactly its family's scope, nothing more.
-fn require_runtime_scope(event: &NewJournalEvent) -> StorageResult<()> {
-    let valid = event.task_id.is_some()
-        && event.from_state.is_none()
-        && event.to_state.is_none()
-        && event.workspace_id.is_none()
-        && event.from_workspace_state.is_none()
-        && event.to_workspace_state.is_none()
-        && match event.event_type {
-            EventType::ExecutionCreated => {
-                event.execution_id.is_some()
-                    && event.attempt_id.is_none()
-                    && event.attempt_outcome.is_none()
-            }
-            EventType::AttemptCreated => {
-                event.execution_id.is_some()
-                    && event.attempt_id.is_some()
-                    && event.attempt_outcome.is_none()
-            }
-            EventType::AttemptConcluded => {
-                event.execution_id.is_some()
-                    && event.attempt_id.is_some()
-                    && event.attempt_outcome.is_some()
-            }
-            _ => false,
-        };
-    if !valid {
-        return Err(StorageError::ConstraintViolation(format!(
-            "runtime event {} carries invalid scope for its family",
-            event.event_type
-        )));
-    }
-    Ok(())
-}
-
-/// ADR-0023 §9 scope matrix enforcement on the write path: each workspace
-/// type carries exactly its family's scope — project + task + execution +
-/// workspace, no attempt scope, no Task lifecycle states — and exactly the
-/// contract-fixed lease lifecycle pair (callers never choose it).
-fn require_workspace_scope(event: &NewJournalEvent) -> StorageResult<()> {
-    use workspace::WorkspaceEventKind;
-    let expected = match event.event_type {
-        EventType::WorkspaceCreated => WorkspaceEventKind::Created.transition(),
-        EventType::WorkspaceRemoved => WorkspaceEventKind::Removed.transition(),
-        _ => {
-            return Err(StorageError::ConstraintViolation(format!(
-                "non-workspace event {} reached workspace scope validation",
-                event.event_type
-            )));
-        }
-    };
-    let valid = event.task_id.is_some()
-        && event.from_state.is_none()
-        && event.to_state.is_none()
-        && event.execution_id.is_some()
-        && event.workspace_id.is_some()
-        && event.attempt_id.is_none()
-        && event.attempt_outcome.is_none()
-        && event.from_workspace_state == Some(expected.0)
-        && event.to_workspace_state == Some(expected.1);
-    if !valid {
-        return Err(StorageError::ConstraintViolation(format!(
-            "workspace event {} carries invalid scope for its family",
-            event.event_type
-        )));
-    }
-    Ok(())
-}
-
 /// Validates that `event` is the `project.created` evidence for exactly
 /// `project` before any write.
 fn require_project_created_envelope(
@@ -1207,7 +698,7 @@ fn require_project_created_envelope(
             "project creation requires a project.created event".to_owned(),
         ));
     }
-    if event.project_id != *project.id() {
+    if event.project_id.as_ref() != Some(project.id()) {
         return Err(StorageError::ConstraintViolation(
             "project.created event references a different project than the state write".to_owned(),
         ));
@@ -1223,7 +714,9 @@ fn require_task_created_envelope(task: &Task, event: &NewJournalEvent) -> Storag
             "task creation requires a task.created event".to_owned(),
         ));
     }
-    if event.task_id.as_ref() != Some(task.id()) || event.project_id != *task.project_id() {
+    if event.task_id.as_ref() != Some(task.id())
+        || event.project_id.as_ref() != Some(task.project_id())
+    {
         return Err(StorageError::ConstraintViolation(
             "task.created event references a different task or project than the state write"
                 .to_owned(),
@@ -1247,7 +740,9 @@ fn require_dependency_envelope(task: &Task, event: &NewJournalEvent) -> StorageR
             "dependency mutation requires a task.dependency_added event".to_owned(),
         ));
     }
-    if event.task_id.as_ref() != Some(task.id()) || event.project_id != *task.project_id() {
+    if event.task_id.as_ref() != Some(task.id())
+        || event.project_id.as_ref() != Some(task.project_id())
+    {
         return Err(StorageError::ConstraintViolation(
             "task.dependency_added event references a different task or project than the edge write"
                 .to_owned(),
@@ -1259,59 +754,6 @@ fn require_dependency_envelope(task: &Task, event: &NewJournalEvent) -> StorageR
         ));
     }
     require_envelope(event)
-}
-
-/// Appends one validated journal record inside the caller's transaction
-/// and returns it with its assigned identity. The caller owns the atomic
-/// boundary (state writes plus this append commit together); this helper
-/// never commits on its own.
-pub(crate) fn insert_journal_event(
-    connection: &Connection,
-    event: &NewJournalEvent,
-) -> StorageResult<JournalEvent> {
-    require_envelope(event)?;
-    // Workspace rows carry lease lifecycle names in the shared state
-    // columns; every other row carries Task names or NULL. The vocabularies
-    // never mix: require_scope above already enforced which pair is set.
-    let from_state = event
-        .from_workspace_state
-        .map(|state| state.as_str().to_owned())
-        .or_else(|| event.from_state.map(|state| state.as_str().to_owned()));
-    let to_state = event
-        .to_workspace_state
-        .map(|state| state.as_str().to_owned())
-        .or_else(|| event.to_state.map(|state| state.as_str().to_owned()));
-    connection.execute(
-        "INSERT INTO event_journal
-         (event_type, event_version, task_id, project_id, from_state, to_state,
-          reason, correlation_id, causation_id, occurred_at, provenance,
-          execution_id, attempt_id, attempt_outcome, workspace_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-        params![
-            event.event_type.as_str(),
-            EVENT_SCHEMA_VERSION,
-            event.task_id.as_ref().map(|id| id.as_str()),
-            event.project_id.as_str(),
-            from_state,
-            to_state,
-            event.reason,
-            event.correlation_id,
-            event.causation_id,
-            event.occurred_at,
-            event.provenance,
-            event.execution_id.as_ref().map(|id| id.as_str()),
-            event.attempt_id.as_ref().map(|id| id.as_str()),
-            event.attempt_outcome.map(|outcome| outcome.as_str()),
-            event.workspace_id.as_ref().map(|id| id.as_str()),
-        ],
-    )?;
-    let seq = connection.last_insert_rowid();
-    Ok(JournalEvent {
-        id: EventId::parse(&format!("evt-{seq}"))?,
-        seq,
-        event_version: EVENT_SCHEMA_VERSION,
-        fact: event.clone(),
-    })
 }
 
 fn insert_task_row(connection: &Connection, snapshot: &TaskSnapshot) -> StorageResult<()> {

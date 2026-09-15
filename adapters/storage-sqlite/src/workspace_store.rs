@@ -17,7 +17,7 @@ use workspace::{
 
 use crate::error::StorageError;
 use crate::event::{EventType, NewJournalEvent};
-use crate::task_store::{insert_journal_event, require_envelope};
+use crate::journal_store::{insert_journal_event, require_envelope};
 
 /// Maps a storage-local failure across the port boundary. The trait error
 /// is [`WorkspaceFailure`]; every SQLite, constraint, and corruption
@@ -343,7 +343,7 @@ impl crate::task_store::SqliteStore {
                 workspace::WorkspaceEventKind::Removed => EventType::WorkspaceRemoved,
             },
             task_id: Some(evidence.task_id.clone()),
-            project_id: evidence.project_id.clone(),
+            project_id: Some(evidence.project_id.clone()),
             from_state: None,
             to_state: None,
             reason: None,
@@ -357,6 +357,7 @@ impl crate::task_store::SqliteStore {
             workspace_id: Some(evidence.workspace_id.clone()),
             from_workspace_state: Some(from),
             to_workspace_state: Some(to),
+            plan_revision: None,
         }
     }
 }

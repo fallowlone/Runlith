@@ -1558,6 +1558,7 @@ name = "storage-sqlite"
 version = "0.1.0"
 dependencies = [
  "agent-runtime",
+ "plan-domain",
  "policy",
  "rusqlite",
  "secrets",
