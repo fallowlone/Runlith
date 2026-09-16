@@ -704,3 +704,81 @@ The previous queue entries below were deleted because overlap analysis disproved
 - CI runs the shared matrix for every adapter declaring the relevant contract.
 
 **runlith_improvement:** 9Router demonstrates that registry-derived matrices keep compatibility tests synchronized with provider/model support. Runlith can make that mechanism safer and more durable by deriving tests from accepted provider-neutral contracts, separating capability facts from authority, rejecting lossy mandatory translations explicitly, and preserving independent Verification/Runner evidence outside provider protocol handling.
+
+## IKQ-010 — Evaluation environment identity and contamination-control contract
+
+**id:** `IKQ-010`
+
+**origin_repository:** `https://github.com/ai-boost/awesome-harness-engineering`
+
+**origin_revision:** `9c0dd218b5db8a4f38e82607276f72d98f266ad3`
+
+**idea:** Before G8 evaluation becomes completion-authoritative, define which evaluator/harness environment properties are part of verification evidence identity and how hidden-answer/benchmark/test contamination, network access and tool access affect evidence validity.
+
+**novelty:** `NEEDS_ADR`. Runlith already has independent Evaluation, subject/toolchain/config fingerprints, model/runtime/hardware benchmark provenance, Policy/Runner isolation and task-risk-dependent verification. Targeted repository search found no accepted contract that binds evaluator network/tool/isolation/fixture visibility to the evidence identity or defines a contaminated/tainted verification outcome.
+
+**status:** `NEEDS_ADR`
+
+**existing_runlith:**
+
+- ADR-0018 makes Evaluation/Verification the independent completion authority and keeps provider/agent self-claims non-authoritative.
+- Source of Truth requires G8 verification evidence to be tied to subject/toolchain/config fingerprints and produced by authorized independent principals/runners/humans.
+- `ModelRuntimeProfile`, benchmark evidence and `INV-080` already preserve runtime/hardware/methodology provenance.
+- G6 Policy/Runner provide scoped process/filesystem/network authority and fail-closed isolation.
+- The Web architecture already has per-hop SSRF/network policy, but no evaluator-specific network/held-out-evidence contract was found.
+
+**files:**
+
+- `docs/architecture/adr/ADR-0018-independent-evaluation.md` — completion/evaluation authority.
+- `docs/architecture/task-engine.md` — required verification/review/risk ownership and open verification taxonomy.
+- `AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md` — G8 evidence fingerprints, benchmark/runtime provenance, Policy/Runner and evaluation direction.
+- `docs/architecture/INVARIANTS.md` — benchmark/evidence/security invariants.
+- `docs/security/POLICY_CONTRACT.md` and `docs/security/THREAT_MODEL.md` — scoped authority and network/data-flow risks.
+- `planning/roadmap.yaml` / `planning/tasks/queue.yaml` — read-only overlap check; this research does not modify canonical planning.
+
+**invariants:**
+
+- `INV-009` — only trusted verification may grant completion.
+- `INV-062` — global benchmark scores remain provenance-bearing evidence rather than universal truth.
+- `INV-080` — performance claims require reproducible methodology/hardware/build provenance.
+- `INV-114` — implementation agents may not weaken their own approval evidence without explicit authorization and independent review.
+- G6 authority/isolation invariants `INV-146`-`INV-153` remain applicable to evaluator execution.
+
+**adrs:** ADR-0018 defines authority but not evaluator-environment/contamination semantics. A G8-focused ADR or accepted amendment is required before freezing implementation types/schemas.
+
+**tasks:** no canonical G8 task currently owns this exact delta; G7 remains the active gate and canonical queue is unchanged by this research.
+
+**actual_delta:** Define a provider-neutral `EvaluationEnvironment`/evidence contract covering only materially relevant properties: evaluator/runner identity and version/profile, Policy/isolation profile, network/tool access, resource constraints where they affect comparability, fixture/held-out evidence identity and visibility, evaluator/judge/rubric versions when used, and a contamination/taint result that cannot produce trusted `VERIFIED`. Specify when network isolation is mandatory versus when legitimate integration verification intentionally requires network access. Avoid turning ordinary telemetry into fingerprint noise.
+
+**decision:** `ADAPT`
+
+**target_subsystem:** G8 Evaluation/Verification + evidence provenance + Runner/Policy.
+
+**priority:** `MEDIUM now; HIGH when G8 architecture/tasks activate`.
+
+**dependencies:**
+
+- activation of G8 verification architecture;
+- accepted required-verification taxonomy;
+- existing Runner/Policy capability/isolation contracts;
+- evidence/config fingerprint representation;
+- representative coding benchmark and normal integration-test workloads for non-overfitted validation.
+
+**security_impact:** Positive. Prevents a network/tool-enabled evaluated agent from silently obtaining held-out answers or protected fixtures and prevents contaminated evidence from granting completion. Evaluator network access remains an explicit capability rather than an ambient assumption.
+
+**architecture_impact:** Moderate and localized. It enriches Evaluation evidence identity without moving Task state, Policy authority or provider semantics into the evaluator. Environment details remain evidence/configuration, not a second Task lifecycle.
+
+**candidate_task:** `TASK-CANDIDATE — G8 evaluation environment and contamination-control research/ADR`.
+
+**verification_direction:**
+
+- two semantically equivalent evaluation environments produce stable equivalent evidence identity for the properties declared relevant;
+- changing a relevant evaluator/runner/toolchain/network/isolation/fixture version changes the evidence identity or invalidates reuse as specified;
+- an agent/evaluator denied network or held-out fixture access cannot bypass the restriction through provider/tool indirection;
+- detected benchmark/answer leakage yields explicit contaminated/invalid evidence and cannot transition a Task to VERIFIED;
+- legitimate networked integration tests can declare scoped network access and remain valid without being mislabeled as isolated benchmark results;
+- deterministic checks remain preferred over LLM-as-judge where available; judge/rubric/model identity is recorded when subjective evaluation is required;
+- restart/replay can explain which environment and evidence inputs produced the verdict;
+- no provider-specific conversation/session state becomes canonical evaluation identity.
+
+**runlith_improvement:** The curated repository highlights that measured agent capability belongs to the model-plus-harness/environment and that web-enabled benchmarks can leak answers. Runlith can turn that lesson into a stronger control: durable provider-neutral evidence identity, Policy/Runner-enforced evaluator scope and an explicit contamination state under independent completion authority.

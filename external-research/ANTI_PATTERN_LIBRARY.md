@@ -503,3 +503,57 @@ The previous research attributed **"external event as canonical truth"** to Over
 **Existing Runlith protection:** TASK-0063 / ADR-0026 and SECRET data classification keep credential values in the OS credential backend while SQLite/application state stores opaque references and non-secret metadata only.
 
 **Additional lesson:** Durable state may reference a secret and record its binding/provenance, but generic state persistence, backup and export mechanisms should never become the storage mechanism for the secret value itself.
+
+## AP-028 — Verification cache without freshness or source/config identity
+
+**Anti-pattern:** Reuse a previous validation result indefinitely because its last status was successful or deterministically failed, without recording when, against which source/configuration, or under which expiry policy the observation was made.
+
+**Source:** `ai-boost/awesome-harness-engineering`
+
+**Revision:** `9c0dd218b5db8a4f38e82607276f72d98f266ad3`
+
+**Evidence:** `verify_urls.py:72-110,192-198,225-240` stores URL/status/status-code/final-URL/error/response-time but no timestamp, source revision, validator version or expiry. `split_urls` revalidates only cached `ERROR`/`TIMEOUT`; cached `SUCCESS`, `REDIRECTED` and `NOT_FOUND` are accepted indefinitely unless the caller manually disables cache use.
+
+**Failure mode:** A dead link can remain reported healthy indefinitely, a recovered resource can remain reported 404 indefinitely, and a newly printed verification summary can be composed from stale observations.
+
+**Security/reliability impact:** Evidence freshness becomes ambiguous and a performance cache silently acts as a second source of truth.
+
+**Existing Runlith protection:** derived context/web snapshots carry provenance/freshness; caches are rebuildable derived state; `INV-070` and `INV-103` prevent a cache/snapshot from silently becoming canonical current truth.
+
+**Additional lesson:** Cache reuse in an evidence path needs explicit freshness/invalidation semantics and enough source/config identity to know what the cached observation actually proves.
+
+## AP-029 — Repository-controlled URLs inherit the validator host's ambient network reachability
+
+**Anti-pattern:** Parse URLs from repository-controlled content and perform ordinary redirect-following network requests without a destination policy for schemes, resolved IPs, loopback/link-local/private ranges and redirect hops.
+
+**Source:** `ai-boost/awesome-harness-engineering`
+
+**Revision:** `9c0dd218b5db8a4f38e82607276f72d98f266ad3`
+
+**Evidence:** `CONTRIBUTING.md:18-23` defines adding arbitrary resource URLs to `README.md`; `verify_urls.py:60-70` accepts every Markdown `http://`/`https://` destination and `112-150` performs GETs with `allow_redirects=True` and no network/SSRF policy. This revision has no checked-in CI workflow automatically invoking the checker on untrusted PRs, so the exploitable SSRF path is conditional even though the unrestricted network sink is source-confirmed.
+
+**Failure mode:** If executed over attacker-controlled repository content from a host with sensitive network reachability, link validation can request local/private/link-local/internal destinations directly or through redirects.
+
+**Security/reliability impact:** Input validation and network authorization are conflated; moving the same utility into CI/VPN/cloud infrastructure can silently widen its authority without code changes.
+
+**Existing Runlith protection:** `INV-097`, `THR-007` and the Web/NetworkAccessPolicy architecture require centralized per-hop destination evaluation, resolved-address checks and scoped network capability.
+
+**Additional lesson:** A URL string being syntactically valid never authorizes the network location it resolves or redirects to. Treat repository/web URLs as untrusted evidence and bind acquisition to an explicit egress policy.
+
+## AP-030 — Verification command depends on undeclared local runtime state
+
+**Anti-pattern:** Declare a command as required verification while its third-party runtime dependencies and versions are absent from repository metadata, so the command's ability to execute depends on the reviewer's pre-existing machine state.
+
+**Source:** `ai-boost/awesome-harness-engineering`
+
+**Revision:** `9c0dd218b5db8a4f38e82607276f72d98f266ad3`
+
+**Evidence:** `AGENTS.md:39-45` requires URL reachability before PR; `verify_urls.py:18-25` imports third-party `aiohttp`; the reviewed tree has no `requirements*.txt`, `pyproject.toml`, lockfile, package/workspace manifest or CI workflow. Running the frozen script in the review environment failed immediately with `ModuleNotFoundError: No module named 'aiohttp'`.
+
+**Failure mode:** different contributors/CI environments can execute different effective verification stacks or cannot run the gate at all; later reviewers cannot reproduce the evidence from repository state.
+
+**Security/reliability impact:** completion evidence becomes environment-dependent and the stated verification rule degrades into a convention rather than an executable contract.
+
+**Existing Runlith protection:** G8 direction already binds verification to subject/toolchain/config fingerprints and independent trusted Evaluation; reproducible benchmark/runtime provenance is an invariant. The narrower evaluator-environment/contamination contract remains a design gap.
+
+**Additional lesson:** Evidence-producing tooling is part of the evidence chain. Its executable/runtime dependencies, relevant configuration and isolation profile need reproducible provenance rather than ambient workstation assumptions.
