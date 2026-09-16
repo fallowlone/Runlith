@@ -250,6 +250,23 @@ pub fn verify_proposal_hash(changeset: &PlanChangeSet) -> bool {
     changeset.proposal_hash == compute_proposal_hash(changeset)
 }
 
+/// Canonical identity of one triggering-evidence event (ADR-0027 §5 L3, §6):
+/// SHA-256 over the sorted, de-duplicated evidence refs. Order and repetition
+/// never produce a fresh event; only a different evidence set does.
+#[must_use]
+pub fn planning_evidence_key(evidence: &[crate::ids::EvidenceRef]) -> String {
+    let mut refs: Vec<&str> = evidence.iter().map(AsRef::as_ref).collect();
+    refs.sort_unstable();
+    refs.dedup();
+    let mut hasher = Sha256::new();
+    push_field(&mut hasher, b"plan-trigger-evidence-v1");
+    push_u64(&mut hasher, refs.len() as u64);
+    for item in refs {
+        push_str(&mut hasher, item);
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
 /// V7 fingerprint: `SHA-256(canonical(parent_task_id, sorted child scope
 /// roots, sorted criterion ids, sorted evidence refs))`.
 #[must_use]

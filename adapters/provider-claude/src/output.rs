@@ -135,6 +135,19 @@ fn validate_session_ref(session_ref: &str) -> Result<(), ClaudeFailure> {
     Ok(())
 }
 
+/// Recovers provider-reported usage from one final result document even when
+/// that document reports a provider error or its result is unusable. Spend
+/// already happened; only a `type: "result"` object is trusted to carry
+/// usage. Unparseable output reads as unknown — never fabricated.
+pub(crate) fn reported_usage(stdout: &str) -> UsageSample {
+    match parse_json(stdout.trim()) {
+        Ok(json) if json.get("type").and_then(|v| v.as_str()) == Some("result") => {
+            parse_usage(&json)
+        }
+        _ => UsageSample::unknown(),
+    }
+}
+
 /// Extracts the optional `usage` object. Absent or unusable usage is
 /// [`UsageProvenance::Unknown`] — never zero-filled, never estimated.
 fn parse_usage(json: &Json) -> UsageSample {
@@ -239,6 +252,25 @@ mod tests {
                 matches!(err, ClaudeFailure::MalformedOutput { .. }),
                 "malformed must be MalformedOutput, got {err:?} for {doc:?}"
             );
+        }
+    }
+
+    #[test]
+    fn usage_is_recoverable_from_provider_error_documents_without_fabrication() {
+        let error_doc = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom","session_id":"s-1","usage":{"input_tokens":20000,"output_tokens":7000}}"#;
+        assert!(parse_provider_output(error_doc).is_err());
+        let usage = reported_usage(error_doc);
+        assert_eq!(usage.provenance, UsageProvenance::Reported);
+        assert_eq!(
+            (usage.total_input_tokens(), usage.output_tokens),
+            (Some(20_000), Some(7_000))
+        );
+        for unusable in [
+            "",
+            "not json",
+            r#"{"type":"message","usage":{"input_tokens":1}}"#,
+        ] {
+            assert_eq!(reported_usage(unusable), UsageSample::unknown());
         }
     }
 

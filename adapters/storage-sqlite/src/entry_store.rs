@@ -33,6 +33,7 @@
 //!   journal). There is no partial admission to reconcile.
 
 use agent_runtime::{AttemptId, Execution};
+use plan_domain::{PlanBranchId, PlanningInputSnapshotId};
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use task_domain::{Task, TaskId, TaskState};
 
@@ -49,6 +50,10 @@ use crate::runtime_store::require_execution_created_envelope;
 /// the single commit boundary. Provider-neutral: no provider, model,
 /// session, or protocol data travels here.
 pub struct ExecutionEntryAdmission<'a> {
+    /// Optional canonical Plan head that authorized this entry. When present,
+    /// it is checked inside this admission transaction before any Task
+    /// lifecycle mutation. Legacy non-planning callers leave it absent.
+    pub plan_head: Option<PlanHeadPrecondition>,
     /// Task being entered (must be READY at commit time).
     pub task_id: &'a TaskId,
     /// Task after the validated `Claim` (READY → CLAIMED).
@@ -79,6 +84,27 @@ pub struct ExecutionEntryAdmission<'a> {
     pub managed_branch: &'a str,
 }
 
+/// Exact accepted Plan head that authorizes one execution admission.
+///
+/// This is an admission predicate, not a new durable relationship: the Plan
+/// revision remains canonical in `plan_branches` and the Task/Execution
+/// schemas remain unchanged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlanHeadPrecondition {
+    pub plan_branch_id: PlanBranchId,
+    pub revision_seq: u64,
+    /// Exact current planning-input binding for ADR-0028 execution admission.
+    /// `None` exists only for lower-level tests/legacy internal callers that
+    /// use a Plan-head CAS without the G7 production execution gate.
+    pub planning_input: Option<PlanningInputPrecondition>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlanningInputPrecondition {
+    pub snapshot_id: PlanningInputSnapshotId,
+    pub input_fingerprint: String,
+}
+
 /// The journal facts committed by one admission, in commit order.
 pub struct AdmittedExecutionEntry {
     /// Committed `task.claimed` record.
@@ -103,6 +129,7 @@ impl crate::task_store::SqliteStore {
     ///   [`StorageError::Duplicate`] (TASK-0053: digest collisions and any
     ///   residual same-string identity hazard fail closed here, before the
     ///   first Task mutation — never as a post-admission Git wedge);
+    /// - required Plan head missing or moved → [`StorageError::PlanStale`];
     /// - task no longer READY (a concurrent entrant moved first) →
     ///   [`StorageError::Stale`].
     pub fn admit_execution_entry(
@@ -113,6 +140,61 @@ impl crate::task_store::SqliteStore {
         let transaction = self
             .connection_mut()
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // -- Plan authorization (when this is plan-gated) -----------------
+        // The plan decision was made by application services, but its exact
+        // head must still hold at this atomic Task/Execution entry boundary.
+        // Check before the first lifecycle UPDATE so a stale/missing head
+        // rolls the entire admission back with no Task, Execution, Attempt,
+        // reservation, or journal mutation.
+        if let Some(precondition) = &admission.plan_head {
+            let found: Option<i64> = transaction
+                .query_row(
+                    "SELECT head_revision FROM plan_branches WHERE plan_branch_id = ?1",
+                    params![precondition.plan_branch_id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let found = found
+                .map(|head| {
+                    u64::try_from(head).map_err(|_| {
+                        StorageError::Corrupt(format!(
+                            "plan branch {} has invalid negative head revision {head}",
+                            precondition.plan_branch_id.as_str()
+                        ))
+                    })
+                })
+                .transpose()?;
+            if found != Some(precondition.revision_seq) {
+                // Accepted revisions begin at one, so zero is a stable
+                // fail-closed representation for an absent branch in the
+                // existing PlanStale taxonomy. Application services expose
+                // it as a missing head rather than a revision.
+                return Err(StorageError::PlanStale {
+                    branch: precondition.plan_branch_id.as_str().to_owned(),
+                    expected: precondition.revision_seq,
+                    found: found.unwrap_or(0),
+                });
+            }
+            if let Some(input) = &precondition.planning_input {
+                let current: Option<(String, String)> = transaction
+                    .query_row(
+                        "SELECT snapshot_id, input_fingerprint FROM planning_input_heads
+                         WHERE plan_branch_id = ?1",
+                        params![precondition.plan_branch_id.as_str()],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                if !current.is_some_and(|(snapshot_id, fingerprint)| {
+                    snapshot_id == input.snapshot_id.as_str()
+                        && fingerprint == input.input_fingerprint
+                }) {
+                    return Err(StorageError::PlanningInputStale {
+                        branch: precondition.plan_branch_id.as_str().to_owned(),
+                        expected_fingerprint: input.input_fingerprint.clone(),
+                    });
+                }
+            }
+        }
         // -- guarded lifecycle transitions (expected-state compare) -------
         let claimed = transaction.execute(
             "UPDATE tasks SET state = ?1 WHERE id = ?2 AND state = ?3",

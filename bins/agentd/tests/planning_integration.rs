@@ -11,7 +11,7 @@ use agent_runtime::{AttemptId, ExecutionId, ProviderRef};
 use agentd::{execution::ExecutionComposition, DaemonConfig};
 use app_services::{
     FixedClock, OrchestrationIds, OrchestrationOutcome, OrchestrationService,
-    PlannedOrchestrationOutcome, PlanningCycle, PlanningPolicyContext, PlanningService,
+    PlannedOrchestrationOutcome, PlanningPolicyContext, PlanningService,
 };
 use fake_evaluator::{EvaluatorMode, FakeEvaluator};
 use fake_planner::{FakePlanner, FakePlannerScenario};
@@ -112,62 +112,75 @@ impl ExecutionPort for CountingExecutor {
     }
 }
 
-fn seed_ready_task(orchestration: &mut OrchestrationService<FixedClock>) -> TaskId {
-    let project_id = ProjectId::new("P-PLANNING").expect("project id");
+/// Creates READY canonical Tasks named like the plan nodes that represent
+/// them (plan node id == Task id).
+fn seed_ready_tasks(
+    orchestration: &mut OrchestrationService<FixedClock>,
+    project: &str,
+    names: &[&str],
+) -> Vec<TaskId> {
+    let project_id = ProjectId::new(project).expect("project id");
     orchestration
         .tasks_mut()
         .create_project(&Project::new(project_id.clone(), "planning fixture".to_owned()).unwrap())
         .expect("create project");
-    let task = Task::draft(
-        TaskId::new("planned-child-0").expect("task id"),
-        project_id,
-        "execute the planned leaf".to_owned(),
-    )
-    .expect("draft task");
-    orchestration
-        .tasks_mut()
-        .create_task(&task)
-        .expect("create task");
-    orchestration
-        .tasks_mut()
-        .mark_ready(task.id())
-        .expect("mark ready");
-    task.id().clone()
+    names
+        .iter()
+        .map(|name| {
+            let task = Task::draft(
+                TaskId::new(*name).expect("task id"),
+                project_id.clone(),
+                format!("planned step {name}"),
+            )
+            .expect("draft task");
+            orchestration
+                .tasks_mut()
+                .create_task(&task)
+                .expect("create task");
+            orchestration
+                .tasks_mut()
+                .mark_ready(task.id())
+                .expect("mark ready");
+            task.id().clone()
+        })
+        .collect()
 }
 
-fn seed_ready_chain_tasks(
-    orchestration: &mut OrchestrationService<FixedClock>,
-) -> (TaskId, TaskId) {
-    let project_id = ProjectId::new("P-PLANNING-CHAIN").expect("project id");
-    orchestration
-        .tasks_mut()
-        .create_project(
-            &Project::new(project_id.clone(), "planning chain fixture".to_owned()).unwrap(),
-        )
-        .expect("create project");
-    let first = Task::draft(
-        TaskId::new("step-a").expect("task id"),
-        project_id.clone(),
-        "first planned step".to_owned(),
-    )
-    .expect("draft first task");
-    let second = Task::draft(
-        TaskId::new("step-b").expect("task id"),
-        project_id,
-        "dependent planned step".to_owned(),
-    )
-    .expect("draft second task");
-    for task in [&first, &second] {
-        orchestration
-            .tasks_mut()
-            .create_task(task)
-            .expect("create task");
-        orchestration
-            .tasks_mut()
-            .mark_ready(task.id())
-            .expect("mark ready");
+fn ids(suffix: &str) -> OrchestrationIds {
+    OrchestrationIds {
+        execution_id: ExecutionId::new(format!("E-{suffix}")).expect("execution id"),
+        attempt_id: AttemptId::new(format!("A-{suffix}")).expect("attempt id"),
     }
-    (first.id().clone(), second.id().clone())
+}
+
+fn policy(parent: &str, fingerprint: &str) -> PlanningPolicyContext {
+    PlanningPolicyContext {
+        scope_bound: ScopeBound::new(vec!["repo:src".to_owned()]).expect("scope"),
+        baseline_risk: RiskClass::Low,
+        affected_parent_criteria: vec![AffectedParentCriterion {
+            id: CriterionId::new("criterion-root").expect("criterion"),
+            method: VerificationMethod::AutomatedTest,
+        }],
+        parent_task_ref: parent.to_owned(),
+        lineage_fingerprints: vec![],
+        risk_grant: None,
+        policy_fingerprint: fingerprint.to_owned(),
+    }
+}
+
+fn request(evidence: &str) -> DecompositionRequest {
+    DecompositionRequest {
+        parent_task_ref: "caller-value-is-overwritten".to_owned(),
+        base_plan_revision: u64::MAX,
+        acceptance_criteria_refs: vec![],
+        scope_bound: ScopeBound::new(vec!["caller:ignored".to_owned()]).expect("caller scope"),
+        evidence_refs: vec![EvidenceRef::new(evidence).expect("evidence")],
+        depth_remaining: 4,
+        budget_remaining: PlanningBudget {
+            calls_remaining: MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
+            input_tokens_remaining: MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
+        },
+    }
 }
 
 #[test]
@@ -183,51 +196,29 @@ fn agentd_composes_planning_validation_persistence_execution_and_bounded_replan(
         OrchestrationService::open(database_path, FixedClock(FIXED_MILLIS)).expect("orchestration");
     let mut planning =
         PlanningService::open(database_path, FixedClock(FIXED_MILLIS)).expect("planning");
-    let task_id = seed_ready_task(&mut orchestration);
+    // `replanned-child` is the canonical Task the bounded replan proposes as
+    // replacement work; ADR-0027 L4 requires the accepted replan to leave
+    // runnable canonical work, not merely a structurally valid node.
+    let tasks = seed_ready_tasks(
+        &mut orchestration,
+        "P-PLANNING",
+        &["planned-child-0", "replanned-child"],
+    );
+    let task_id = tasks[0].clone();
     let branch = PlanBranchId::new("task-0078-agentd").expect("branch");
     let planner = FakePlanner::for_scenario(FakePlannerScenario::Valid);
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysRejected);
     let executor = DeterministicExecutor;
-    let mut cycle = PlanningCycle::new();
-    let scope = ScopeBound::new(vec!["repo:src".to_owned()]).expect("scope");
-    let policy = PlanningPolicyContext {
-        scope_bound: scope.clone(),
-        baseline_risk: RiskClass::Low,
-        affected_parent_criteria: vec![AffectedParentCriterion {
-            id: CriterionId::new("criterion-root").expect("criterion"),
-            method: VerificationMethod::AutomatedTest,
-        }],
-        parent_task_ref: "TASK-0078".to_owned(),
-        lineage_fingerprints: vec![],
-        risk_grant: None,
-        policy_fingerprint: "policy:agentd-planning-test".to_owned(),
-    };
-    let request = DecompositionRequest {
-        parent_task_ref: "caller-value-is-overwritten".to_owned(),
-        base_plan_revision: u64::MAX,
-        acceptance_criteria_refs: vec![],
-        scope_bound: ScopeBound::new(vec!["caller:ignored".to_owned()]).expect("caller scope"),
-        evidence_refs: vec![EvidenceRef::new("fixture:initial").expect("evidence")],
-        depth_remaining: 4,
-        budget_remaining: PlanningBudget {
-            calls_remaining: MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
-            input_tokens_remaining: MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
-        },
-    };
 
     let outcome = orchestration
         .schedule_with_planning(
             &mut planning,
             &planner,
-            &mut cycle,
             &branch,
-            request,
-            policy,
+            request("fixture:initial"),
+            policy("TASK-0078", "policy:agentd-planning-test"),
             &task_id,
-            OrchestrationIds {
-                execution_id: ExecutionId::new("E-PLANNING").expect("execution id"),
-                attempt_id: AttemptId::new("A-PLANNING").expect("attempt id"),
-            },
+            ids("PLANNING"),
             &executor,
             &evaluator,
         )
@@ -272,51 +263,26 @@ fn plan_dependency_direction_runs_predecessor_before_successor() {
     let mut orchestration =
         OrchestrationService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("orchestration");
     let mut planning = PlanningService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("planning");
-    let (first, second) = seed_ready_chain_tasks(&mut orchestration);
+    let tasks = seed_ready_tasks(
+        &mut orchestration,
+        "P-PLANNING-CHAIN",
+        &["step-a", "step-b"],
+    );
+    let (first, second) = (tasks[0].clone(), tasks[1].clone());
     let branch = PlanBranchId::new("task-0078-plan-chain").expect("branch");
     let planner = FakePlanner::for_scenario(FakePlannerScenario::DependencyChain);
     let executor = CountingExecutor::new();
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
-    let mut cycle = PlanningCycle::new();
-    let scope = ScopeBound::new(vec!["repo:src".to_owned()]).expect("scope");
-    let policy = PlanningPolicyContext {
-        scope_bound: scope.clone(),
-        baseline_risk: RiskClass::Low,
-        affected_parent_criteria: vec![AffectedParentCriterion {
-            id: CriterionId::new("criterion-root").expect("criterion"),
-            method: VerificationMethod::AutomatedTest,
-        }],
-        parent_task_ref: "TASK-0078-CHAIN".to_owned(),
-        lineage_fingerprints: vec![],
-        risk_grant: None,
-        policy_fingerprint: "policy:agentd-plan-chain".to_owned(),
-    };
-    let request = DecompositionRequest {
-        parent_task_ref: "caller-value-is-overwritten".to_owned(),
-        base_plan_revision: u64::MAX,
-        acceptance_criteria_refs: vec![],
-        scope_bound: scope,
-        evidence_refs: vec![EvidenceRef::new("fixture:chain").expect("evidence")],
-        depth_remaining: 4,
-        budget_remaining: PlanningBudget {
-            calls_remaining: MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
-            input_tokens_remaining: MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
-        },
-    };
 
     let outcome = orchestration
         .schedule_with_planning(
             &mut planning,
             &planner,
-            &mut cycle,
             &branch,
-            request,
-            policy,
+            request("fixture:chain"),
+            policy("TASK-0078-CHAIN", "policy:agentd-plan-chain"),
             &second,
-            OrchestrationIds {
-                execution_id: ExecutionId::new("E-PLANNING-CHAIN").expect("execution id"),
-                attempt_id: AttemptId::new("A-PLANNING-CHAIN").expect("attempt id"),
-            },
+            ids("PLANNING-CHAIN"),
             &executor,
             &evaluator,
         )
@@ -349,12 +315,152 @@ fn plan_dependency_direction_runs_predecessor_before_successor() {
     assert_eq!(successor.state(), TaskState::Ready);
 }
 
+/// R2-02: an accepted multi-step plan is executed step by step against its
+/// durable head. Advancing to the next node never calls the planner and
+/// never creates a Plan revision.
+#[test]
+fn accepted_plan_chain_runs_successor_after_predecessor_without_replanning() {
+    let db = TestDb::new();
+    let mut orchestration =
+        OrchestrationService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("orchestration");
+    let mut planning = PlanningService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("planning");
+    let tasks = seed_ready_tasks(&mut orchestration, "P-PLAN-E2E", &["step-a", "step-b"]);
+    let (step_a, step_b) = (tasks[0].clone(), tasks[1].clone());
+    let branch = PlanBranchId::new("task-0078-accepted-chain").expect("branch");
+    let planner = FakePlanner::for_scenario(FakePlannerScenario::DependencyChain);
+    let executor = CountingExecutor::new();
+    let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
+
+    // 1. The planner creates and persists revision 1 (step-a -> step-b).
+    let planned = orchestration
+        .schedule_with_planning(
+            &mut planning,
+            &planner,
+            &branch,
+            request("fixture:e2e"),
+            policy("TASK-0078-E2E", "policy:agentd-plan-e2e"),
+            &step_b,
+            ids("E2E-PLAN"),
+            &executor,
+            &evaluator,
+        )
+        .expect("plan accepted");
+    assert!(matches!(
+        planned,
+        PlannedOrchestrationOutcome::WaitingOnPlanDependency { .. }
+    ));
+    assert_eq!(planner.call_count(), 1);
+    assert_eq!(planning.store().get_plan_head(&branch).unwrap(), Some(1));
+
+    // 2. step-b cannot run before step-a through the accepted-plan path.
+    let early = orchestration
+        .schedule_from_current_plan(
+            &planning,
+            &branch,
+            &step_b,
+            ids("E2E-B-EARLY"),
+            &executor,
+            &evaluator,
+        )
+        .expect("plan gate outcome");
+    match early {
+        PlannedOrchestrationOutcome::WaitingOnPlanDependency { blocking, .. } => {
+            assert_eq!(blocking, vec![step_a.clone()]);
+        }
+        other => panic!("step-b must wait on step-a, got {other:?}"),
+    }
+    assert_eq!(executor.calls(), 0);
+
+    // 3 + 4. step-a executes and independent evaluation completes it.
+    let ran_a = orchestration
+        .schedule_from_current_plan(
+            &planning,
+            &branch,
+            &step_a,
+            ids("E2E-A"),
+            &executor,
+            &evaluator,
+        )
+        .expect("step-a runs from the accepted plan");
+    assert!(matches!(
+        ran_a,
+        PlannedOrchestrationOutcome::Executed {
+            execution: OrchestrationOutcome::ExecutionSucceededAndVerified { .. },
+            replan: None,
+            ..
+        }
+    ));
+    let a_state = orchestration
+        .tasks()
+        .get_task(&step_a)
+        .unwrap()
+        .expect("step-a")
+        .state();
+    assert_eq!(a_state, TaskState::Completed);
+
+    // 5 + 6. The plan-gated path runs step-b.
+    let ran_b = orchestration
+        .schedule_from_current_plan(
+            &planning,
+            &branch,
+            &step_b,
+            ids("E2E-B"),
+            &executor,
+            &evaluator,
+        )
+        .expect("step-b runs from the accepted plan");
+    match ran_b {
+        PlannedOrchestrationOutcome::Executed {
+            plan,
+            execution: OrchestrationOutcome::ExecutionSucceededAndVerified { task_id, .. },
+            replan: None,
+        } => {
+            assert_eq!(task_id, step_b);
+            assert_eq!(plan.revision().revision_seq, 1);
+        }
+        other => panic!("expected step-b execution, got {other:?}"),
+    }
+    assert_eq!(executor.calls(), 2);
+
+    // 7-9. No planner call, head still 1, no revision created to run step-b.
+    assert_eq!(planner.call_count(), 1);
+    assert_eq!(planning.store().get_plan_head(&branch).unwrap(), Some(1));
+    assert!(planning
+        .store()
+        .get_plan_revision(&branch, 2)
+        .unwrap()
+        .is_none());
+    assert_eq!(planning.store().get_plan_lineage(&branch).unwrap().len(), 1);
+
+    // 10. Canonical Task readiness stays authoritative after the plan gate.
+    let again = orchestration
+        .schedule_from_current_plan(
+            &planning,
+            &branch,
+            &step_b,
+            ids("E2E-B-AGAIN"),
+            &executor,
+            &evaluator,
+        )
+        .expect("scheduler outcome");
+    assert!(matches!(
+        again,
+        PlannedOrchestrationOutcome::Executed {
+            execution: OrchestrationOutcome::NotRunnable {
+                state: TaskState::Completed,
+                ..
+            },
+            ..
+        }
+    ));
+    assert_eq!(executor.calls(), 2);
+    assert_eq!(planner.call_count(), 1);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn production_claude_planner_composition_crosses_g6_runner_before_provider_call() {
     let db = TestDb::new();
-    let workspace = db.dir.join("planner-workspace");
-    std::fs::create_dir_all(&workspace).expect("planner workspace");
     let provider = fixture(
         &db.dir,
         "planner-provider.sh",
@@ -374,40 +480,29 @@ fn production_claude_planner_composition_crosses_g6_runner_before_provider_call(
         ),
     );
     let composition = ExecutionComposition::new(db.path.clone(), Some(provider));
+    {
+        // Canonical Task the secured proposal decomposes into (L4).
+        let mut orchestration =
+            OrchestrationService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("orchestration");
+        seed_ready_tasks(
+            &mut orchestration,
+            "P-SECURED",
+            &["TASK-0078", "secured-child"],
+        );
+    }
     let mut planning = composition.planning_service().expect("planning service");
     let planner = composition
-        .secured_claude_planner("TASK-0078", &workspace)
+        .secured_claude_planner("TASK-0078")
         .expect("secured planner composition");
     let branch = PlanBranchId::new("task-0078-secured-claude").expect("branch");
-    let scope = ScopeBound::new(vec!["repo:src".to_owned()]).expect("scope");
-    let policy = PlanningPolicyContext {
-        scope_bound: scope.clone(),
-        baseline_risk: RiskClass::Low,
-        affected_parent_criteria: vec![AffectedParentCriterion {
-            id: CriterionId::new("criterion-root").expect("criterion"),
-            method: VerificationMethod::AutomatedTest,
-        }],
-        parent_task_ref: "TASK-0078".to_owned(),
-        lineage_fingerprints: vec![],
-        risk_grant: None,
-        policy_fingerprint: "policy:secured-claude-planner".to_owned(),
-    };
-    let request = DecompositionRequest {
-        parent_task_ref: "caller-value-is-overwritten".to_owned(),
-        base_plan_revision: u64::MAX,
-        acceptance_criteria_refs: vec![],
-        scope_bound: scope,
-        evidence_refs: vec![EvidenceRef::new("fixture:secured").expect("evidence")],
-        depth_remaining: 4,
-        budget_remaining: PlanningBudget {
-            calls_remaining: MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
-            input_tokens_remaining: MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
-        },
-    };
-    let mut cycle = PlanningCycle::new();
 
     let outcome = planning
-        .propose_decomposition(&planner, &mut cycle, &branch, request, &policy)
+        .propose_decomposition(
+            &planner,
+            &branch,
+            request("fixture:secured"),
+            &policy("TASK-0078", "policy:secured-claude-planner"),
+        )
         .expect("secured planner proposal");
     let accepted = match outcome {
         app_services::PlanningProposalOutcome::Accepted(accepted) => accepted,
@@ -415,6 +510,20 @@ fn production_claude_planner_composition_crosses_g6_runner_before_provider_call(
     };
     assert_eq!(accepted.revision().revision_seq, 1);
     assert_eq!(planning.store().get_plan_head(&branch).unwrap(), Some(1));
+    let trigger = [EvidenceRef::new("fixture:secured").unwrap()];
+    let guardrails = planning.guardrail_state(&branch, &trigger).unwrap();
+    assert_eq!(
+        (guardrails.planner_calls, guardrails.charged_input_tokens),
+        (1, 100)
+    );
+    assert_eq!(
+        planning
+            .planner_call_receipt(&branch, &trigger, 1)
+            .unwrap()
+            .as_ref(),
+        Some(accepted.planning_cost_receipt()),
+        "the production planner call leaves durable measured cost evidence"
+    );
 
     let audit = planning
         .store()
@@ -433,7 +542,7 @@ fn production_claude_planner_composition_crosses_g6_runner_before_provider_call(
             .capabilities
             .iter()
             .all(|capability| capability.kind != CapabilityKind::FilesystemWrite),
-        "proposal-only planner must not receive workspace write authority"
+        "proposal-only planner must not receive filesystem write authority"
     );
     for event in [
         storage_sqlite::SecurityAuditEvent::PolicyDecision,
@@ -450,4 +559,21 @@ fn production_claude_planner_composition_crosses_g6_runner_before_provider_call(
             "secured planner call must emit {event:?} through the production G6 boundary"
         );
     }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn production_claude_planner_refuses_unknown_authority_task_before_provider_setup() {
+    let db = TestDb::new();
+    let provider = fixture(&db.dir, "unused-planner-provider.sh", "exit 99\n");
+    let composition = ExecutionComposition::new(db.path.clone(), Some(provider));
+
+    let error = composition
+        .secured_claude_planner("missing-task")
+        .err()
+        .expect("unknown task must be refused");
+    assert!(
+        error.contains("does not exist"),
+        "unexpected authority refusal: {error}"
+    );
 }

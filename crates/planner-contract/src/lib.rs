@@ -6,8 +6,9 @@
 
 use plan_domain::{
     call_within_envelope, verify_proposal_hash, AtomicityRequest, AtomicityVerdict, CriterionId,
-    DecompositionRequest, EvidenceRef, PlannerFault, PlannerPort, PlanningBudget, ReplanRequest,
-    ScopeBound, MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH, MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
+    DecompositionRequest, EvidenceRef, PlannerCallSpend, PlannerFault, PlannerPort, PlanningBudget,
+    ReplanRequest, ScopeBound, MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
+    MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
 };
 
 /// Concrete planner behaviors supplied by one adapter's test target.
@@ -97,6 +98,10 @@ fn atomicity_is_proposal_only_data(planner: &dyn PlannerPort) {
         .expect("assessment must remain callable without mutation authority");
     assert!(!first.rationale.trim().is_empty());
     assert!(!second.rationale.trim().is_empty());
+    assert!(
+        call_within_envelope(&first.planning_cost_receipt),
+        "assessment cost evidence must be inside the accepted call envelope"
+    );
     assert!(matches!(
         first.verdict,
         AtomicityVerdict::Atomic
@@ -147,9 +152,15 @@ fn provider_failure_is_typed(planner: &dyn PlannerPort) {
         matches!(error, PlannerFault::ProviderFailure { .. }),
         "provider/planner failure must stay typed, got {error:?}"
     );
+    assert_ne!(
+        error.spend(),
+        PlannerCallSpend::NotStarted,
+        "a failure observed after invoking the provider must never claim zero spend"
+    );
 }
 
 fn guardrail_faults_are_typed_before_proposal(planner: &dyn PlannerPort) {
+    // Pre-call refusals happen before any provider spend and must say so.
     let mut depth = contract_decomposition_request();
     depth.depth_remaining = 0;
     assert!(matches!(
@@ -161,14 +172,18 @@ fn guardrail_faults_are_typed_before_proposal(planner: &dyn PlannerPort) {
     call_budget.budget_remaining.calls_remaining = 0;
     assert!(matches!(
         planner.propose_decomposition(call_budget),
-        Err(PlannerFault::BudgetExhausted)
+        Err(PlannerFault::BudgetExhausted {
+            spend: PlannerCallSpend::NotStarted
+        })
     ));
 
     let mut token_budget = contract_replan_request();
     token_budget.budget_remaining.input_tokens_remaining = 0;
     assert!(matches!(
         planner.propose_replan(token_budget),
-        Err(PlannerFault::BudgetExhausted)
+        Err(PlannerFault::BudgetExhausted {
+            spend: PlannerCallSpend::NotStarted
+        })
     ));
 }
 

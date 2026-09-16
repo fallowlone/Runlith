@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex};
 use plan_domain::{
     compute_proposal_hash, AtomicityAssessment, AtomicityRequest, AtomicityVerdict, BudgetDelta,
     CriterionDecl, CriterionId, DecompositionRequest, EdgeAddition, EvidenceRef, NodeAddition,
-    PlanChangeSet, PlanNodeId, PlanScope, PlannerAdapterId, PlannerFault, PlannerIdentity,
-    PlannerPort, PlanningCostReceipt, ReplanRequest, RiskClass, VerificationMethod,
-    MAX_CHILDREN_PER_DECOMPOSITION,
+    PlanChangeSet, PlanNodeId, PlanScope, PlannerAdapterId, PlannerCallSpend, PlannerFault,
+    PlannerIdentity, PlannerPort, PlanningCostReceipt, ReplanRequest, RiskClass,
+    VerificationMethod, MAX_CHILDREN_PER_DECOMPOSITION,
 };
 
 /// Deterministic behavior selected by tests.
@@ -30,6 +30,7 @@ pub enum FakePlannerScenario {
 #[derive(Clone, Debug)]
 pub struct FakePlanner {
     scenario: FakePlannerScenario,
+    fixed_leaf: Option<PlanNodeId>,
     calls: Arc<Mutex<Vec<&'static str>>>,
 }
 
@@ -38,6 +39,19 @@ impl FakePlanner {
     pub fn for_scenario(scenario: FakePlannerScenario) -> Self {
         Self {
             scenario,
+            fixed_leaf: None,
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Builds the smallest accepted-plan fixture for one canonical Task.
+    /// Useful for execution-boundary tests whose subject is G5 behavior but
+    /// which must now satisfy the G7 accepted-plan precondition first.
+    #[must_use]
+    pub fn for_single_leaf(node_id: PlanNodeId) -> Self {
+        Self {
+            scenario: FakePlannerScenario::Valid,
+            fixed_leaf: Some(node_id),
             calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -71,9 +85,12 @@ impl FakePlanner {
         PlanningCostReceipt::new(100, 50, 5, "test".to_owned()).expect("static receipt")
     }
 
+    /// Simulates a provider that was invoked but failed without reporting
+    /// usage: spend is unmeasured, never zero and never fabricated.
     fn failure<T>(&self) -> Result<T, PlannerFault> {
         Err(PlannerFault::ProviderFailure {
             typed_cause: "FAKE_PROVIDER_FAILURE".to_owned(),
+            spend: PlannerCallSpend::Unmeasured,
         })
     }
 
@@ -102,7 +119,9 @@ impl FakePlanner {
             let child_criterion =
                 CriterionId::new(format!("{}-child-{index}", parent_criterion.as_str()))
                     .expect("derived criterion");
-            let node_id = if self.scenario == FakePlannerScenario::DependencyChain {
+            let node_id = if let Some(fixed) = &self.fixed_leaf {
+                fixed.as_str().to_owned()
+            } else if self.scenario == FakePlannerScenario::DependencyChain {
                 if index == 0 { "step-a" } else { "step-b" }.to_owned()
             } else {
                 format!("planned-child-{index}")
@@ -196,6 +215,12 @@ impl FakePlanner {
     }
 }
 
+fn budget_exhausted<T>() -> Result<T, PlannerFault> {
+    Err(PlannerFault::BudgetExhausted {
+        spend: PlannerCallSpend::NotStarted,
+    })
+}
+
 impl PlannerPort for FakePlanner {
     fn assess_atomicity(
         &self,
@@ -209,9 +234,11 @@ impl PlannerPort for FakePlanner {
             AtomicityVerdict::Decomposable,
             "deterministic fixture requires decomposition".to_owned(),
             input.evidence_refs,
+            Self::receipt(),
         )
         .map_err(|error| PlannerFault::ProviderFailure {
             typed_cause: error.to_string(),
+            spend: PlannerCallSpend::Measured(Self::receipt()),
         })
     }
 
@@ -229,7 +256,7 @@ impl PlannerPort for FakePlanner {
         if input.budget_remaining.calls_remaining == 0
             || input.budget_remaining.input_tokens_remaining == 0
         {
-            return Err(PlannerFault::BudgetExhausted);
+            return budget_exhausted();
         }
         Ok(self.proposal_for_decomposition(&input))
     }
@@ -245,7 +272,7 @@ impl PlannerPort for FakePlanner {
         if input.budget_remaining.calls_remaining == 0
             || input.budget_remaining.input_tokens_remaining == 0
         {
-            return Err(PlannerFault::BudgetExhausted);
+            return budget_exhausted();
         }
         Ok(self.proposal_for_replan(&input))
     }

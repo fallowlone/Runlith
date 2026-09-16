@@ -198,7 +198,13 @@ fn lifecycle(task: &str, op: TaskLifecycleOp) -> TaskCoreRequest {
     }
 }
 
-async fn seed_ready(endpoint: &UnixEndpoint, project: &str, task: &str, objective: &str) {
+async fn seed_ready(
+    endpoint: &UnixEndpoint,
+    db: &Path,
+    project: &str,
+    task: &str,
+    objective: &str,
+) {
     let created = business(endpoint, create_project(project)).await;
     match &created.payload {
         Some(task_core_response::Payload::CreateProject(_)) => {}
@@ -223,6 +229,44 @@ async fn seed_ready(endpoint: &UnixEndpoint, project: &str, task: &str, objectiv
         ),
         "seed ready, got {ready:?}"
     );
+    seed_accepted_plan(db, task);
+}
+
+fn seed_accepted_plan(db: &Path, task: &str) {
+    let mut planning = app_services::PlanningService::open(db, app_services::SystemClock)
+        .expect("open planning service");
+    let scope = plan_domain::ScopeBound::new(vec!["repo:src".to_owned()]).unwrap();
+    let branch = plan_domain::PlanBranchId::new(format!("fixture-plan-{task}")).unwrap();
+    let planner =
+        fake_planner::FakePlanner::for_single_leaf(plan_domain::PlanNodeId::new(task).unwrap());
+    let request = plan_domain::DecompositionRequest {
+        parent_task_ref: task.to_owned(),
+        base_plan_revision: 0,
+        acceptance_criteria_refs: vec![],
+        scope_bound: scope.clone(),
+        evidence_refs: vec![plan_domain::EvidenceRef::new(format!("fixture-plan:{task}")).unwrap()],
+        depth_remaining: plan_domain::MAX_DECOMPOSITION_DEPTH,
+        budget_remaining: plan_domain::PlanningBudget {
+            calls_remaining: plan_domain::MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
+            input_tokens_remaining: plan_domain::MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
+        },
+    };
+    let policy = app_services::PlanningPolicyContext {
+        scope_bound: scope,
+        baseline_risk: plan_domain::RiskClass::Low,
+        affected_parent_criteria: vec![],
+        parent_task_ref: task.to_owned(),
+        lineage_fingerprints: vec![],
+        risk_grant: None,
+        policy_fingerprint: format!("policy:fixture:{task}"),
+    };
+    let outcome = planning
+        .propose_decomposition(&planner, &branch, request, &policy)
+        .expect("seed accepted plan");
+    assert!(matches!(
+        outcome,
+        app_services::PlanningProposalOutcome::Accepted(_)
+    ));
 }
 
 async fn task_state(endpoint: &UnixEndpoint, task: &str) -> String {
@@ -314,7 +358,7 @@ async fn success_leaves_task_verifying_never_completed() {
     wait_ready(&sandbox.endpoint).await;
     // The fixture's result text claims completion ("fixture completed
     // the work"): the claim alone must never complete the Task.
-    seed_ready(&sandbox.endpoint, "P-1", "T-1", "do the thing").await;
+    seed_ready(&sandbox.endpoint, &sandbox.db, "P-1", "T-1", "do the thing").await;
 
     let started = execution(&sandbox.endpoint, run_req(&sandbox, "T-1", "E-1", "A-1")).await;
     match &started.payload {
@@ -379,7 +423,14 @@ async fn malformed_output_is_attempt_failure_never_task_failure() {
     let sandbox = Sandbox::new("malformed");
     let daemon = sandbox.spawn_daemon(Some(sandbox.provider_fixture()));
     wait_ready(&sandbox.endpoint).await;
-    seed_ready(&sandbox.endpoint, "P-1", "T-1", "work BADJSON work").await;
+    seed_ready(
+        &sandbox.endpoint,
+        &sandbox.db,
+        "P-1",
+        "T-1",
+        "work BADJSON work",
+    )
+    .await;
 
     execution(&sandbox.endpoint, run_req(&sandbox, "T-1", "E-1", "A-1")).await;
     let status = poll_status(
@@ -414,7 +465,14 @@ async fn nonzero_exit_is_attempt_failure() {
     let sandbox = Sandbox::new("exit3");
     let daemon = sandbox.spawn_daemon(Some(sandbox.provider_fixture()));
     wait_ready(&sandbox.endpoint).await;
-    seed_ready(&sandbox.endpoint, "P-1", "T-1", "work EXIT3 work").await;
+    seed_ready(
+        &sandbox.endpoint,
+        &sandbox.db,
+        "P-1",
+        "T-1",
+        "work EXIT3 work",
+    )
+    .await;
 
     execution(&sandbox.endpoint, run_req(&sandbox, "T-1", "E-1", "A-1")).await;
     let status = poll_status(
@@ -444,8 +502,15 @@ async fn cancel_reaches_only_the_target_execution() {
     let sandbox = Sandbox::new("cancel");
     let daemon = sandbox.spawn_daemon(Some(sandbox.provider_fixture()));
     wait_ready(&sandbox.endpoint).await;
-    seed_ready(&sandbox.endpoint, "P-1", "T-slow", "slow work SLOW please").await;
-    seed_ready(&sandbox.endpoint, "P-1", "T-fast", "fast work").await;
+    seed_ready(
+        &sandbox.endpoint,
+        &sandbox.db,
+        "P-1",
+        "T-slow",
+        "slow work SLOW please",
+    )
+    .await;
+    seed_ready(&sandbox.endpoint, &sandbox.db, "P-1", "T-fast", "fast work").await;
 
     execution(
         &sandbox.endpoint,
@@ -529,7 +594,7 @@ async fn missing_workspace_fails_closed_without_fallback() {
     let sandbox = Sandbox::new("noworkspace");
     let daemon = sandbox.spawn_daemon(Some(sandbox.provider_fixture()));
     wait_ready(&sandbox.endpoint).await;
-    seed_ready(&sandbox.endpoint, "P-1", "T-1", "do the thing").await;
+    seed_ready(&sandbox.endpoint, &sandbox.db, "P-1", "T-1", "do the thing").await;
 
     // A repository path that is not a Git repository: TASK-0054 refuses
     // deterministically before admission (read-only Git preflight, typed
@@ -568,18 +633,20 @@ async fn missing_workspace_fails_closed_without_fallback() {
 }
 
 #[tokio::test]
-async fn run_rejects_a_task_that_is_not_ready() {
+async fn run_rejects_a_task_without_an_accepted_plan_before_mutation() {
     let sandbox = Sandbox::new("notready");
     let daemon = sandbox.spawn_daemon(Some(sandbox.provider_fixture()));
     wait_ready(&sandbox.endpoint).await;
-    // Seed without mark_ready: the task stays DRAFT.
+    // A DRAFT Task cannot produce an applicable accepted Plan (L4), so the
+    // production G7 execution boundary refuses it before the lower-level G5
+    // lifecycle admission path is even eligible to run.
     business(&sandbox.endpoint, create_project("P-1")).await;
     business(&sandbox.endpoint, create_task("T-1", "P-1", "do the thing")).await;
 
     let response = execution(&sandbox.endpoint, run_req(&sandbox, "T-1", "E-1", "A-1")).await;
     assert_eq!(
         error_code(&response),
-        ipc_contracts::proto::BusinessErrorCode::InvalidTransition as i32
+        ipc_contracts::proto::BusinessErrorCode::StaleState as i32
     );
     // Rejected entry commits nothing: status finds no execution.
     let status = execution(&sandbox.endpoint, get_req("E-1")).await;
@@ -595,7 +662,7 @@ async fn missing_provider_fails_fast_without_mutation() {
     let sandbox = Sandbox::new("noprov");
     let daemon = sandbox.spawn_daemon(Some(sandbox.root.join("no-such-binary")));
     wait_ready(&sandbox.endpoint).await;
-    seed_ready(&sandbox.endpoint, "P-1", "T-1", "do the thing").await;
+    seed_ready(&sandbox.endpoint, &sandbox.db, "P-1", "T-1", "do the thing").await;
 
     let response = execution(&sandbox.endpoint, run_req(&sandbox, "T-1", "E-1", "A-1")).await;
     assert_eq!(

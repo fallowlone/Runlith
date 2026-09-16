@@ -9,6 +9,7 @@
 //! policy-engine, or provider types, so no value produced here can carry
 //! mutation authority over durable state.
 
+pub mod control;
 pub mod error;
 pub mod guardrails;
 pub mod hash;
@@ -18,6 +19,7 @@ pub mod risk;
 pub mod scope;
 pub mod validation;
 
+pub use control::PlanningInputSnapshot;
 pub use error::PlanDomainError;
 pub use guardrails::{
     call_within_envelope, cumulative_spend_within_envelope, l3_no_progress_tripped,
@@ -26,15 +28,19 @@ pub use guardrails::{
     MAX_PLANNER_CUMULATIVE_INPUT_TOKENS, MAX_PLANNER_INPUT_TOKENS, MAX_PLANNER_OUTPUT_TOKENS,
     MAX_PLANNER_WALL_CLOCK_SECS, MAX_REVISIONS_PER_CYCLE_PER_BRANCH, NO_PROGRESS_REJECTIONS_TRIP,
 };
-pub use hash::{compute_proposal_hash, decomposition_fingerprint, verify_proposal_hash};
+pub use hash::{
+    compute_proposal_hash, decomposition_fingerprint, planning_evidence_key, verify_proposal_hash,
+};
 pub use ids::{
     CriterionId, EvidenceRef, PlanBranchId, PlanNodeId, PlannerAdapterId, PlanningCostReceiptRef,
+    PlanningInputSnapshotId, PlanningRunId,
 };
 pub use model::{
     AtomicityAssessment, AtomicityBlocker, AtomicityRequest, AtomicityVerdict, BudgetDelta,
     DecompositionRequest, EdgeAddition, EdgeRemoval, GateUpdate, NodeAddition, NodeUpdate,
-    PlanChangeSet, PlanGraph, PlanNode, PlanRevision, PlannerFault, PlannerIdentity, PlannerPort,
-    PlanningBudget, PlanningCostReceipt, ReplanRequest, RevisionProposedBy, ValidatedBy,
+    PlanChangeSet, PlanGraph, PlanNode, PlanRevision, PlannerCallSpend, PlannerFault,
+    PlannerIdentity, PlannerPort, PlanningBudget, PlanningCostReceipt, ReplanRequest,
+    RevisionProposedBy, ValidatedBy,
 };
 pub use risk::{CriterionDecl, GateRef, RiskClass, RiskDelta, VerificationMethod};
 pub use scope::{PlanScope, ScopeBound};

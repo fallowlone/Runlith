@@ -9,10 +9,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use plan_domain::{DecompositionRequest, PlannerFault, PlannerPort, PlanningBudget, ReplanRequest};
+use plan_domain::{
+    DecompositionRequest, PlannerCallSpend, PlannerFault, PlannerPort, PlanningBudget,
+    ReplanRequest,
+};
 use planner_contract::{
-    contract_decomposition_request, contract_replan_request, run_planner_port_contract,
-    ContractPlanners,
+    contract_atomicity_request, contract_decomposition_request, contract_replan_request,
+    run_planner_port_contract, ContractPlanners,
 };
 use provider_claude::{ClaudeConfig, ClaudePlanner};
 
@@ -130,7 +133,18 @@ fn depth_and_budget_refusal_happen_before_provider_invocation() {
     };
     assert!(matches!(
         planner.propose_replan(budget),
-        Err(PlannerFault::BudgetExhausted)
+        Err(PlannerFault::BudgetExhausted {
+            spend: PlannerCallSpend::NotStarted
+        })
+    ));
+
+    let mut tokens: DecompositionRequest = contract_decomposition_request();
+    tokens.budget_remaining.input_tokens_remaining = 10;
+    assert!(matches!(
+        planner.propose_decomposition(tokens),
+        Err(PlannerFault::BudgetExhausted {
+            spend: PlannerCallSpend::NotStarted
+        })
     ));
     assert!(!marker.exists(), "pre-call refusal must not spawn provider");
 }
@@ -150,7 +164,13 @@ fn unattached_planner_cannot_fall_back_to_direct_host_spawn() {
     let error = planner
         .propose_decomposition(contract_decomposition_request())
         .expect_err("unattached production planner must refuse");
-    assert!(matches!(error, PlannerFault::ProviderFailure { .. }));
+    assert!(matches!(
+        error,
+        PlannerFault::ProviderFailure {
+            spend: PlannerCallSpend::NotStarted,
+            ..
+        }
+    ));
     assert!(
         !marker.exists(),
         "unattached planner must not spawn directly"
@@ -174,29 +194,143 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"%s","ses
         .propose_decomposition(contract_decomposition_request())
         .expect_err("planner usage is mandatory");
     match error {
-        PlannerFault::ProviderFailure { typed_cause } => {
+        PlannerFault::ProviderFailure { typed_cause, spend } => {
             assert!(
                 typed_cause.contains("token usage") || typed_cause.contains("usage"),
                 "missing usage must remain an explicit provider failure: {typed_cause}"
+            );
+            assert_eq!(
+                spend,
+                PlannerCallSpend::Unmeasured,
+                "a started call without usage must be unmeasured, never zero or fabricated"
             );
         }
         other => panic!("expected provider failure, got {other:?}"),
     }
 }
 
+fn fixture_with_usage(usage: &str) -> String {
+    let script = valid_fixture_body().replace(
+        r#""usage":{"input_tokens":100,"output_tokens":100}"#,
+        &format!(r#""usage":{usage}"#),
+    );
+    assert_ne!(script, valid_fixture_body(), "fixture usage replacement");
+    script
+}
+
+fn measured(spend: &PlannerCallSpend) -> (u32, u32) {
+    match spend {
+        PlannerCallSpend::Measured(receipt) => (receipt.input_tokens, receipt.output_tokens),
+        other => panic!("expected measured spend, got {other:?}"),
+    }
+}
+
 #[test]
 fn cached_input_tokens_count_toward_the_planner_budget() {
     let case = Case::named("cached-usage");
-    let script = valid_fixture_body().replace(
-        r#""usage":{"input_tokens":100,"output_tokens":100}"#,
-        r#""usage":{"input_tokens":5,"cache_creation_input_tokens":40000,"cache_read_input_tokens":600000,"output_tokens":100}"#,
+    let script = fixture_with_usage(
+        r#"{"input_tokens":5,"cache_creation_input_tokens":40000,"cache_read_input_tokens":600000,"output_tokens":100}"#,
     );
-    assert_ne!(script, valid_fixture_body(), "fixture usage replacement");
     let fixture = case.fixture("cached-usage.sh", &script);
     let planner = planner_for(&fixture, &case);
 
     let error = planner
         .propose_decomposition(contract_decomposition_request())
         .expect_err("cached input must participate in the 32k per-call envelope");
-    assert!(matches!(error, PlannerFault::BudgetExhausted));
+    match error {
+        PlannerFault::BudgetExhausted { spend } => assert_eq!(measured(&spend), (640_005, 100)),
+        other => panic!("expected measured budget exhaustion, got {other:?}"),
+    }
+}
+
+#[test]
+fn over_envelope_provider_usage_is_preserved_as_measured_spend() {
+    let case = Case::named("over-envelope");
+    let script = fixture_with_usage(
+        r#"{"input_tokens":5,"cache_creation_input_tokens":40000,"cache_read_input_tokens":0,"output_tokens":10}"#,
+    );
+    let fixture = case.fixture("over-envelope.sh", &script);
+    let planner = planner_for(&fixture, &case);
+
+    for fault in [
+        planner
+            .propose_decomposition(contract_decomposition_request())
+            .expect_err("over-envelope decomposition"),
+        planner
+            .assess_atomicity(contract_atomicity_request())
+            .expect_err("over-envelope assessment"),
+    ] {
+        match fault {
+            PlannerFault::BudgetExhausted { spend } => assert_eq!(measured(&spend), (40_005, 10)),
+            other => panic!("post-call budget excess must keep its receipt, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn over_remaining_budget_usage_is_preserved_as_measured_spend() {
+    let case = Case::named("over-remaining");
+    let script = fixture_with_usage(r#"{"input_tokens":30000,"output_tokens":10}"#);
+    let fixture = case.fixture("over-remaining.sh", &script);
+    let planner = planner_for(&fixture, &case);
+    let mut request = contract_decomposition_request();
+    request.budget_remaining.input_tokens_remaining = 20_000;
+
+    match planner.propose_decomposition(request) {
+        Err(PlannerFault::BudgetExhausted { spend }) => {
+            assert_eq!(measured(&spend), (30_000, 10))
+        }
+        other => panic!("expected measured cumulative budget excess, got {other:?}"),
+    }
+}
+
+#[test]
+fn malformed_planner_output_after_reported_usage_keeps_measured_receipt() {
+    let case = Case::named("malformed-spend");
+    let fixture = case.fixture(
+        "malformed-spend.sh",
+        r#"printf '{"type":"result","subtype":"success","is_error":false,"result":"not planner json","session_id":"planner-malformed","usage":{"input_tokens":20000,"output_tokens":7000}}'"#,
+    );
+    let planner = planner_for(&fixture, &case);
+
+    match planner.propose_decomposition(contract_decomposition_request()) {
+        Err(PlannerFault::ProviderFailure { typed_cause, spend }) => {
+            assert!(typed_cause.contains("malformed planner output"));
+            assert_eq!(measured(&spend), (20_000, 7_000));
+        }
+        other => panic!("malformed output must stay typed with its spend, got {other:?}"),
+    }
+}
+
+#[test]
+fn provider_reported_error_with_usage_keeps_measured_receipt() {
+    let case = Case::named("provider-error-spend");
+    let fixture = case.fixture(
+        "provider-error.sh",
+        r#"printf '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom","session_id":"planner-error","usage":{"input_tokens":300,"output_tokens":20}}'
+exit 1
+"#,
+    );
+    let planner = planner_for(&fixture, &case);
+
+    match planner.propose_decomposition(contract_decomposition_request()) {
+        Err(PlannerFault::ProviderFailure { spend, .. }) => {
+            assert_eq!(measured(&spend), (300, 20))
+        }
+        other => panic!("provider error with usage must keep its spend, got {other:?}"),
+    }
+}
+
+#[test]
+fn provider_failure_without_usage_is_unmeasured_never_fabricated() {
+    let case = Case::named("failure-unmeasured");
+    let fixture = case.fixture("failure.sh", "echo 'planner failed' >&2\nexit 3\n");
+    let planner = planner_for(&fixture, &case);
+
+    match planner.propose_decomposition(contract_decomposition_request()) {
+        Err(PlannerFault::ProviderFailure { spend, .. }) => {
+            assert_eq!(spend, PlannerCallSpend::Unmeasured)
+        }
+        other => panic!("expected unmeasured provider failure, got {other:?}"),
+    }
 }

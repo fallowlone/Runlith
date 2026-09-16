@@ -348,6 +348,26 @@ pub(crate) fn map_error(error: &ServiceError) -> (BusinessErrorCode, String) {
                     found
                 ),
             ),
+            StorageError::PlanningRunStale {
+                branch,
+                expected_generation,
+                found_generation,
+            } => (
+                BusinessErrorCode::StaleState,
+                format!(
+                    "planning run for branch {} changed concurrently: expected generation {}, found {}",
+                    truncate_id(branch),
+                    expected_generation,
+                    found_generation
+                ),
+            ),
+            StorageError::PlanningInputStale { branch, .. } => (
+                BusinessErrorCode::StaleState,
+                format!(
+                    "planning input for branch {} changed concurrently",
+                    truncate_id(branch)
+                ),
+            ),
             StorageError::Corrupt(_)
             | StorageError::DomainReconstruction(_)
             | StorageError::UnsupportedSchemaVersion { .. } => (
@@ -594,6 +614,22 @@ mod tests {
             }
             other => panic!("expected INTERNAL, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn planning_fences_map_to_stale_state() {
+        let (run_code, _) = map_error(&ServiceError::Storage(StorageError::PlanningRunStale {
+            branch: "branch-a".to_owned(),
+            expected_generation: 1,
+            found_generation: 2,
+        }));
+        assert_eq!(run_code, BusinessErrorCode::StaleState);
+
+        let (input_code, _) = map_error(&ServiceError::Storage(StorageError::PlanningInputStale {
+            branch: "branch-a".to_owned(),
+            expected_fingerprint: format!("sha256:{}", "0".repeat(64)),
+        }));
+        assert_eq!(input_code, BusinessErrorCode::StaleState);
     }
 
     #[test]

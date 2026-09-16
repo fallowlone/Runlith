@@ -59,6 +59,20 @@ pub struct ClaudeOutcome {
     pub(crate) provider_result: String,
 }
 
+/// Adapter-internal observation of one prompt run (see
+/// [`ClaudeExecutor::run_prompt_observed`]).
+pub(crate) enum ObservedPromptRun {
+    /// Refused strictly before any provider child existed: zero spend.
+    NotStarted(ClaudeFailure),
+    /// A provider child may have run. `usage` is whatever the provider
+    /// reported in its final output (possibly unknown), even on failure.
+    /// The success payload is boxed to keep the enum small.
+    Started {
+        result: Result<Box<ClaudeOutcome>, ClaudeFailure>,
+        usage: UsageSample,
+    },
+}
+
 /// One bound Claude execution: config plus the attempt's prompt and
 /// workspace directory. Constructed per attempt by the composition layer
 /// (or tests); single-flight (one in-flight `execute` at a time).
@@ -249,14 +263,27 @@ impl ClaudeExecutor {
     /// This is crate-visible so the Claude Planner adapter can reuse the G5/G6
     /// process seam without inventing a synthetic Task/Execution/Attempt.
     pub(crate) fn run_prompt(&self, prompt: &str) -> Result<ClaudeOutcome, ClaudeFailure> {
-        let environment =
-            self.environment
-                .as_ref()
-                .map_err(|detail| ClaudeFailure::EnvironmentIsolation {
+        match self.run_prompt_observed(prompt) {
+            ObservedPromptRun::NotStarted(failure) => Err(failure),
+            ObservedPromptRun::Started { result, .. } => result.map(|outcome| *outcome),
+        }
+    }
+
+    /// Runs one prompt and additionally reports whether a provider child may
+    /// have started plus any provider-reported usage recoverable from its
+    /// final output, including failed runs. Used by the proposal-only planner
+    /// so post-spawn outcomes never become invisible spend (ADR-0027 §6).
+    pub(crate) fn run_prompt_observed(&self, prompt: &str) -> ObservedPromptRun {
+        let environment = match self.environment.as_ref() {
+            Ok(environment) => environment,
+            Err(detail) => {
+                return ObservedPromptRun::NotStarted(ClaudeFailure::EnvironmentIsolation {
                     detail: bounded_detail(detail.clone()),
-                })?;
+                })
+            }
+        };
         let argv = build_argv(&self.config, prompt);
-        let outcome = spawn_and_supervise(
+        let outcome = match spawn_and_supervise(
             ProcessInvocation {
                 executable: self.config.executable(),
                 argv: &argv,
@@ -268,20 +295,49 @@ impl ClaudeExecutor {
             self.config.timeout(),
             self.config.max_output_bytes(),
             self.config.capture_grace(),
-        )?;
+        ) {
+            Ok(outcome) => outcome,
+            // Only failures that are raised strictly before a child exists
+            // are zero-spend. `SpawnFailed` also covers post-spawn wait
+            // failures, so it stays conservatively "started".
+            Err(
+                failure @ (ClaudeFailure::WorkspaceBinding { .. }
+                | ClaudeFailure::LaunchUnmanaged { .. }
+                | ClaudeFailure::CliMissing { .. }),
+            ) => return ObservedPromptRun::NotStarted(failure),
+            Err(failure) => {
+                return ObservedPromptRun::Started {
+                    result: Err(failure),
+                    usage: UsageSample::unknown(),
+                }
+            }
+        };
         match outcome {
-            ChildOutcome::Cancelled => Err(ClaudeFailure::Cancelled),
-            ChildOutcome::TimedOut => Err(ClaudeFailure::TimedOut {
-                detail: bounded_detail(format!(
-                    "claude execution exceeded {:?}; child killed",
-                    self.config.timeout()
-                )),
-            }),
+            ChildOutcome::Cancelled => ObservedPromptRun::Started {
+                result: Err(ClaudeFailure::Cancelled),
+                usage: UsageSample::unknown(),
+            },
+            ChildOutcome::TimedOut => ObservedPromptRun::Started {
+                result: Err(ClaudeFailure::TimedOut {
+                    detail: bounded_detail(format!(
+                        "claude execution exceeded {:?}; child killed",
+                        self.config.timeout()
+                    )),
+                }),
+                usage: UsageSample::unknown(),
+            },
             ChildOutcome::Exited {
                 code,
                 stdout,
                 stderr,
-            } => self.interpret_exit(code, &stdout, &stderr),
+            } => {
+                let result = self.interpret_exit(code, &stdout, &stderr).map(Box::new);
+                let usage = match &result {
+                    Ok(outcome) => outcome.usage.clone(),
+                    Err(_) => crate::output::reported_usage(&String::from_utf8_lossy(&stdout)),
+                };
+                ObservedPromptRun::Started { result, usage }
+            }
         }
     }
 

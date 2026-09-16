@@ -51,6 +51,18 @@ pub enum StorageError {
         /// Durable branch head observed inside the write transaction.
         found: u64,
     },
+    /// A planner worker no longer owns the branch generation it started with.
+    PlanningRunStale {
+        branch: String,
+        expected_generation: u64,
+        found_generation: u64,
+    },
+    /// A Plan revision references a planning-input snapshot that is no longer
+    /// the branch's current product-owned input.
+    PlanningInputStale {
+        branch: String,
+        expected_fingerprint: String,
+    },
 }
 
 impl fmt::Display for StorageError {
@@ -90,6 +102,21 @@ impl fmt::Display for StorageError {
             } => write!(
                 f,
                 "stale plan write for branch {branch}: validated against revision {expected}, durable head is {found}"
+            ),
+            Self::PlanningRunStale {
+                branch,
+                expected_generation,
+                found_generation,
+            } => write!(
+                f,
+                "stale planning run for branch {branch}: expected generation {expected_generation}, current generation is {found_generation}"
+            ),
+            Self::PlanningInputStale {
+                branch,
+                expected_fingerprint,
+            } => write!(
+                f,
+                "stale planning input for branch {branch}: snapshot fingerprint {expected_fingerprint} is no longer current"
             ),
         }
     }
