@@ -12,6 +12,7 @@
 mod approval_service;
 mod clock;
 mod error;
+mod human_decision_service;
 mod managed_identity;
 mod orchestration_service;
 mod plan_graph;
@@ -25,6 +26,7 @@ mod workspace_service;
 pub use approval_service::ApprovalService;
 pub use clock::{format_rfc3339, Clock, FixedClock, SystemClock};
 pub use error::{ServiceError, ServiceResult};
+pub use human_decision_service::{HumanDecisionCreate, HumanDecisionService};
 pub use managed_identity::{
     branch_for_execution, decode_readable_slug, is_ascii_casefold_stable, is_canonical_v2_slug,
     is_windows_reserved_basename, managed_slug, MANAGED_DIGEST_PREFIX, MANAGED_READABLE_PREFIX,

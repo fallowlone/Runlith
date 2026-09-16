@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use app_services::{ApprovalService, SystemClock, TaskService};
+use app_services::{ApprovalService, HumanDecisionService, SystemClock, TaskService};
 use bytes::BytesMut;
 #[cfg(unix)]
 use ipc_control::{ClientConfig, ClientSession};
@@ -38,6 +38,7 @@ pub mod approval;
 pub mod data_dir;
 pub mod dispatch;
 pub mod execution;
+pub mod human_decision;
 pub mod planning;
 
 pub use data_dir::{resolve_data_dir, resolve_database_path};
@@ -185,7 +186,7 @@ impl DaemonConfig {
     /// Production default from TASK-0047 on.
     pub fn with_execution(path: impl Into<PathBuf>) -> Self {
         Self {
-            server_config: ServerConfig::g6_default(),
+            server_config: ServerConfig::g7_default(),
             database_path: Some(path.into()),
             provider_executable: None,
         }
@@ -209,6 +210,14 @@ pub type BusinessHandle = Arc<tokio::sync::Mutex<TaskService>>;
 /// Shared trusted G6 approval service. It owns a separate short-lived SQLite
 /// connection over the same canonical database file as the other contexts.
 pub type ApprovalHandle = Arc<tokio::sync::Mutex<ApprovalService<SystemClock>>>;
+pub type HumanDecisionHandle = Arc<tokio::sync::Mutex<HumanDecisionService<SystemClock>>>;
+
+struct ConnectionServices {
+    business: Option<BusinessHandle>,
+    execution: Option<execution::ExecutionHandle>,
+    approval: Option<ApprovalHandle>,
+    human_decision: Option<HumanDecisionHandle>,
+}
 
 /// Terminal outcome of a daemon run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,6 +292,22 @@ fn open_approval_service(config: &DaemonConfig) -> Result<Option<ApprovalHandle>
     ))))
 }
 
+fn open_human_decision_service(
+    config: &DaemonConfig,
+) -> Result<Option<HumanDecisionHandle>, DaemonError> {
+    let Some(path) = config.database_path.as_ref() else {
+        return Ok(None);
+    };
+    Ok(Some(Arc::new(tokio::sync::Mutex::new(
+        HumanDecisionService::open(path).map_err(|error| match error {
+            app_services::ServiceError::Storage(storage) => DaemonError::Storage(storage),
+            other => {
+                DaemonError::DataDir(format!("human decision service startup failed: {other}"))
+            }
+        })?,
+    ))))
+}
+
 /// Local authentication policy (ADR-0020 §12, §13): the peer is allowed
 /// only when its OS identity is the same local principal as the daemon's.
 /// Shared by the Unix and Windows admission paths so exactly one policy
@@ -312,9 +337,7 @@ pub(crate) fn authorize_peer(
 async fn serve_connection<S>(
     stream: S,
     config: &ServerConfig,
-    business: Option<BusinessHandle>,
-    execution: Option<execution::ExecutionHandle>,
-    approval: Option<ApprovalHandle>,
+    services: ConnectionServices,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     prefetched: Option<BytesMut>,
 ) -> ConnectionOutcome
@@ -342,7 +365,7 @@ where
                 return ConnectionOutcome::ShutdownInitiated;
             }
             Ok(ReadyRequest::Business(request)) => {
-                let response = match &business {
+                let response = match &services.business {
                     Some(handle) => {
                         let mut service = handle.lock().await;
                         dispatch::dispatch(&mut service, request)
@@ -354,7 +377,7 @@ where
                 }
             }
             Ok(ReadyRequest::Execution(request)) => {
-                let (response, job) = match &execution {
+                let (response, job) = match &services.execution {
                     Some(composition) => execution::dispatch_execution(composition, request),
                     None => (execution::execution_unavailable(), None),
                 };
@@ -373,7 +396,7 @@ where
                             .spawn(move || execution::run_background(job))
                         {
                             Ok(_) => response,
-                            Err(_) => match &execution {
+                            Err(_) => match &services.execution {
                                 // A job exists only when composition is
                                 // present; the fallback keeps totality.
                                 Some(composition) => {
@@ -390,7 +413,7 @@ where
                 }
             }
             Ok(ReadyRequest::Policy(request)) => {
-                let response = match &approval {
+                let response = match &services.approval {
                     Some(handle) => {
                         let mut service = handle.lock().await;
                         approval::dispatch(&mut service, request)
@@ -398,6 +421,18 @@ where
                     None => approval::unavailable(),
                 };
                 if session.respond_policy(response).await.is_err() {
+                    return ConnectionOutcome::Ended;
+                }
+            }
+            Ok(ReadyRequest::HumanDecision(request)) => {
+                let response = match &services.human_decision {
+                    Some(handle) => {
+                        let mut service = handle.lock().await;
+                        human_decision::dispatch(&mut service, request)
+                    }
+                    None => human_decision::unavailable(),
+                };
+                if session.respond_human_decision(response).await.is_err() {
                     return ConnectionOutcome::Ended;
                 }
             }
@@ -424,6 +459,7 @@ async fn serve_streams<S>(
     business: Option<BusinessHandle>,
     execution: Option<execution::ExecutionHandle>,
     approval: Option<ApprovalHandle>,
+    human_decision: Option<HumanDecisionHandle>,
 ) -> RunOutcome
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -457,14 +493,18 @@ where
                 let business = business.clone();
                 let execution = execution.clone();
                 let approval = approval.clone();
+                let human_decision = human_decision.clone();
                 joins.spawn(async move {
                     let _permit = permit;
                     serve_connection(
                         stream,
                         &server_config,
-                        business,
-                        execution,
-                        approval,
+                        ConnectionServices {
+                            business,
+                            execution,
+                            approval,
+                            human_decision,
+                        },
                         sender,
                         prefetched,
                     )
@@ -656,12 +696,14 @@ mod unix_daemon {
             }
         });
         let approval = open_approval_service(&config)?;
+        let human_decision = open_human_decision_service(&config)?;
         let outcome = serve_streams(
             accepted_rx,
             &config,
             business,
             open_execution(&config),
             approval,
+            human_decision,
         )
         .await;
         if let Some(snapshot) = owned.as_ref() {
@@ -754,12 +796,14 @@ mod windows_daemon {
             }
         });
         let approval = super::open_approval_service(&config)?;
+        let human_decision = super::open_human_decision_service(&config)?;
         Ok(serve_streams(
             accepted_rx,
             &config,
             business,
             open_execution(&config),
             approval,
+            human_decision,
         )
         .await)
     }

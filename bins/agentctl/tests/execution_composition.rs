@@ -258,6 +258,7 @@ fn seed_accepted_plan(db: &Path, task: &str) {
         parent_task_ref: task.to_owned(),
         lineage_fingerprints: vec![],
         risk_grant: None,
+        risk_decision_id: None,
         policy_fingerprint: format!("policy:fixture:{task}"),
     };
     let outcome = planning

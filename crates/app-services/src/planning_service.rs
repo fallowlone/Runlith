@@ -26,18 +26,20 @@ use std::path::Path;
 use plan_domain::{
     call_within_envelope, l3_no_progress_tripped, planning_evidence_key, validate_proposal,
     AffectedParentCriterion, AtomicityAssessment, AtomicityBlocker, AtomicityRequest,
-    DecompositionRequest, EvidenceRef, GuardrailTrip, PlanBranchId, PlanChangeSet, PlanDomainError,
-    PlanGraph, PlanRevision, PlannerCallSpend, PlannerFault, PlannerPort, PlanningBudget,
-    PlanningCostReceipt, PlanningCostReceiptRef, PlanningInputSnapshot, PlanningInputSnapshotId,
-    ReplanRequest, RevisionProposedBy, RiskClass, RiskEscalationGrant, ScopeBound, ValidatedBy,
-    ValidationContext, ValidationOutcome, ValidationRefusal, MAX_DECOMPOSITION_DEPTH,
-    MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH, MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
-    MAX_PLANNER_INPUT_TOKENS, MAX_PLANNER_OUTPUT_TOKENS, MAX_PLANNER_WALL_CLOCK_SECS,
-    MAX_REVISIONS_PER_CYCLE_PER_BRANCH,
+    DecompositionRequest, EvidenceRef, GuardrailTrip, HumanContinuation, HumanDecisionReason,
+    HumanDecisionRequest, HumanDecisionRequestId, HumanDecisionStatus, PlanBranchId, PlanChangeSet,
+    PlanDomainError, PlanGraph, PlanRevision, PlannerCallSpend, PlannerFault, PlannerPort,
+    PlanningBudget, PlanningCostReceipt, PlanningCostReceiptRef, PlanningInputSnapshot,
+    PlanningInputSnapshotId, ReplanRequest, RevisionProposedBy, RiskClass, RiskEscalationGrant,
+    ScopeBound, ValidatedBy, ValidationContext, ValidationOutcome, ValidationRefusal,
+    MAX_DECOMPOSITION_DEPTH, MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
+    MAX_PLANNER_CUMULATIVE_INPUT_TOKENS, MAX_PLANNER_INPUT_TOKENS, MAX_PLANNER_OUTPUT_TOKENS,
+    MAX_PLANNER_WALL_CLOCK_SECS, MAX_REVISIONS_PER_CYCLE_PER_BRANCH,
 };
 use storage_sqlite::{
-    PlanCommitJournalEvidence, PlanRevisionLineage, PlanRevisionLineageRecord,
-    PlannerCallSettlement, PlanningRunRecord, PlanningRunState, SqliteStore, StorageError,
+    NewHumanDecisionRequest, PlanCommitJournalEvidence, PlanRevisionLineage,
+    PlanRevisionLineageRecord, PlannerCallSettlement, PlanningRunRecord, PlanningRunState,
+    SqliteStore, StorageError,
 };
 use task_domain::TaskId;
 
@@ -52,6 +54,7 @@ const PLAN_PROVENANCE: &str = "app-services/planning-service";
 /// Input tokens reserved durably before every planner call and charged when a
 /// started call reports no usage: one full ADR-0027 §6 per-call allowance.
 const CONSERVATIVE_CALL_CHARGE: u32 = MAX_PLANNER_INPUT_TOKENS;
+const HUMAN_DECISION_TTL_MS: u64 = 30 * 60 * 1000;
 
 /// Trusted non-planner inputs used by canonical V1-V9 validation.
 ///
@@ -67,6 +70,10 @@ pub struct PlanningPolicyContext {
     pub parent_task_ref: String,
     pub lineage_fingerprints: Vec<String>,
     pub risk_grant: Option<RiskEscalationGrant>,
+    /// Durable HumanDecisionRequest that produced `risk_grant`. V9 plan
+    /// publication consumes it atomically; a raw grant without this binding
+    /// can validate pure domain rules but cannot publish production state.
+    pub risk_decision_id: Option<HumanDecisionRequestId>,
     pub policy_fingerprint: String,
 }
 
@@ -165,6 +172,7 @@ pub enum PlanApplicabilityRefusal {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PlanningProposalOutcome {
     Accepted(Box<AcceptedPlanRevision>),
+    WaitingForHuman(Box<HumanDecisionRequest>),
     Refused(ValidationRefusal),
     NotApplicable(PlanApplicabilityRefusal),
     GuardrailTripped(GuardrailTrip),
@@ -176,6 +184,7 @@ pub enum PlanningProposalOutcome {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PlanningAssessmentOutcome {
     Assessed(AtomicityAssessment),
+    WaitingForHuman(Box<HumanDecisionRequest>),
     GuardrailTripped(GuardrailTrip),
     Blocked(AtomicityBlocker),
 }
@@ -276,6 +285,10 @@ impl<C: Clock> PlanningService<C> {
     #[must_use]
     pub fn store(&self) -> &SqliteStore {
         &self.store
+    }
+
+    pub(crate) fn now_millis(&self) -> u64 {
+        self.clock.now_millis()
     }
 
     /// Durable guardrail state for `branch` and the triggering evidence set.
@@ -396,10 +409,26 @@ impl<C: Clock> PlanningService<C> {
         policy: &PlanningPolicyContext,
     ) -> Result<PlanningAssessmentOutcome, PlanningServiceError> {
         validate_policy_context(policy)?;
+        if let Some(decision) = self.planning_human_gate(branch, policy, None)? {
+            return Ok(PlanningAssessmentOutcome::WaitingForHuman(Box::new(
+                decision,
+            )));
+        }
         let key = trigger_key(&request.evidence_refs)?;
         let lineage = self.store.get_plan_lineage(branch)?;
         let state = self.guardrail_snapshot(branch, &key, &lineage)?;
         if let Some(trip) = pre_call_guardrail(&state, false) {
+            if let Some(decision) = self.pre_call_human_intervention(
+                branch,
+                &request.evidence_refs,
+                policy,
+                &lineage,
+                trip.clone(),
+            )? {
+                return Ok(PlanningAssessmentOutcome::WaitingForHuman(Box::new(
+                    decision,
+                )));
+            }
             return Ok(PlanningAssessmentOutcome::GuardrailTripped(trip));
         }
         request.task_ref = policy.parent_task_ref.clone();
@@ -428,22 +457,59 @@ impl<C: Clock> PlanningService<C> {
                 Ok(PlanningAssessmentOutcome::Assessed(value))
             }
             Metered::Tripped(trip) => {
+                if let Some(reason) = human_reason_for_guardrail(&trip) {
+                    let decision = self.create_planning_human_decision(
+                        branch,
+                        policy,
+                        &snapshot,
+                        reason,
+                        &snapshot.triggering_evidence,
+                    )?;
+                    self.finish_run(&run, PlanningRunState::Refused)?;
+                    return Ok(PlanningAssessmentOutcome::WaitingForHuman(Box::new(
+                        decision,
+                    )));
+                }
                 self.finish_run(&run, PlanningRunState::Refused)?;
                 Ok(PlanningAssessmentOutcome::GuardrailTripped(trip))
             }
-            Metered::Faulted(fault) => match planner_fault_outcome(fault)? {
-                PlanningProposalOutcome::Blocked(blocker) => {
+            Metered::Faulted(fault) => {
+                let human_reason = match &fault {
+                    PlannerFault::DepthExhausted | PlannerFault::Unplannable { .. } => {
+                        Some(HumanDecisionReason::PlannerBlocked)
+                    }
+                    PlannerFault::BudgetExhausted { .. } => {
+                        Some(HumanDecisionReason::PlannerBudget)
+                    }
+                    PlannerFault::ProviderFailure { .. } => None,
+                };
+                if let Some(reason) = human_reason {
+                    let decision = self.create_planning_human_decision(
+                        branch,
+                        policy,
+                        &snapshot,
+                        reason,
+                        &snapshot.triggering_evidence,
+                    )?;
                     self.finish_run(&run, PlanningRunState::Failed)?;
-                    Ok(PlanningAssessmentOutcome::Blocked(blocker))
+                    return Ok(PlanningAssessmentOutcome::WaitingForHuman(Box::new(
+                        decision,
+                    )));
                 }
-                PlanningProposalOutcome::GuardrailTripped(trip) => {
-                    self.finish_run(&run, PlanningRunState::Refused)?;
-                    Ok(PlanningAssessmentOutcome::GuardrailTripped(trip))
+                match planner_fault_outcome(fault)? {
+                    PlanningProposalOutcome::Blocked(blocker) => {
+                        self.finish_run(&run, PlanningRunState::Failed)?;
+                        Ok(PlanningAssessmentOutcome::Blocked(blocker))
+                    }
+                    PlanningProposalOutcome::GuardrailTripped(trip) => {
+                        self.finish_run(&run, PlanningRunState::Refused)?;
+                        Ok(PlanningAssessmentOutcome::GuardrailTripped(trip))
+                    }
+                    other => Err(PlanningServiceError::InvalidContext(format!(
+                        "unexpected assessment fault outcome {other:?}"
+                    ))),
                 }
-                other => Err(PlanningServiceError::InvalidContext(format!(
-                    "unexpected assessment fault outcome {other:?}"
-                ))),
-            },
+            }
         }
     }
 
@@ -479,6 +545,9 @@ impl<C: Clock> PlanningService<C> {
         target: Option<&TaskId>,
     ) -> Result<PlanningProposalOutcome, PlanningServiceError> {
         validate_policy_context(policy)?;
+        if let Some(decision) = self.planning_human_gate(branch, policy, None)? {
+            return Ok(PlanningProposalOutcome::WaitingForHuman(Box::new(decision)));
+        }
         let base = match self.prepare_proposal(
             branch,
             &request.evidence_refs,
@@ -486,7 +555,19 @@ impl<C: Clock> PlanningService<C> {
             policy,
         )? {
             Ok(base) => base,
-            Err(trip) => return Ok(PlanningProposalOutcome::GuardrailTripped(trip)),
+            Err(trip) => {
+                let lineage = self.store.get_plan_lineage(branch)?;
+                if let Some(decision) = self.pre_call_human_intervention(
+                    branch,
+                    &request.evidence_refs,
+                    policy,
+                    &lineage,
+                    trip.clone(),
+                )? {
+                    return Ok(PlanningProposalOutcome::WaitingForHuman(Box::new(decision)));
+                }
+                return Ok(PlanningProposalOutcome::GuardrailTripped(trip));
+            }
         };
 
         request.parent_task_ref = policy.parent_task_ref.clone();
@@ -514,10 +595,24 @@ impl<C: Clock> PlanningService<C> {
         &mut self,
         planner: &impl PlannerPort,
         branch: &PlanBranchId,
-        mut request: ReplanRequest,
+        request: ReplanRequest,
         policy: &PlanningPolicyContext,
     ) -> Result<PlanningProposalOutcome, PlanningServiceError> {
+        self.propose_replan_with_human_decision(planner, branch, request, policy, None)
+    }
+
+    pub(crate) fn propose_replan_with_human_decision(
+        &mut self,
+        planner: &impl PlannerPort,
+        branch: &PlanBranchId,
+        mut request: ReplanRequest,
+        policy: &PlanningPolicyContext,
+        human_decision_id: Option<&HumanDecisionRequestId>,
+    ) -> Result<PlanningProposalOutcome, PlanningServiceError> {
         validate_policy_context(policy)?;
+        if let Some(decision) = self.planning_human_gate(branch, policy, human_decision_id)? {
+            return Ok(PlanningProposalOutcome::WaitingForHuman(Box::new(decision)));
+        }
         let base = match self.prepare_proposal(
             branch,
             &request.triggering_evidence_refs,
@@ -525,7 +620,19 @@ impl<C: Clock> PlanningService<C> {
             policy,
         )? {
             Ok(base) => base,
-            Err(trip) => return Ok(PlanningProposalOutcome::GuardrailTripped(trip)),
+            Err(trip) => {
+                let lineage = self.store.get_plan_lineage(branch)?;
+                if let Some(decision) = self.pre_call_human_intervention(
+                    branch,
+                    &request.triggering_evidence_refs,
+                    policy,
+                    &lineage,
+                    trip.clone(),
+                )? {
+                    return Ok(PlanningProposalOutcome::WaitingForHuman(Box::new(decision)));
+                }
+                return Ok(PlanningProposalOutcome::GuardrailTripped(trip));
+            }
         };
 
         request.branch_root_ref = policy.parent_task_ref.clone();
@@ -660,6 +767,131 @@ impl<C: Clock> PlanningService<C> {
         Ok((snapshot, run))
     }
 
+    /// A durable HumanDecisionRequest is a planning gate, not advisory data.
+    /// Pending/resolved requests stop fresh planner calls for their owner
+    /// scope. The only bypasses are the exact continuations being applied by
+    /// the trusted application layer: a bound V9 RESUME grant or the exact
+    /// REPLAN request currently being consumed.
+    fn planning_human_gate(
+        &self,
+        branch: &PlanBranchId,
+        policy: &PlanningPolicyContext,
+        replan_decision_id: Option<&HumanDecisionRequestId>,
+    ) -> Result<Option<HumanDecisionRequest>, PlanningServiceError> {
+        let task_id = policy_task_id(policy)?;
+        let Some(record) = self
+            .store
+            .latest_human_decision_for_scope(&task_id, branch)?
+        else {
+            return Ok(None);
+        };
+        let current = self
+            .store
+            .validate_human_decision_current(&record.id, self.clock.now_millis())?;
+        match current.status {
+            HumanDecisionStatus::Pending => Ok(Some(current)),
+            HumanDecisionStatus::Resolved
+                if current.reason == HumanDecisionReason::RiskEscalation
+                    && current.selected == Some(HumanContinuation::Resume)
+                    && policy.risk_decision_id.as_ref() == Some(&current.id) =>
+            {
+                Ok(None)
+            }
+            HumanDecisionStatus::Resolved
+                if current.selected == Some(HumanContinuation::Replan)
+                    && replan_decision_id == Some(&current.id) =>
+            {
+                Ok(None)
+            }
+            HumanDecisionStatus::Resolved => Ok(Some(current)),
+            HumanDecisionStatus::Consumed if current.selected == Some(HumanContinuation::Abort) => {
+                Err(PlanningServiceError::Storage(
+                    StorageError::HumanDecisionState {
+                        request_id: current.id.as_str().to_owned(),
+                        state: "ABORTED_BY_HUMAN".to_owned(),
+                    },
+                ))
+            }
+            HumanDecisionStatus::Consumed | HumanDecisionStatus::Superseded => Ok(None),
+        }
+    }
+
+    /// Converts only guardrails whose canonical ADR semantics require human
+    /// intervention. Ordinary validation limits remain typed guardrail
+    /// outcomes for TASK-0080's failure matrix.
+    fn pre_call_human_intervention(
+        &mut self,
+        branch: &PlanBranchId,
+        triggering_evidence: &[EvidenceRef],
+        policy: &PlanningPolicyContext,
+        durable_lineage: &[PlanRevisionLineageRecord],
+        trip: GuardrailTrip,
+    ) -> Result<Option<HumanDecisionRequest>, PlanningServiceError> {
+        let Some(reason) = human_reason_for_guardrail(&trip) else {
+            return Ok(None);
+        };
+        if let Some(existing) = self.planning_human_gate(branch, policy, None)? {
+            return Ok(Some(existing));
+        }
+        let (head, _) = self.load_base(branch)?;
+        let trigger_key = trigger_key(triggering_evidence)?;
+        let (snapshot, run) = self.start_control_run(
+            branch,
+            triggering_evidence,
+            policy,
+            head,
+            durable_lineage,
+            &trigger_key,
+        )?;
+        let decision = self.create_planning_human_decision(
+            branch,
+            policy,
+            &snapshot,
+            reason,
+            triggering_evidence,
+        );
+        let finished = self.finish_run(&run, PlanningRunState::Refused);
+        match (decision, finished) {
+            (Ok(decision), Ok(())) => Ok(Some(decision)),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    fn create_planning_human_decision(
+        &mut self,
+        branch: &PlanBranchId,
+        policy: &PlanningPolicyContext,
+        snapshot: &PlanningInputSnapshot,
+        reason: HumanDecisionReason,
+        evidence: &[EvidenceRef],
+    ) -> Result<HumanDecisionRequest, PlanningServiceError> {
+        let task_id = policy_task_id(policy)?;
+        Ok(self.store.create_human_decision_request(
+            NewHumanDecisionRequest {
+                task_id,
+                plan_branch_id: branch.clone(),
+                reason,
+                risk: policy.baseline_risk,
+                affected_scope: policy.scope_bound.clone(),
+                options: vec![HumanContinuation::Replan, HumanContinuation::Abort],
+                recommendation: None,
+                evidence: evidence.to_vec(),
+                proposal_hash: None,
+                plan_head: snapshot.expected_plan_head,
+                planning_input_snapshot_id: snapshot.id.clone(),
+                planning_input_fingerprint: snapshot.input_fingerprint.clone(),
+                policy_fingerprint: policy.policy_fingerprint.clone(),
+                expires_at_ms: Some(
+                    self.clock
+                        .now_millis()
+                        .saturating_add(HUMAN_DECISION_TTL_MS),
+                ),
+            },
+            self.clock.now_millis(),
+        )?)
+    }
+
     /// Reserves the call durably, invokes the planner, then settles the call
     /// with its measured receipt or a conservative charge in one transaction.
     /// No provider-started outcome can skip settlement.
@@ -772,10 +1004,41 @@ impl<C: Clock> PlanningService<C> {
     ) -> Result<PlanningProposalOutcome, PlanningServiceError> {
         match metered {
             Metered::Tripped(trip) => {
+                if let Some(reason) = human_reason_for_guardrail(&trip) {
+                    let decision = self.create_planning_human_decision(
+                        branch,
+                        policy,
+                        &base.snapshot,
+                        reason,
+                        &base.snapshot.triggering_evidence,
+                    )?;
+                    self.finish_run(&base.run, PlanningRunState::Refused)?;
+                    return Ok(PlanningProposalOutcome::WaitingForHuman(Box::new(decision)));
+                }
                 self.finish_run(&base.run, PlanningRunState::Refused)?;
                 Ok(PlanningProposalOutcome::GuardrailTripped(trip))
             }
             Metered::Faulted(fault) => {
+                let human_reason = match &fault {
+                    PlannerFault::DepthExhausted | PlannerFault::Unplannable { .. } => {
+                        Some(HumanDecisionReason::PlannerBlocked)
+                    }
+                    PlannerFault::BudgetExhausted { .. } => {
+                        Some(HumanDecisionReason::PlannerBudget)
+                    }
+                    PlannerFault::ProviderFailure { .. } => None,
+                };
+                if let Some(reason) = human_reason {
+                    let decision = self.create_planning_human_decision(
+                        branch,
+                        policy,
+                        &base.snapshot,
+                        reason,
+                        &base.snapshot.triggering_evidence,
+                    )?;
+                    self.finish_run(&base.run, PlanningRunState::Failed)?;
+                    return Ok(PlanningProposalOutcome::WaitingForHuman(Box::new(decision)));
+                }
                 let outcome = planner_fault_outcome(fault);
                 self.finish_run(&base.run, PlanningRunState::Failed)?;
                 outcome
@@ -873,21 +1136,95 @@ impl<C: Clock> PlanningService<C> {
             risk_grant: policy.risk_grant.clone(),
         };
 
-        match validate_proposal(&base_graph, &proposal, &validation) {
+        let risk_escalated = match validate_proposal(&base_graph, &proposal, &validation) {
             ValidationOutcome::Refused(refusal) => {
                 if let Some(limit) = refusal.limit_detail() {
                     return Ok(PlanningProposalOutcome::GuardrailTripped(
                         GuardrailTrip::new(limit.which, limit.observed),
                     ));
                 }
-                return self.record_rejection(
+                if matches!(refusal, ValidationRefusal::RiskGateOpen { .. }) {
+                    // A caller that already supplied a grant reached V9 with
+                    // an invalid/expired/mismatched grant. Fail closed as the
+                    // validation refusal; only the grant-absent path can mint
+                    // a fresh HumanDecisionRequest.
+                    if policy.risk_grant.is_some() {
+                        return self.record_rejection_with_human_intervention(
+                            branch,
+                            &trigger_key,
+                            PlanningProposalOutcome::Refused(refusal),
+                            policy,
+                            &snapshot,
+                            &proposal.source_evidence_refs,
+                        );
+                    }
+                    let task_id = target
+                        .cloned()
+                        .or_else(|| TaskId::new(policy.parent_task_ref.clone()).ok())
+                        .ok_or_else(|| {
+                            PlanningServiceError::InvalidContext(
+                                "human decision requires a valid owning Task id".to_owned(),
+                            )
+                        })?;
+                    if let Some(existing) = self.planning_human_gate(branch, policy, None)? {
+                        return Ok(PlanningProposalOutcome::WaitingForHuman(Box::new(existing)));
+                    }
+                    let decision = self.store.create_human_decision_request(
+                        NewHumanDecisionRequest {
+                            task_id,
+                            plan_branch_id: branch.clone(),
+                            reason: HumanDecisionReason::RiskEscalation,
+                            risk: proposal
+                                .risk_delta
+                                .iter()
+                                .map(|delta| delta.to)
+                                .max()
+                                .unwrap_or(policy.baseline_risk),
+                            affected_scope: ScopeBound::new(proposal.scope_delta.roots())?,
+                            options: vec![
+                                HumanContinuation::Resume,
+                                HumanContinuation::Replan,
+                                HumanContinuation::Abort,
+                            ],
+                            recommendation: None,
+                            evidence: proposal.source_evidence_refs.clone(),
+                            proposal_hash: Some(proposal.proposal_hash.clone()),
+                            plan_head: trusted_base_head,
+                            planning_input_snapshot_id: snapshot.id.clone(),
+                            planning_input_fingerprint: snapshot.input_fingerprint.clone(),
+                            policy_fingerprint: policy.policy_fingerprint.clone(),
+                            expires_at_ms: Some(
+                                self.clock
+                                    .now_millis()
+                                    .saturating_add(HUMAN_DECISION_TTL_MS),
+                            ),
+                        },
+                        self.clock.now_millis(),
+                    )?;
+                    return Ok(PlanningProposalOutcome::WaitingForHuman(Box::new(decision)));
+                }
+                return self.record_rejection_with_human_intervention(
                     branch,
                     &trigger_key,
                     PlanningProposalOutcome::Refused(refusal),
+                    policy,
+                    &snapshot,
+                    &proposal.source_evidence_refs,
                 );
             }
-            ValidationOutcome::Accepted { .. } => {}
-        }
+            ValidationOutcome::Accepted { risk_escalated } => risk_escalated,
+        };
+
+        let risk_decision = if risk_escalated {
+            Some(policy.risk_decision_id.as_ref().ok_or_else(|| {
+                PlanningServiceError::InvalidContext(
+                    "risk escalation grant requires a durable HumanDecisionRequest binding"
+                        .to_owned(),
+                )
+            })?)
+        } else {
+            None
+        };
 
         // Structural validity is not product applicability. Resolve the
         // detached candidate against canonical Task state before durable
@@ -899,17 +1236,25 @@ impl<C: Clock> PlanningService<C> {
         let candidate = apply_validated_changeset(&base_graph, &proposal)?;
         if let Some(task_id) = target {
             if let Some(refusal) = target_applicability(&self.store, &candidate, task_id)? {
-                return self.record_rejection(
+                return self.record_rejection_with_human_intervention(
                     branch,
                     &trigger_key,
                     PlanningProposalOutcome::NotApplicable(refusal),
+                    policy,
+                    &snapshot,
+                    &proposal.source_evidence_refs,
                 );
             }
         }
         if !has_runnable_node(&self.store, &candidate)? {
-            return Ok(PlanningProposalOutcome::GuardrailTripped(
-                GuardrailTrip::new("runnable-leaf", 0),
-            ));
+            let decision = self.create_planning_human_decision(
+                branch,
+                policy,
+                &snapshot,
+                HumanDecisionReason::PlannerBlocked,
+                &proposal.source_evidence_refs,
+            )?;
+            return Ok(PlanningProposalOutcome::WaitingForHuman(Box::new(decision)));
         }
 
         // Catch a writer that won after the first head check. Storage repeats
@@ -952,10 +1297,14 @@ impl<C: Clock> PlanningService<C> {
             planning_run_generation: run.generation,
         };
 
-        match self
-            .store
-            .commit_plan_revision(&proposal, &revision, &candidate, &lineage, &evidence)
-        {
+        match self.store.commit_plan_revision_with_human_decision(
+            &proposal,
+            &revision,
+            &candidate,
+            &lineage,
+            &evidence,
+            risk_decision,
+        ) {
             Ok(_) => {}
             Err(StorageError::PlanStale { found, .. }) => {
                 return self.record_rejection(
@@ -1018,6 +1367,32 @@ impl<C: Clock> PlanningService<C> {
             ));
         }
         Ok(refusal)
+    }
+
+    fn record_rejection_with_human_intervention(
+        &mut self,
+        branch: &PlanBranchId,
+        trigger_key: &str,
+        refusal: PlanningProposalOutcome,
+        policy: &PlanningPolicyContext,
+        snapshot: &PlanningInputSnapshot,
+        evidence: &[EvidenceRef],
+    ) -> Result<PlanningProposalOutcome, PlanningServiceError> {
+        let outcome = self.record_rejection(branch, trigger_key, refusal)?;
+        if matches!(
+            &outcome,
+            PlanningProposalOutcome::GuardrailTripped(trip) if trip.bound == "no-progress"
+        ) {
+            let decision = self.create_planning_human_decision(
+                branch,
+                policy,
+                snapshot,
+                HumanDecisionReason::NoProgress,
+                evidence,
+            )?;
+            return Ok(PlanningProposalOutcome::WaitingForHuman(Box::new(decision)));
+        }
+        Ok(outcome)
     }
 }
 
@@ -1170,7 +1545,32 @@ fn validate_policy_context(policy: &PlanningPolicyContext) -> Result<(), Plannin
             "policy_fingerprint must be non-blank".to_owned(),
         ));
     }
+    if policy.risk_grant.is_some() != policy.risk_decision_id.is_some() {
+        return Err(PlanningServiceError::InvalidContext(
+            "risk escalation grant and durable HumanDecisionRequest binding must be supplied together"
+                .to_owned(),
+        ));
+    }
     Ok(())
+}
+
+fn policy_task_id(policy: &PlanningPolicyContext) -> Result<TaskId, PlanningServiceError> {
+    TaskId::new(policy.parent_task_ref.clone()).map_err(|error| {
+        PlanningServiceError::InvalidContext(format!(
+            "planning policy parent_task_ref is not a valid Task id: {error}"
+        ))
+    })
+}
+
+fn human_reason_for_guardrail(trip: &GuardrailTrip) -> Option<HumanDecisionReason> {
+    match trip.bound {
+        "no-progress" => Some(HumanDecisionReason::NoProgress),
+        "planner-calls" | "planner-input-tokens" | "planner-budget" => {
+            Some(HumanDecisionReason::PlannerBudget)
+        }
+        "depth" | "runnable-leaf" => Some(HumanDecisionReason::PlannerBlocked),
+        _ => None,
+    }
 }
 
 fn planner_fault_outcome(

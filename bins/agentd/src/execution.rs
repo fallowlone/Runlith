@@ -1125,6 +1125,26 @@ fn start_run(
             ),
             None,
         ),
+        Ok(PlannedExecutionEntryOutcome::WaitingForHuman { decision, .. }) => (
+            exec_error(
+                BusinessErrorCode::Conflict,
+                format!(
+                    "task is waiting for human decision {}",
+                    truncate_id(decision.id.as_str())
+                ),
+            ),
+            None,
+        ),
+        Ok(PlannedExecutionEntryOutcome::AbortedByHuman { decision, .. }) => (
+            exec_error(
+                BusinessErrorCode::Conflict,
+                format!(
+                    "bounded task scope was aborted by human decision {}",
+                    truncate_id(decision.id.as_str())
+                ),
+            ),
+            None,
+        ),
         Ok(
             PlannedExecutionEntryOutcome::PlanHeadMoved { .. }
             | PlannedExecutionEntryOutcome::PlanningInputMoved { .. },
@@ -2043,6 +2063,7 @@ mod tests {
             parent_task_ref: task.to_owned(),
             lineage_fingerprints: vec![],
             risk_grant: None,
+            risk_decision_id: None,
             policy_fingerprint: format!("policy:fixture:{task}"),
         };
         let outcome = planning

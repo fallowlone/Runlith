@@ -164,6 +164,7 @@ fn policy(parent: &str, fingerprint: &str) -> PlanningPolicyContext {
         parent_task_ref: parent.to_owned(),
         lineage_fingerprints: vec![],
         risk_grant: None,
+        risk_decision_id: None,
         policy_fingerprint: fingerprint.to_owned(),
     }
 }

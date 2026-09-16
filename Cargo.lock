@@ -36,6 +36,7 @@ dependencies = [
  "policy",
  "prost",
  "storage-sqlite",
+ "task-domain",
  "tokio",
  "workspace",
 ]
@@ -1098,6 +1099,7 @@ name = "plan-domain"
 version = "0.1.0"
 dependencies = [
  "sha2 0.10.9",
+ "task-domain",
 ]
 
 [[package]]

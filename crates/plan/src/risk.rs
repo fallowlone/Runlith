@@ -21,6 +21,30 @@ pub enum RiskClass {
     Critical,
 }
 
+impl RiskClass {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, PlanDomainError> {
+        match value {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "critical" => Ok(Self::Critical),
+            other => Err(PlanDomainError::input(format!(
+                "unknown risk class {other:?}"
+            ))),
+        }
+    }
+}
+
 /// Closed proof-method vocabulary from ADR-0027 V3.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum VerificationMethod {

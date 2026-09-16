@@ -368,6 +368,20 @@ pub(crate) fn map_error(error: &ServiceError) -> (BusinessErrorCode, String) {
                     truncate_id(branch)
                 ),
             ),
+            StorageError::HumanDecisionStale { request_id, .. } => (
+                BusinessErrorCode::StaleState,
+                format!(
+                    "human decision {} is stale; refresh the canonical request",
+                    truncate_id(request_id)
+                ),
+            ),
+            StorageError::HumanDecisionState { request_id, .. } => (
+                BusinessErrorCode::Conflict,
+                format!(
+                    "human decision {} is already resolved, consumed, or superseded",
+                    truncate_id(request_id)
+                ),
+            ),
             StorageError::Corrupt(_)
             | StorageError::DomainReconstruction(_)
             | StorageError::UnsupportedSchemaVersion { .. } => (

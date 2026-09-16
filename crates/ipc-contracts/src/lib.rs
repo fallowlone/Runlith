@@ -31,18 +31,23 @@ pub const IPC_PROTOCOL_VERSION_V2: u32 = 2;
 /// G6 approval protocol version: adds the bounded `policy_core` envelope.
 pub const IPC_PROTOCOL_VERSION_V3: u32 = 3;
 
+/// G7 Human Decision Queue protocol version: adds the bounded
+/// `human_decision_core` envelope while preserving all older authority.
+pub const IPC_PROTOCOL_VERSION_V4: u32 = 4;
+
 /// Current IPC protocol version: the highest version this build speaks.
-pub const IPC_PROTOCOL_VERSION: u32 = IPC_PROTOCOL_VERSION_V3;
+pub const IPC_PROTOCOL_VERSION: u32 = IPC_PROTOCOL_VERSION_V4;
 
 /// Alias making "current" explicit at call sites.
-pub const IPC_PROTOCOL_VERSION_CURRENT: u32 = IPC_PROTOCOL_VERSION_V3;
+pub const IPC_PROTOCOL_VERSION_CURRENT: u32 = IPC_PROTOCOL_VERSION_V4;
 
 /// Every protocol version this build negotiates, oldest first.
-pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 4] = [
+pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 5] = [
     IPC_PROTOCOL_VERSION_V0,
     IPC_PROTOCOL_VERSION_V1,
     IPC_PROTOCOL_VERSION_V2,
     IPC_PROTOCOL_VERSION_V3,
+    IPC_PROTOCOL_VERSION_V4,
 ];
 
 /// Maximum length of a client-supplied human/request `reason` (block
@@ -84,7 +89,10 @@ pub fn is_supported_version(version: u32) -> bool {
 pub fn supports_business_ipc(negotiated_version: u32) -> bool {
     matches!(
         negotiated_version,
-        IPC_PROTOCOL_VERSION_V1 | IPC_PROTOCOL_VERSION_V2 | IPC_PROTOCOL_VERSION_V3
+        IPC_PROTOCOL_VERSION_V1
+            | IPC_PROTOCOL_VERSION_V2
+            | IPC_PROTOCOL_VERSION_V3
+            | IPC_PROTOCOL_VERSION_V4
     )
 }
 
@@ -94,14 +102,27 @@ pub fn supports_business_ipc(negotiated_version: u32) -> bool {
 /// protocol — decoding is never authority.
 #[must_use]
 pub fn supports_execution_ipc(negotiated_version: u32) -> bool {
-    negotiated_version == IPC_PROTOCOL_VERSION_V2 || negotiated_version == IPC_PROTOCOL_VERSION_V3
+    matches!(
+        negotiated_version,
+        IPC_PROTOCOL_VERSION_V2 | IPC_PROTOCOL_VERSION_V3 | IPC_PROTOCOL_VERSION_V4
+    )
 }
 
 /// Reports whether a negotiated session carries G6 approval control-plane
 /// authority. Only protocol v3 does.
 #[must_use]
 pub fn supports_policy_ipc(negotiated_version: u32) -> bool {
-    negotiated_version == IPC_PROTOCOL_VERSION_V3
+    matches!(
+        negotiated_version,
+        IPC_PROTOCOL_VERSION_V3 | IPC_PROTOCOL_VERSION_V4
+    )
+}
+
+/// Reports whether a negotiated session carries G7 Human Decision Queue
+/// observation/resolution authority. Only protocol v4 does.
+#[must_use]
+pub fn supports_human_decision_ipc(negotiated_version: u32) -> bool {
+    negotiated_version == IPC_PROTOCOL_VERSION_V4
 }
 
 #[cfg(test)]
@@ -125,40 +146,48 @@ mod tests {
     }
 
     #[test]
-    fn historical_versions_remain_supported_and_v3_is_current() {
+    fn historical_versions_remain_supported_and_v4_is_current() {
         assert_eq!(IPC_PROTOCOL_VERSION_V0, 0);
         assert_eq!(IPC_PROTOCOL_VERSION_V1, 1);
         assert_eq!(IPC_PROTOCOL_VERSION_V2, 2);
         assert_eq!(IPC_PROTOCOL_VERSION_V3, 3);
-        assert_eq!(IPC_PROTOCOL_VERSION, 3);
-        assert_eq!(IPC_PROTOCOL_VERSION_CURRENT, 3);
-        assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, [0, 1, 2, 3]);
+        assert_eq!(IPC_PROTOCOL_VERSION, 4);
+        assert_eq!(IPC_PROTOCOL_VERSION_CURRENT, 4);
+        assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, [0, 1, 2, 3, 4]);
         assert!(is_supported_version(0));
         assert!(is_supported_version(1));
         assert!(is_supported_version(2));
         assert!(is_supported_version(3));
-        assert!(!is_supported_version(4));
+        assert!(is_supported_version(4));
+        assert!(!is_supported_version(5));
         assert!(is_compatible(0));
         assert!(is_compatible(1));
         assert!(is_compatible(2));
         assert!(is_compatible(3));
+        assert!(is_compatible(4));
     }
 
     #[test]
-    fn protocol_authority_is_cumulative_and_v3_adds_policy() {
+    fn protocol_authority_is_cumulative_and_v4_adds_human_decisions() {
         assert!(!supports_business_ipc(IPC_PROTOCOL_VERSION_V0));
         assert!(supports_business_ipc(IPC_PROTOCOL_VERSION_V1));
         assert!(supports_business_ipc(IPC_PROTOCOL_VERSION_V2));
         assert!(supports_business_ipc(IPC_PROTOCOL_VERSION_V3));
+        assert!(supports_business_ipc(IPC_PROTOCOL_VERSION_V4));
         assert!(!supports_business_ipc(99));
         assert!(!supports_execution_ipc(IPC_PROTOCOL_VERSION_V0));
         assert!(!supports_execution_ipc(IPC_PROTOCOL_VERSION_V1));
         assert!(supports_execution_ipc(IPC_PROTOCOL_VERSION_V2));
         assert!(supports_execution_ipc(IPC_PROTOCOL_VERSION_V3));
+        assert!(supports_execution_ipc(IPC_PROTOCOL_VERSION_V4));
         assert!(!supports_execution_ipc(99));
         assert!(!supports_policy_ipc(IPC_PROTOCOL_VERSION_V2));
         assert!(supports_policy_ipc(IPC_PROTOCOL_VERSION_V3));
+        assert!(supports_policy_ipc(IPC_PROTOCOL_VERSION_V4));
         assert!(!supports_policy_ipc(99));
+        assert!(!supports_human_decision_ipc(IPC_PROTOCOL_VERSION_V3));
+        assert!(supports_human_decision_ipc(IPC_PROTOCOL_VERSION_V4));
+        assert!(!supports_human_decision_ipc(99));
     }
 
     #[test]

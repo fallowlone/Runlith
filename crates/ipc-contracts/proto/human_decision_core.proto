@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package ai_engineering_os.ipc;
+
+// Minimal G7 Human Decision Queue control plane (protocol v4). Clients may
+// observe and resolve canonical requests. Creation, stale validation,
+// continuation consumption, policy enforcement and Plan mutation remain
+// trusted application-service authority.
+import "task_core.proto";
+
+enum HumanContinuationDecision {
+  HUMAN_CONTINUATION_DECISION_UNSPECIFIED = 0;
+  RESUME = 1;
+  REPLAN = 2;
+  ABORT = 3;
+}
+
+message HumanDecisionDto {
+  string request_id = 1;
+  uint32 request_version = 2;
+  string task_id = 3;
+  string plan_branch_id = 4;
+  string reason = 5;
+  string risk = 6;
+  repeated string affected_scope = 7;
+  repeated HumanContinuationDecision options = 8;
+  optional HumanContinuationDecision recommendation = 9;
+  repeated string evidence = 10;
+  optional string proposal_hash = 11;
+  string task_state_at_creation = 12;
+  uint64 task_event_seq = 13;
+  uint64 plan_head = 14;
+  string planning_input_snapshot_id = 15;
+  string planning_input_fingerprint = 16;
+  string policy_fingerprint = 17;
+  uint64 created_at_ms = 18;
+  optional uint64 expires_at_ms = 19;
+  string status = 20;
+  optional HumanContinuationDecision selected = 21;
+  optional string decided_by = 22;
+  optional uint64 decided_at_ms = 23;
+  optional uint64 consumed_at_ms = 24;
+}
+
+message ListHumanDecisionsRequest {}
+
+message GetHumanDecisionRequest {
+  string request_id = 1;
+}
+
+message DecideHumanDecisionRequest {
+  string request_id = 1;
+  HumanContinuationDecision continuation = 2;
+}
+
+message HumanDecisionCoreRequest {
+  oneof payload {
+    ListHumanDecisionsRequest list_pending = 1;
+    GetHumanDecisionRequest get = 2;
+    DecideHumanDecisionRequest decide = 3;
+  }
+}
+
+message ListHumanDecisionsResponse {
+  repeated HumanDecisionDto decisions = 1;
+}
+
+message GetHumanDecisionResponse {
+  HumanDecisionDto decision = 1;
+}
+
+message DecideHumanDecisionResponse {
+  HumanDecisionDto decision = 1;
+}
+
+message HumanDecisionCoreResponse {
+  oneof payload {
+    ListHumanDecisionsResponse list_pending = 1;
+    GetHumanDecisionResponse get = 2;
+    DecideHumanDecisionResponse decide = 3;
+    BusinessError error = 4;
+  }
+}

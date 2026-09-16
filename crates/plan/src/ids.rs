@@ -42,3 +42,4 @@ opaque_id!(PlannerAdapterId, "planner_adapter_id");
 opaque_id!(PlanningCostReceiptRef, "planning_cost_receipt_ref");
 opaque_id!(PlanningInputSnapshotId, "planning_input_snapshot_id");
 opaque_id!(PlanningRunId, "planning_run_id");
+opaque_id!(HumanDecisionRequestId, "human_decision_request_id");

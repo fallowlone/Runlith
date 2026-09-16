@@ -29,8 +29,9 @@ use crate::planning_service::{
 };
 use crate::{EvaluationPort, ExecutionEntry};
 use plan_domain::{
-    DecompositionRequest, PlanningBudget, MAX_DECOMPOSITION_DEPTH,
-    MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH, MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
+    DecompositionRequest, HumanContinuation, HumanDecisionRequest, HumanDecisionStatus,
+    PlanningBudget, MAX_DECOMPOSITION_DEPTH, MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
+    MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
 };
 
 /// Result of one bounded plan-gated scheduling cycle.
@@ -49,6 +50,17 @@ pub enum PlannedOrchestrationOutcome {
     WaitingOnPlanDependency {
         plan: Box<AcceptedPlanRevision>,
         blocking: Vec<TaskId>,
+    },
+    /// Only this Task/Plan scope is waiting for durable human input.
+    WaitingForHuman {
+        plan: Box<AcceptedPlanRevision>,
+        decision: Box<HumanDecisionRequest>,
+    },
+    /// A consumed bounded ABORT stops this owner scope without changing
+    /// unrelated Tasks/Executions.
+    AbortedByHuman {
+        plan: Box<AcceptedPlanRevision>,
+        decision: Box<HumanDecisionRequest>,
     },
     /// The canonical head moved away from `plan` before execution started.
     /// Nothing was scheduled; the caller must reconcile against the new head.
@@ -86,6 +98,14 @@ pub enum PlannedExecutionEntryOutcome {
         plan: Box<AcceptedPlanRevision>,
         blocking: Vec<TaskId>,
     },
+    WaitingForHuman {
+        plan: Box<AcceptedPlanRevision>,
+        decision: Box<HumanDecisionRequest>,
+    },
+    AbortedByHuman {
+        plan: Box<AcceptedPlanRevision>,
+        decision: Box<HumanDecisionRequest>,
+    },
     PlanHeadMoved {
         plan: Box<AcceptedPlanRevision>,
         found: Option<u64>,
@@ -122,6 +142,8 @@ impl std::error::Error for PlannedOrchestrationError {}
 enum PlanStep {
     NotRepresented,
     Waiting(Vec<TaskId>),
+    WaitingForHuman(Box<HumanDecisionRequest>),
+    AbortedByHuman(Box<HumanDecisionRequest>),
     HeadMoved(Option<u64>),
     InputMoved,
     Executed(OrchestrationOutcome),
@@ -168,6 +190,12 @@ impl<C: Clock> OrchestrationService<C> {
             }
             PlanStep::Waiting(blocking) => {
                 return Ok(PlannedOrchestrationOutcome::WaitingOnPlanDependency { plan, blocking })
+            }
+            PlanStep::WaitingForHuman(decision) => {
+                return Ok(PlannedOrchestrationOutcome::WaitingForHuman { plan, decision })
+            }
+            PlanStep::AbortedByHuman(decision) => {
+                return Ok(PlannedOrchestrationOutcome::AbortedByHuman { plan, decision })
             }
             PlanStep::HeadMoved(found) => {
                 return Ok(PlannedOrchestrationOutcome::PlanHeadMoved { plan, found })
@@ -237,6 +265,12 @@ impl<C: Clock> OrchestrationService<C> {
                 PlanStep::Waiting(blocking) => {
                     PlannedOrchestrationOutcome::WaitingOnPlanDependency { plan, blocking }
                 }
+                PlanStep::WaitingForHuman(decision) => {
+                    PlannedOrchestrationOutcome::WaitingForHuman { plan, decision }
+                }
+                PlanStep::AbortedByHuman(decision) => {
+                    PlannedOrchestrationOutcome::AbortedByHuman { plan, decision }
+                }
                 PlanStep::HeadMoved(found) => {
                     PlannedOrchestrationOutcome::PlanHeadMoved { plan, found }
                 }
@@ -302,6 +336,23 @@ impl<C: Clock> OrchestrationService<C> {
             .map_err(|error| PlannedOrchestrationError::Planning(error.into()))?
         {
             return Ok(PlannedExecutionEntryOutcome::PlanningInputMoved { plan });
+        }
+
+        if let Some(decision) = human_gate(planning, task_id, &branch)? {
+            return Ok(match decision.status {
+                HumanDecisionStatus::Consumed
+                    if decision.selected == Some(HumanContinuation::Abort) =>
+                {
+                    PlannedExecutionEntryOutcome::AbortedByHuman {
+                        plan,
+                        decision: Box::new(decision),
+                    }
+                }
+                _ => PlannedExecutionEntryOutcome::WaitingForHuman {
+                    plan,
+                    decision: Box::new(decision),
+                },
+            });
         }
 
         let predecessors = plan
@@ -380,6 +431,28 @@ impl<C: Clock> OrchestrationService<C> {
         if head != Some(plan.revision().revision_seq) {
             return Ok(PlanStep::HeadMoved(head));
         }
+        if !planning
+            .store()
+            .current_planning_input_matches(
+                &plan.revision().plan_branch_id,
+                plan.planning_input_snapshot_id(),
+                plan.planning_input_fingerprint(),
+            )
+            .map_err(|error| PlannedOrchestrationError::Planning(error.into()))?
+        {
+            return Ok(PlanStep::InputMoved);
+        }
+        if let Some(decision) = human_gate(planning, task_id, &plan.revision().plan_branch_id)? {
+            return Ok(
+                if decision.status == HumanDecisionStatus::Consumed
+                    && decision.selected == Some(HumanContinuation::Abort)
+                {
+                    PlanStep::AbortedByHuman(Box::new(decision))
+                } else {
+                    PlanStep::WaitingForHuman(Box::new(decision))
+                },
+            );
+        }
         let Some(predecessors) = plan
             .predecessor_task_ids(task_id)
             .map_err(PlannedOrchestrationError::Planning)?
@@ -443,6 +516,25 @@ impl<C: Clock> OrchestrationService<C> {
             Err(error) => Err(PlannedOrchestrationError::Orchestration(error)),
         }
     }
+}
+
+fn human_gate<C: Clock>(
+    planning: &PlanningService<C>,
+    task_id: &TaskId,
+    branch: &PlanBranchId,
+) -> Result<Option<HumanDecisionRequest>, PlannedOrchestrationError> {
+    let Some(record) = planning
+        .store()
+        .latest_human_decision_for_scope(task_id, branch)
+        .map_err(|error| PlannedOrchestrationError::Planning(error.into()))?
+    else {
+        return Ok(None);
+    };
+    let current = planning
+        .store()
+        .validate_human_decision_current(&record.id, planning.now_millis())
+        .map_err(|error| PlannedOrchestrationError::Planning(error.into()))?;
+    Ok(Some(current))
 }
 
 fn durable_head<C: Clock>(

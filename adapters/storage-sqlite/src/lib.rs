@@ -19,6 +19,7 @@ mod audit_store;
 mod entry_store;
 mod error;
 mod event;
+mod human_decision_store;
 mod journal_store;
 mod migration;
 mod path_security;
@@ -43,6 +44,7 @@ pub use event::{
     AttemptOutcome, EventId, EventType, JournalEvent, NewJournalEvent, PlanRevisionJournalPayload,
     EVENT_SCHEMA_VERSION,
 };
+pub use human_decision_store::NewHumanDecisionRequest;
 pub use migration::SUPPORTED_SCHEMA_VERSION;
 pub use plan_guardrail_store::{PlanGuardrailEvent, PlannerCallSettlement};
 pub use plan_store::{PlanCommitJournalEvidence, PlanRevisionLineage, PlanRevisionLineageRecord};

@@ -63,6 +63,12 @@ pub enum StorageError {
         branch: String,
         expected_fingerprint: String,
     },
+    /// A HumanDecisionRequest no longer describes the canonical state the
+    /// human saw. Continuation always fails closed before mutation.
+    HumanDecisionStale { request_id: String, reason: String },
+    /// A HumanDecisionRequest is durable but its lifecycle does not permit
+    /// the requested resolve/consume transition (including replay).
+    HumanDecisionState { request_id: String, state: String },
 }
 
 impl fmt::Display for StorageError {
@@ -117,6 +123,14 @@ impl fmt::Display for StorageError {
             } => write!(
                 f,
                 "stale planning input for branch {branch}: snapshot fingerprint {expected_fingerprint} is no longer current"
+            ),
+            Self::HumanDecisionStale { request_id, reason } => write!(
+                f,
+                "stale human decision {request_id}: {reason}"
+            ),
+            Self::HumanDecisionState { request_id, state } => write!(
+                f,
+                "human decision {request_id} cannot transition from {state}"
             ),
         }
     }
