@@ -449,3 +449,57 @@ The previous research attributed **"external event as canonical truth"** to Over
 **Existing Runlith protection:** Policy Engine capability scoping, Secret Broker bindings, `INV-099`, `INV-106`, and `INV-146`-`INV-153` separate authenticated executor identity from exact operation/secret/network authority.
 
 **Additional lesson:** Authenticate the worker/device strongly, then grant site credentials, targets, network scope and actions separately. Device identity is evidence about the executor, not a wildcard capability over everything that executor can technically access.
+
+## AP-025 — Comment command treated as write authorization
+
+**Anti-pattern:** A natural-language command in an external issue/PR comment is treated as sufficient authority to start a repository-mutating workflow with write credentials.
+
+**Source:** `SnailSploit/claude-red`
+
+**Revision:** `24d7968bab4b883e7f13477afe0fd91f2df3b722`
+
+**Evidence:** `.github/workflows/skill-optimize-apply.yml:1-21` triggers on every created `issue_comment`, checks only that the issue is a pull request and the body contains `/apply-optimize`, grants `pull-requests: write` plus `contents: write`, and invokes `tesslio/skill-review-and-optimize@bff9490027d60847df6494fdac7dccfb3ad82948` in `mode: apply`. At that pinned action revision, `src/apply.ts:15-29` parses optimized `SKILL.md` content directly from public HTML/Markdown markers in a comment body; `101-125` selects the supposed review comment by marker presence without validating its author; and `51-58,75-99,133-180` obtains `GITHUB_TOKEN`, resolves/checks out the PR branch, writes the parsed content, commits it, and pushes `HEAD:<prBranch>`. No actor-association or trusted-principal authorization check is present in the repository workflow.
+
+**Failure mode:** A commenter can place the expected review marker, a forged optimized-content block, and `/apply-optimize` in comment input, causing the action to treat commenter-authored payload as the review bot's content. On a same-repository PR branch that the workflow token can update, the workflow can commit that accepted `SKILL.md` content even when the commenter has no independent push authority. Fork-branch pushes may fail depending on repository topology, but the mutation decision and payload provenance are still derived from untrusted comment content.
+
+**Security/reliability impact:** Event transport and authorization become coupled. As comment-driven automation gains more operations, an untrusted external event can trigger increasingly privileged mutations without a corresponding principal/capability decision.
+
+**Existing Runlith protection:** G6 canonical Policy/Approval (`INV-146`-`INV-153`) separates a requested operation from effective authority, binds approval to the exact operation/capabilities/provenance/validity, and enforces security-sensitive scope at the privileged operation boundary. External events remain evidence/request inputs rather than authority.
+
+**Additional lesson:** Authenticate who issued an external command and authorize the exact mutation separately from parsing the command text. Command syntax selects an operation; it does not grant permission to perform it.
+
+## AP-026 — Debug request tracing disables credential redaction
+
+**Anti-pattern:** A diagnostic/request-trace mode intentionally disables sensitive-header masking and persists complete request/response material, turning observability output into a secondary secret store.
+
+**Source:** `decolua/9router`
+
+**Revision:** `17c4cc76877bd1755030a8414f8d0083f48dcccf`
+
+**Evidence:** `open-sse/utils/requestLogger.js:60-90,117-175` keeps `maskSensitiveHeaders` disabled with an explicit full-token-for-testing comment and writes client/target request headers plus provider response material to per-request files; `open-sse/handlers/chatCore.js:357-380` invokes target-request trace logging on the live provider request path when request logging is enabled.
+
+**Failure mode:** Enabling troubleshooting creates plaintext files containing authorization/API-key/cookie material and potentially sensitive prompts/provider payloads. A separately sanitized database-observability path does not protect these trace files.
+
+**Security/reliability impact:** Debugging silently widens secret exposure, retention and backup/search surfaces. Operators can accumulate reusable credentials outside the canonical secret lifecycle without an explicit new grant.
+
+**Existing Runlith protection:** ADR-0026, `docs/security/DATA_CLASSIFICATION.md`, Secrets Broker and audit boundaries forbid SECRET values in ordinary logs/files and keep secret material behind explicit scoped delivery.
+
+**Additional lesson:** Redaction belongs at the capture boundary and remains invariant across verbosity/debug modes. Diagnostic detail may increase, but SECRET classification and retention policy must not weaken with it.
+
+## AP-027 — Ordinary application persistence doubles as a provider credential vault
+
+**Anti-pattern:** Provider access/refresh/API credentials are serialized into ordinary application-state rows, so backup/export/read access to the application database also becomes credential-vault access.
+
+**Source:** `decolua/9router`
+
+**Revision:** `17c4cc76877bd1755030a8414f8d0083f48dcccf`
+
+**Evidence:** `src/lib/db/repos/connectionsRepo.js:5-11,52-78` includes `accessToken`, `refreshToken`, `apiKey` and `idToken` in connection data serialized into `providerConnections.data`; `src/lib/db/schema.js:34-52,78-87` stores connection data and application API keys in ordinary TEXT columns; `src/sse/services/tokenRefresh.js:153-210` persists refreshed token material back through the connection update path.
+
+**Failure mode:** A database copy, support bundle, backup, migration/export path or unintended read of application state can expose reusable provider credentials. Rotation/deletion semantics become coupled to generic database lifecycle rather than a dedicated secret backend.
+
+**Security/reliability impact:** The blast radius of application-state compromise expands to external provider authority, while auditing and least-privilege separation between durable orchestration state and secret material weaken.
+
+**Existing Runlith protection:** TASK-0063 / ADR-0026 and SECRET data classification keep credential values in the OS credential backend while SQLite/application state stores opaque references and non-secret metadata only.
+
+**Additional lesson:** Durable state may reference a secret and record its binding/provenance, but generic state persistence, backup and export mechanisms should never become the storage mechanism for the secret value itself.

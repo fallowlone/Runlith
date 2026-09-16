@@ -631,3 +631,76 @@ The previous queue entries below were deleted because overlap analysis disproved
 - backend-specific CDP node IDs remain adapter-private.
 
 **runlith_improvement:** BrowserSkill protects refs inside one browser session with generation/document checks. Runlith can generalize this into a durable, provider-neutral, evidence-bearing action reference that remains safe across adapter replacement and restart.
+
+## IKQ-009 — Registry-derived provider protocol conformance matrix
+
+**id:** `IKQ-009`
+
+**origin_repository:** `https://github.com/decolua/9router`
+
+**origin_revision:** `17c4cc76877bd1755030a8414f8d0083f48dcccf`
+
+**idea:** When Runlith activates the broader AgentProvider protocol surface, derive shared conformance cases from the same provider/model capability and wire-format declarations used by runtime composition so declared support automatically creates executable request/response/tool/stream compatibility obligations.
+
+**novelty:** `PARTIALLY_EXISTS`. Runlith already has a reusable provider-neutral `ExecutionPort` contract suite in `crates/execution-contract`, and the provider anti-corruption/replacement boundary is accepted architecture. The narrower missing delta is explicitly outside that seam: `docs/architecture/providers.md` still leaves the full `AgentProviderPort` detect/capabilities/send shape, capability taxonomy, streaming output contract and provider tool-call normalization open, so no accepted cross-provider protocol conformance matrix exists yet.
+
+**status:** `PARTIALLY_EXISTS`
+
+**existing_runlith:**
+
+- `crates/execution-contract` already proves the G5 execution seam for deterministic success/failure/malformed/timeout behavior and opaque provider references.
+- `docs/architecture/providers.md` requires provider-specific behavior behind the adapter boundary and defines provider replacement as an architecture fitness test.
+- The same provider document explicitly excludes streaming/tool/capability behavior from the current `ExecutionPort` suite and lists those contracts as open design items.
+- Policy, approval, Runner evidence, Task/Execution/Attempt state and completion authority already remain outside provider output/translation semantics.
+
+**files:**
+
+- `crates/execution-contract/src/lib.rs` — current shared provider-neutral execution contract suite.
+- `docs/architecture/providers.md` — §§13a and 16 define the closed execution seam and open broader provider protocol items.
+- `docs/architecture/INVARIANTS.md` — provider neutrality, provider output trust, capability/authority and verification invariants.
+- `planning/roadmap.yaml` and `planning/tasks/queue.yaml` — read-only overlap check; this research does not modify canonical planning or allocate a real task ID.
+
+**invariants:**
+
+- provider-specific types/semantics remain behind provider adaptation boundaries;
+- provider/model output remains untrusted evidence and cannot mark a Task complete;
+- capability declarations describe support/eligibility and never grant Policy authority;
+- provider replacement cannot require unrelated Task, Memory, Workspace, Policy or Runner business-logic changes.
+
+**adrs:** no new ADR is created by this research. The broader AgentProvider contract is already an explicit open provider-design area; if its owning gate needs to freeze new canonical protocol semantics, that gate should decide whether an ADR is required.
+
+**tasks:** no canonical roadmap/task-queue item was changed. Candidate remains `TASK-CANDIDATE` until accepted by orchestration/planning.
+
+**actual_delta:** Define a deterministic shared matrix generated from accepted Runlith provider/model capability and wire-format declarations. Declaring support should automatically require fixtures for canonical request/response semantics, structured tool call/result identity, streaming assembly/termination, reasoning metadata, supported media/modality handling, provider-native passthrough equivalence where applicable, malformed/unsupported inputs, and explicit failure when a mandatory semantic cannot be represented without loss. Keep Task/Execution/Attempt lifecycle, Policy authority, Secrets and trusted execution receipts outside this translation matrix.
+
+**decision:** `ADAPT`
+
+**target_subsystem:** future AgentProvider contract + provider adapter conformance-test infrastructure.
+
+**priority:** `MEDIUM` now; `HIGH` when the full AgentProvider send/capability/stream/tool-call surface or a second materially different production provider protocol becomes active.
+
+**dependencies:**
+
+- accepted broader AgentProvider capability/send/stream/tool-call contracts;
+- a canonical provider capability/format declaration source suitable for generating test cases;
+- deterministic provider fixtures/adapters rather than live-provider tests;
+- at least two materially different protocol paths, or one provider plus a canonical translation fixture corpus, to prove the abstraction is real.
+
+**security_impact:** Positive when used as a fail-closed compatibility gate. Malformed/provider-specific output remains untrusted; translation support cannot widen effective capabilities, bypass Policy/Approval, expose secrets, or substitute provider claims for trusted Runner/Tool receipts.
+
+**architecture_impact:** Low-to-moderate and bounded to provider contracts/tests. It strengthens the existing provider anti-corruption layer without adding provider semantics to Task identity or moving orchestration authority into adapters.
+
+**candidate_task:** `TASK-CANDIDATE — Provider protocol translation conformance matrix`.
+
+**verification_direction:**
+
+- adding/changing a declared provider/model capability or wire-format surface automatically expands required conformance cases;
+- deterministic native and translated paths preserve equivalent canonical meaning for supported message/tool/reasoning/media concerns;
+- tool-call and tool-result identities survive translation and streaming assembly without cross-call confusion;
+- malformed provider frames and unsupported mandatory semantics fail explicitly and cannot become success/completion evidence;
+- streaming termination/partial-output/error behavior is deterministic and provider-neutral at the accepted contract boundary;
+- golden protocol-shape tests are limited to adapter wire contracts, while semantic round-trip/property tests verify provider-neutral meaning;
+- no live provider/network dependency is needed for the shared suite;
+- CI runs the shared matrix for every adapter declaring the relevant contract.
+
+**runlith_improvement:** 9Router demonstrates that registry-derived matrices keep compatibility tests synchronized with provider/model support. Runlith can make that mechanism safer and more durable by deriving tests from accepted provider-neutral contracts, separating capability facts from authority, rejecting lossy mandatory translations explicitly, and preserving independent Verification/Runner evidence outside provider protocol handling.
