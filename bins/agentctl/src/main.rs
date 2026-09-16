@@ -12,14 +12,16 @@ use std::process::ExitCode;
 
 use agentctl::{resolve_production_endpoint, spawn_sibling_daemon, ClientError};
 use ipc_contracts::proto::{
-    execution_core_request, execution_core_response, policy_core_request, policy_core_response,
-    task_core_request, task_core_response, AddDependencyRequest, ApprovalDecision,
-    CancelExecutionRequest, CreateProjectRequest, CreateTaskRequest, DecideApprovalRequest,
+    execution_core_request, execution_core_response, human_decision_core_request,
+    human_decision_core_response, policy_core_request, policy_core_response, task_core_request,
+    task_core_response, AddDependencyRequest, ApprovalDecision, CancelExecutionRequest,
+    CreateProjectRequest, CreateTaskRequest, DecideApprovalRequest, DecideHumanDecisionRequest,
     ExecutionCoreRequest, ExecutionCoreResponse, GetApprovalRequest, GetExecutionRequest,
-    GetProjectRequest, GetTaskRequest, LifecycleRequest, ListDependenciesRequest,
-    ListProjectsRequest, ListTasksForProjectRequest, PolicyCoreRequest, PolicyCoreResponse,
-    ResumeExecutionRequest, RunExecutionRequest, TaskCoreRequest, TaskCoreResponse,
-    TaskLifecycleOp,
+    GetHumanDecisionRequest, GetProjectRequest, GetTaskRequest, HumanContinuationDecision,
+    HumanDecisionCoreRequest, HumanDecisionCoreResponse, HumanDecisionDto, LifecycleRequest,
+    ListDependenciesRequest, ListHumanDecisionsRequest, ListProjectsRequest,
+    ListTasksForProjectRequest, PolicyCoreRequest, PolicyCoreResponse, ResumeExecutionRequest,
+    RunExecutionRequest, TaskCoreRequest, TaskCoreResponse, TaskLifecycleOp,
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -33,8 +35,9 @@ async fn main() -> ExitCode {
         Some("task") => cmd_task(args.collect()).await,
         Some("execution") => cmd_execution(args.collect()).await,
         Some("approval") => cmd_approval(args.collect()).await,
+        Some("human-decision") => cmd_human_decision(args.collect()).await,
         _ => {
-            eprintln!("usage: agentctl <start|ping|shutdown|project|task|execution|approval> ...");
+            eprintln!("usage: agentctl <start|ping|shutdown|project|task|execution|approval|human-decision> ...");
             eprintln!("  agentctl project create <id> <name>");
             eprintln!("  agentctl project get <id>");
             eprintln!("  agentctl project list");
@@ -50,6 +53,9 @@ async fn main() -> ExitCode {
             eprintln!("  agentctl execution resume <execution-id> <repository-path> [--ref <name>] [--rev <R>]");
             eprintln!("  agentctl approval get <approval-request-id>");
             eprintln!("  agentctl approval decide <approval-request-id> <approve|deny>");
+            eprintln!("  agentctl human-decision list");
+            eprintln!("  agentctl human-decision get <request-id>");
+            eprintln!("  agentctl human-decision decide <request-id> <resume|replan|abort>");
             ExitCode::FAILURE
         }
     }
@@ -498,6 +504,174 @@ fn print_approval_capability(label: &str, capability: ipc_contracts::proto::Appr
             capability.kind, workspace, capability.scope
         ),
         None => println!("{label} {} scope={}", capability.kind, capability.scope),
+    }
+}
+
+fn usage_human_decision() -> ExitCode {
+    eprintln!("usage: agentctl human-decision <list|get|decide> ...");
+    eprintln!("  agentctl human-decision list");
+    eprintln!("  agentctl human-decision get <request-id>");
+    eprintln!("  agentctl human-decision decide <request-id> <resume|replan|abort>");
+    ExitCode::FAILURE
+}
+
+fn human_decision_request(args: &[String]) -> Result<HumanDecisionCoreRequest, ()> {
+    match args {
+        [verb] if verb == "list" => Ok(HumanDecisionCoreRequest {
+            payload: Some(human_decision_core_request::Payload::ListPending(
+                ListHumanDecisionsRequest {},
+            )),
+        }),
+        [verb, request_id] if verb == "get" && !request_id.trim().is_empty() => {
+            Ok(HumanDecisionCoreRequest {
+                payload: Some(human_decision_core_request::Payload::Get(
+                    GetHumanDecisionRequest {
+                        request_id: request_id.clone(),
+                    },
+                )),
+            })
+        }
+        [verb, request_id, continuation] if verb == "decide" && !request_id.trim().is_empty() => {
+            let continuation = match continuation.as_str() {
+                "resume" => HumanContinuationDecision::Resume,
+                "replan" => HumanContinuationDecision::Replan,
+                "abort" => HumanContinuationDecision::Abort,
+                _ => return Err(()),
+            };
+            Ok(HumanDecisionCoreRequest {
+                payload: Some(human_decision_core_request::Payload::Decide(
+                    DecideHumanDecisionRequest {
+                        request_id: request_id.clone(),
+                        continuation: continuation as i32,
+                    },
+                )),
+            })
+        }
+        _ => Err(()),
+    }
+}
+
+#[cfg(unix)]
+async fn cmd_human_decision(args: Vec<String>) -> ExitCode {
+    let endpoint = match resolve_production_endpoint() {
+        Ok(endpoint) => endpoint,
+        Err(error) => return fail(&error),
+    };
+    let request = match human_decision_request(&args) {
+        Ok(request) => request,
+        Err(_) => return usage_human_decision(),
+    };
+    run_human_decision(&endpoint, request).await
+}
+
+#[cfg(windows)]
+async fn cmd_human_decision(args: Vec<String>) -> ExitCode {
+    let pipe_name = match resolve_production_endpoint() {
+        Ok(pipe_name) => pipe_name,
+        Err(error) => return fail(&error),
+    };
+    let request = match human_decision_request(&args) {
+        Ok(request) => request,
+        Err(_) => return usage_human_decision(),
+    };
+    run_human_decision(&pipe_name, request).await
+}
+
+#[cfg(unix)]
+async fn run_human_decision(
+    endpoint: &ipc_transport::platform::unix::UnixEndpoint,
+    request: HumanDecisionCoreRequest,
+) -> ExitCode {
+    match agentctl::human_decision_request(endpoint, spawn_sibling_daemon, request).await {
+        Ok(response) => print_human_decision_response(response),
+        Err(error) => fail(&error),
+    }
+}
+
+#[cfg(windows)]
+async fn run_human_decision(pipe_name: &str, request: HumanDecisionCoreRequest) -> ExitCode {
+    match agentctl::human_decision_request(pipe_name, spawn_sibling_daemon, request).await {
+        Ok(response) => print_human_decision_response(response),
+        Err(error) => fail(&error),
+    }
+}
+
+fn print_human_decision_response(response: HumanDecisionCoreResponse) -> ExitCode {
+    match response.payload {
+        Some(human_decision_core_response::Payload::ListPending(response)) => {
+            for decision in response.decisions {
+                print_human_decision(decision);
+            }
+            ExitCode::SUCCESS
+        }
+        Some(human_decision_core_response::Payload::Get(response)) => {
+            let Some(decision) = response.decision else {
+                return fail(&ClientError::HumanDecisionAmbiguous(
+                    "daemon omitted the human decision dto".to_owned(),
+                ));
+            };
+            print_human_decision(decision);
+            ExitCode::SUCCESS
+        }
+        Some(human_decision_core_response::Payload::Decide(response)) => {
+            let Some(decision) = response.decision else {
+                return fail(&ClientError::HumanDecisionAmbiguous(
+                    "daemon omitted the human decision dto".to_owned(),
+                ));
+            };
+            print_human_decision(decision);
+            ExitCode::SUCCESS
+        }
+        Some(human_decision_core_response::Payload::Error(error)) => {
+            eprintln!(
+                "error {}: {}",
+                business_error_name(error.code),
+                error.message
+            );
+            ExitCode::FAILURE
+        }
+        None => fail(&ClientError::HumanDecisionAmbiguous(
+            "daemon sent an empty human-decision response".to_owned(),
+        )),
+    }
+}
+
+fn print_human_decision(decision: HumanDecisionDto) {
+    println!(
+        "human-decision {} {} task={} branch={} version={} risk={} plan_head={} snapshot={}",
+        decision.request_id,
+        decision.status,
+        decision.task_id,
+        decision.plan_branch_id,
+        decision.request_version,
+        decision.risk,
+        decision.plan_head,
+        decision.planning_input_snapshot_id
+    );
+    println!("scope {}", decision.affected_scope.join(","));
+    println!(
+        "options {}",
+        decision
+            .options
+            .into_iter()
+            .map(human_continuation_name)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    if let Some(selected) = decision.selected {
+        println!("selected {}", human_continuation_name(selected));
+    }
+    if let Some(consumed_at_ms) = decision.consumed_at_ms {
+        println!("consumed_at_ms {consumed_at_ms}");
+    }
+}
+
+fn human_continuation_name(value: i32) -> &'static str {
+    match HumanContinuationDecision::try_from(value) {
+        Ok(HumanContinuationDecision::Resume) => "RESUME",
+        Ok(HumanContinuationDecision::Replan) => "REPLAN",
+        Ok(HumanContinuationDecision::Abort) => "ABORT",
+        _ => "UNSPECIFIED",
     }
 }
 

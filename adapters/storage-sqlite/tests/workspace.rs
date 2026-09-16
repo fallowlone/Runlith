@@ -11,7 +11,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::os::unix::fs::PermissionsExt;
 
 use agent_runtime::{Execution, ExecutionId};
-use storage_sqlite::{EventType, NewJournalEvent, SqliteStore, StorageError, EVENT_SCHEMA_VERSION};
+use storage_sqlite::{
+    EventType, NewJournalEvent, SqliteStore, StorageError, EVENT_SCHEMA_VERSION,
+    SUPPORTED_SCHEMA_VERSION,
+};
 use task_domain::{Project, ProjectId, Task, TaskId};
 use workspace::{
     BranchRef, LeaseLifecycle, RepositoryRef, Revision, WorkspaceEventKind, WorkspaceFailure,
@@ -760,7 +763,7 @@ fn v4_database_with_g2_g3_data_migrates_preserving_everything() {
             .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 14);
+    assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
 
     // Every historical fact survives verbatim: seq, ids, types, versions,
     // scopes, outcomes, states, correlation/causation, timestamps,
@@ -891,7 +894,7 @@ fn v5_database_with_lease_migrates_to_v7_preserving_everything() {
             .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 14);
+    assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
 
     // Execution with its still-open attempt survived.
     let execution = store

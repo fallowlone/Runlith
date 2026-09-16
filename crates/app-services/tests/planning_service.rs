@@ -8,22 +8,23 @@ use std::sync::Mutex;
 
 use agent_runtime::{AttemptId, ExecutionId, ProviderRef};
 use app_services::{
-    FixedClock, OrchestrationIds, OrchestrationService, PlanApplicabilityRefusal,
-    PlannedExecutionEntryOutcome, PlannedOrchestrationOutcome, PlanningAssessmentOutcome,
-    PlanningPolicyContext, PlanningProposalOutcome, PlanningService, PlanningServiceError,
-    RuntimeService, TaskService,
+    FixedClock, HumanDecisionCreate, HumanDecisionService, OrchestrationIds, OrchestrationService,
+    PlanApplicabilityRefusal, PlannedExecutionEntryOutcome, PlannedOrchestrationOutcome,
+    PlanningAssessmentOutcome, PlanningPolicyContext, PlanningProposalOutcome, PlanningService,
+    PlanningServiceError, RuntimeService, TaskService,
 };
 use fake_evaluator::{EvaluatorMode, FakeEvaluator};
 use fake_planner::{FakePlanner, FakePlannerScenario};
 use plan_domain::{
     compute_proposal_hash, planning_evidence_key, AffectedParentCriterion, AtomicityAssessment,
     AtomicityRequest, AtomicityVerdict, BudgetDelta, CriterionDecl, CriterionId,
-    DecompositionRequest, EdgeAddition, EvidenceRef, NodeAddition, PlanBranchId, PlanChangeSet,
-    PlanNodeId, PlanScope, PlannerAdapterId, PlannerCallSpend, PlannerFault, PlannerIdentity,
-    PlannerPort, PlanningBudget, PlanningCostReceipt, PlanningInputSnapshot, ReplanRequest,
-    RiskClass, ScopeBound, ValidationRefusal, VerificationMethod,
-    MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH, MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
-    MAX_PLANNER_INPUT_TOKENS,
+    DecompositionRequest, EdgeAddition, EvidenceRef, GateRef, HumanContinuation,
+    HumanDecisionReason, HumanDecisionRequest, HumanDecisionRequestId, HumanDecisionStatus,
+    NodeAddition, PlanBranchId, PlanChangeSet, PlanNodeId, PlanScope, PlannerAdapterId,
+    PlannerCallSpend, PlannerFault, PlannerIdentity, PlannerPort, PlanningBudget,
+    PlanningCostReceipt, PlanningInputSnapshot, ReplanRequest, RiskClass, RiskDelta, ScopeBound,
+    ValidationRefusal, VerificationMethod, MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
+    MAX_PLANNER_CUMULATIVE_INPUT_TOKENS, MAX_PLANNER_INPUT_TOKENS,
 };
 use scheduler::{ExecutionPort, ExecutionProblem, WorkEvidence, WorkItem};
 use storage_sqlite::{
@@ -106,6 +107,7 @@ impl Drop for TestDb {
 #[derive(Clone, Copy, Debug)]
 enum ProposalCase {
     Valid,
+    RiskEscalation,
     Cyclic,
     InvalidHash,
     MissingCriteria,
@@ -186,6 +188,16 @@ impl TestPlanner {
         };
 
         match self.case {
+            ProposalCase::RiskEscalation => {
+                proposal.node_additions[0].risk_class = RiskClass::High;
+                proposal.node_additions[0].required_gate =
+                    Some(GateRef::new("human-review").expect("gate"));
+                proposal.risk_delta = vec![RiskDelta {
+                    node: child_id.clone(),
+                    from: RiskClass::Low,
+                    to: RiskClass::High,
+                }];
+            }
             ProposalCase::Cyclic => {
                 let second =
                     PlanNodeId::new(format!("node-cycle-{}", input.base_plan_revision + 1))
@@ -490,6 +502,7 @@ fn policy(with_criterion: bool) -> PlanningPolicyContext {
         parent_task_ref: "TASK-0078".to_owned(),
         lineage_fingerprints: vec![],
         risk_grant: None,
+        risk_decision_id: None,
         policy_fingerprint: "policy:test".to_owned(),
     }
 }
@@ -554,6 +567,72 @@ fn seed_head(db: &TestDb, target: u64) {
             "seed revision {revision}: {outcome:?}"
         );
     }
+}
+
+fn create_human_decision(
+    db: &TestDb,
+    task_id: &str,
+    options: Vec<HumanContinuation>,
+) -> HumanDecisionRequest {
+    let accepted = db
+        .service()
+        .current_accepted_plan(&branch())
+        .expect("current accepted plan")
+        .expect("accepted plan required");
+    let mut service = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS));
+    service
+        .create(HumanDecisionCreate {
+            task_id: TaskId::new(task_id).expect("task id"),
+            plan_branch_id: branch(),
+            reason: HumanDecisionReason::PlannerBlocked,
+            risk: RiskClass::Low,
+            affected_scope: ScopeBound::new(vec!["repo:src".to_owned()]).expect("scope"),
+            options,
+            recommendation: None,
+            evidence: vec![evidence("human-decision-fixture")],
+            proposal_hash: None,
+            plan_head: accepted.revision().revision_seq,
+            planning_input_snapshot_id: accepted.planning_input_snapshot_id().clone(),
+            planning_input_fingerprint: accepted.planning_input_fingerprint().to_owned(),
+            policy_fingerprint: "policy:test".to_owned(),
+            expires_at_ms: None,
+        })
+        .expect("create human decision")
+}
+
+fn replace_current_planning_input(
+    db: &TestDb,
+    scope_roots: Vec<&str>,
+    risk: RiskClass,
+    policy_fingerprint: &str,
+    evidence_ref: &str,
+) {
+    let accepted = db
+        .service()
+        .current_accepted_plan(&branch())
+        .expect("accepted plan query")
+        .expect("accepted plan");
+    let trigger = vec![evidence(evidence_ref)];
+    let snapshot = PlanningInputSnapshot::new(
+        branch(),
+        "TASK-0078".to_owned(),
+        accepted.revision().revision_seq,
+        ScopeBound::new(scope_roots.into_iter().map(str::to_owned).collect()).expect("scope"),
+        risk,
+        vec![],
+        trigger.clone(),
+        vec![],
+        None,
+        policy_fingerprint.to_owned(),
+    )
+    .expect("replacement snapshot");
+    db.store()
+        .start_planning_run(
+            &snapshot,
+            &planning_evidence_key(&trigger),
+            FIXED_MILLIS + 1,
+        )
+        .expect("replace planning input");
 }
 
 fn measured_fault(input_tokens: u32) -> PlannerFault {
@@ -863,6 +942,7 @@ fn policy_weakening_is_rejected_before_persistence() {
 #[test]
 fn provider_failure_consumes_conservative_budget_without_fabricating_usage_evidence() {
     let db = TestDb::new("provider-failure-budget");
+    db.seed_tasks(&["TASK-0078"], true);
     let mut service = db.service();
     let planner = FakePlanner::for_scenario(FakePlannerScenario::ProviderFailure);
     let trigger = [evidence("provider-failure")];
@@ -902,7 +982,9 @@ fn provider_failure_consumes_conservative_budget_without_fabricating_usage_evide
         .expect("ninth attempt is stopped before provider call");
     assert!(matches!(
         stopped,
-        PlanningProposalOutcome::GuardrailTripped(_)
+        PlanningProposalOutcome::WaitingForHuman(ref decision)
+            if decision.reason == HumanDecisionReason::PlannerBudget
+                && decision.options == [HumanContinuation::Replan, HumanContinuation::Abort]
     ));
     assert_eq!(
         planner.call_count(),
@@ -944,6 +1026,7 @@ fn pre_provider_refusal_counts_the_call_but_charges_no_tokens() {
 #[test]
 fn atomicity_assessment_shares_the_bounded_recorded_call_budget() {
     let db = TestDb::new("assessment-budget");
+    db.seed_tasks(&["TASK-0078"], true);
     let mut service = db.service();
     let planner = FakePlanner::for_scenario(FakePlannerScenario::Valid);
     let trigger = [evidence("assessment")];
@@ -973,10 +1056,13 @@ fn atomicity_assessment_shares_the_bounded_recorded_call_budget() {
             &policy(false),
         )
         .expect("bounded assessment");
-    assert!(matches!(
-        stopped,
-        PlanningAssessmentOutcome::GuardrailTripped(trip) if trip.bound == "planner-calls"
-    ));
+    let decision_id = match stopped {
+        PlanningAssessmentOutcome::WaitingForHuman(decision) => {
+            assert_eq!(decision.reason, HumanDecisionReason::PlannerBudget);
+            decision.id
+        }
+        other => panic!("expected planner-budget human decision, got {other:?}"),
+    };
     assert_eq!(
         planner.call_count(),
         MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH as usize
@@ -986,7 +1072,7 @@ fn atomicity_assessment_shares_the_bounded_recorded_call_budget() {
         .expect("proposal shares the event budget");
     assert!(matches!(
         stopped_proposal,
-        PlanningProposalOutcome::GuardrailTripped(_)
+        PlanningProposalOutcome::WaitingForHuman(decision) if decision.id == decision_id
     ));
     assert_eq!(
         planner.call_count(),
@@ -1126,6 +1212,7 @@ fn post_call_over_envelope_usage_is_charged_and_durably_receipted() {
 #[test]
 fn repeated_post_call_budget_excess_cannot_bypass_the_cumulative_limit() {
     let db = TestDb::new("claude-cumulative");
+    db.seed_tasks(&["TASK-0078"], true);
     let fixture = claude_fixture::fixture(
         &db,
         "cumulative",
@@ -1164,10 +1251,10 @@ fn repeated_post_call_budget_excess_cannot_bypass_the_cumulative_limit() {
     assert_eq!(state.charged_input_tokens, 7 * 40_005);
     assert!(state.charged_input_tokens > u64::from(MAX_PLANNER_CUMULATIVE_INPUT_TOKENS));
     match last.expect("calls ran") {
-        PlanningProposalOutcome::GuardrailTripped(trip) => {
-            assert_eq!(trip.bound, "planner-input-tokens");
+        PlanningProposalOutcome::WaitingForHuman(decision) => {
+            assert_eq!(decision.reason, HumanDecisionReason::PlannerBudget);
         }
-        other => panic!("expected cumulative token guardrail, got {other:?}"),
+        other => panic!("expected cumulative-budget human decision, got {other:?}"),
     }
     for call in 1..=7 {
         assert!(service
@@ -1260,6 +1347,7 @@ fn provider_failure_without_usage_is_charged_conservatively_without_receipt() {
 #[test]
 fn planner_call_budget_is_hard_and_prevents_ninth_call() {
     let db = TestDb::new("call-budget");
+    db.seed_tasks(&["TASK-0078"], true);
     let planner = FaultPlanner::new(measured_fault(100));
     let trigger = [evidence("same-evidence")];
 
@@ -1308,10 +1396,14 @@ fn planner_call_budget_is_hard_and_prevents_ninth_call() {
         )
         .expect("budget trip");
     match blocked {
-        PlanningProposalOutcome::GuardrailTripped(trip) => {
-            assert_eq!(trip.bound, "planner-calls");
+        PlanningProposalOutcome::WaitingForHuman(decision) => {
+            assert_eq!(decision.reason, HumanDecisionReason::PlannerBudget);
+            assert_eq!(
+                decision.options,
+                vec![HumanContinuation::Replan, HumanContinuation::Abort]
+            );
         }
-        other => panic!("expected planner call guardrail, got {other:?}"),
+        other => panic!("expected planner-budget human decision, got {other:?}"),
     }
     assert_eq!(
         planner.call_count(),
@@ -1362,6 +1454,7 @@ fn cumulative_token_budget_survives_restart_for_same_evidence() {
 #[test]
 fn l3_no_progress_survives_restart_for_same_evidence() {
     let db = TestDb::new("l3-restart");
+    db.seed_tasks(&["TASK-0078"], true);
     let planner = TestPlanner::new(ProposalCase::InvalidHash);
 
     let first = db
@@ -1377,10 +1470,17 @@ fn l3_no_progress_survives_restart_for_same_evidence() {
         .service()
         .propose_decomposition(&planner, &branch(), request("l3-evidence"), &policy(false))
         .expect("second rejection");
-    match second {
-        PlanningProposalOutcome::GuardrailTripped(trip) => assert_eq!(trip.bound, "no-progress"),
-        other => panic!("second same-evidence rejection after restart must trip L3, got {other:?}"),
-    }
+    let decision_id = match second {
+        PlanningProposalOutcome::WaitingForHuman(decision) => {
+            assert_eq!(decision.reason, HumanDecisionReason::NoProgress);
+            assert_eq!(
+                decision.options,
+                vec![HumanContinuation::Replan, HumanContinuation::Abort]
+            );
+            decision.id
+        }
+        other => panic!("second same-evidence rejection must escalate to human, got {other:?}"),
+    };
 
     let third = db
         .service()
@@ -1388,7 +1488,7 @@ fn l3_no_progress_survives_restart_for_same_evidence() {
         .expect("tripped branch");
     assert!(matches!(
         third,
-        PlanningProposalOutcome::GuardrailTripped(trip) if trip.bound == "no-progress"
+        PlanningProposalOutcome::WaitingForHuman(decision) if decision.id == decision_id
     ));
     assert_eq!(
         planner.call_count(),
@@ -1561,6 +1661,7 @@ fn structurally_valid_plan_without_runnable_task_trips_l4_before_commit() {
         ("task-not-ready", &["planned-child-0"][..], false),
     ] {
         let db = TestDb::new(label);
+        db.seed_tasks(&["TASK-0078"], true);
         db.seed_tasks(seeded, ready);
         let outcome = db
             .service()
@@ -1570,13 +1671,15 @@ fn structurally_valid_plan_without_runnable_task_trips_l4_before_commit() {
                 request(label),
                 &policy(true),
             )
-            .expect("L4 trip is typed");
+            .expect("L4 escalation is typed");
         assert!(
             matches!(
                 outcome,
-                PlanningProposalOutcome::GuardrailTripped(ref trip) if trip.bound == "runnable-leaf"
+                PlanningProposalOutcome::WaitingForHuman(ref decision)
+                    if decision.reason == HumanDecisionReason::PlannerBlocked
+                        && decision.options == [HumanContinuation::Replan, HumanContinuation::Abort]
             ),
-            "{label}: a sink node without runnable canonical work must not pass L4, got {outcome:?}"
+            "{label}: a sink node without runnable canonical work must escalate L4, got {outcome:?}"
         );
         assert_no_plan_persisted(&db);
     }
@@ -2032,4 +2135,474 @@ fn stale_planning_input_at_admission_with_unchanged_plan_head_rolls_back_everyth
                 EventType::Claimed | EventType::Started | EventType::ExecutionCreated
             )
         }));
+}
+
+// ---------------------------------------------------------------------------
+// TASK-0079: bounded durable Human Decision Queue
+// ---------------------------------------------------------------------------
+
+#[test]
+fn risk_decision_survives_restart_and_resume_is_consumed_with_plan_commit() {
+    let db = TestDb::new("human-risk-resume");
+    db.seed_tasks(&["TASK-0078", "node-1"], true);
+    let planner = TestPlanner::new(ProposalCase::RiskEscalation);
+
+    let waiting = db
+        .service()
+        .propose_decomposition(
+            &planner,
+            &branch(),
+            request("risk-needs-human"),
+            &policy(false),
+        )
+        .expect("risk escalation produces a bounded decision request");
+    let decision = match waiting {
+        PlanningProposalOutcome::WaitingForHuman(decision) => *decision,
+        other => panic!("expected human decision request, got {other:?}"),
+    };
+    assert_eq!(decision.reason, HumanDecisionReason::RiskEscalation);
+    assert_eq!(decision.status, HumanDecisionStatus::Pending);
+    assert_eq!(decision.risk, RiskClass::High);
+    assert_eq!(db.store().get_plan_head(&branch()).unwrap(), None);
+
+    let calls_before_retry = planner.call_count();
+    let repeated = db
+        .service()
+        .propose_decomposition(
+            &planner,
+            &branch(),
+            request("risk-needs-human"),
+            &policy(false),
+        )
+        .expect("pending human decision remains the planning gate");
+    assert!(matches!(
+        repeated,
+        PlanningProposalOutcome::WaitingForHuman(ref existing) if existing.id == decision.id
+    ));
+    assert_eq!(
+        planner.call_count(),
+        calls_before_retry,
+        "a pending V9 decision cannot be bypassed by asking the planner again"
+    );
+
+    // A new service handle over the same SQLite file is the daemon-restart
+    // boundary. The request and its exact preconditions survive it.
+    let mut human = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS));
+    assert_eq!(human.get(&decision.id).unwrap(), Some(decision.clone()));
+    assert_eq!(human.list_pending().unwrap(), vec![decision.clone()]);
+    human
+        .decide(&decision.id, HumanContinuation::Resume, "operator:test")
+        .expect("resolve after restart");
+    let grant = human.risk_grant(&decision.id).expect("bound V9 grant");
+    drop(human);
+
+    // RESUME re-enters the ordinary G7 planning path. TASK-0078 correctly
+    // gives the grant-bearing retry a new PlanningInputSnapshot fingerprint;
+    // commit accepts only that exact derived transition and consumes the
+    // source decision in the same SQLite transaction as revision 1.
+    let mut resumed_policy = policy(false);
+    resumed_policy.risk_grant = Some(grant);
+    resumed_policy.risk_decision_id = Some(decision.id.clone());
+    let accepted = db
+        .service()
+        .propose_decomposition(
+            &planner,
+            &branch(),
+            request("risk-needs-human"),
+            &resumed_policy,
+        )
+        .expect("exact resumed proposal commits");
+    assert!(matches!(accepted, PlanningProposalOutcome::Accepted(_)));
+    assert_eq!(db.store().get_plan_head(&branch()).unwrap(), Some(1));
+
+    let persisted = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS))
+        .get(&decision.id)
+        .unwrap()
+        .expect("decision after commit");
+    assert_eq!(persisted.status, HumanDecisionStatus::Consumed);
+    assert_eq!(persisted.selected, Some(HumanContinuation::Resume));
+    assert!(persisted.consumed_at_ms.is_some());
+    assert_eq!(planner.call_count(), 2);
+}
+
+#[test]
+fn risk_decision_replan_uses_original_policy_input_and_normal_g7_boundary() {
+    let db = TestDb::new("human-risk-replan");
+    db.seed_tasks(&["TASK-0078", "node-1"], true);
+    let waiting = db
+        .service()
+        .propose_decomposition(
+            &TestPlanner::new(ProposalCase::RiskEscalation),
+            &branch(),
+            request("risk-replan"),
+            &policy(false),
+        )
+        .unwrap();
+    let decision = match waiting {
+        PlanningProposalOutcome::WaitingForHuman(decision) => *decision,
+        other => panic!("expected risk decision, got {other:?}"),
+    };
+    let mut human = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS));
+    human
+        .decide(&decision.id, HumanContinuation::Replan, "operator:test")
+        .unwrap();
+
+    let replan_planner = TestPlanner::new(ProposalCase::Valid);
+    let mut planning = db.service();
+    let outcome = human
+        .apply_replan(&mut planning, &replan_planner, &decision.id, &policy(false))
+        .expect("risk REPLAN uses the original canonical policy baseline");
+    assert!(matches!(outcome, PlanningProposalOutcome::Accepted(_)));
+    assert_eq!(replan_planner.call_count(), 1);
+    assert_eq!(db.store().get_plan_head(&branch()).unwrap(), Some(1));
+    assert_eq!(
+        human.get(&decision.id).unwrap().unwrap().status,
+        HumanDecisionStatus::Consumed
+    );
+}
+
+#[test]
+fn raw_risk_grant_without_durable_decision_binding_cannot_publish() {
+    let db = TestDb::new("human-risk-no-binding");
+    db.seed_tasks(&["TASK-0078", "node-1"], true);
+    let planner = TestPlanner::new(ProposalCase::RiskEscalation);
+    let waiting = db
+        .service()
+        .propose_decomposition(
+            &planner,
+            &branch(),
+            request("risk-no-binding"),
+            &policy(false),
+        )
+        .unwrap();
+    let decision = match waiting {
+        PlanningProposalOutcome::WaitingForHuman(decision) => *decision,
+        other => panic!("expected human decision, got {other:?}"),
+    };
+    let mut human = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS));
+    human
+        .decide(&decision.id, HumanContinuation::Resume, "operator:test")
+        .unwrap();
+    let grant = human.risk_grant(&decision.id).unwrap();
+    drop(human);
+
+    let mut bearer_only = policy(false);
+    bearer_only.risk_grant = Some(grant);
+    let error = db
+        .service()
+        .propose_decomposition(
+            &planner,
+            &branch(),
+            request("risk-no-binding"),
+            &bearer_only,
+        )
+        .expect_err("raw grant is not publication authority");
+    assert!(matches!(error, PlanningServiceError::InvalidContext(_)));
+    assert_eq!(db.store().get_plan_head(&branch()).unwrap(), None);
+}
+
+#[test]
+fn resume_is_restart_durable_once_only_and_reopens_only_owner_scope() {
+    let db = TestDb::new("human-resume-restart");
+    seed_head(&db, 1);
+    let task_id = TaskId::new("node-1").unwrap();
+    let decision = create_human_decision(
+        &db,
+        task_id.as_str(),
+        vec![HumanContinuation::Resume, HumanContinuation::Abort],
+    );
+
+    // Restart between request and response.
+    let mut human = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS));
+    assert_eq!(human.list_pending().unwrap().len(), 1);
+    human
+        .decide(&decision.id, HumanContinuation::Resume, "operator:test")
+        .unwrap();
+    drop(human);
+
+    // Restart after response and before continuation. The resolved row is
+    // durable and is consumed exactly once.
+    let mut restarted = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS));
+    assert_eq!(
+        restarted.get(&decision.id).unwrap().unwrap().status,
+        HumanDecisionStatus::Resolved
+    );
+    let consumed = restarted.apply_local(&decision.id).expect("apply resume");
+    assert_eq!(consumed.status, HumanDecisionStatus::Consumed);
+    let replay = restarted
+        .apply_local(&decision.id)
+        .expect_err("consumed decision cannot replay");
+    assert!(matches!(
+        replay,
+        app_services::ServiceError::Storage(StorageError::HumanDecisionState { .. })
+    ));
+    drop(restarted);
+
+    let mut orchestration = db.orchestration();
+    let outcome = orchestration
+        .enter_from_current_plan(&db.service(), &task_id, ids("HDQ-RESUME"))
+        .expect("resume removes bounded gate");
+    assert!(matches!(
+        outcome,
+        PlannedExecutionEntryOutcome::Entered { .. }
+    ));
+    assert_eq!(db.store().get_plan_head(&branch()).unwrap(), Some(1));
+}
+
+#[test]
+fn pending_and_abort_block_only_owner_while_independent_task_enters() {
+    let db = TestDb::new("human-bounded-blocking");
+    seed_head(&db, 2);
+    let task_a = TaskId::new("node-1").unwrap();
+    let task_b = TaskId::new("node-2").unwrap();
+    let decision = create_human_decision(
+        &db,
+        task_a.as_str(),
+        vec![
+            HumanContinuation::Resume,
+            HumanContinuation::Replan,
+            HumanContinuation::Abort,
+        ],
+    );
+    let planning = db.service();
+    let mut orchestration = db.orchestration();
+
+    let waiting = orchestration
+        .enter_from_current_plan(&planning, &task_a, ids("HDQ-A-WAIT"))
+        .expect("owner is gated");
+    assert!(matches!(
+        waiting,
+        PlannedExecutionEntryOutcome::WaitingForHuman { .. }
+    ));
+    assert_eq!(
+        db.store().get_task(&task_a).unwrap().unwrap().state(),
+        TaskState::Ready
+    );
+
+    let independent = orchestration
+        .enter_from_current_plan(&planning, &task_b, ids("HDQ-B-INDEPENDENT"))
+        .expect("independent task remains runnable");
+    assert!(matches!(
+        independent,
+        PlannedExecutionEntryOutcome::Entered { .. }
+    ));
+    assert_eq!(
+        db.store().get_task(&task_b).unwrap().unwrap().state(),
+        TaskState::Running
+    );
+
+    let mut human = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS));
+    human
+        .decide(&decision.id, HumanContinuation::Abort, "operator:test")
+        .unwrap();
+    human
+        .apply_local(&decision.id)
+        .expect("consume bounded abort");
+    drop(human);
+
+    let aborted = orchestration
+        .enter_from_current_plan(&planning, &task_a, ids("HDQ-A-ABORT"))
+        .expect("abort is a bounded outcome");
+    assert!(matches!(
+        aborted,
+        PlannedExecutionEntryOutcome::AbortedByHuman { .. }
+    ));
+    assert_eq!(
+        db.store().get_task(&task_a).unwrap().unwrap().state(),
+        TaskState::Ready
+    );
+    assert_eq!(
+        db.store().get_task(&task_b).unwrap().unwrap().state(),
+        TaskState::Running,
+        "ABORT on A must not cancel or mutate independent B"
+    );
+}
+
+#[test]
+fn human_decision_stale_fences_task_plan_snapshot_scope_and_risk_changes() {
+    // Task state/evidence changed.
+    let db = TestDb::new("human-stale-task");
+    seed_head(&db, 1);
+    let decision = create_human_decision(&db, "node-1", vec![HumanContinuation::Resume]);
+    TaskService::open(&db.path, FixedClock(FIXED_MILLIS))
+        .unwrap()
+        .claim(&TaskId::new("node-1").unwrap())
+        .unwrap();
+    let error = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS))
+        .decide(&decision.id, HumanContinuation::Resume, "operator:test")
+        .expect_err("Task mutation makes decision stale");
+    assert!(matches!(
+        error,
+        app_services::ServiceError::Storage(StorageError::HumanDecisionStale { ref reason, .. })
+            if reason.contains("Task state")
+    ));
+
+    // Plan head moved.
+    let db = TestDb::new("human-stale-head");
+    seed_head(&db, 1);
+    let decision = create_human_decision(&db, "node-1", vec![HumanContinuation::Resume]);
+    assert!(matches!(
+        db.service()
+            .propose_decomposition(
+                &TestPlanner::new(ProposalCase::Valid),
+                &branch(),
+                request("move-head-after-decision"),
+                &policy(false),
+            )
+            .unwrap(),
+        PlanningProposalOutcome::Accepted(_)
+    ));
+    let error = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS))
+        .decide(&decision.id, HumanContinuation::Resume, "operator:test")
+        .expect_err("moved Plan head makes decision stale");
+    assert!(matches!(
+        error,
+        app_services::ServiceError::Storage(StorageError::HumanDecisionStale { ref reason, .. })
+            if reason == "Plan head moved"
+    ));
+
+    // Same Plan head, new snapshot/fingerprint only.
+    let db = TestDb::new("human-stale-snapshot");
+    seed_head(&db, 1);
+    let decision = create_human_decision(&db, "node-1", vec![HumanContinuation::Resume]);
+    replace_current_planning_input(
+        &db,
+        vec!["repo:src"],
+        RiskClass::Low,
+        "policy:test",
+        "snapshot-only-change",
+    );
+    let error = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS))
+        .decide(&decision.id, HumanContinuation::Resume, "operator:test")
+        .expect_err("changed snapshot makes decision stale");
+    assert!(matches!(
+        error,
+        app_services::ServiceError::Storage(StorageError::HumanDecisionStale { ref reason, .. })
+            if reason == "PlanningInputSnapshot changed"
+    ));
+
+    // Scope widened under the same Plan head.
+    let db = TestDb::new("human-stale-scope");
+    seed_head(&db, 1);
+    let decision = create_human_decision(&db, "node-1", vec![HumanContinuation::Resume]);
+    replace_current_planning_input(
+        &db,
+        vec!["repo:src", "repo:other"],
+        RiskClass::Low,
+        "policy:test",
+        "scope-widened",
+    );
+    let error = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS))
+        .decide(&decision.id, HumanContinuation::Resume, "operator:test")
+        .expect_err("widened scope makes decision stale");
+    assert!(matches!(
+        error,
+        app_services::ServiceError::Storage(StorageError::HumanDecisionStale { ref reason, .. })
+            if reason == "affected scope widened"
+    ));
+
+    // Risk increased under the same Plan head.
+    let db = TestDb::new("human-stale-risk");
+    seed_head(&db, 1);
+    let decision = create_human_decision(&db, "node-1", vec![HumanContinuation::Resume]);
+    replace_current_planning_input(
+        &db,
+        vec!["repo:src"],
+        RiskClass::High,
+        "policy:test",
+        "risk-increased",
+    );
+    let error = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS))
+        .decide(&decision.id, HumanContinuation::Resume, "operator:test")
+        .expect_err("increased risk makes decision stale");
+    assert!(matches!(
+        error,
+        app_services::ServiceError::Storage(StorageError::HumanDecisionStale { ref reason, .. })
+            if reason == "risk increased"
+    ));
+}
+
+#[test]
+fn invalid_unknown_superseded_and_duplicate_human_decisions_fail_closed() {
+    let db = TestDb::new("human-lifecycle-refusals");
+    seed_head(&db, 1);
+    let first = create_human_decision(&db, "node-1", vec![HumanContinuation::Resume]);
+    let second = create_human_decision(&db, "node-1", vec![HumanContinuation::Abort]);
+    let mut human = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS));
+
+    let superseded = human
+        .decide(&first.id, HumanContinuation::Resume, "operator:test")
+        .expect_err("older request was superseded");
+    assert!(matches!(
+        superseded,
+        app_services::ServiceError::Storage(StorageError::HumanDecisionState { ref state, .. })
+            if state == "SUPERSEDED"
+    ));
+
+    let invalid = human
+        .decide(&second.id, HumanContinuation::Resume, "operator:test")
+        .expect_err("option outside bounded set is refused");
+    assert!(matches!(
+        invalid,
+        app_services::ServiceError::Storage(StorageError::ConstraintViolation(_))
+    ));
+
+    let unknown = HumanDecisionRequestId::new("hdr-unknown").unwrap();
+    let missing = human
+        .decide(&unknown, HumanContinuation::Abort, "operator:test")
+        .expect_err("unknown id is typed not-found");
+    assert!(matches!(
+        missing,
+        app_services::ServiceError::Storage(StorageError::NotFound(_))
+    ));
+
+    human
+        .decide(&second.id, HumanContinuation::Abort, "operator:test")
+        .expect("allowed option resolves");
+    human.apply_local(&second.id).expect("first consume");
+    let duplicate = human
+        .apply_local(&second.id)
+        .expect_err("duplicate consume is refused");
+    assert!(matches!(
+        duplicate,
+        app_services::ServiceError::Storage(StorageError::HumanDecisionState { ref state, .. })
+            if state == "CONSUMED"
+    ));
+}
+
+#[test]
+fn replan_decision_uses_normal_g7_planning_boundary_and_is_once_only() {
+    let db = TestDb::new("human-replan");
+    seed_head(&db, 1);
+    db.seed_tasks(&["TASK-0078"], true);
+    let decision = create_human_decision(&db, "TASK-0078", vec![HumanContinuation::Replan]);
+    let mut human = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS));
+    human
+        .decide(&decision.id, HumanContinuation::Replan, "operator:test")
+        .unwrap();
+    drop(human);
+
+    let planner = TestPlanner::new(ProposalCase::Valid);
+    let mut planning = db.service();
+    let mut restarted = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS));
+    let outcome = restarted
+        .apply_replan(&mut planning, &planner, &decision.id, &policy(false))
+        .expect("REPLAN crosses ordinary PlanningService boundary");
+    assert!(matches!(outcome, PlanningProposalOutcome::Accepted(_)));
+    assert_eq!(planner.call_count(), 1);
+    assert_eq!(db.store().get_plan_head(&branch()).unwrap(), Some(2));
+    assert_eq!(
+        restarted.get(&decision.id).unwrap().unwrap().status,
+        HumanDecisionStatus::Consumed
+    );
+
+    let replay = restarted
+        .apply_replan(&mut planning, &planner, &decision.id, &policy(false))
+        .expect_err("REPLAN cannot be applied twice");
+    assert!(matches!(
+        replay,
+        PlanningServiceError::Storage(StorageError::HumanDecisionStale { .. })
+            | PlanningServiceError::Storage(StorageError::HumanDecisionState { .. })
+    ));
+    assert_eq!(planner.call_count(), 1);
 }

@@ -10,15 +10,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
 use plan_domain::{
-    decomposition_fingerprint, CriterionDecl, CriterionId, EvidenceRef, GateRef, PlanBranchId,
-    PlanChangeSet, PlanGraph, PlanNode, PlanNodeId, PlanRevision, PlannerAdapterId,
-    PlannerIdentity, PlanningCostReceiptRef, RevisionProposedBy, RiskClass, ValidatedBy,
-    VerificationMethod,
+    decomposition_fingerprint, CriterionDecl, CriterionId, EvidenceRef, GateRef,
+    HumanDecisionRequestId, PlanBranchId, PlanChangeSet, PlanGraph, PlanNode, PlanNodeId,
+    PlanRevision, PlannerAdapterId, PlannerIdentity, PlanningCostReceiptRef, RevisionProposedBy,
+    RiskClass, ValidatedBy, VerificationMethod,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::error::{map_constraint, StorageError, StorageResult};
 use crate::event::{EventType, JournalEvent, NewJournalEvent, PlanRevisionJournalPayload};
+use crate::human_decision_store::{
+    consume_risk_decision_for_plan_commit, RiskDecisionPlanCommitBinding,
+};
 use crate::journal_store::{insert_journal_event, require_canonical_sha256};
 use crate::plan_cost_store::load_plan_cost_receipt;
 use crate::plan_guardrail_store::{require_evidence_key, reset_rejections};
@@ -203,6 +206,29 @@ impl crate::task_store::SqliteStore {
         lineage: &PlanRevisionLineage,
         evidence: &PlanCommitJournalEvidence,
     ) -> StorageResult<JournalEvent> {
+        self.commit_plan_revision_with_human_decision(
+            changeset,
+            revision,
+            resulting_graph,
+            lineage,
+            evidence,
+            None,
+        )
+    }
+
+    /// Same atomic Plan publication boundary, additionally consuming an
+    /// exact durable V9 HumanDecisionRequest when risk escalation required
+    /// human RESUME. The decision update and revision/journal writes share
+    /// one SQLite transaction, so neither can commit without the other.
+    pub fn commit_plan_revision_with_human_decision(
+        &mut self,
+        changeset: &PlanChangeSet,
+        revision: &PlanRevision,
+        resulting_graph: &PlanGraph,
+        lineage: &PlanRevisionLineage,
+        evidence: &PlanCommitJournalEvidence,
+        risk_decision: Option<&HumanDecisionRequestId>,
+    ) -> StorageResult<JournalEvent> {
         validate_commit_binding(changeset, revision, evidence)?;
         validate_graph_snapshot(resulting_graph)?;
         require_evidence_key(&lineage.trigger_evidence_key)?;
@@ -233,6 +259,23 @@ impl crate::task_store::SqliteStore {
             &revision.plan_branch_id,
             revision.base_revision,
         )?;
+
+        if let Some(decision_id) = risk_decision {
+            consume_risk_decision_for_plan_commit(
+                &transaction,
+                decision_id,
+                &RiskDecisionPlanCommitBinding {
+                    task_ref: &lineage.parent_task_ref,
+                    branch: &revision.plan_branch_id,
+                    plan_head: revision.base_revision,
+                    snapshot_id: &lineage.planning_input_snapshot_id,
+                    input_fingerprint: &lineage.planning_input_fingerprint,
+                    policy_fingerprint: &revision.validated_by.policy_fingerprint,
+                    proposal_hash: &revision.changeset_hash,
+                    consumed_at_ms: revision.created_at,
+                },
+            )?;
+        }
 
         if revision.revision_seq == 1 {
             transaction.execute(

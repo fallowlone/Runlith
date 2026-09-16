@@ -199,6 +199,7 @@ fn seed_accepted_plan(sandbox: &Sandbox, task: &str) {
         parent_task_ref: task.to_owned(),
         lineage_fingerprints: vec![],
         risk_grant: None,
+        risk_decision_id: None,
         policy_fingerprint: format!("policy:fixture:{task}"),
     };
     let outcome = planning
@@ -208,6 +209,48 @@ fn seed_accepted_plan(sandbox: &Sandbox, task: &str) {
         outcome,
         app_services::PlanningProposalOutcome::Accepted(_)
     ));
+}
+
+fn seed_human_decision(sandbox: &Sandbox, task: &str) -> String {
+    let db = sandbox
+        .root
+        .join("data")
+        .join("ai-engineering-os")
+        .join("state.sqlite3");
+    let branch = plan_domain::PlanBranchId::new(format!("fixture-plan-{task}")).unwrap();
+    let planning = app_services::PlanningService::open(&db, app_services::SystemClock)
+        .expect("open planning service");
+    let accepted = planning
+        .current_accepted_plan(&branch)
+        .expect("accepted plan query")
+        .expect("accepted plan");
+    let mut decisions =
+        app_services::HumanDecisionService::open(&db).expect("open human decision service");
+    decisions
+        .create(app_services::HumanDecisionCreate {
+            task_id: task_domain::TaskId::new(task).unwrap(),
+            plan_branch_id: branch,
+            reason: plan_domain::HumanDecisionReason::PlannerBlocked,
+            risk: plan_domain::RiskClass::Low,
+            affected_scope: plan_domain::ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+            options: vec![
+                plan_domain::HumanContinuation::Resume,
+                plan_domain::HumanContinuation::Replan,
+                plan_domain::HumanContinuation::Abort,
+            ],
+            recommendation: None,
+            evidence: vec![plan_domain::EvidenceRef::new(format!("hdq:{task}")).unwrap()],
+            proposal_hash: None,
+            plan_head: accepted.revision().revision_seq,
+            planning_input_snapshot_id: accepted.planning_input_snapshot_id().clone(),
+            planning_input_fingerprint: accepted.planning_input_fingerprint().to_owned(),
+            policy_fingerprint: format!("policy:fixture:{task}"),
+            expires_at_ms: None,
+        })
+        .expect("create human decision")
+        .id
+        .as_str()
+        .to_owned()
 }
 
 fn stop_daemon(mut child: Child) {
@@ -611,5 +654,52 @@ fn detach_then_cancel_reaches_the_live_run() {
         "got {:?}",
         stdout(&again)
     );
+    stop_daemon(daemon);
+}
+
+#[test]
+fn human_decision_cli_lists_gets_and_decides_over_protocol_v4() {
+    let sandbox = Sandbox::new("human-decision-cli", SUCCESS_BODY);
+    let daemon = sandbox.spawn_agentd();
+    sandbox.wait_ready();
+    seed_ready(&sandbox, "P-HD", "T-HD");
+    let decision_id = seed_human_decision(&sandbox, "T-HD");
+
+    let list = sandbox.agentctl(&["human-decision", "list"]);
+    assert!(list.status.success(), "list: {}", stderr(&list));
+    let listed = stdout(&list);
+    assert!(listed.contains(&decision_id), "listed {listed:?}");
+    assert!(listed.contains("PENDING"), "listed {listed:?}");
+
+    let get = sandbox.agentctl(&["human-decision", "get", &decision_id]);
+    assert!(get.status.success(), "get: {}", stderr(&get));
+    let got = stdout(&get);
+    assert!(got.contains(&decision_id), "get {got:?}");
+    assert!(got.contains("RESUME,REPLAN,ABORT"), "get {got:?}");
+
+    let decide = sandbox.agentctl(&["human-decision", "decide", &decision_id, "abort"]);
+    assert!(decide.status.success(), "decide: {}", stderr(&decide));
+    let decided = stdout(&decide);
+    assert!(decided.contains("RESOLVED"), "decided {decided:?}");
+    assert!(decided.contains("selected ABORT"), "decided {decided:?}");
+
+    let list_after = sandbox.agentctl(&["human-decision", "list"]);
+    assert!(list_after.status.success());
+    assert!(
+        !stdout(&list_after).contains(&decision_id),
+        "resolved request must leave pending queue"
+    );
+
+    let missing = sandbox.agentctl(&["human-decision", "get", "hdr-does-not-exist"]);
+    assert!(!missing.status.success());
+    assert!(
+        stderr(&missing).contains("NOT_FOUND"),
+        "missing: {}",
+        stderr(&missing)
+    );
+
+    let invalid = sandbox.agentctl(&["human-decision", "decide", &decision_id, "invalid-option"]);
+    assert!(!invalid.status.success());
+    assert!(stderr(&invalid).contains("usage: agentctl human-decision"));
     stop_daemon(daemon);
 }

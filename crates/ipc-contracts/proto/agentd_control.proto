@@ -14,6 +14,7 @@ package ai_engineering_os.ipc;
 import "task_core.proto";
 import "execution_core.proto";
 import "policy_core.proto";
+import "human_decision_core.proto";
 
 // A single inbound control message from a local client to agentd.
 message ControlRequest {
@@ -29,6 +30,8 @@ message ControlRequest {
     ExecutionCoreRequest execution_core = 5;
     // G6 approval control-plane request. Valid only on protocol-v3 sessions.
     PolicyCoreRequest policy_core = 6;
+    // G7 bounded Human Decision Queue. Valid only on protocol-v4 sessions.
+    HumanDecisionCoreRequest human_decision_core = 7;
   }
 }
 
@@ -44,6 +47,8 @@ message ControlResponse {
     ExecutionCoreResponse execution_core = 5;
     // G6 approval control-plane response. Valid only on protocol-v3 sessions.
     PolicyCoreResponse policy_core = 6;
+    // G7 bounded Human Decision Queue response. Protocol v4 only.
+    HumanDecisionCoreResponse human_decision_core = 7;
   }
 }
 

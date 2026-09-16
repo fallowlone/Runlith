@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use ipc_contracts::proto::{
     control_request, control_response, ControlRequest, ControlResponse, ExecutionCoreRequest,
-    ExecutionCoreResponse, PolicyCoreRequest, PolicyCoreResponse, ShutdownRequest, TaskCoreRequest,
-    TaskCoreResponse,
+    ExecutionCoreResponse, HumanDecisionCoreRequest, HumanDecisionCoreResponse, PolicyCoreRequest,
+    PolicyCoreResponse, ShutdownRequest, TaskCoreRequest, TaskCoreResponse,
 };
 use ipc_control::{ClientConfig, ClientSession, ControlError, CLIENT_KIND_AGENTCTL};
 use ipc_transport::{FramedTransport, TransportError};
@@ -58,6 +58,9 @@ pub const EXECUTION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Deadline for one local approval control-plane exchange.
 pub const POLICY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Deadline for one local Human Decision Queue exchange.
+pub const HUMAN_DECISION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Poll interval while waiting for endpoint disappearance.
 const ABSENCE_POLL: Duration = Duration::from_millis(50);
@@ -130,6 +133,10 @@ pub enum ClientError {
     /// A G6 approval request may have reached the daemon but its reply is
     /// unconfirmed. Human decisions are never replayed automatically.
     PolicyAmbiguous(String),
+    /// A G7 human-decision request may have reached the daemon but its
+    /// reply is unconfirmed. A decision mutation is never replayed
+    /// automatically; callers must re-probe the request by id.
+    HumanDecisionAmbiguous(String),
     /// OS/runtime I/O failure.
     Io(io::Error),
 }
@@ -158,6 +165,12 @@ impl fmt::Display for ClientError {
             }
             Self::PolicyAmbiguous(detail) => {
                 write!(f, "ambiguous approval result (not replayed): {detail}")
+            }
+            Self::HumanDecisionAmbiguous(detail) => {
+                write!(
+                    f,
+                    "ambiguous human-decision result (not replayed): {detail}"
+                )
             }
             Self::Io(error) => write!(f, "client I/O failure: {error}"),
         }
@@ -700,6 +713,128 @@ pub async fn policy_request(
 ) -> Result<PolicyCoreResponse, ClientError> {
     let session = connect_or_start_with(spawn, || connect_and_handshake_v3(pipe_name)).await?;
     policy_session(session, request, absence_note(pipe_name)).await
+}
+
+/// Performs a protocol-v4 handshake for the bounded G7 Human Decision
+/// Queue surface.
+async fn handshake_stream_v4<S>(stream: S) -> Result<ClientSession<S>, ClientError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut session = ClientSession::new(
+        FramedTransport::new(stream),
+        ClientConfig::human_decision_default(CLIENT_KIND_AGENTCTL),
+    );
+    session
+        .perform_handshake()
+        .await
+        .map_err(classify_control)?;
+    if !session.human_decision_allowed() {
+        return Err(ClientError::Control(ControlError::UnsupportedProtocol {
+            negotiated: session.negotiated_version().unwrap_or(0),
+            required: ipc_contracts::IPC_PROTOCOL_VERSION_V4,
+        }));
+    }
+    Ok(session)
+}
+
+#[cfg(unix)]
+pub async fn connect_and_handshake_v4(
+    endpoint: &UnixEndpoint,
+) -> Result<ClientSession<UnixStream>, ClientError> {
+    let stream = transport_connect(endpoint)
+        .await
+        .map_err(|error| match error {
+            TransportError::EndpointUnavailable { endpoint } => {
+                ClientError::DaemonUnavailable(endpoint)
+            }
+            other => classify_transport(other),
+        })?;
+    handshake_stream_v4(stream).await
+}
+
+#[cfg(windows)]
+pub async fn connect_and_handshake_v4(
+    pipe_name: &str,
+) -> Result<ClientSession<NamedPipeClient>, ClientError> {
+    let stream = connect_client(pipe_name).map_err(|error| match error {
+        TransportError::EndpointUnavailable { endpoint } => {
+            ClientError::DaemonUnavailable(endpoint)
+        }
+        other => classify_transport(other),
+    })?;
+    handshake_stream_v4(stream).await
+}
+
+fn human_decision_request_frame(request: HumanDecisionCoreRequest) -> Bytes {
+    Bytes::from(
+        ControlRequest {
+            payload: Some(control_request::Payload::HumanDecisionCore(request)),
+        }
+        .encode_to_vec(),
+    )
+}
+
+async fn human_decision_session<S>(
+    session: ClientSession<S>,
+    request: HumanDecisionCoreRequest,
+    absence: &str,
+) -> Result<HumanDecisionCoreResponse, ClientError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut transport = session.into_inner();
+    transport
+        .write_frame(human_decision_request_frame(request))
+        .await
+        .map_err(|error| {
+            ClientError::HumanDecisionAmbiguous(format!(
+                "HumanDecisionCoreRequest send failed ({error}); endpoint {absence}; not replaying"
+            ))
+        })?;
+    let frame = tokio::time::timeout(HUMAN_DECISION_RESPONSE_TIMEOUT, transport.read_frame())
+        .await
+        .map_err(|_| {
+            ClientError::HumanDecisionAmbiguous(format!(
+                "human-decision response timeout; endpoint {absence}; not replaying"
+            ))
+        })?;
+    let frame = frame.map_err(|error| {
+        ClientError::HumanDecisionAmbiguous(format!(
+            "human-decision response lost ({error}); endpoint {absence}; not replaying"
+        ))
+    })?;
+    let response = ControlResponse::decode(&frame[..]).map_err(|error| {
+        ClientError::HumanDecisionAmbiguous(format!(
+            "human-decision response undecodable ({error}); endpoint {absence}; not replaying"
+        ))
+    })?;
+    match response.payload {
+        Some(control_response::Payload::HumanDecisionCore(response)) => Ok(response),
+        other => Err(ClientError::HumanDecisionAmbiguous(format!(
+            "unexpected human-decision reply ({other:?}); endpoint {absence}; not replaying"
+        ))),
+    }
+}
+
+#[cfg(unix)]
+pub async fn human_decision_request(
+    endpoint: &UnixEndpoint,
+    spawn: impl FnOnce() -> io::Result<Child>,
+    request: HumanDecisionCoreRequest,
+) -> Result<HumanDecisionCoreResponse, ClientError> {
+    let session = connect_or_start_with(spawn, || connect_and_handshake_v4(endpoint)).await?;
+    human_decision_session(session, request, absence_note(endpoint)).await
+}
+
+#[cfg(windows)]
+pub async fn human_decision_request(
+    pipe_name: &str,
+    spawn: impl FnOnce() -> io::Result<Child>,
+    request: HumanDecisionCoreRequest,
+) -> Result<HumanDecisionCoreResponse, ClientError> {
+    let session = connect_or_start_with(spawn, || connect_and_handshake_v4(pipe_name)).await?;
+    human_decision_session(session, request, absence_note(pipe_name)).await
 }
 
 /// Shared connect-first + spawn-once + bounded-retry lifecycle.

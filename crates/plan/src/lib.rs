@@ -13,6 +13,7 @@ pub mod control;
 pub mod error;
 pub mod guardrails;
 pub mod hash;
+pub mod human_decision;
 pub mod ids;
 pub mod model;
 pub mod risk;
@@ -31,9 +32,13 @@ pub use guardrails::{
 pub use hash::{
     compute_proposal_hash, decomposition_fingerprint, planning_evidence_key, verify_proposal_hash,
 };
+pub use human_decision::{
+    HumanContinuation, HumanDecisionPrecondition, HumanDecisionReason, HumanDecisionRequest,
+    HumanDecisionStatus, HUMAN_DECISION_VERSION,
+};
 pub use ids::{
-    CriterionId, EvidenceRef, PlanBranchId, PlanNodeId, PlannerAdapterId, PlanningCostReceiptRef,
-    PlanningInputSnapshotId, PlanningRunId,
+    CriterionId, EvidenceRef, HumanDecisionRequestId, PlanBranchId, PlanNodeId, PlannerAdapterId,
+    PlanningCostReceiptRef, PlanningInputSnapshotId, PlanningRunId,
 };
 pub use model::{
     AtomicityAssessment, AtomicityBlocker, AtomicityRequest, AtomicityVerdict, BudgetDelta,

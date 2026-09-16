@@ -1,7 +1,8 @@
 //! Durable planning-input and planning-run control state (ADR-0028).
 
 use plan_domain::{
-    PlanBranchId, PlanningInputSnapshot, PlanningInputSnapshotId, PlanningRunId, RiskClass,
+    AffectedParentCriterion, PlanBranchId, PlanningInputSnapshot, PlanningInputSnapshotId,
+    PlanningRunId, RiskClass, RiskEscalationGrant, ScopeBound,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use task_domain::TaskId;
@@ -84,6 +85,122 @@ pub struct PlanningRunRecord {
 }
 
 impl SqliteStore {
+    /// Checks the trusted policy-derived portion of one immutable planning
+    /// input snapshot. Triggering evidence is intentionally excluded because
+    /// REPLAN has new control-plane evidence; all policy authority inputs must
+    /// still match the snapshot the human decision was based on exactly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn planning_input_policy_matches(
+        &self,
+        snapshot_id: &PlanningInputSnapshotId,
+        task_ref: &str,
+        scope_bound: &ScopeBound,
+        baseline_risk: RiskClass,
+        affected_parent_criteria: &[AffectedParentCriterion],
+        lineage_fingerprints: &[String],
+        risk_grant: Option<&RiskEscalationGrant>,
+        policy_fingerprint: &str,
+    ) -> StorageResult<bool> {
+        type PolicyRow = (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+        );
+        let row: Option<PolicyRow> = self
+            .connection()
+            .query_row(
+                "SELECT task_ref, baseline_risk, policy_fingerprint,
+                        risk_grant_proposal_hash, risk_grant_expires_at_ms,
+                        risk_grant_consumed
+                 FROM planning_input_snapshots WHERE snapshot_id = ?1",
+                params![snapshot_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some(row) = row else {
+            return Ok(false);
+        };
+
+        let expected_grant = risk_grant
+            .map(|grant| {
+                Ok::<_, StorageError>((
+                    Some(grant.proposal_hash.as_str()),
+                    Some(sqlite_u64(grant.expires_at_ms, "risk grant expiry")?),
+                    Some(if grant.consumed { 1_i64 } else { 0_i64 }),
+                ))
+            })
+            .transpose()?
+            .unwrap_or((None, None, None));
+        if row.0 != task_ref
+            || row.1 != risk_name(baseline_risk)
+            || row.2 != policy_fingerprint
+            || row.3.as_deref() != expected_grant.0
+            || row.4 != expected_grant.1
+            || row.5 != expected_grant.2
+        {
+            return Ok(false);
+        }
+
+        let mut scope_statement = self.connection().prepare(
+            "SELECT scope_root FROM planning_input_scope_roots
+             WHERE snapshot_id = ?1 ORDER BY position",
+        )?;
+        let stored_scope = scope_statement
+            .query_map(params![snapshot_id.as_str()], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if stored_scope != scope_bound.roots() {
+            return Ok(false);
+        }
+
+        let mut criteria_statement = self.connection().prepare(
+            "SELECT criterion_id, verification_method FROM planning_input_criteria
+             WHERE snapshot_id = ?1 ORDER BY position",
+        )?;
+        let stored_criteria = criteria_statement
+            .query_map(params![snapshot_id.as_str()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut expected_criteria = affected_parent_criteria
+            .iter()
+            .map(|criterion| {
+                (
+                    criterion.id.as_str().to_owned(),
+                    criterion.method.as_str().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        expected_criteria.sort();
+        expected_criteria.dedup();
+        if stored_criteria != expected_criteria {
+            return Ok(false);
+        }
+
+        let mut lineage_statement = self.connection().prepare(
+            "SELECT fingerprint FROM planning_input_lineage
+             WHERE snapshot_id = ?1 ORDER BY position",
+        )?;
+        let stored_lineage = lineage_statement
+            .query_map(params![snapshot_id.as_str()], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut expected_lineage = lineage_fingerprints.to_vec();
+        expected_lineage.sort();
+        expected_lineage.dedup();
+        Ok(stored_lineage == expected_lineage)
+    }
+
     /// Publishes the immutable input snapshot as current and claims a new
     /// durable planning generation for the branch. Any previous ACTIVE run
     /// is atomically superseded.

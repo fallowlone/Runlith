@@ -9,16 +9,18 @@ use std::os::unix::fs::PermissionsExt;
 
 use plan_domain::{
     compute_proposal_hash, decomposition_fingerprint, planning_evidence_key, BudgetDelta,
-    CriterionDecl, CriterionId, EdgeAddition, EvidenceRef, GateRef, NodeAddition, PlanBranchId,
-    PlanChangeSet, PlanGraph, PlanNode, PlanNodeId, PlanRevision, PlannerAdapterId,
-    PlannerIdentity, PlanningCostReceipt, PlanningCostReceiptRef, PlanningInputSnapshot,
-    PlanningInputSnapshotId, PlanningRunId, RevisionProposedBy, RiskClass, ScopeBound, ValidatedBy,
+    CriterionDecl, CriterionId, EdgeAddition, EvidenceRef, GateRef, HumanContinuation,
+    HumanDecisionReason, HumanDecisionStatus, NodeAddition, PlanBranchId, PlanChangeSet, PlanGraph,
+    PlanNode, PlanNodeId, PlanRevision, PlannerAdapterId, PlannerIdentity, PlanningCostReceipt,
+    PlanningCostReceiptRef, PlanningInputSnapshot, PlanningInputSnapshotId, PlanningRunId,
+    RevisionProposedBy, RiskClass, RiskEscalationGrant, ScopeBound, ValidatedBy,
     VerificationMethod,
 };
 use storage_sqlite::{
-    EventType, PlanCommitJournalEvidence, PlanRevisionLineage, SqliteStore, StorageError,
-    SUPPORTED_SCHEMA_VERSION,
+    EventType, NewHumanDecisionRequest, PlanCommitJournalEvidence, PlanRevisionLineage,
+    SqliteStore, StorageError, SUPPORTED_SCHEMA_VERSION,
 };
+use task_domain::{Project, ProjectId, Task, TaskId};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -261,11 +263,11 @@ fn journal_evidence(seq: u64) -> PlanCommitJournalEvidence {
 }
 
 #[test]
-fn fresh_database_reaches_schema_14() {
+fn fresh_database_reaches_schema_15() {
     let db = TestDb::new("schema");
     let store = db.open();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 14);
-    assert_eq!(store.schema_version().unwrap(), 14);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 15);
+    assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
 }
 
 #[test]
@@ -358,7 +360,7 @@ fn v11_database_migrates_preserving_g2_g3_g5_g6_data_and_starts_with_empty_plan(
     }
 
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 14);
+    assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
     let history = store.list_events_ordered().unwrap();
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].seq, 1);
@@ -972,6 +974,157 @@ fn superseded_planning_run_generation_cannot_publish_a_revision() {
 }
 
 #[test]
+fn risk_decision_consumption_rolls_back_when_plan_commit_fails_then_consumes_on_retry() {
+    let db = TestDb::new("human-risk-atomic-rollback");
+    let mut store = db.open();
+    let project_id = ProjectId::new("P-HD-ATOMIC").unwrap();
+    store
+        .create_project(&Project::new(project_id.clone(), "hd atomic".to_owned()).unwrap())
+        .unwrap();
+    let task_id = TaskId::new("task-root").unwrap();
+    store
+        .create_task(&Task::draft(task_id.clone(), project_id, "risk owner".to_owned()).unwrap())
+        .unwrap();
+
+    let branch = PlanBranchId::new("branch-human-risk").unwrap();
+    let changeset = changeset(0, "risk guarded revision", &[evidence("risk-attempt")]);
+    let created_at = 1_800_000_000_100;
+    let policy_fingerprint = "policy:abc123".to_owned();
+    let trigger = changeset.source_evidence_refs.clone();
+    let trigger_key = planning_evidence_key(&trigger);
+    let old_snapshot = PlanningInputSnapshot::new(
+        branch.clone(),
+        task_id.as_str().to_owned(),
+        0,
+        ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+        RiskClass::Low,
+        vec![],
+        trigger.clone(),
+        vec![],
+        None,
+        policy_fingerprint.clone(),
+    )
+    .unwrap();
+    store
+        .start_planning_run(&old_snapshot, &trigger_key, created_at - 3)
+        .unwrap();
+
+    let expires_at = created_at + 60_000;
+    let decision = store
+        .create_human_decision_request(
+            NewHumanDecisionRequest {
+                task_id: task_id.clone(),
+                plan_branch_id: branch.clone(),
+                reason: HumanDecisionReason::RiskEscalation,
+                risk: RiskClass::High,
+                affected_scope: ScopeBound::new(vec!["repo:src/worker".to_owned()]).unwrap(),
+                options: vec![HumanContinuation::Resume],
+                recommendation: Some(HumanContinuation::Resume),
+                evidence: trigger.clone(),
+                proposal_hash: Some(changeset.proposal_hash.clone()),
+                plan_head: 0,
+                planning_input_snapshot_id: old_snapshot.id.clone(),
+                planning_input_fingerprint: old_snapshot.input_fingerprint.clone(),
+                policy_fingerprint: policy_fingerprint.clone(),
+                expires_at_ms: Some(expires_at),
+            },
+            created_at - 2,
+        )
+        .unwrap();
+    store
+        .resolve_human_decision(
+            &decision.id,
+            HumanContinuation::Resume,
+            "operator:test",
+            created_at - 1,
+        )
+        .unwrap();
+
+    let grant = RiskEscalationGrant {
+        proposal_hash: changeset.proposal_hash.clone(),
+        expires_at_ms: expires_at,
+        consumed: false,
+    };
+    let resumed_snapshot = PlanningInputSnapshot::new(
+        branch.clone(),
+        task_id.as_str().to_owned(),
+        0,
+        ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+        RiskClass::Low,
+        vec![],
+        trigger,
+        vec![],
+        Some(grant),
+        policy_fingerprint.clone(),
+    )
+    .unwrap();
+    let run = store
+        .start_planning_run(&resumed_snapshot, &trigger_key, created_at - 1)
+        .unwrap();
+    let lineage = PlanRevisionLineage {
+        parent_task_ref: task_id.as_str().to_owned(),
+        trigger_evidence_key: trigger_key,
+        planning_input_snapshot_id: resumed_snapshot.id,
+        planning_input_fingerprint: resumed_snapshot.input_fingerprint,
+        planning_run_id: run.id,
+        planning_run_generation: run.generation,
+    };
+    let missing_receipt = PlanningCostReceiptRef::new("receipt-deliberately-missing").unwrap();
+    let revision = PlanRevision::new(
+        1,
+        branch.clone(),
+        0,
+        changeset.proposal_hash.clone(),
+        changeset.reason.clone(),
+        changeset.source_evidence_refs.clone(),
+        RevisionProposedBy::new(changeset.proposed_by.clone(), missing_receipt.clone()),
+        ValidatedBy::new("plan-reconciler".to_owned(), policy_fingerprint).unwrap(),
+        created_at,
+    )
+    .unwrap();
+
+    // The decision update happens before receipt validation inside the same
+    // BEGIN IMMEDIATE transaction. This forced late failure proves rollback
+    // restores the decision to reusable RESOLVED state and publishes nothing.
+    let error = store
+        .commit_plan_revision_with_human_decision(
+            &changeset,
+            &revision,
+            &graph_v1(),
+            &lineage,
+            &journal_evidence(1),
+            Some(&decision.id),
+        )
+        .expect_err("missing receipt fails after tentative decision consumption");
+    assert!(matches!(error, StorageError::ConstraintViolation(_)));
+    assert_eq!(store.get_plan_head(&branch).unwrap(), None);
+    let after_failure = store
+        .get_human_decision(&decision.id)
+        .unwrap()
+        .expect("decision survives failed transaction");
+    assert_eq!(after_failure.status, HumanDecisionStatus::Resolved);
+    assert_eq!(after_failure.consumed_at_ms, None);
+
+    store
+        .record_plan_cost_receipt(&missing_receipt, &fixture_receipt())
+        .unwrap();
+    store
+        .commit_plan_revision_with_human_decision(
+            &changeset,
+            &revision,
+            &graph_v1(),
+            &lineage,
+            &journal_evidence(1),
+            Some(&decision.id),
+        )
+        .expect("successful retry atomically publishes and consumes");
+    assert_eq!(store.get_plan_head(&branch).unwrap(), Some(1));
+    let consumed = store.get_human_decision(&decision.id).unwrap().unwrap();
+    assert_eq!(consumed.status, HumanDecisionStatus::Consumed);
+    assert_eq!(consumed.selected, Some(HumanContinuation::Resume));
+}
+
+#[test]
 fn schema_13_revision_history_without_lineage_fails_closed_after_upgrade() {
     let db = TestDb::new("v13-lineage");
     let branch = PlanBranchId::new("branch-main").unwrap();
@@ -990,7 +1143,11 @@ fn schema_13_revision_history_without_lineage_fails_closed_after_upgrade() {
     }
     db.raw()
         .execute_batch(
-            "DROP TABLE planning_run_heads;
+            "DROP TABLE human_decision_evidence;
+             DROP TABLE human_decision_options;
+             DROP TABLE human_decision_scope_roots;
+             DROP TABLE human_decision_requests;
+             DROP TABLE planning_run_heads;
              DROP TABLE planning_runs;
              DROP TABLE planning_input_heads;
              DROP TABLE planning_input_lineage;
@@ -1005,7 +1162,7 @@ fn schema_13_revision_history_without_lineage_fails_closed_after_upgrade() {
         .unwrap();
 
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 14);
+    assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
     assert_eq!(store.get_plan_head(&branch).unwrap(), Some(1));
     assert!(
         matches!(

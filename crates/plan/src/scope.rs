@@ -130,6 +130,15 @@ impl ScopeBound {
             })
             .collect()
     }
+
+    /// True when every root in `self` is contained by `bound`. Human
+    /// decisions use this to refuse scope widening before continuation.
+    #[must_use]
+    pub fn is_subset_of(&self, bound: &ScopeBound) -> bool {
+        self.roots
+            .iter()
+            .all(|child| bound.roots.iter().any(|parent| parent.contains(child)))
+    }
 }
 
 impl PlanScope {
