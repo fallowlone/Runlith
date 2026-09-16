@@ -104,13 +104,264 @@ fn secret_access(correlation: &str) -> NewSecurityAuditRecord {
     }
 }
 
+fn human_decision_audit(
+    event: SecurityAuditEvent,
+    outcome: SecurityAuditOutcome,
+) -> NewSecurityAuditRecord {
+    NewSecurityAuditRecord {
+        event,
+        author: SecurityAuditAuthor::HumanDecisionService,
+        outcome: Some(outcome),
+        occurred_at_ms: 1_700_000_000_010,
+        correlation_id: "corr-human-decision".into(),
+        causation_id: Some("planning-run-1".into()),
+        operation_id: None,
+        task_id: Some("TASK-human".into()),
+        execution_id: None,
+        attempt_id: None,
+        subject: Some(SecurityAuditSubject {
+            kind: SecurityAuditSubjectKind::HumanDecision,
+            id: "hdr-1".into(),
+        }),
+        policy_fingerprint: Some("sha256:policy".into()),
+        rule_id: None,
+        reason_code: Some("risk_escalation".into()),
+        approval_request_id: None,
+        capabilities: vec![],
+    }
+}
+
+fn create_schema_v15(path: &std::path::Path) {
+    let connection = rusqlite::Connection::open(path).unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .unwrap();
+    for migration in [
+        include_str!("../migrations/0001_task_core.sql"),
+        include_str!("../migrations/0002_event_journal.sql"),
+        include_str!("../migrations/0003_event_scope.sql"),
+        include_str!("../migrations/0004_runtime_core.sql"),
+        include_str!("../migrations/0005_workspace_leases.sql"),
+        include_str!("../migrations/0006_attempt_reservations.sql"),
+        include_str!("../migrations/0007_managed_identity_reservations.sql"),
+        include_str!("../migrations/0008_approvals.sql"),
+        include_str!("../migrations/0009_secret_refs.sql"),
+        include_str!("../migrations/0010_security_audit.sql"),
+        include_str!("../migrations/0011_workspace_trusted_anchor.sql"),
+        include_str!("../migrations/0012_plan_persistence.sql"),
+        include_str!("../migrations/0013_plan_cost_receipts.sql"),
+        include_str!("../migrations/0014_plan_guardrails.sql"),
+        include_str!("../migrations/0015_human_decisions.sql"),
+    ] {
+        connection.execute_batch(migration).unwrap();
+    }
+    connection
+        .execute_batch("PRAGMA user_version = 15;")
+        .unwrap();
+}
+
 #[test]
 fn fresh_database_reaches_schema_v10_with_empty_separate_audit() {
     let db = TestDb::new("fresh");
     let store = db.open();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 15);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 16);
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
     assert!(store.list_security_audit_ordered().unwrap().is_empty());
+}
+
+#[test]
+fn schema_v15_security_audit_upgrades_to_v16_without_rewriting_chain_or_capabilities() {
+    let db = TestDb::new("v15-preservation");
+    create_schema_v15(&db.path);
+    let genesis = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    let first_hash = format!("sha256:{}", "a".repeat(64));
+    {
+        let raw = db.raw();
+        raw.execute(
+            "INSERT INTO security_audit (
+                seq, record_version, event_type, author, outcome, occurred_at_ms,
+                correlation_id, causation_id, operation_id, task_id, execution_id,
+                attempt_id, subject_kind, subject_id, policy_fingerprint, rule_id,
+                reason_code, approval_request_id, previous_hash, record_hash
+             ) VALUES (
+                1, 1, 'tool.invoked', 'tool-service', 'succeeded', 42,
+                'corr-old', NULL, 'op-old', 'TASK-old', NULL, NULL,
+                'tool', 'git', NULL, NULL, NULL, NULL, ?1, ?2
+             )",
+            rusqlite::params![genesis, first_hash],
+        )
+        .unwrap();
+        raw.execute(
+            "INSERT INTO security_audit_capabilities
+                (audit_seq, position, capability_kind, workspace, scope)
+             VALUES (1, 0, 'tool.invoke', NULL, 'git')",
+            [],
+        )
+        .unwrap();
+        raw.execute(
+            "UPDATE security_audit_head SET seq = 1, record_hash = ?1 WHERE singleton = 1",
+            rusqlite::params![first_hash],
+        )
+        .unwrap();
+    }
+
+    let before = {
+        let raw = db.raw();
+        let audit: (i64, String, String, String, String, String) = raw
+            .query_row(
+                "SELECT seq, event_type, author, outcome, previous_hash, record_hash
+                 FROM security_audit WHERE seq = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let capability: (i64, i64, String, Option<String>, String) = raw
+            .query_row(
+                "SELECT audit_seq, position, capability_kind, workspace, scope
+                 FROM security_audit_capabilities WHERE audit_seq = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let head: (i64, String) = raw
+            .query_row(
+                "SELECT seq, record_hash FROM security_audit_head WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        (audit, capability, head)
+    };
+
+    let store = db.open();
+    assert_eq!(store.schema_version().unwrap(), 16);
+    drop(store);
+
+    let raw = db.raw();
+    let audit: (i64, String, String, String, String, String) = raw
+        .query_row(
+            "SELECT seq, event_type, author, outcome, previous_hash, record_hash
+             FROM security_audit WHERE seq = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    let capability: (i64, i64, String, Option<String>, String) = raw
+        .query_row(
+            "SELECT audit_seq, position, capability_kind, workspace, scope
+             FROM security_audit_capabilities WHERE audit_seq = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    let head: (i64, String) = raw
+        .query_row(
+            "SELECT seq, record_hash FROM security_audit_head WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((audit, capability, head), before);
+    let foreign_key_violations: i64 = raw
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(foreign_key_violations, 0);
+}
+
+#[test]
+fn schema_v16_accepts_human_decision_audit_vocabulary_and_preserves_append_only_guards() {
+    let db = TestDb::new("human-decision-vocabulary");
+    let mut store = db.open();
+    for (event, outcome) in [
+        (
+            SecurityAuditEvent::HumanDecisionRequested,
+            SecurityAuditOutcome::Requested,
+        ),
+        (
+            SecurityAuditEvent::HumanDecisionDecided,
+            SecurityAuditOutcome::Resolved,
+        ),
+        (
+            SecurityAuditEvent::HumanDecisionApplied,
+            SecurityAuditOutcome::Consumed,
+        ),
+        (
+            SecurityAuditEvent::HumanDecisionSuperseded,
+            SecurityAuditOutcome::Superseded,
+        ),
+    ] {
+        store
+            .append_security_audit(&human_decision_audit(event, outcome))
+            .unwrap();
+    }
+    let records = store.list_security_audit_ordered().unwrap();
+    assert_eq!(records.len(), 4);
+    assert_eq!(
+        records[3].fact.event,
+        SecurityAuditEvent::HumanDecisionSuperseded
+    );
+    drop(store);
+
+    let raw = db.raw();
+    assert!(raw
+        .execute(
+            "UPDATE security_audit SET correlation_id = 'changed' WHERE seq = 1",
+            [],
+        )
+        .is_err());
+    assert!(raw
+        .execute("DELETE FROM security_audit WHERE seq = 1", [])
+        .is_err());
+    assert!(raw
+        .execute(
+            "INSERT INTO security_audit (
+                seq, record_version, event_type, author, outcome, occurred_at_ms,
+                correlation_id, previous_hash, record_hash
+             ) VALUES (
+                99, 1, 'future.unknown', 'runtime', 'succeeded', 1,
+                'corr-invalid',
+                'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+                'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+             )",
+            [],
+        )
+        .is_err());
 }
 
 #[test]

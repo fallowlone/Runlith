@@ -112,11 +112,12 @@ impl ExecutionPort for CountingExecutor {
     }
 }
 
-/// Creates READY canonical Tasks named like the plan nodes that represent
-/// them (plan node id == Task id).
-fn seed_ready_tasks(
+/// Creates one canonical planning parent plus READY descendant Tasks whose
+/// identities may legitimately appear in planner output for that parent.
+fn seed_ready_child_tasks(
     orchestration: &mut OrchestrationService<FixedClock>,
     project: &str,
+    parent: &str,
     names: &[&str],
 ) -> Vec<TaskId> {
     let project_id = ProjectId::new(project).expect("project id");
@@ -124,15 +125,29 @@ fn seed_ready_tasks(
         .tasks_mut()
         .create_project(&Project::new(project_id.clone(), "planning fixture".to_owned()).unwrap())
         .expect("create project");
+    let parent_id = TaskId::new(parent).expect("parent task id");
+    let parent_task = Task::draft(
+        parent_id.clone(),
+        project_id.clone(),
+        format!("planning parent {parent}"),
+    )
+    .expect("draft planning parent");
+    orchestration
+        .tasks_mut()
+        .create_task(&parent_task)
+        .expect("create planning parent");
+
     names
         .iter()
         .map(|name| {
-            let task = Task::draft(
+            let mut task = Task::draft(
                 TaskId::new(*name).expect("task id"),
                 project_id.clone(),
                 format!("planned step {name}"),
             )
             .expect("draft task");
+            task.set_parent(parent_id.clone())
+                .expect("set planning parent");
             orchestration
                 .tasks_mut()
                 .create_task(&task)
@@ -200,9 +215,10 @@ fn agentd_composes_planning_validation_persistence_execution_and_bounded_replan(
     // `replanned-child` is the canonical Task the bounded replan proposes as
     // replacement work; ADR-0027 L4 requires the accepted replan to leave
     // runnable canonical work, not merely a structurally valid node.
-    let tasks = seed_ready_tasks(
+    let tasks = seed_ready_child_tasks(
         &mut orchestration,
         "P-PLANNING",
+        "TASK-0078",
         &["planned-child-0", "replanned-child"],
     );
     let task_id = tasks[0].clone();
@@ -264,9 +280,10 @@ fn plan_dependency_direction_runs_predecessor_before_successor() {
     let mut orchestration =
         OrchestrationService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("orchestration");
     let mut planning = PlanningService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("planning");
-    let tasks = seed_ready_tasks(
+    let tasks = seed_ready_child_tasks(
         &mut orchestration,
         "P-PLANNING-CHAIN",
+        "TASK-0078-CHAIN",
         &["step-a", "step-b"],
     );
     let (first, second) = (tasks[0].clone(), tasks[1].clone());
@@ -325,7 +342,12 @@ fn accepted_plan_chain_runs_successor_after_predecessor_without_replanning() {
     let mut orchestration =
         OrchestrationService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("orchestration");
     let mut planning = PlanningService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("planning");
-    let tasks = seed_ready_tasks(&mut orchestration, "P-PLAN-E2E", &["step-a", "step-b"]);
+    let tasks = seed_ready_child_tasks(
+        &mut orchestration,
+        "P-PLAN-E2E",
+        "TASK-0078-E2E",
+        &["step-a", "step-b"],
+    );
     let (step_a, step_b) = (tasks[0].clone(), tasks[1].clone());
     let branch = PlanBranchId::new("task-0078-accepted-chain").expect("branch");
     let planner = FakePlanner::for_scenario(FakePlannerScenario::DependencyChain);
@@ -485,10 +507,11 @@ fn production_claude_planner_composition_crosses_g6_runner_before_provider_call(
         // Canonical Task the secured proposal decomposes into (L4).
         let mut orchestration =
             OrchestrationService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("orchestration");
-        seed_ready_tasks(
+        seed_ready_child_tasks(
             &mut orchestration,
             "P-SECURED",
-            &["TASK-0078", "secured-child"],
+            "TASK-0078",
+            &["secured-child"],
         );
     }
     let mut planning = composition.planning_service().expect("planning service");

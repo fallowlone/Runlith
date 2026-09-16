@@ -92,17 +92,53 @@ impl Sandbox {
             .expect("spawn agentd")
     }
 
+    fn replace_provider_body(&self, provider_body: &str) {
+        let exe = self.root.join("bin/claude");
+        let mut file = std::fs::File::create(&exe).expect("replace fixture provider");
+        file.write_all(b"#!/bin/sh\n").expect("replacement shebang");
+        file.write_all(provider_body.as_bytes())
+            .expect("replacement fixture body");
+        drop(file);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755))
+            .expect("replacement fixture chmod");
+    }
+
+    fn endpoint(&self) -> ipc_transport::platform::unix::UnixEndpoint {
+        let runtime_dir = self.root.join("run/ai-engineering-os");
+        ipc_transport::platform::unix::UnixEndpoint {
+            socket_path: runtime_dir.join("agentd.sock"),
+            runtime_dir,
+        }
+    }
+
+    /// Probes only this sandbox's already-bound endpoint. Unlike the
+    /// `agentctl ping` binary command, this path cannot launch a sibling
+    /// daemon when a just-spawned daemon has not bound its socket yet.
+    fn connect_ping(&self) -> bool {
+        let endpoint = self.endpoint();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("readiness runtime")
+            .block_on(async move {
+                match agentctl::connect_and_handshake(&endpoint).await {
+                    Ok(mut session) => session.ping().await.is_ok(),
+                    Err(_) => false,
+                }
+            })
+    }
+
     fn wait_ready(&self) {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            let output = self.agentctl(&["ping"]);
-            if output.status.success() {
+            if self.connect_ping() {
                 return;
             }
             if Instant::now() >= deadline {
                 panic!(
-                    "daemon never became ready: {}",
-                    String::from_utf8_lossy(&output.stderr)
+                    "daemon never became ready at {}",
+                    self.endpoint().socket_path.display()
                 );
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -143,7 +179,25 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+fn planning_decision_id(output: &Output) -> String {
+    stdout(output)
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("decision="))
+        .filter(|value| !value.is_empty())
+        .expect("planning output decision id")
+        .to_owned()
+}
+
 const SUCCESS_BODY: &str = r#"printf '{"type":"result","subtype":"success","is_error":false,"result":"binary fixture finished","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"}'; exit 0
+"#;
+
+// The same fixture is a valid planner result and a successful execution
+// result. The planner adapter reads the JSON string in `result`; the
+// execution adapter only needs the outer successful provider event.
+const PLANNING_BODY: &str = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":0,\"reason\":\"fixture decomposition\",\"node_additions\":[{\"id\":\"T-PLAN\",\"scope\":[\"repo:src\"],\"criteria\":[{\"id\":\"criterion-root\",\"method\":\"automated-test\"}],\"risk_class\":\"low\",\"required_gate\":null}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"fixture work is executable\",\"risk_delta\":[],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:src\"],\"coverage_map\":{\"criterion-root\":[\"criterion-root\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
+"#;
+
+const RISK_PLANNING_BODY: &str = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":0,\"reason\":\"fixture risk escalation\",\"node_additions\":[{\"id\":\"T-RISK\",\"scope\":[\"repo:src\"],\"criteria\":[{\"id\":\"criterion-root\",\"method\":\"automated-test\"}],\"risk_class\":\"high\",\"required_gate\":\"human-review\"}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"fixture work requires human approval\",\"risk_delta\":[{\"node\":\"T-RISK\",\"from\":\"low\",\"to\":\"high\"}],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:src\"],\"coverage_map\":{\"criterion-root\":[\"criterion-root\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
 "#;
 
 const SLOW_BODY: &str = "while :; do :; done\n";
@@ -253,15 +307,24 @@ fn seed_human_decision(sandbox: &Sandbox, task: &str) -> String {
         .to_owned()
 }
 
-fn stop_daemon(mut child: Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 /// RAII daemon handle for the TASK-0056 keepers: kills and reaps the child
-/// on drop so a keeper failure can never leak a daemon (TEST-H).
+/// on drop so any test failure can never leak a daemon (TEST-H).
 struct DaemonGuard {
     child: Option<Child>,
+}
+
+#[test]
+fn readiness_probe_never_starts_a_daemon() {
+    let sandbox = Sandbox::new("readiness-no-spawn", SUCCESS_BODY);
+
+    assert!(
+        !sandbox.connect_ping(),
+        "a missing sandbox endpoint must not appear ready"
+    );
+    assert!(
+        !sandbox.endpoint().socket_path.exists(),
+        "connect-only readiness must not spawn agentd"
+    );
 }
 
 impl DaemonGuard {
@@ -547,7 +610,7 @@ mod live_ownership {
 #[test]
 fn run_wait_mode_reports_terminal_success_with_exit_zero() {
     let sandbox = Sandbox::new("wait", SUCCESS_BODY);
-    let daemon = sandbox.spawn_agentd();
+    let _daemon = DaemonGuard::spawn(&sandbox);
     sandbox.wait_ready();
     seed_ready(&sandbox, "P-1", "T-1");
 
@@ -589,13 +652,12 @@ fn run_wait_mode_reports_terminal_success_with_exit_zero() {
         out.contains("E-1") && out.contains("claude-code"),
         "got {out:?}"
     );
-    stop_daemon(daemon);
 }
 
 #[test]
 fn detach_then_cancel_reaches_the_live_run() {
     let sandbox = Sandbox::new("cancel", SLOW_BODY);
-    let daemon = sandbox.spawn_agentd();
+    let _daemon = DaemonGuard::spawn(&sandbox);
     sandbox.wait_ready();
     seed_ready(&sandbox, "P-1", "T-1");
 
@@ -654,14 +716,12 @@ fn detach_then_cancel_reaches_the_live_run() {
         "got {:?}",
         stdout(&again)
     );
-    stop_daemon(daemon);
 }
 
 #[test]
 fn human_decision_cli_lists_gets_and_decides_over_protocol_v4() {
     let sandbox = Sandbox::new("human-decision-cli", SUCCESS_BODY);
-    let daemon = sandbox.spawn_agentd();
-    sandbox.wait_ready();
+    let _daemon = DaemonGuard::spawn(&sandbox);
     seed_ready(&sandbox, "P-HD", "T-HD");
     let decision_id = seed_human_decision(&sandbox, "T-HD");
 
@@ -701,5 +761,139 @@ fn human_decision_cli_lists_gets_and_decides_over_protocol_v4() {
     let invalid = sandbox.agentctl(&["human-decision", "decide", &decision_id, "invalid-option"]);
     assert!(!invalid.status.success());
     assert!(stderr(&invalid).contains("usage: agentctl human-decision"));
-    stop_daemon(daemon);
+}
+
+#[test]
+fn v5_planning_cli_publishes_an_accepted_plan_then_admits_execution() {
+    let sandbox = Sandbox::new("v5-planning-cli", PLANNING_BODY);
+    let _daemon = DaemonGuard::spawn(&sandbox);
+    sandbox.wait_ready();
+
+    let project = sandbox.agentctl(&["project", "create", "P-PLAN", "planning fixture"]);
+    assert!(project.status.success(), "project: {}", stderr(&project));
+    let task = sandbox.agentctl(&["task", "create", "T-PLAN", "P-PLAN", "plan fixture"]);
+    assert!(task.status.success(), "task: {}", stderr(&task));
+    let ready = sandbox.agentctl(&["task", "ready", "T-PLAN"]);
+    assert!(ready.status.success(), "ready: {}", stderr(&ready));
+
+    let planning = sandbox.agentctl(&[
+        "planning",
+        "trigger",
+        "T-PLAN",
+        "B-PLAN",
+        "repo:src",
+        "criterion-root",
+        "policy:binary-planning",
+        "fixture:planning",
+    ]);
+    assert!(planning.status.success(), "planning: {}", stderr(&planning));
+    assert!(
+        stdout(&planning).contains("planning ACCEPTED branch=B-PLAN revision=1"),
+        "planning output: {}",
+        stdout(&planning)
+    );
+
+    let run = sandbox.agentctl(&[
+        "execution",
+        "run",
+        "T-PLAN",
+        &sandbox.repo.display().to_string(),
+        "--execution",
+        "E-PLAN",
+        "--attempt",
+        "A-PLAN",
+    ]);
+    assert!(run.status.success(), "execution: {}", stderr(&run));
+    assert!(
+        stdout(&run).contains("execution E-PLAN"),
+        "run: {}",
+        stdout(&run)
+    );
+
+    // Assertion-only durable read: no planning state was seeded through
+    // SQLite; every write above travelled through agentctl/agentd.
+    let db = sandbox.root.join("data/ai-engineering-os/state.sqlite3");
+    let planning = app_services::PlanningService::open(&db, app_services::SystemClock)
+        .expect("open assertion planning service");
+    assert!(planning
+        .current_accepted_plan(&plan_domain::PlanBranchId::new("B-PLAN").unwrap())
+        .expect("accepted plan query")
+        .is_some());
+}
+
+#[test]
+fn v5_planning_cli_applies_risk_resume_without_replaying_the_planner() {
+    let sandbox = Sandbox::new("v5-risk-resume-cli", RISK_PLANNING_BODY);
+    let _daemon = DaemonGuard::spawn(&sandbox);
+    sandbox.wait_ready();
+
+    let project = sandbox.agentctl(&["project", "create", "P-RISK", "risk fixture"]);
+    assert!(project.status.success(), "project: {}", stderr(&project));
+    let task = sandbox.agentctl(&["task", "create", "T-RISK", "P-RISK", "risk fixture"]);
+    assert!(task.status.success(), "task: {}", stderr(&task));
+    let ready = sandbox.agentctl(&["task", "ready", "T-RISK"]);
+    assert!(ready.status.success(), "ready: {}", stderr(&ready));
+
+    let planning = sandbox.agentctl(&[
+        "planning",
+        "trigger",
+        "T-RISK",
+        "B-RISK",
+        "repo:src",
+        "criterion-root",
+        "policy:binary-risk",
+        "fixture:risk",
+    ]);
+    assert!(planning.status.success(), "planning: {}", stderr(&planning));
+    assert!(
+        stdout(&planning).contains("planning WAITING_FOR_HUMAN branch=B-RISK"),
+        "planning output: {}",
+        stdout(&planning)
+    );
+    let decision_id = planning_decision_id(&planning);
+
+    let decide = sandbox.agentctl(&["human-decision", "decide", &decision_id, "resume"]);
+    assert!(decide.status.success(), "decide: {}", stderr(&decide));
+    assert!(
+        stdout(&decide).contains("selected RESUME"),
+        "decide output: {}",
+        stdout(&decide)
+    );
+
+    // Any second PlannerPort call would execute this failing provider. The
+    // exact proposal approved by the human must already be durable.
+    sandbox.replace_provider_body("echo 'planner replayed during RESUME' >&2\nexit 99\n");
+    let applied = sandbox.agentctl(&[
+        "planning",
+        "apply",
+        &decision_id,
+        "T-RISK",
+        "B-RISK",
+        "repo:src",
+        "criterion-root",
+        "policy:binary-risk",
+        "fixture:risk",
+    ]);
+    assert!(applied.status.success(), "apply: {}", stderr(&applied));
+    assert!(
+        stdout(&applied).contains("planning ACCEPTED branch=B-RISK revision=1"),
+        "apply output: {}",
+        stdout(&applied)
+    );
+
+    let replay = sandbox.agentctl(&[
+        "planning",
+        "apply",
+        &decision_id,
+        "T-RISK",
+        "B-RISK",
+        "repo:src",
+        "criterion-root",
+        "policy:binary-risk",
+        "fixture:risk",
+    ]);
+    assert!(
+        !replay.status.success(),
+        "consumed decision must not replay"
+    );
 }

@@ -263,10 +263,10 @@ fn journal_evidence(seq: u64) -> PlanCommitJournalEvidence {
 }
 
 #[test]
-fn fresh_database_reaches_schema_15() {
+fn fresh_database_reaches_schema_16() {
     let db = TestDb::new("schema");
     let store = db.open();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 15);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 16);
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
 }
 
@@ -1022,6 +1022,7 @@ fn risk_decision_consumption_rolls_back_when_plan_commit_fails_then_consumes_on_
                 recommendation: Some(HumanContinuation::Resume),
                 evidence: trigger.clone(),
                 proposal_hash: Some(changeset.proposal_hash.clone()),
+                approved_proposal: None,
                 plan_head: 0,
                 planning_input_snapshot_id: old_snapshot.id.clone(),
                 planning_input_fingerprint: old_snapshot.input_fingerprint.clone(),
@@ -1143,7 +1144,8 @@ fn schema_13_revision_history_without_lineage_fails_closed_after_upgrade() {
     }
     db.raw()
         .execute_batch(
-            "DROP TABLE human_decision_evidence;
+            "DROP TABLE planning_input_candidate_tasks;
+             DROP TABLE human_decision_evidence;
              DROP TABLE human_decision_options;
              DROP TABLE human_decision_scope_roots;
              DROP TABLE human_decision_requests;

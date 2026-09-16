@@ -29,7 +29,7 @@ use plan_domain::{
 use scheduler::{ExecutionPort, ExecutionProblem, WorkEvidence, WorkItem};
 use storage_sqlite::{
     EventType, ExecutionEntryAdmission, PlanHeadPrecondition, PlanningInputPrecondition,
-    SqliteStore, StorageError,
+    SecurityAuditEvent, SqliteStore, StorageError,
 };
 use task_domain::{Project, ProjectId, Task, TaskId, TaskState};
 
@@ -40,6 +40,7 @@ static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 struct TestDb {
     dir: PathBuf,
     path: PathBuf,
+    project_id: ProjectId,
 }
 
 impl TestDb {
@@ -50,10 +51,13 @@ impl TestDb {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).expect("create test directory");
-        Self {
+        let db = Self {
             path: dir.join("runlith.db"),
             dir,
-        }
+            project_id: ProjectId::new(format!("P-PLANNING-{id}")).expect("project id"),
+        };
+        db.seed_tasks(&[], true);
+        db
     }
 
     /// A fresh service handle over the same durable database: the restart
@@ -74,23 +78,54 @@ impl TestDb {
     /// RUNNABLE; others stay DRAFT.
     fn seed_tasks(&self, names: &[&str], ready: bool) {
         let mut tasks = TaskService::open(&self.path, FixedClock(FIXED_MILLIS)).expect("tasks");
-        seed_into(&mut tasks, names, ready);
+        seed_into(&mut tasks, &self.project_id, names, ready);
     }
 }
 
-fn seed_into(tasks: &mut TaskService<FixedClock>, names: &[&str], ready: bool) {
-    let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let project = ProjectId::new(format!("P-PLANNING-{id}")).expect("project id");
-    tasks
-        .create_project(&Project::new(project.clone(), "planning fixture".to_owned()).unwrap())
-        .expect("create project");
-    for name in names {
-        let task = Task::draft(
-            TaskId::new(*name).expect("task id"),
+fn seed_into(
+    tasks: &mut TaskService<FixedClock>,
+    project: &ProjectId,
+    names: &[&str],
+    ready: bool,
+) {
+    if tasks
+        .store()
+        .get_project(project)
+        .expect("read project")
+        .is_none()
+    {
+        tasks
+            .create_project(&Project::new(project.clone(), "planning fixture".to_owned()).unwrap())
+            .expect("create project");
+    }
+    let parent_id = TaskId::new("TASK-0078").expect("parent task id");
+    if tasks
+        .store()
+        .get_task(&parent_id)
+        .expect("read parent")
+        .is_none()
+    {
+        let parent = Task::draft(
+            parent_id.clone(),
             project.clone(),
-            "planned work".to_owned(),
+            "planning root".to_owned(),
         )
-        .expect("draft task");
+        .expect("draft parent");
+        tasks.create_task(&parent).expect("create parent");
+        if ready {
+            tasks.mark_ready(parent.id()).expect("mark parent ready");
+        }
+    }
+    for name in names {
+        let id = TaskId::new(*name).expect("task id");
+        if tasks.store().get_task(&id).expect("read task").is_some() {
+            continue;
+        }
+        let mut task =
+            Task::draft(id, project.clone(), "planned work".to_owned()).expect("draft task");
+        if task.id() != &parent_id {
+            task.set_parent(parent_id.clone()).expect("set task parent");
+        }
         tasks.create_task(&task).expect("create task");
         if ready {
             tasks.mark_ready(task.id()).expect("mark ready");
@@ -117,6 +152,7 @@ enum ProposalCase {
     UpdateRemovedNode,
     DropRemovedCriteria,
     StaleBase(u64),
+    ForeignNode,
 }
 
 struct TestPlanner {
@@ -253,6 +289,10 @@ impl TestPlanner {
                     .expect("derived existing node id");
                 proposal.node_removals.push(target);
                 proposal.coverage_map.clear();
+            }
+            ProposalCase::ForeignNode => {
+                proposal.node_additions[0].id =
+                    PlanNodeId::new("foreign-task").expect("foreign node id");
             }
             ProposalCase::Valid | ProposalCase::InvalidHash | ProposalCase::StaleBase(_) => {}
         }
@@ -548,6 +588,30 @@ fn assert_no_plan_persisted(db: &TestDb) {
         .any(|event| event.fact.event_type == EventType::PlanRevisionCommitted));
 }
 
+fn seed_unrelated_task(db: &TestDb, project: ProjectId, id: &str) {
+    let mut tasks = TaskService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("tasks");
+    if tasks
+        .store()
+        .get_project(&project)
+        .expect("read project")
+        .is_none()
+    {
+        tasks
+            .create_project(&Project::new(project.clone(), "unrelated fixture".to_owned()).unwrap())
+            .expect("create project");
+    }
+    let task = Task::draft(
+        TaskId::new(id).expect("task id"),
+        project,
+        "unrelated task".to_owned(),
+    )
+    .expect("draft unrelated task");
+    tasks.create_task(&task).expect("create unrelated task");
+    tasks
+        .mark_ready(task.id())
+        .expect("mark unrelated task ready");
+}
+
 fn seed_head(db: &TestDb, target: u64) {
     let names: Vec<String> = (1..=target + 1).map(|n| format!("node-{n}")).collect();
     db.seed_tasks(&names.iter().map(String::as_str).collect::<Vec<_>>(), true);
@@ -703,6 +767,41 @@ fn valid_proposal_validates_and_persists_one_revision() {
         Some(&*accepted),
         "the durable head reconstructs exactly the accepted capability"
     );
+}
+
+#[test]
+fn planner_cannot_capture_foreign_or_unrelated_canonical_tasks_before_publication() {
+    let db = TestDb::new("trusted-node-identity");
+    db.seed_tasks(&["node-1"], true);
+    let foreign_project = ProjectId::new("P-FOREIGN-IDENTITY").unwrap();
+    seed_unrelated_task(&db, foreign_project, "foreign-task");
+
+    let mut service = db.service();
+    let foreign = TestPlanner::new(ProposalCase::ForeignNode);
+    let outcome = service
+        .propose_decomposition(
+            &foreign,
+            &branch(),
+            request("foreign-task-capture"),
+            &policy(true),
+        )
+        .expect("foreign identity is a typed refusal");
+    assert!(matches!(
+        outcome,
+        PlanningProposalOutcome::NotApplicable(PlanApplicabilityRefusal::UntrustedNodeIdentity { ref node })
+            if node == "foreign-task"
+    ));
+    assert_no_plan_persisted(&db);
+
+    // A new service handle must derive the same bounded tree; a durable
+    // foreign Task cannot become executable after a restart.
+    let restarted = db.service();
+    assert!(matches!(
+        restarted
+            .current_accepted_plan_for_task(&TaskId::new("foreign-task").unwrap())
+            .unwrap(),
+        app_services::AcceptedTaskPlanResolution::Missing
+    ));
 }
 
 #[test]
@@ -1595,6 +1694,7 @@ fn task_not_in_candidate_plan_is_refused_before_commit() {
     let mut orchestration = db.orchestration();
     seed_into(
         orchestration.tasks_mut(),
+        &db.project_id,
         &["planned-child-0", "unplanned-task"],
         true,
     );
@@ -1628,7 +1728,7 @@ fn task_not_in_candidate_plan_is_refused_before_commit() {
 fn plan_predecessor_without_canonical_task_is_refused_before_commit() {
     let db = TestDb::new("predecessor-missing");
     let mut orchestration = db.orchestration();
-    seed_into(orchestration.tasks_mut(), &["step-b"], true);
+    seed_into(orchestration.tasks_mut(), &db.project_id, &["step-b"], true);
     let mut planning = db.service();
     let executor = CountingExecutor::new();
 
@@ -1647,9 +1747,9 @@ fn plan_predecessor_without_canonical_task_is_refused_before_commit() {
         .expect("applicability refusal is a typed outcome");
     match outcome {
         PlannedOrchestrationOutcome::PlanningStopped(PlanningProposalOutcome::NotApplicable(
-            PlanApplicabilityRefusal::PredecessorWithoutTask { node },
+            PlanApplicabilityRefusal::UntrustedNodeIdentity { node },
         )) => assert_eq!(node, "step-a"),
-        other => panic!("expected missing predecessor refusal, got {other:?}"),
+        other => panic!("expected trusted identity refusal, got {other:?}"),
     }
     assert_eq!(executor.calls(), 0);
     assert_no_plan_persisted(&db);
@@ -1675,12 +1775,17 @@ fn structurally_valid_plan_without_runnable_task_trips_l4_before_commit() {
             .expect("L4 escalation is typed");
         assert!(
             matches!(
-                outcome,
+                &outcome,
+                PlanningProposalOutcome::NotApplicable(
+                    PlanApplicabilityRefusal::UntrustedNodeIdentity { .. }
+                )
+            ) || matches!(
+                &outcome,
                 PlanningProposalOutcome::WaitingForHuman(ref decision)
                     if decision.reason == HumanDecisionReason::PlannerBlocked
                         && decision.options == [HumanContinuation::Replan, HumanContinuation::Abort]
             ),
-            "{label}: a sink node without runnable canonical work must escalate L4, got {outcome:?}"
+            "{label}: untrusted or non-runnable work must not publish, got {outcome:?}"
         );
         assert_no_plan_persisted(&db);
     }
@@ -1693,6 +1798,7 @@ fn planning_path_errors_never_follow_a_plan_mutation() {
     let mut orchestration = db.orchestration();
     seed_into(
         orchestration.tasks_mut(),
+        &db.project_id,
         &["planned-child-0", "other"],
         true,
     );
@@ -1779,7 +1885,12 @@ fn planning_path_errors_never_follow_a_plan_mutation() {
 fn current_plan_scheduling_reports_missing_plan_and_unrepresented_task_without_planner() {
     let db = TestDb::new("current-plan-negative");
     let mut orchestration = db.orchestration();
-    seed_into(orchestration.tasks_mut(), &["node-1", "unplanned"], true);
+    seed_into(
+        orchestration.tasks_mut(),
+        &db.project_id,
+        &["node-1", "unplanned"],
+        true,
+    );
     let planning = db.service();
     let executor = CountingExecutor::new();
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
@@ -1888,6 +1999,60 @@ fn production_entry_for_task_outside_current_plan_leaves_state_unmodified() {
         outcome,
         PlannedExecutionEntryOutcome::NoAcceptedPlan
     ));
+
+    let store = db.store();
+    assert_eq!(
+        store.get_task(&task_id).unwrap().unwrap().state(),
+        TaskState::Ready
+    );
+    assert!(store.get_execution(&execution_id).unwrap().is_none());
+    assert!(store.get_attempt(&attempt_id).unwrap().is_none());
+    assert!(store
+        .get_attempt_reservation(&attempt_id)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn production_entry_with_multiple_legitimate_current_plans_is_ambiguous_and_non_mutating() {
+    let db = TestDb::new("production-entry-ambiguous-plan");
+    db.seed_tasks(&["node-1"], true);
+    let task_id = TaskId::new("node-1").unwrap();
+    let branch_a = PlanBranchId::new("ambiguous-branch-a").unwrap();
+    let branch_b = PlanBranchId::new("ambiguous-branch-b").unwrap();
+    let planner = TestPlanner::new(ProposalCase::Valid);
+
+    for (branch, evidence_ref) in [
+        (&branch_a, "ambiguous-plan-a"),
+        (&branch_b, "ambiguous-plan-b"),
+    ] {
+        let accepted = db
+            .service()
+            .propose_decomposition(&planner, branch, request(evidence_ref), &policy(false))
+            .expect("legitimate branch proposal");
+        assert!(matches!(accepted, PlanningProposalOutcome::Accepted(_)));
+    }
+
+    let execution_id = ExecutionId::new("E-AMBIGUOUS-PLAN").unwrap();
+    let attempt_id = AttemptId::new("A-AMBIGUOUS-PLAN").unwrap();
+    let mut orchestration = db.orchestration();
+    let outcome = orchestration
+        .enter_from_current_plan(
+            &db.service(),
+            &task_id,
+            OrchestrationIds {
+                execution_id: execution_id.clone(),
+                attempt_id: attempt_id.clone(),
+            },
+        )
+        .expect("ambiguity is a typed safe outcome");
+    match outcome {
+        PlannedExecutionEntryOutcome::AmbiguousAcceptedPlan { mut branches } => {
+            branches.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+            assert_eq!(branches, vec![branch_a, branch_b]);
+        }
+        other => panic!("expected ambiguous accepted plan, got {other:?}"),
+    }
 
     let store = db.store();
     assert_eq!(
@@ -2166,6 +2331,20 @@ fn risk_decision_survives_restart_and_resume_is_consumed_with_plan_commit() {
     assert_eq!(decision.risk, RiskClass::High);
     assert_eq!(db.store().get_plan_head(&branch()).unwrap(), None);
 
+    let approved = db
+        .store()
+        .get_approved_human_decision_proposal(&decision.id)
+        .unwrap()
+        .expect("risk decision stores the exact approved proposal");
+    let mut replay_with_different_receipt = approved.changeset.clone();
+    replay_with_different_receipt.planning_cost_receipt =
+        PlanningCostReceipt::new(100, 50, 777, "test".to_owned()).unwrap();
+    assert_ne!(
+        compute_proposal_hash(&replay_with_different_receipt),
+        decision.proposal_hash.as_deref().expect("proposal hash"),
+        "measured receipt variation changes the proposal hash; RESUME must use the durable approved proposal"
+    );
+
     let calls_before_retry = planner.call_count();
     let repeated = db
         .service()
@@ -2194,24 +2373,15 @@ fn risk_decision_survives_restart_and_resume_is_consumed_with_plan_commit() {
     human
         .decide(&decision.id, HumanContinuation::Resume, "operator:test")
         .expect("resolve after restart");
-    let grant = human.risk_grant(&decision.id).expect("bound V9 grant");
     drop(human);
 
-    // RESUME re-enters the ordinary G7 planning path. TASK-0078 correctly
-    // gives the grant-bearing retry a new PlanningInputSnapshot fingerprint;
-    // commit accepts only that exact derived transition and consumes the
-    // source decision in the same SQLite transaction as revision 1.
-    let mut resumed_policy = policy(false);
-    resumed_policy.risk_grant = Some(grant);
-    resumed_policy.risk_decision_id = Some(decision.id.clone());
+    // RESUME rehydrates the exact approved immutable proposal and original
+    // measured receipt. There is no second PlannerPort call; the trusted
+    // service creates only the grant-bearing control snapshot/run and then
+    // revalidates the stored proposal immediately before atomic publication.
     let accepted = db
         .service()
-        .propose_decomposition(
-            &planner,
-            &branch(),
-            request("risk-needs-human"),
-            &resumed_policy,
-        )
+        .resume_approved_risk_proposal(&decision.id, &policy(false))
         .expect("exact resumed proposal commits");
     assert!(matches!(accepted, PlanningProposalOutcome::Accepted(_)));
     assert_eq!(db.store().get_plan_head(&branch()).unwrap(), Some(1));
@@ -2223,7 +2393,185 @@ fn risk_decision_survives_restart_and_resume_is_consumed_with_plan_commit() {
     assert_eq!(persisted.status, HumanDecisionStatus::Consumed);
     assert_eq!(persisted.selected, Some(HumanContinuation::Resume));
     assert!(persisted.consumed_at_ms.is_some());
+    assert_eq!(
+        planner.call_count(),
+        1,
+        "V9 RESUME must publish the approved changeset without invoking PlannerPort again"
+    );
+
+    let replay = db
+        .service()
+        .resume_approved_risk_proposal(&decision.id, &policy(false))
+        .expect_err("consumed V9 RESUME cannot be applied twice");
+    assert!(matches!(
+        replay,
+        PlanningServiceError::Storage(StorageError::HumanDecisionStale { .. })
+            | PlanningServiceError::Storage(StorageError::HumanDecisionState { .. })
+    ));
+    assert_eq!(
+        planner.call_count(),
+        1,
+        "duplicate RESUME must not gain a PlannerPort call"
+    );
+
+    let audit = db
+        .store()
+        .list_security_audit_by_correlation(&format!("human-decision:{}", decision.id.as_str()))
+        .unwrap();
+    let events: Vec<_> = audit.iter().map(|record| record.fact.event).collect();
+    assert_eq!(
+        events,
+        vec![
+            SecurityAuditEvent::HumanDecisionRequested,
+            SecurityAuditEvent::HumanDecisionDecided,
+            SecurityAuditEvent::HumanDecisionApplied,
+        ],
+        "request, operator decision and atomic application remain distinct audit facts"
+    );
+}
+
+#[test]
+fn expired_risk_decision_is_superseded_once_and_replaced_after_restart() {
+    let db = TestDb::new("human-risk-expiry-replacement");
+    db.seed_tasks(&["TASK-0078", "node-1"], true);
+    let planner = TestPlanner::new(ProposalCase::RiskEscalation);
+
+    let first = match db
+        .service()
+        .propose_decomposition(&planner, &branch(), request("risk-expiry"), &policy(false))
+        .unwrap()
+    {
+        PlanningProposalOutcome::WaitingForHuman(decision) => *decision,
+        other => panic!("expected first risk decision, got {other:?}"),
+    };
+    assert_eq!(planner.call_count(), 1);
+
+    let after_expiry = FIXED_MILLIS + (31 * 60 * 1000);
+    let mut restarted =
+        PlanningService::open(&db.path, FixedClock(after_expiry)).expect("restart after TTL");
+    let second = match restarted
+        .propose_decomposition(&planner, &branch(), request("risk-expiry"), &policy(false))
+        .expect("expired decision is superseded through trusted planning")
+    {
+        PlanningProposalOutcome::WaitingForHuman(decision) => *decision,
+        other => panic!("expected replacement risk decision, got {other:?}"),
+    };
+    assert_ne!(first.id, second.id);
     assert_eq!(planner.call_count(), 2);
+
+    let first_persisted = HumanDecisionService::attach(db.store(), FixedClock(after_expiry))
+        .get(&first.id)
+        .unwrap()
+        .expect("superseded decision remains durable");
+    assert_eq!(first_persisted.status, HumanDecisionStatus::Superseded);
+    let first_audit = db
+        .store()
+        .list_security_audit_by_correlation(&format!("human-decision:{}", first.id.as_str()))
+        .unwrap();
+    assert_eq!(
+        first_audit
+            .iter()
+            .map(|record| record.fact.event)
+            .collect::<Vec<_>>(),
+        vec![
+            SecurityAuditEvent::HumanDecisionRequested,
+            SecurityAuditEvent::HumanDecisionSuperseded,
+        ]
+    );
+
+    // A second restart sees the replacement as the one current blocker. It
+    // must not churn requests or call the planner again while that request is
+    // still current.
+    let mut restarted_again =
+        PlanningService::open(&db.path, FixedClock(after_expiry)).expect("second restart");
+    let repeated = restarted_again
+        .propose_decomposition(&planner, &branch(), request("risk-expiry"), &policy(false))
+        .unwrap();
+    assert!(matches!(
+        repeated,
+        PlanningProposalOutcome::WaitingForHuman(ref current) if current.id == second.id
+    ));
+    assert_eq!(planner.call_count(), 2);
+}
+
+#[test]
+fn resolved_risk_resume_supersedes_when_snapshot_changes_before_application() {
+    let db = TestDb::new("human-risk-resume-stale-snapshot");
+    db.seed_tasks(&["TASK-0078", "node-1"], true);
+    let planner = TestPlanner::new(ProposalCase::RiskEscalation);
+    let decision = match db
+        .service()
+        .propose_decomposition(
+            &planner,
+            &branch(),
+            request("risk-resume-stale"),
+            &policy(false),
+        )
+        .unwrap()
+    {
+        PlanningProposalOutcome::WaitingForHuman(decision) => *decision,
+        other => panic!("expected risk decision, got {other:?}"),
+    };
+    HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS))
+        .decide(&decision.id, HumanContinuation::Resume, "operator:test")
+        .unwrap();
+
+    // Simulate a distinct trusted planning operation moving only the current
+    // PlanningInputSnapshot while the Plan head remains at zero.
+    let replacement_evidence = vec![evidence("risk-resume-new-snapshot")];
+    let replacement = PlanningInputSnapshot::new_with_candidates(
+        branch(),
+        "TASK-0078".to_owned(),
+        vec!["TASK-0078".to_owned(), "node-1".to_owned()],
+        0,
+        ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+        RiskClass::Low,
+        vec![],
+        replacement_evidence.clone(),
+        vec![],
+        None,
+        "policy:test".to_owned(),
+    )
+    .unwrap();
+    db.store()
+        .start_planning_run(
+            &replacement,
+            &planning_evidence_key(&replacement_evidence),
+            FIXED_MILLIS + 1,
+        )
+        .unwrap();
+
+    let error = db
+        .service()
+        .resume_approved_risk_proposal(&decision.id, &policy(false))
+        .expect_err("stale approved proposal must fail before publication");
+    assert!(matches!(
+        error,
+        PlanningServiceError::Storage(StorageError::HumanDecisionStale { .. })
+    ));
+    assert_eq!(db.store().get_plan_head(&branch()).unwrap(), None);
+    assert_eq!(planner.call_count(), 1);
+
+    let persisted = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS))
+        .get(&decision.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.status, HumanDecisionStatus::Superseded);
+    let events = db
+        .store()
+        .list_security_audit_by_correlation(&format!("human-decision:{}", decision.id.as_str()))
+        .unwrap()
+        .into_iter()
+        .map(|record| record.fact.event)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events,
+        vec![
+            SecurityAuditEvent::HumanDecisionRequested,
+            SecurityAuditEvent::HumanDecisionDecided,
+            SecurityAuditEvent::HumanDecisionSuperseded,
+        ]
+    );
 }
 
 #[test]
@@ -2606,4 +2954,39 @@ fn replan_decision_uses_normal_g7_planning_boundary_and_is_once_only() {
             | PlanningServiceError::Storage(StorageError::HumanDecisionState { .. })
     ));
     assert_eq!(planner.call_count(), 1);
+}
+
+#[test]
+fn failed_replan_is_superseded_without_erasing_decision_evidence() {
+    let db = TestDb::new("human-replan-failure-recovery");
+    seed_head(&db, 1);
+    db.seed_tasks(&["TASK-0078"], true);
+    let decision = create_human_decision(&db, "TASK-0078", vec![HumanContinuation::Replan]);
+    let mut human = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS));
+    human
+        .decide(&decision.id, HumanContinuation::Replan, "operator:test")
+        .unwrap();
+
+    let mut planning = db.service();
+    let refusal = human
+        .apply_replan(
+            &mut planning,
+            &TestPlanner::new(ProposalCase::InvalidScope),
+            &decision.id,
+            &policy(false),
+        )
+        .expect("a refused continuation is an honest planning result");
+    assert!(matches!(
+        refusal,
+        PlanningProposalOutcome::Refused(_) | PlanningProposalOutcome::NotApplicable(_)
+    ));
+
+    let persisted = human
+        .get(&decision.id)
+        .unwrap()
+        .expect("superseded decision remains durable evidence");
+    assert_eq!(persisted.status, HumanDecisionStatus::Superseded);
+    assert_eq!(persisted.selected, Some(HumanContinuation::Replan));
+    assert_eq!(persisted.decided_by.as_deref(), Some("operator:test"));
+    assert_eq!(db.store().get_plan_head(&branch()).unwrap(), Some(1));
 }

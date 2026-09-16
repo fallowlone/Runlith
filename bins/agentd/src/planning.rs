@@ -12,9 +12,18 @@ use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use app_services::{HumanDecisionService, PlanningPolicyContext, PlanningProposalOutcome};
+use ipc_contracts::proto::{
+    planning_core_request, planning_core_response, ApplyHumanContinuationRequest, BusinessError,
+    BusinessErrorCode, PlanningContext, PlanningCoreRequest, PlanningCoreResponse,
+    PlanningOperationResponse,
+};
 use plan_domain::{
-    AtomicityAssessment, AtomicityRequest, DecompositionRequest, PlanChangeSet, PlannerCallSpend,
-    PlannerFault, PlannerPort, ReplanRequest,
+    AffectedParentCriterion, AtomicityAssessment, AtomicityRequest, CriterionId,
+    DecompositionRequest, EvidenceRef, HumanContinuation, HumanDecisionRequestId, PlanBranchId,
+    PlanChangeSet, PlannerCallSpend, PlannerFault, PlannerPort, PlanningBudget, ReplanRequest,
+    RiskClass, ScopeBound, VerificationMethod, MAX_DECOMPOSITION_DEPTH,
+    MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH, MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
 };
 use task_domain::TaskId;
 
@@ -208,4 +217,260 @@ fn not_started(detail: impl Into<String>) -> PlannerFault {
         typed_cause: detail.into(),
         spend: PlannerCallSpend::NotStarted,
     }
+}
+
+/// Version-5 control-plane mapping. It reconstructs bounded domain input and
+/// invokes trusted services; it never accepts a graph or PlanRevision from a
+/// client.
+pub fn dispatch_control(
+    composition: &ExecutionComposition,
+    decisions: &mut HumanDecisionService,
+    request: PlanningCoreRequest,
+) -> PlanningCoreResponse {
+    match request.payload {
+        Some(planning_core_request::Payload::Trigger(request)) => {
+            let context = match request.context {
+                Some(value) => value,
+                None => return invalid("planning context is required"),
+            };
+            let (task, branch, policy, decomposition) = match planning_input(context) {
+                Ok(value) => value,
+                Err(message) => return invalid(&message),
+            };
+            let mut planning = match composition.planning_service() {
+                Ok(value) => value,
+                Err(error) => return internal(error.to_string()),
+            };
+            let planner = match composition.secured_claude_planner(task.as_str()) {
+                Ok(value) => value,
+                Err(error) => return internal(error),
+            };
+            match planning.propose_decomposition(&planner, &branch, decomposition, &policy) {
+                Ok(outcome) => outcome_response(outcome, &branch),
+                Err(error) => internal(error.to_string()),
+            }
+        }
+        Some(planning_core_request::Payload::ApplyHumanContinuation(request)) => {
+            apply_continuation(composition, decisions, request)
+        }
+        None => invalid("empty planning request"),
+    }
+}
+
+fn apply_continuation(
+    composition: &ExecutionComposition,
+    decisions: &mut HumanDecisionService,
+    request: ApplyHumanContinuationRequest,
+) -> PlanningCoreResponse {
+    let id = match HumanDecisionRequestId::new(request.request_id.clone()) {
+        Ok(value) => value,
+        Err(_) => return invalid("human decision request id is invalid"),
+    };
+    let record = match decisions.get(&id) {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            return error(
+                BusinessErrorCode::NotFound,
+                &format!("human decision {} does not exist", id.as_str()),
+            )
+        }
+        Err(error) => return internal(error.to_string()),
+    };
+    if record.reason == plan_domain::HumanDecisionReason::RiskEscalation
+        && record.selected == Some(HumanContinuation::Resume)
+    {
+        let context = match request.context {
+            Some(value) => value,
+            None => return invalid("planning context is required for RESUME"),
+        };
+        let (task, branch, policy, _) = match planning_input(context) {
+            Ok(value) => value,
+            Err(message) => return invalid(&message),
+        };
+        if task != record.task_id || branch != record.plan_branch_id {
+            return invalid("planning context does not match human decision scope");
+        }
+        let mut planning = match composition.planning_service() {
+            Ok(value) => value,
+            Err(error) => return internal(error.to_string()),
+        };
+        return match planning.resume_approved_risk_proposal(&id, &policy) {
+            Ok(outcome) => outcome_response(outcome, &branch),
+            Err(error) => internal(error.to_string()),
+        };
+    }
+    if record.selected == Some(HumanContinuation::Replan) {
+        let context = match request.context {
+            Some(value) => value,
+            None => return invalid("planning context is required for REPLAN"),
+        };
+        let (task, branch, policy, _) = match planning_input(context) {
+            Ok(value) => value,
+            Err(message) => return invalid(&message),
+        };
+        if task != record.task_id || branch != record.plan_branch_id {
+            return invalid("planning context does not match human decision scope");
+        }
+        let mut planning = match composition.planning_service() {
+            Ok(value) => value,
+            Err(error) => return internal(error.to_string()),
+        };
+        let planner = match composition.secured_claude_planner(task.as_str()) {
+            Ok(value) => value,
+            Err(error) => return internal(error),
+        };
+        return match decisions.apply_replan(&mut planning, &planner, &id, &policy) {
+            Ok(outcome) => outcome_response(outcome, &branch),
+            Err(error) => internal(error.to_string()),
+        };
+    }
+    match decisions.apply_local(&id) {
+        Ok(record) => success(
+            "CONTINUATION_APPLIED",
+            &record.plan_branch_id,
+            None,
+            Some(record.id.as_str().to_owned()),
+            record.status.as_str().to_owned(),
+        ),
+        Err(error) => internal(error.to_string()),
+    }
+}
+
+fn planning_input(
+    context: PlanningContext,
+) -> Result<
+    (
+        TaskId,
+        PlanBranchId,
+        PlanningPolicyContext,
+        DecompositionRequest,
+    ),
+    String,
+> {
+    let task = TaskId::new(context.task_id).map_err(|error| format!("invalid task id: {error}"))?;
+    let branch = PlanBranchId::new(context.plan_branch_id)
+        .map_err(|error| format!("invalid plan branch id: {error}"))?;
+    let scope_bound = ScopeBound::new(context.scope_roots)
+        .map_err(|error| format!("invalid planning scope: {error}"))?;
+    let evidence = EvidenceRef::new(context.evidence_ref)
+        .map_err(|error| format!("invalid planning evidence reference: {error}"))?;
+    if context.policy_fingerprint.trim().is_empty()
+        || context.policy_fingerprint.len() > ipc_contracts::MAX_WIRE_ID_LEN
+    {
+        return Err("policy fingerprint is invalid".to_owned());
+    }
+    let criteria = context
+        .acceptance_criterion_ids
+        .into_iter()
+        .map(|value| {
+            CriterionId::new(value)
+                .map(|id| AffectedParentCriterion {
+                    id,
+                    method: VerificationMethod::AutomatedTest,
+                })
+                .map_err(|error| format!("invalid acceptance criterion: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if criteria.is_empty() {
+        return Err("at least one acceptance criterion is required".to_owned());
+    }
+    let policy = PlanningPolicyContext {
+        scope_bound: scope_bound.clone(),
+        baseline_risk: RiskClass::Low,
+        affected_parent_criteria: criteria,
+        parent_task_ref: task.as_str().to_owned(),
+        lineage_fingerprints: Vec::new(),
+        risk_grant: None,
+        risk_decision_id: None,
+        policy_fingerprint: context.policy_fingerprint,
+    };
+    let request = DecompositionRequest {
+        parent_task_ref: String::new(),
+        base_plan_revision: 0,
+        acceptance_criteria_refs: Vec::new(),
+        scope_bound,
+        evidence_refs: vec![evidence],
+        depth_remaining: MAX_DECOMPOSITION_DEPTH,
+        budget_remaining: PlanningBudget {
+            calls_remaining: MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
+            input_tokens_remaining: MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
+        },
+    };
+    Ok((task, branch, policy, request))
+}
+
+fn outcome_response(
+    outcome: PlanningProposalOutcome,
+    branch: &PlanBranchId,
+) -> PlanningCoreResponse {
+    match outcome {
+        PlanningProposalOutcome::Accepted(plan) => success(
+            "ACCEPTED",
+            branch,
+            Some(plan.revision().revision_seq),
+            None,
+            plan.revision().changeset_hash.clone(),
+        ),
+        PlanningProposalOutcome::WaitingForHuman(decision) => success(
+            "WAITING_FOR_HUMAN",
+            branch,
+            None,
+            Some(decision.id.as_str().to_owned()),
+            decision.reason.as_str().to_owned(),
+        ),
+        PlanningProposalOutcome::Refused(value) => {
+            success("REFUSED", branch, None, None, format!("{value:?}"))
+        }
+        PlanningProposalOutcome::NotApplicable(value) => {
+            success("NOT_APPLICABLE", branch, None, None, format!("{value:?}"))
+        }
+        PlanningProposalOutcome::GuardrailTripped(value) => success(
+            "GUARDRAIL_TRIPPED",
+            branch,
+            None,
+            None,
+            format!("{value:?}"),
+        ),
+        PlanningProposalOutcome::Blocked(value) => {
+            success("BLOCKED", branch, None, None, format!("{value:?}"))
+        }
+    }
+}
+
+fn success(
+    outcome: &str,
+    branch: &PlanBranchId,
+    revision_seq: Option<u64>,
+    decision: Option<String>,
+    detail: String,
+) -> PlanningCoreResponse {
+    PlanningCoreResponse {
+        payload: Some(planning_core_response::Payload::Operation(
+            PlanningOperationResponse {
+                outcome: outcome.to_owned(),
+                plan_branch_id: Some(branch.as_str().to_owned()),
+                revision_seq,
+                human_decision_request_id: decision,
+                detail,
+            },
+        )),
+    }
+}
+fn invalid(message: &str) -> PlanningCoreResponse {
+    error(BusinessErrorCode::InvalidArgument, message)
+}
+fn internal(message: String) -> PlanningCoreResponse {
+    error(BusinessErrorCode::Internal, &message)
+}
+fn error(code: BusinessErrorCode, message: &str) -> PlanningCoreResponse {
+    PlanningCoreResponse {
+        payload: Some(planning_core_response::Payload::Error(BusinessError {
+            code: code as i32,
+            message: message.chars().take(512).collect(),
+        })),
+    }
+}
+
+pub fn unavailable() -> PlanningCoreResponse {
+    error(BusinessErrorCode::Internal, "planning service unavailable")
 }

@@ -18,6 +18,10 @@ pub enum SecurityAuditEvent {
     EffectiveAuthority,
     ApprovalRequested,
     ApprovalDecided,
+    HumanDecisionRequested,
+    HumanDecisionDecided,
+    HumanDecisionApplied,
+    HumanDecisionSuperseded,
     SecretAccess,
     PrivilegeElevation,
     DeniedOperation,
@@ -36,6 +40,10 @@ impl SecurityAuditEvent {
             Self::EffectiveAuthority => "authority.effective",
             Self::ApprovalRequested => "approval.requested",
             Self::ApprovalDecided => "approval.decided",
+            Self::HumanDecisionRequested => "human_decision.requested",
+            Self::HumanDecisionDecided => "human_decision.decided",
+            Self::HumanDecisionApplied => "human_decision.applied",
+            Self::HumanDecisionSuperseded => "human_decision.superseded",
             Self::SecretAccess => "secret.access",
             Self::PrivilegeElevation => "privilege.elevation",
             Self::DeniedOperation => "operation.denied",
@@ -53,6 +61,10 @@ impl SecurityAuditEvent {
             "authority.effective" => Ok(Self::EffectiveAuthority),
             "approval.requested" => Ok(Self::ApprovalRequested),
             "approval.decided" => Ok(Self::ApprovalDecided),
+            "human_decision.requested" => Ok(Self::HumanDecisionRequested),
+            "human_decision.decided" => Ok(Self::HumanDecisionDecided),
+            "human_decision.applied" => Ok(Self::HumanDecisionApplied),
+            "human_decision.superseded" => Ok(Self::HumanDecisionSuperseded),
             "secret.access" => Ok(Self::SecretAccess),
             "privilege.elevation" => Ok(Self::PrivilegeElevation),
             "operation.denied" => Ok(Self::DeniedOperation),
@@ -69,6 +81,7 @@ impl SecurityAuditEvent {
 pub enum SecurityAuditAuthor {
     PolicyEngine,
     ApprovalService,
+    HumanDecisionService,
     SecretsBroker,
     Runner,
     ProviderEnvironment,
@@ -82,6 +95,7 @@ impl SecurityAuditAuthor {
         match self {
             Self::PolicyEngine => "policy-engine",
             Self::ApprovalService => "approval-service",
+            Self::HumanDecisionService => "human-decision-service",
             Self::SecretsBroker => "secrets-broker",
             Self::Runner => "runner",
             Self::ProviderEnvironment => "provider-environment",
@@ -94,6 +108,7 @@ impl SecurityAuditAuthor {
         match value {
             "policy-engine" => Ok(Self::PolicyEngine),
             "approval-service" => Ok(Self::ApprovalService),
+            "human-decision-service" => Ok(Self::HumanDecisionService),
             "secrets-broker" => Ok(Self::SecretsBroker),
             "runner" => Ok(Self::Runner),
             "provider-environment" => Ok(Self::ProviderEnvironment),
@@ -112,6 +127,8 @@ pub enum SecurityAuditOutcome {
     ApprovalRequired,
     Approved,
     Rejected,
+    Resolved,
+    Superseded,
     Consumed,
     Succeeded,
     Failed,
@@ -129,6 +146,8 @@ impl SecurityAuditOutcome {
             Self::ApprovalRequired => "approval_required",
             Self::Approved => "approved",
             Self::Rejected => "rejected",
+            Self::Resolved => "resolved",
+            Self::Superseded => "superseded",
             Self::Consumed => "consumed",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
@@ -145,6 +164,8 @@ impl SecurityAuditOutcome {
             "approval_required" => Ok(Self::ApprovalRequired),
             "approved" => Ok(Self::Approved),
             "rejected" => Ok(Self::Rejected),
+            "resolved" => Ok(Self::Resolved),
+            "superseded" => Ok(Self::Superseded),
             "consumed" => Ok(Self::Consumed),
             "succeeded" => Ok(Self::Succeeded),
             "failed" => Ok(Self::Failed),
@@ -159,6 +180,7 @@ impl SecurityAuditOutcome {
 pub enum SecurityAuditSubjectKind {
     PolicyRule,
     Approval,
+    HumanDecision,
     SecretRef,
     RunnerBackend,
     Provider,
@@ -172,6 +194,7 @@ impl SecurityAuditSubjectKind {
         match self {
             Self::PolicyRule => "policy_rule",
             Self::Approval => "approval",
+            Self::HumanDecision => "human_decision",
             Self::SecretRef => "secret_ref",
             Self::RunnerBackend => "runner_backend",
             Self::Provider => "provider",
@@ -184,6 +207,7 @@ impl SecurityAuditSubjectKind {
         match value {
             "policy_rule" => Ok(Self::PolicyRule),
             "approval" => Ok(Self::Approval),
+            "human_decision" => Ok(Self::HumanDecision),
             "secret_ref" => Ok(Self::SecretRef),
             "runner_backend" => Ok(Self::RunnerBackend),
             "provider" => Ok(Self::Provider),
@@ -385,6 +409,38 @@ fn validate_shape(record: &NewSecurityAuditRecord) -> Result<(), SecurityAuditEr
                     Some(O::Approved | O::Denied | O::Rejected | O::Consumed)
                 ),
                 "approval outcome",
+            )?;
+        }
+        E::HumanDecisionRequested => {
+            require_subject(S::HumanDecision)?;
+            require(record.task_id.is_some(), "task_id")?;
+            require(
+                matches!(record.outcome, Some(O::Requested)),
+                "human decision outcome",
+            )?;
+        }
+        E::HumanDecisionDecided => {
+            require_subject(S::HumanDecision)?;
+            require(record.task_id.is_some(), "task_id")?;
+            require(
+                matches!(record.outcome, Some(O::Resolved)),
+                "human decision outcome",
+            )?;
+        }
+        E::HumanDecisionApplied => {
+            require_subject(S::HumanDecision)?;
+            require(record.task_id.is_some(), "task_id")?;
+            require(
+                matches!(record.outcome, Some(O::Consumed)),
+                "human decision outcome",
+            )?;
+        }
+        E::HumanDecisionSuperseded => {
+            require_subject(S::HumanDecision)?;
+            require(record.task_id.is_some(), "task_id")?;
+            require(
+                matches!(record.outcome, Some(O::Superseded)),
+                "human decision outcome",
             )?;
         }
         E::SecretAccess => require_subject(S::SecretRef)?,

@@ -65,8 +65,12 @@ Product version != IPC protocol version.
 ```
 
 Today (see `product/version.toml` for the current development task):
-supported IPC `0, 1, 2` (`2` adds the G5 `execution_core` envelope; see
-`docs/architecture/ipc.md` §16 and ADR-0024). A product-version bump
+supported IPC `0, 1, 2, 3, 4, 5` (`2` adds the G5 `execution_core` envelope;
+`3` adds the G6 security control surface; `4` adds bounded Human Decision
+observation/resolution; `5` adds trusted G7 planning trigger and Human Decision
+continuation application). Historical versions keep their original authority:
+planning operations require a negotiated v5 session. See
+`docs/architecture/ipc.md` and the corresponding accepted ADRs. A product-version bump
 MUST NOT automatically change protocol version; protocol versions
 change only for wire-contract compatibility reasons.
 

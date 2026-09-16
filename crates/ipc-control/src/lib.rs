@@ -24,11 +24,11 @@ pub mod session;
 pub use error::{ControlError, ControlResult};
 pub use negotiation::{
     default_client_build_version, default_daemon_build_version, evaluate_handshake,
-    is_business_allowed, is_execution_allowed, is_human_decision_allowed, is_policy_allowed,
-    is_recognized_client_kind, negotiate_capabilities, rejection_for,
+    is_business_allowed, is_execution_allowed, is_human_decision_allowed, is_planning_allowed,
+    is_policy_allowed, is_recognized_client_kind, negotiate_capabilities, rejection_for,
     select_highest_common_version, validate_business_allowed, validate_execution_allowed,
-    validate_human_decision_allowed, validate_policy_allowed, AcceptedParameters, ServerConfig,
-    CLIENT_KIND_AGENTCTL, CLIENT_KIND_TAURI_HOST,
+    validate_human_decision_allowed, validate_planning_allowed, validate_policy_allowed,
+    AcceptedParameters, ServerConfig, CLIENT_KIND_AGENTCTL, CLIENT_KIND_TAURI_HOST,
 };
 pub use session::{
     ClientConfig, ClientSession, HandshakeAcceptedInfo, ReadyRequest, ServerHandshakeInfo,
