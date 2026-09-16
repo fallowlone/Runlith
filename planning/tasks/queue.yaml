@@ -1508,25 +1508,6 @@ items:
       through the production path with bounded cost; FakePlanner and
       real adapter pass the same contract suite; guardrail violations
       refuse typed before mutation; workspace green.
-    outcome: >-
-      Implemented the G7 proposal-only planning loop end to end. A shared
-      provider-neutral PlannerPort contract is exercised by deterministic
-      FakePlanner and ClaudePlanner adapters; Claude planning reuses the
-      existing provider process seam and production agentd composition routes
-      every real planner call through G6 Policy plus Runner SandboxedLaunch
-      with read-only repository authority. PlanningService owns bounded
-      propose/replan calls, canonical V1-V9 validation against the durable
-      branch head, atomic TASK-0077 revision persistence and the accepted-plan
-      capability consumed by scheduler orchestration. Regression coverage
-      proves malformed/stale/scope/policy/budget failures refuse before
-      mutation, persistence failure leaves no partial state, missing provider
-      token usage fails closed, and independent evaluation can trigger one
-      bounded replan without granting completion authority. Deterministic
-      agentd integration covers FakePlanner execution/replan and a Claude-shaped
-      production composition fixture through Policy/Runner/Security Audit with
-      no external API. cargo fmt, workspace clippy -D warnings, full workspace
-      tests and diff checks are green; authenticated real-Claude smoke remains
-      opt-in/ignored. G7 remains IN_PROGRESS.
     depends_on:
       - TASK-0077
     blocked_by: []

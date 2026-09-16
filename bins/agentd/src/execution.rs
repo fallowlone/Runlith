@@ -6,7 +6,8 @@
 //! agentctl
 //!  → versioned local IPC (`execution_core`, protocol v2 only)
 //!  → agentd `serve_connection` (this composition root)
-//!  → OrchestrationService::enter_execution (durable entry, synchronous)
+//!  → PlanningService current accepted Plan resolution (no planner call)
+//!  → OrchestrationService::enter_from_current_plan (durable entry, synchronous)
 //!  → background thread: WorkspaceService lease → ClaudeExecutor
 //!    (default real provider) → attempt → submit → deferred verification
 //!  → durable state observable via status, signallable via cancel
@@ -50,7 +51,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use agent_runtime::{AttemptOutcome, ExecutionId};
 use app_services::{
     ExecutionEntry, G6Authorization, G6SecurityService, ManagedWorkspaceRoot, OrchestrationIds,
-    OrchestrationService, PrivilegedOperation, ProcessSecuritySpec, WorkspaceRequest,
+    OrchestrationService, PlannedExecutionEntryOutcome, PlannedOrchestrationError, PlanningService,
+    PlanningServiceError, PrivilegedOperation, ProcessSecuritySpec, ServiceError, WorkspaceRequest,
     WorkspaceService,
 };
 use evaluation::{EvaluationPort, EvaluationRequest, EvaluationResult, EvaluationVerdict};
@@ -1042,8 +1044,23 @@ fn start_run(
                 );
             }
         };
-    match orchestration.enter_execution(&task_id, ids) {
-        Ok(ExecutionEntry::Runnable(work)) => {
+    let planning = match PlanningService::open(&composition.db_path, app_services::SystemClock) {
+        Ok(service) => service,
+        Err(error) => {
+            return (
+                exec_error(
+                    BusinessErrorCode::Internal,
+                    format!("execution planning gate unavailable: {error}"),
+                ),
+                None,
+            );
+        }
+    };
+    match orchestration.enter_from_current_plan(&planning, &task_id, ids) {
+        Ok(PlannedExecutionEntryOutcome::Entered {
+            entry: ExecutionEntry::Runnable(work),
+            ..
+        }) => {
             // Exclusive live ownership (TASK-0056, G5 B-CR): the run owns
             // the live provider/cancellation lifecycle only after winning
             // the atomic claim. A live owner for the same execution can
@@ -1083,9 +1100,59 @@ fn start_run(
             };
             (response, Some(job))
         }
-        Ok(ExecutionEntry::NotRunnable(outcome)) => (not_runnable_error(&task_id, outcome), None),
-        Err(error) => {
+        Ok(PlannedExecutionEntryOutcome::Entered {
+            entry: ExecutionEntry::NotRunnable(outcome),
+            ..
+        }) => (not_runnable_error(&task_id, outcome), None),
+        Ok(PlannedExecutionEntryOutcome::NoAcceptedPlan) => (
+            exec_error(
+                BusinessErrorCode::StaleState,
+                "task has no current accepted plan; complete planning before execution",
+            ),
+            None,
+        ),
+        Ok(PlannedExecutionEntryOutcome::AmbiguousAcceptedPlan { .. }) => (
+            exec_error(
+                BusinessErrorCode::Conflict,
+                "task is represented by multiple current accepted plans; reconcile planning before execution",
+            ),
+            None,
+        ),
+        Ok(PlannedExecutionEntryOutcome::WaitingOnPlanDependency { .. }) => (
+            exec_error(
+                BusinessErrorCode::Conflict,
+                "task is waiting on an accepted-plan predecessor",
+            ),
+            None,
+        ),
+        Ok(
+            PlannedExecutionEntryOutcome::PlanHeadMoved { .. }
+            | PlannedExecutionEntryOutcome::PlanningInputMoved { .. },
+        ) => (
+            exec_error(
+                BusinessErrorCode::StaleState,
+                "accepted planning state changed before execution admission; reconcile and retry",
+            ),
+            None,
+        ),
+        Err(PlannedOrchestrationError::Orchestration(error)) => {
             let (code, message) = crate::dispatch::map_error(&error);
+            (exec_error(code, message), None)
+        }
+        Err(PlannedOrchestrationError::Planning(error)) => {
+            let (code, message) = match error {
+                PlanningServiceError::Storage(storage) => {
+                    crate::dispatch::map_error(&ServiceError::Storage(storage))
+                }
+                PlanningServiceError::Planner(_) => (
+                    BusinessErrorCode::ProviderUnavailable,
+                    "planning provider failed while resolving execution admission".to_owned(),
+                ),
+                PlanningServiceError::Domain(_) | PlanningServiceError::InvalidContext(_) => (
+                    BusinessErrorCode::CorruptState,
+                    "accepted planning state failed validation".to_owned(),
+                ),
+            };
             (exec_error(code, message), None)
         }
     }
@@ -1946,6 +2013,45 @@ mod tests {
             .create_task(&task_domain::Task::draft(task_id.clone(), project_id, objective).unwrap())
             .unwrap();
         tasks.mark_ready(&task_id).unwrap();
+        seed_accepted_plan(db, task);
+    }
+
+    fn seed_accepted_plan(db: &Path, task: &str) {
+        let mut planning = app_services::PlanningService::open(db, app_services::SystemClock)
+            .expect("open planning service");
+        let scope = plan_domain::ScopeBound::new(vec!["repo:src".to_owned()]).unwrap();
+        let evidence = plan_domain::EvidenceRef::new(format!("fixture-plan:{task}")).unwrap();
+        let branch = plan_domain::PlanBranchId::new(format!("fixture-plan-{task}")).unwrap();
+        let planner =
+            fake_planner::FakePlanner::for_single_leaf(plan_domain::PlanNodeId::new(task).unwrap());
+        let request = plan_domain::DecompositionRequest {
+            parent_task_ref: task.to_owned(),
+            base_plan_revision: 0,
+            acceptance_criteria_refs: vec![],
+            scope_bound: scope.clone(),
+            evidence_refs: vec![evidence],
+            depth_remaining: plan_domain::MAX_DECOMPOSITION_DEPTH,
+            budget_remaining: plan_domain::PlanningBudget {
+                calls_remaining: plan_domain::MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
+                input_tokens_remaining: plan_domain::MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
+            },
+        };
+        let policy = app_services::PlanningPolicyContext {
+            scope_bound: scope,
+            baseline_risk: plan_domain::RiskClass::Low,
+            affected_parent_criteria: vec![],
+            parent_task_ref: task.to_owned(),
+            lineage_fingerprints: vec![],
+            risk_grant: None,
+            policy_fingerprint: format!("policy:fixture:{task}"),
+        };
+        let outcome = planning
+            .propose_decomposition(&planner, &branch, request, &policy)
+            .expect("seed accepted plan");
+        assert!(matches!(
+            outcome,
+            app_services::PlanningProposalOutcome::Accepted(_)
+        ));
     }
 
     fn run_request(task: &str, repo: &Path) -> RunExecutionRequest {

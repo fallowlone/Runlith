@@ -14,6 +14,8 @@ mod clock;
 mod error;
 mod managed_identity;
 mod orchestration_service;
+mod plan_graph;
+mod planned_orchestration;
 mod planning_service;
 mod runtime_service;
 mod security_service;
@@ -31,9 +33,13 @@ pub use managed_identity::{
 pub use orchestration_service::{
     ExecutionEntry, OrchestrationIds, OrchestrationService, PreAttemptResumePlan,
 };
+pub use planned_orchestration::{
+    PlannedExecutionEntryOutcome, PlannedOrchestrationError, PlannedOrchestrationOutcome,
+};
 pub use planning_service::{
-    AcceptedPlanRevision, PlannedOrchestrationError, PlannedOrchestrationOutcome, PlanningCycle,
-    PlanningPolicyContext, PlanningProposalOutcome, PlanningService, PlanningServiceError,
+    AcceptedPlanRevision, AcceptedTaskPlanResolution, PlanApplicabilityRefusal,
+    PlanningAssessmentOutcome, PlanningGuardrailState, PlanningPolicyContext,
+    PlanningProposalOutcome, PlanningService, PlanningServiceError,
 };
 pub use runtime_service::{AppliedExecution, PlannedExecution, RuntimeService};
 pub use security_service::{

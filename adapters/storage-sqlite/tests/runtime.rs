@@ -142,8 +142,8 @@ fn journal_len(store: &SqliteStore) -> usize {
 fn fresh_database_reaches_current_schema() {
     let db = TestDb::new("fresh-current");
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 13);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 13);
+    assert_eq!(store.schema_version().unwrap(), 14);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 14);
     assert!(store.list_events_ordered().unwrap().is_empty());
     assert!(store
         .get_execution(&ExecutionId::new("MISSING").unwrap())
@@ -172,7 +172,7 @@ fn current_schema_reopen_is_a_no_op() {
             .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 13);
+    assert_eq!(store.schema_version().unwrap(), 14);
     assert!(store
         .get_execution(&ExecutionId::new("E-1").unwrap())
         .unwrap()
@@ -213,7 +213,7 @@ fn v3_database_with_g2_data_migrates_preserving_everything() {
             .unwrap();
     }
     let mut store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 13);
+    assert_eq!(store.schema_version().unwrap(), 14);
     // History decodes unchanged through the current codec.
     let history = store.list_events_ordered().unwrap();
     assert_eq!(history.len(), 2);

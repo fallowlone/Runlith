@@ -61,22 +61,35 @@ fn plan_cost_receipt_round_trips_and_identity_is_immutable() {
 }
 
 #[test]
-fn schema_12_database_upgrades_to_13_without_plan_cost_data() {
-    let db = TestDb::new("upgrade-12-13");
+fn schema_12_database_upgrades_to_current_without_plan_cost_data() {
+    let db = TestDb::new("upgrade-12-current");
     {
         let store = SqliteStore::open(&db.path).expect("fresh current store");
-        assert_eq!(store.schema_version().unwrap(), 13);
+        assert_eq!(store.schema_version().unwrap(), 14);
     }
     {
         let connection = rusqlite::Connection::open(&db.path).expect("raw sqlite");
         connection
-            .execute_batch("DROP TABLE plan_cost_receipts; PRAGMA user_version = 12;")
+            .execute_batch(
+                "DROP TABLE planning_run_heads;
+                 DROP TABLE planning_runs;
+                 DROP TABLE planning_input_heads;
+                 DROP TABLE planning_input_lineage;
+                 DROP TABLE planning_input_evidence;
+                 DROP TABLE planning_input_criteria;
+                 DROP TABLE planning_input_scope_roots;
+                 DROP TABLE planning_input_snapshots;
+                 DROP TABLE plan_guardrail_events;
+                 DROP TABLE plan_revision_lineage;
+                 DROP TABLE plan_cost_receipts;
+                 PRAGMA user_version = 12;",
+            )
             .expect("simulate historical v12 schema");
     }
 
-    let mut store = SqliteStore::open(&db.path).expect("migrate v12 to v13");
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 13);
-    assert_eq!(store.schema_version().unwrap(), 13);
+    let mut store = SqliteStore::open(&db.path).expect("migrate v12 to current");
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 14);
+    assert_eq!(store.schema_version().unwrap(), 14);
     let receipt_ref = PlanningCostReceiptRef::new("planning-receipt:after-upgrade").unwrap();
     let evidence = receipt(1);
     store

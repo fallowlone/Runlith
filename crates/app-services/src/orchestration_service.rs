@@ -39,7 +39,7 @@ use scheduler::{
     derive_readiness, interpret, AttemptInterpretation, ExecutionPort, OrchestrationOutcome,
     ScheduleReadiness, WorkItem,
 };
-use storage_sqlite::StorageError;
+use storage_sqlite::{SqliteStore, StorageError};
 use task_domain::{DomainError, Task, TaskId, TaskState};
 use workspace::{GitPort, WorkspaceLease, WorkspaceStore};
 
@@ -181,7 +181,23 @@ impl<C: Clock> OrchestrationService<C> {
         executor: &impl ExecutionPort,
         evaluator: &impl EvaluationPort,
     ) -> ServiceResult<OrchestrationOutcome> {
-        let entered = match self.enter(task_id, ids)? {
+        self.schedule_with_plan_head(task_id, ids, None, executor, evaluator)
+    }
+
+    /// Runs one bounded cycle authorized by an optional exact Plan head.
+    /// The predicate is enforced by the SQLite admission transaction, before
+    /// it mutates Task lifecycle state. This is crate-visible solely for the
+    /// plan-gated orchestration facade; ordinary scheduling remains
+    /// unconditioned.
+    pub(crate) fn schedule_with_plan_head(
+        &mut self,
+        task_id: &TaskId,
+        ids: OrchestrationIds,
+        plan_head: Option<storage_sqlite::PlanHeadPrecondition>,
+        executor: &impl ExecutionPort,
+        evaluator: &impl EvaluationPort,
+    ) -> ServiceResult<OrchestrationOutcome> {
+        let entered = match self.enter(task_id, ids, plan_head)? {
             Entered::NotRunnable(outcome) => return Ok(outcome),
             Entered::Runnable(entered) => entered,
         };
@@ -280,7 +296,16 @@ impl<C: Clock> OrchestrationService<C> {
         task_id: &TaskId,
         ids: OrchestrationIds,
     ) -> ServiceResult<ExecutionEntry> {
-        match self.enter(task_id, ids)? {
+        self.enter_execution_with_plan_head(task_id, ids, None)
+    }
+
+    pub(crate) fn enter_execution_with_plan_head(
+        &mut self,
+        task_id: &TaskId,
+        ids: OrchestrationIds,
+        plan_head: Option<storage_sqlite::PlanHeadPrecondition>,
+    ) -> ServiceResult<ExecutionEntry> {
+        match self.enter(task_id, ids, plan_head)? {
             Entered::NotRunnable(outcome) => Ok(ExecutionEntry::NotRunnable(outcome)),
             Entered::Runnable(entered) => Ok(ExecutionEntry::Runnable(entered.work)),
         }
@@ -456,20 +481,19 @@ impl<C: Clock> OrchestrationService<C> {
     /// execution/attempt identity, or a concurrent claim of the same
     /// task, rolls the loser back with zero unrelated mutations — the
     /// loser keeps its pre-run state and a typed conflict.
-    fn enter(&mut self, task_id: &TaskId, ids: OrchestrationIds) -> ServiceResult<Entered> {
+    fn enter(
+        &mut self,
+        task_id: &TaskId,
+        ids: OrchestrationIds,
+        plan_head: Option<storage_sqlite::PlanHeadPrecondition>,
+    ) -> ServiceResult<Entered> {
         // -- derived readiness (read-only) ---------------------------------
-        let task = self.tasks.get_task(task_id)?.ok_or_else(|| {
+        let readiness = derive_task_readiness(self.tasks.store(), task_id)?.ok_or_else(|| {
             ServiceError::Storage(StorageError::NotFound(format!(
                 "task {task_id} does not exist"
             )))
         })?;
-        let state = task.state();
-        let blocking = if state == TaskState::Ready {
-            self.blocking_dependencies(task_id)?
-        } else {
-            Vec::new()
-        };
-        match derive_readiness(state, blocking) {
+        match readiness {
             ScheduleReadiness::NotRunnable { state } => {
                 return Ok(Entered::NotRunnable(OrchestrationOutcome::NotRunnable {
                     task_id: task_id.clone(),
@@ -588,6 +612,7 @@ impl<C: Clock> OrchestrationService<C> {
         // derived purely above (no Git/filesystem/provider work inside the
         // transaction — INV-145); the transaction owns the reservation.
         let admission = storage_sqlite::ExecutionEntryAdmission {
+            plan_head,
             task_id,
             claimed_task: &claimed.task,
             claimed_event: &claimed.event,
@@ -706,24 +731,36 @@ impl<C: Clock> OrchestrationService<C> {
             }
         }
     }
+}
 
-    /// Lists required dependencies that are not COMPLETED. A dependency
-    /// row that cannot be resolved fails closed: an unresolvable graph
-    /// must never execute.
-    fn blocking_dependencies(&self, task_id: &TaskId) -> ServiceResult<Vec<TaskId>> {
-        let mut blocking = Vec::new();
-        for dependency_id in self.tasks.list_dependencies(task_id)? {
-            let dependency = self.tasks.get_task(&dependency_id)?.ok_or_else(|| {
-                ServiceError::Storage(StorageError::Corrupt(format!(
+/// Canonical derived scheduling readiness of one Task (read-only): the Task
+/// state plus its required Task dependencies that are not COMPLETED. `None`
+/// when the Task does not exist. A dependency row that cannot be resolved
+/// fails closed: an unresolvable graph must never execute. Shared by the
+/// scheduler entry and plan applicability checks so both judge readiness
+/// with exactly one rule.
+pub(crate) fn derive_task_readiness(
+    store: &SqliteStore,
+    task_id: &TaskId,
+) -> Result<Option<ScheduleReadiness>, StorageError> {
+    let Some(task) = store.get_task(task_id)? else {
+        return Ok(None);
+    };
+    let state = task.state();
+    let mut blocking = Vec::new();
+    if state == TaskState::Ready {
+        for dependency_id in store.list_dependencies(task_id)? {
+            let dependency = store.get_task(&dependency_id)?.ok_or_else(|| {
+                StorageError::Corrupt(format!(
                     "task {task_id} depends on missing task {dependency_id}"
-                )))
+                ))
             })?;
             if dependency.state() != TaskState::Completed {
                 blocking.push(dependency_id);
             }
         }
-        Ok(blocking)
     }
+    Ok(Some(derive_readiness(state, blocking)))
 }
 
 impl<C: Clock + Clone> OrchestrationService<C> {

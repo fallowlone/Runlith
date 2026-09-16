@@ -23,7 +23,9 @@ mod journal_store;
 mod migration;
 mod path_security;
 mod plan_cost_store;
+mod plan_guardrail_store;
 mod plan_store;
+mod planning_control_store;
 mod runtime_store;
 mod secret_store;
 mod task_store;
@@ -32,14 +34,19 @@ mod workspace_store;
 pub use approval_store::{
     ApprovalCapabilityRecord, ApprovalRecord, ApprovalState, NewApprovalRecord,
 };
-pub use entry_store::{AdmittedExecutionEntry, ExecutionEntryAdmission, StrandedPreAttemptEntry};
+pub use entry_store::{
+    AdmittedExecutionEntry, ExecutionEntryAdmission, PlanHeadPrecondition,
+    PlanningInputPrecondition, StrandedPreAttemptEntry,
+};
 pub use error::{StorageError, StorageResult};
 pub use event::{
     AttemptOutcome, EventId, EventType, JournalEvent, NewJournalEvent, PlanRevisionJournalPayload,
     EVENT_SCHEMA_VERSION,
 };
 pub use migration::SUPPORTED_SCHEMA_VERSION;
-pub use plan_store::PlanCommitJournalEvidence;
+pub use plan_guardrail_store::{PlanGuardrailEvent, PlannerCallSettlement};
+pub use plan_store::{PlanCommitJournalEvidence, PlanRevisionLineage, PlanRevisionLineageRecord};
+pub use planning_control_store::{PlanningRunRecord, PlanningRunState};
 pub use security_audit::{
     AuditCapability, NewSecurityAuditRecord, SecurityAuditAuthor, SecurityAuditEvent,
     SecurityAuditId, SecurityAuditOutcome, SecurityAuditRecord, SecurityAuditSubject,

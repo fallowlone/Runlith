@@ -995,52 +995,83 @@ fn plan_revision_requires_provenance() {
     .is_err());
 }
 
+fn assessment_receipt() -> PlanningCostReceipt {
+    PlanningCostReceipt::new(10, 5, 1, "standard".to_owned()).unwrap()
+}
+
 #[test]
 fn atomicity_assessment_vocabulary_matches_adr() {
     let a = AtomicityAssessment::new(
         AtomicityVerdict::Atomic,
         "single verifiable outcome".to_owned(),
         vec![eref("attempt-A1")],
+        assessment_receipt(),
     )
     .unwrap();
     assert!(matches!(a.verdict, AtomicityVerdict::Atomic));
+    assert_eq!(a.planning_cost_receipt, assessment_receipt());
     let b = AtomicityAssessment::new(
         AtomicityVerdict::Blocked {
             blocker: AtomicityBlocker::new("missing-scope", "no scope bound").unwrap(),
         },
         "blocked with typed blocker".to_owned(),
         vec![],
+        assessment_receipt(),
     )
     .unwrap();
     assert!(matches!(b.verdict, AtomicityVerdict::Blocked { .. }));
-    assert!(
-        AtomicityAssessment::new(AtomicityVerdict::Decomposable, "".to_owned(), vec![]).is_err()
-    );
+    assert!(AtomicityAssessment::new(
+        AtomicityVerdict::Decomposable,
+        "".to_owned(),
+        vec![],
+        assessment_receipt()
+    )
+    .is_err());
 }
 
 #[test]
 fn planner_fault_taxonomy_matches_adr() {
-    use plan_domain::PlannerFault;
-    assert!(matches!(
-        PlannerFault::BudgetExhausted,
-        PlannerFault::BudgetExhausted
-    ));
+    use plan_domain::{PlannerCallSpend, PlannerFault};
+    let measured = PlannerCallSpend::Measured(assessment_receipt());
+    let budget = PlannerFault::BudgetExhausted {
+        spend: measured.clone(),
+    };
+    assert!(matches!(budget, PlannerFault::BudgetExhausted { .. }));
+    assert_eq!(budget.spend(), measured);
     assert!(matches!(
         PlannerFault::DepthExhausted,
         PlannerFault::DepthExhausted
     ));
+    assert_eq!(
+        PlannerFault::DepthExhausted.spend(),
+        PlannerCallSpend::NotStarted
+    );
     assert!(matches!(
         PlannerFault::Unplannable {
             blocker: AtomicityBlocker::new("no-scope", "missing bound").unwrap(),
+            spend: PlannerCallSpend::NotStarted,
         },
         PlannerFault::Unplannable { .. }
     ));
-    assert!(matches!(
-        PlannerFault::ProviderFailure {
-            typed_cause: "timeout".to_owned(),
-        },
-        PlannerFault::ProviderFailure { .. }
-    ));
+    let failure = PlannerFault::ProviderFailure {
+        typed_cause: "timeout".to_owned(),
+        spend: PlannerCallSpend::Unmeasured,
+    };
+    assert!(matches!(failure, PlannerFault::ProviderFailure { .. }));
+    assert_eq!(failure.spend(), PlannerCallSpend::Unmeasured);
+}
+
+#[test]
+fn planning_evidence_key_ignores_order_and_repetition_but_not_content() {
+    use plan_domain::planning_evidence_key;
+    let ab = planning_evidence_key(&[eref("attempt-A"), eref("attempt-B")]);
+    let ba_dup = planning_evidence_key(&[eref("attempt-B"), eref("attempt-A"), eref("attempt-A")]);
+    assert_eq!(
+        ab, ba_dup,
+        "same evidence set must never become a fresh event"
+    );
+    assert_ne!(ab, planning_evidence_key(&[eref("attempt-A")]));
+    assert!(ab.starts_with("sha256:") && ab.len() == 71);
 }
 
 // ---------------------------------------------------------------------------

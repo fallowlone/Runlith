@@ -8,13 +8,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::os::unix::fs::PermissionsExt;
 
 use plan_domain::{
-    compute_proposal_hash, BudgetDelta, CriterionDecl, CriterionId, EdgeAddition, EvidenceRef,
-    GateRef, NodeAddition, PlanBranchId, PlanChangeSet, PlanGraph, PlanNode, PlanNodeId,
-    PlanRevision, PlannerAdapterId, PlannerIdentity, PlanningCostReceipt, PlanningCostReceiptRef,
-    RevisionProposedBy, RiskClass, ValidatedBy, VerificationMethod,
+    compute_proposal_hash, decomposition_fingerprint, planning_evidence_key, BudgetDelta,
+    CriterionDecl, CriterionId, EdgeAddition, EvidenceRef, GateRef, NodeAddition, PlanBranchId,
+    PlanChangeSet, PlanGraph, PlanNode, PlanNodeId, PlanRevision, PlannerAdapterId,
+    PlannerIdentity, PlanningCostReceipt, PlanningCostReceiptRef, PlanningInputSnapshot,
+    PlanningInputSnapshotId, PlanningRunId, RevisionProposedBy, RiskClass, ScopeBound, ValidatedBy,
+    VerificationMethod,
 };
 use storage_sqlite::{
-    EventType, PlanCommitJournalEvidence, SqliteStore, StorageError, SUPPORTED_SCHEMA_VERSION,
+    EventType, PlanCommitJournalEvidence, PlanRevisionLineage, SqliteStore, StorageError,
+    SUPPORTED_SCHEMA_VERSION,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -36,8 +39,19 @@ impl TestDb {
         }
     }
 
+    /// Opens the store with the planning cost receipts the fixture revisions
+    /// reference (commits require resolvable receipt refs).
     fn open(&self) -> SqliteStore {
-        SqliteStore::open(&self.path).unwrap()
+        let mut store = SqliteStore::open(&self.path).unwrap();
+        for seq in 1..=3 {
+            store
+                .record_plan_cost_receipt(
+                    &PlanningCostReceiptRef::new(format!("receipt-{seq}")).unwrap(),
+                    &fixture_receipt(),
+                )
+                .unwrap();
+        }
+        store
     }
 
     fn raw(&self) -> rusqlite::Connection {
@@ -150,11 +164,73 @@ fn changeset(base: u64, reason: &str, caused_by: &[EvidenceRef]) -> PlanChangeSe
         coverage_map: BTreeMap::from([(cid("criterion-root"), vec![cid("criterion-worker")])]),
         proposal_hash: String::new(),
         proposed_by: identity(),
-        planning_cost_receipt: PlanningCostReceipt::new(120, 40, 850, "standard".to_owned())
-            .unwrap(),
+        planning_cost_receipt: fixture_receipt(),
     };
     changeset.proposal_hash = compute_proposal_hash(&changeset);
     changeset
+}
+
+fn fixture_receipt() -> PlanningCostReceipt {
+    PlanningCostReceipt::new(120, 40, 850, "standard".to_owned()).unwrap()
+}
+
+/// Placeholder used only to preserve the original direct-storage test call
+/// shape. `commit_revision` replaces this with the real snapshot/run binding
+/// it creates immediately before publication.
+fn lineage() -> PlanRevisionLineage {
+    PlanRevisionLineage {
+        parent_task_ref: "task-root".to_owned(),
+        trigger_evidence_key: planning_evidence_key(&[evidence("attempt-1")]),
+        planning_input_snapshot_id: PlanningInputSnapshotId::new("fixture-unbound").unwrap(),
+        planning_input_fingerprint: format!("sha256:{}", "0".repeat(64)),
+        planning_run_id: PlanningRunId::new("fixture-unbound-run").unwrap(),
+        planning_run_generation: 1,
+    }
+}
+
+fn commit_revision(
+    store: &mut SqliteStore,
+    changeset: &PlanChangeSet,
+    revision: &PlanRevision,
+    graph: &PlanGraph,
+    _placeholder_lineage: &PlanRevisionLineage,
+    evidence: &PlanCommitJournalEvidence,
+) -> storage_sqlite::StorageResult<storage_sqlite::JournalEvent> {
+    let trigger_evidence = if changeset.source_evidence_refs.is_empty() {
+        vec![crate::evidence("attempt-1")]
+    } else {
+        changeset.source_evidence_refs.clone()
+    };
+    let trigger_key = planning_evidence_key(&trigger_evidence);
+    let snapshot = PlanningInputSnapshot::new(
+        revision.plan_branch_id.clone(),
+        "task-root".to_owned(),
+        revision.base_revision,
+        ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+        RiskClass::Low,
+        vec![],
+        trigger_evidence,
+        vec![],
+        None,
+        revision.validated_by.policy_fingerprint.clone(),
+    )
+    .unwrap();
+    let run = store
+        .start_planning_run(
+            &snapshot,
+            &trigger_key,
+            revision.created_at.saturating_sub(1),
+        )
+        .unwrap();
+    let lineage = PlanRevisionLineage {
+        parent_task_ref: "task-root".to_owned(),
+        trigger_evidence_key: trigger_key,
+        planning_input_snapshot_id: snapshot.id,
+        planning_input_fingerprint: snapshot.input_fingerprint,
+        planning_run_id: run.id,
+        planning_run_generation: run.generation,
+    };
+    store.commit_plan_revision(changeset, revision, graph, &lineage, evidence)
 }
 
 fn revision(branch: &PlanBranchId, seq: u64, changeset: &PlanChangeSet) -> PlanRevision {
@@ -185,11 +261,11 @@ fn journal_evidence(seq: u64) -> PlanCommitJournalEvidence {
 }
 
 #[test]
-fn fresh_database_reaches_schema_13() {
+fn fresh_database_reaches_schema_14() {
     let db = TestDb::new("schema");
     let store = db.open();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 13);
-    assert_eq!(store.schema_version().unwrap(), 13);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 14);
+    assert_eq!(store.schema_version().unwrap(), 14);
 }
 
 #[test]
@@ -282,7 +358,7 @@ fn v11_database_migrates_preserving_g2_g3_g5_g6_data_and_starts_with_empty_plan(
     }
 
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 13);
+    assert_eq!(store.schema_version().unwrap(), 14);
     let history = store.list_events_ordered().unwrap();
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].seq, 1);
@@ -342,9 +418,15 @@ fn revision_commit_persists_graph_provenance_and_exactly_one_bounded_event() {
     let revision = revision(&branch, 1, &changeset);
     let graph = graph_v1();
 
-    let committed = store
-        .commit_plan_revision(&changeset, &revision, &graph, &journal_evidence(1))
-        .unwrap();
+    let committed = commit_revision(
+        &mut store,
+        &changeset,
+        &revision,
+        &graph,
+        &lineage(),
+        &journal_evidence(1),
+    )
+    .unwrap();
 
     assert_eq!(store.get_plan_head(&branch).unwrap(), Some(1));
     assert_eq!(
@@ -404,9 +486,15 @@ fn journal_insert_failure_rolls_back_revision_head_and_graph() {
     let changeset = changeset(0, "first revision", &[evidence("attempt-1")]);
     let revision = revision(&branch, 1, &changeset);
 
-    assert!(store
-        .commit_plan_revision(&changeset, &revision, &graph_v1(), &journal_evidence(1),)
-        .is_err());
+    assert!(commit_revision(
+        &mut store,
+        &changeset,
+        &revision,
+        &graph_v1(),
+        &lineage(),
+        &journal_evidence(1),
+    )
+    .is_err());
     drop(store);
     let store = db.open();
     assert_eq!(store.get_plan_head(&branch).unwrap(), None);
@@ -428,9 +516,15 @@ fn state_write_failure_appends_no_event() {
     let branch = PlanBranchId::new("branch-main").unwrap();
     let changeset = changeset(0, "first revision", &[evidence("attempt-1")]);
     let revision = revision(&branch, 1, &changeset);
-    assert!(store
-        .commit_plan_revision(&changeset, &revision, &graph_v1(), &journal_evidence(1),)
-        .is_err());
+    assert!(commit_revision(
+        &mut store,
+        &changeset,
+        &revision,
+        &graph_v1(),
+        &lineage(),
+        &journal_evidence(1),
+    )
+    .is_err());
     drop(store);
     db.raw()
         .execute_batch("DROP TRIGGER fail_plan_node")
@@ -449,9 +543,15 @@ fn successful_commit_survives_reopen_with_semantic_equivalence() {
     let graph = graph_v1();
     {
         let mut store = db.open();
-        store
-            .commit_plan_revision(&changeset, &revision, &graph, &journal_evidence(1))
-            .unwrap();
+        commit_revision(
+            &mut store,
+            &changeset,
+            &revision,
+            &graph,
+            &lineage(),
+            &journal_evidence(1),
+        )
+        .unwrap();
     }
     let store = db.open();
     assert_eq!(store.get_plan_head(&branch).unwrap(), Some(1));
@@ -470,9 +570,15 @@ fn journal_revision_hash_mismatch_fails_closed_on_reconstruction() {
     let revision = revision(&branch, 1, &changeset);
     {
         let mut store = db.open();
-        store
-            .commit_plan_revision(&changeset, &revision, &graph_v1(), &journal_evidence(1))
-            .unwrap();
+        commit_revision(
+            &mut store,
+            &changeset,
+            &revision,
+            &graph_v1(),
+            &lineage(),
+            &journal_evidence(1),
+        )
+        .unwrap();
     }
 
     db.raw()
@@ -524,9 +630,15 @@ fn journal_revision_provenance_mismatches_fail_closed_on_reconstruction() {
         let revision = revision(&branch, 1, &changeset);
         {
             let mut store = db.open();
-            store
-                .commit_plan_revision(&changeset, &revision, &graph_v1(), &journal_evidence(1))
-                .unwrap();
+            commit_revision(
+                &mut store,
+                &changeset,
+                &revision,
+                &graph_v1(),
+                &lineage(),
+                &journal_evidence(1),
+            )
+            .unwrap();
         }
 
         db.raw()
@@ -555,9 +667,15 @@ fn journal_revision_causes_mismatch_fails_closed_on_reconstruction() {
     let revision = revision(&branch, 1, &changeset);
     {
         let mut store = db.open();
-        store
-            .commit_plan_revision(&changeset, &revision, &graph_v1(), &journal_evidence(1))
-            .unwrap();
+        commit_revision(
+            &mut store,
+            &changeset,
+            &revision,
+            &graph_v1(),
+            &lineage(),
+            &journal_evidence(1),
+        )
+        .unwrap();
     }
 
     db.raw()
@@ -582,9 +700,15 @@ fn journal_revision_noncanonical_hash_fails_closed_on_reconstruction() {
     let revision = revision(&branch, 1, &changeset);
     {
         let mut store = db.open();
-        store
-            .commit_plan_revision(&changeset, &revision, &graph_v1(), &journal_evidence(1))
-            .unwrap();
+        commit_revision(
+            &mut store,
+            &changeset,
+            &revision,
+            &graph_v1(),
+            &lineage(),
+            &journal_evidence(1),
+        )
+        .unwrap();
     }
 
     db.raw()
@@ -609,12 +733,24 @@ fn stale_base_and_duplicate_revision_fail_closed_without_new_event() {
     let branch = PlanBranchId::new("branch-main").unwrap();
     let first_changeset = changeset(0, "first revision", &[evidence("attempt-1")]);
     let first = revision(&branch, 1, &first_changeset);
-    store
-        .commit_plan_revision(&first_changeset, &first, &graph_v1(), &journal_evidence(1))
-        .unwrap();
+    commit_revision(
+        &mut store,
+        &first_changeset,
+        &first,
+        &graph_v1(),
+        &lineage(),
+        &journal_evidence(1),
+    )
+    .unwrap();
 
-    let result =
-        store.commit_plan_revision(&first_changeset, &first, &graph_v1(), &journal_evidence(2));
+    let result = commit_revision(
+        &mut store,
+        &first_changeset,
+        &first,
+        &graph_v1(),
+        &lineage(),
+        &journal_evidence(2),
+    );
     assert!(matches!(result, Err(StorageError::PlanStale { .. })));
     assert_eq!(store.get_plan_head(&branch).unwrap(), Some(1));
     assert_eq!(store.list_events_ordered().unwrap().len(), 1);
@@ -628,9 +764,15 @@ fn two_same_head_writers_have_exactly_one_winner() {
     let first = revision(&branch, 1, &first_changeset);
     {
         let mut store = db.open();
-        store
-            .commit_plan_revision(&first_changeset, &first, &graph_v1(), &journal_evidence(1))
-            .unwrap();
+        commit_revision(
+            &mut store,
+            &first_changeset,
+            &first,
+            &graph_v1(),
+            &lineage(),
+            &journal_evidence(1),
+        )
+        .unwrap();
     }
 
     let a_changeset = changeset(1, "writer a", &[evidence("attempt-a")]);
@@ -639,15 +781,239 @@ fn two_same_head_writers_have_exactly_one_winner() {
     let b_revision = revision(&branch, 2, &b_changeset);
     let mut a = db.open();
     let mut b = db.open();
-    let a_result =
-        a.commit_plan_revision(&a_changeset, &a_revision, &graph_v1(), &journal_evidence(2));
-    let b_result =
-        b.commit_plan_revision(&b_changeset, &b_revision, &graph_v1(), &journal_evidence(3));
+    let a_result = commit_revision(
+        &mut a,
+        &a_changeset,
+        &a_revision,
+        &graph_v1(),
+        &lineage(),
+        &journal_evidence(2),
+    );
+    let b_result = commit_revision(
+        &mut b,
+        &b_changeset,
+        &b_revision,
+        &graph_v1(),
+        &lineage(),
+        &journal_evidence(3),
+    );
     assert!(a_result.is_ok());
     assert!(matches!(b_result, Err(StorageError::PlanStale { .. })));
     let store = db.open();
     assert_eq!(store.get_plan_head(&branch).unwrap(), Some(2));
     assert_eq!(store.list_events_ordered().unwrap().len(), 2);
+}
+
+#[test]
+fn commit_requires_resolvable_receipt_matching_the_accepted_proposal() {
+    let db = TestDb::new("receipt-binding");
+    let mut store = db.open();
+    let branch = PlanBranchId::new("branch-main").unwrap();
+    let changeset = changeset(0, "first revision", &[evidence("attempt-1")]);
+
+    let mut unresolved = revision(&branch, 1, &changeset);
+    unresolved.proposed_by.planning_cost_receipt_ref =
+        PlanningCostReceiptRef::new("receipt-missing").unwrap();
+    assert!(matches!(
+        commit_revision(
+            &mut store,
+            &changeset,
+            &unresolved,
+            &graph_v1(),
+            &lineage(),
+            &journal_evidence(1)
+        ),
+        Err(StorageError::ConstraintViolation(_))
+    ));
+
+    let other = PlanningCostReceiptRef::new("receipt-other-evidence").unwrap();
+    store
+        .record_plan_cost_receipt(
+            &other,
+            &PlanningCostReceipt::new(1, 1, 1, "standard".to_owned()).unwrap(),
+        )
+        .unwrap();
+    let mut mismatched = revision(&branch, 1, &changeset);
+    mismatched.proposed_by.planning_cost_receipt_ref = other;
+    assert!(matches!(
+        commit_revision(
+            &mut store,
+            &changeset,
+            &mismatched,
+            &graph_v1(),
+            &lineage(),
+            &journal_evidence(1)
+        ),
+        Err(StorageError::ConstraintViolation(_))
+    ));
+
+    assert_eq!(store.get_plan_head(&branch).unwrap(), None);
+    assert!(store.list_events_ordered().unwrap().is_empty());
+}
+
+#[test]
+fn commit_records_storage_derived_lineage_and_resets_l3_counter_atomically() {
+    let db = TestDb::new("lineage");
+    let mut store = db.open();
+    let branch = PlanBranchId::new("branch-main").unwrap();
+    let changeset = changeset(0, "first revision", &[evidence("attempt-1")]);
+    let key = lineage().trigger_evidence_key;
+    store.record_plan_proposal_rejection(&branch, &key).unwrap();
+
+    db.raw()
+        .execute_batch(
+            "CREATE TRIGGER fail_plan_lineage BEFORE INSERT ON plan_revision_lineage
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .unwrap();
+    assert!(commit_revision(
+        &mut store,
+        &changeset,
+        &revision(&branch, 1, &changeset),
+        &graph_v1(),
+        &lineage(),
+        &journal_evidence(1)
+    )
+    .is_err());
+    assert_eq!(store.get_plan_head(&branch).unwrap(), None);
+    assert!(store.list_events_ordered().unwrap().is_empty());
+    db.raw()
+        .execute_batch("DROP TRIGGER fail_plan_lineage")
+        .unwrap();
+
+    commit_revision(
+        &mut store,
+        &changeset,
+        &revision(&branch, 1, &changeset),
+        &graph_v1(),
+        &lineage(),
+        &journal_evidence(1),
+    )
+    .unwrap();
+    let lineage = store.get_plan_lineage(&branch).unwrap();
+    assert_eq!(lineage.len(), 1);
+    assert_eq!(lineage[0].revision_seq, 1);
+    assert_eq!(lineage[0].parent_task_ref, "task-root");
+    assert_eq!(
+        lineage[0].decomposition_fingerprint,
+        decomposition_fingerprint("task-root", &changeset)
+    );
+    assert_eq!(lineage[0].trigger_evidence_key, key);
+    assert!(store
+        .revision_has_current_planning_input(&branch, 1)
+        .unwrap());
+    assert_eq!(
+        store
+            .get_plan_guardrail_event(&branch, &key)
+            .unwrap()
+            .unwrap()
+            .consecutive_rejections,
+        0
+    );
+}
+
+#[test]
+fn superseded_planning_run_generation_cannot_publish_a_revision() {
+    let db = TestDb::new("stale-planning-run-publication");
+    let mut store = db.open();
+    let branch = PlanBranchId::new("branch-main").unwrap();
+    let changeset = changeset(0, "first revision", &[evidence("attempt-1")]);
+    let revision = revision(&branch, 1, &changeset);
+    let trigger_evidence = changeset.source_evidence_refs.clone();
+    let trigger_key = planning_evidence_key(&trigger_evidence);
+    let snapshot = PlanningInputSnapshot::new(
+        branch.clone(),
+        "task-root".to_owned(),
+        0,
+        ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+        RiskClass::Low,
+        vec![],
+        trigger_evidence,
+        vec![],
+        None,
+        revision.validated_by.policy_fingerprint.clone(),
+    )
+    .unwrap();
+    let stale_run = store
+        .start_planning_run(&snapshot, &trigger_key, revision.created_at - 2)
+        .unwrap();
+    let current_run = store
+        .start_planning_run(&snapshot, &trigger_key, revision.created_at - 1)
+        .unwrap();
+    assert_eq!(current_run.generation, stale_run.generation + 1);
+
+    let stale_lineage = PlanRevisionLineage {
+        parent_task_ref: "task-root".to_owned(),
+        trigger_evidence_key: trigger_key,
+        planning_input_snapshot_id: snapshot.id,
+        planning_input_fingerprint: snapshot.input_fingerprint,
+        planning_run_id: stale_run.id,
+        planning_run_generation: stale_run.generation,
+    };
+    let error = store
+        .commit_plan_revision(
+            &changeset,
+            &revision,
+            &graph_v1(),
+            &stale_lineage,
+            &journal_evidence(1),
+        )
+        .expect_err("superseded planning generation must be fenced");
+    assert!(matches!(
+        error,
+        StorageError::PlanningRunStale {
+            expected_generation: 1,
+            found_generation: 2,
+            ..
+        }
+    ));
+    assert_eq!(store.get_plan_head(&branch).unwrap(), None);
+    assert!(store.list_events_ordered().unwrap().is_empty());
+}
+
+#[test]
+fn schema_13_revision_history_without_lineage_fails_closed_after_upgrade() {
+    let db = TestDb::new("v13-lineage");
+    let branch = PlanBranchId::new("branch-main").unwrap();
+    let changeset = changeset(0, "first revision", &[evidence("attempt-1")]);
+    {
+        let mut store = db.open();
+        commit_revision(
+            &mut store,
+            &changeset,
+            &revision(&branch, 1, &changeset),
+            &graph_v1(),
+            &lineage(),
+            &journal_evidence(1),
+        )
+        .unwrap();
+    }
+    db.raw()
+        .execute_batch(
+            "DROP TABLE planning_run_heads;
+             DROP TABLE planning_runs;
+             DROP TABLE planning_input_heads;
+             DROP TABLE planning_input_lineage;
+             DROP TABLE planning_input_evidence;
+             DROP TABLE planning_input_criteria;
+             DROP TABLE planning_input_scope_roots;
+             DROP TABLE planning_input_snapshots;
+             DROP TABLE plan_guardrail_events;
+             DROP TABLE plan_revision_lineage;
+             PRAGMA user_version = 13;",
+        )
+        .unwrap();
+
+    let store = db.open();
+    assert_eq!(store.schema_version().unwrap(), 14);
+    assert_eq!(store.get_plan_head(&branch).unwrap(), Some(1));
+    assert!(
+        matches!(
+            store.get_plan_lineage(&branch),
+            Err(StorageError::Corrupt(_))
+        ),
+        "guardrail lineage must not be guessed for pre-schema-14 revisions"
+    );
 }
 
 #[test]
@@ -658,9 +1024,15 @@ fn corrupt_plan_rows_fail_closed_on_reconstruction() {
     let revision = revision(&branch, 1, &changeset);
     {
         let mut store = db.open();
-        store
-            .commit_plan_revision(&changeset, &revision, &graph_v1(), &journal_evidence(1))
-            .unwrap();
+        commit_revision(
+            &mut store,
+            &changeset,
+            &revision,
+            &graph_v1(),
+            &lineage(),
+            &journal_evidence(1),
+        )
+        .unwrap();
     }
     db.raw()
         .execute_batch(

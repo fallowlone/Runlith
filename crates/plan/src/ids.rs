@@ -40,3 +40,5 @@ opaque_id!(CriterionId, "criterion_id");
 opaque_id!(EvidenceRef, "evidence_ref");
 opaque_id!(PlannerAdapterId, "planner_adapter_id");
 opaque_id!(PlanningCostReceiptRef, "planning_cost_receipt_ref");
+opaque_id!(PlanningInputSnapshotId, "planning_input_snapshot_id");
+opaque_id!(PlanningRunId, "planning_run_id");

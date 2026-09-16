@@ -416,6 +416,7 @@ fn admit_with_branch(
         .expect("plan execution");
     let mut store = SqliteStore::open(db).expect("open store");
     let admission = ExecutionEntryAdmission {
+        plan_head: None,
         task_id: &task_id,
         claimed_task: &claimed.task,
         claimed_event: &claimed.event,

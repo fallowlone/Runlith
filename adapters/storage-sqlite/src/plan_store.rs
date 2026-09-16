@@ -10,15 +10,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
 use plan_domain::{
-    CriterionDecl, CriterionId, EvidenceRef, GateRef, PlanBranchId, PlanChangeSet, PlanGraph,
-    PlanNode, PlanNodeId, PlanRevision, PlannerAdapterId, PlannerIdentity, PlanningCostReceiptRef,
-    RevisionProposedBy, RiskClass, ValidatedBy, VerificationMethod,
+    decomposition_fingerprint, CriterionDecl, CriterionId, EvidenceRef, GateRef, PlanBranchId,
+    PlanChangeSet, PlanGraph, PlanNode, PlanNodeId, PlanRevision, PlannerAdapterId,
+    PlannerIdentity, PlanningCostReceiptRef, RevisionProposedBy, RiskClass, ValidatedBy,
+    VerificationMethod,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::error::{map_constraint, StorageError, StorageResult};
 use crate::event::{EventType, JournalEvent, NewJournalEvent, PlanRevisionJournalPayload};
 use crate::journal_store::{insert_journal_event, require_canonical_sha256};
+use crate::plan_cost_store::load_plan_cost_receipt;
+use crate::plan_guardrail_store::{require_evidence_key, reset_rejections};
+use crate::planning_control_store::{enforce_publication_fence, mark_publication_succeeded};
 
 /// Trusted application-service envelope for the Event Journal metadata that
 /// surrounds one committed Plan revision. It contains no planner transcript,
@@ -29,6 +33,33 @@ pub struct PlanCommitJournalEvidence {
     pub causation_id: String,
     pub occurred_at: String,
     pub provenance: String,
+}
+
+/// Trusted guardrail lineage committed with one revision: the parent task
+/// ref that feeds the V7 fingerprint and the key of the triggering evidence
+/// event that produced the revision. Storage derives the fingerprint itself
+/// from the accepted changeset, so it cannot disagree with the proposal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlanRevisionLineage {
+    pub parent_task_ref: String,
+    pub trigger_evidence_key: String,
+    pub planning_input_snapshot_id: plan_domain::PlanningInputSnapshotId,
+    pub planning_input_fingerprint: String,
+    pub planning_run_id: plan_domain::PlanningRunId,
+    pub planning_run_generation: u64,
+}
+
+/// Durable lineage of one committed revision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlanRevisionLineageRecord {
+    pub revision_seq: u64,
+    pub parent_task_ref: String,
+    pub decomposition_fingerprint: String,
+    pub trigger_evidence_key: String,
+    pub planning_input_snapshot_id: plan_domain::PlanningInputSnapshotId,
+    pub planning_input_fingerprint: String,
+    pub planning_run_id: plan_domain::PlanningRunId,
+    pub planning_run_generation: u64,
 }
 
 impl crate::task_store::SqliteStore {
@@ -77,6 +108,82 @@ impl crate::task_store::SqliteStore {
         load_graph(self.connection(), branch, revision_seq).map(Some)
     }
 
+    /// Reads the durable guardrail lineage of every committed revision on the
+    /// branch, in revision order. A committed revision without lineage (for
+    /// example history written before schema 14) fails closed: V7 and the
+    /// per-evidence revision bound cannot be reconstructed from guesses.
+    pub fn get_plan_lineage(
+        &self,
+        branch: &PlanBranchId,
+    ) -> StorageResult<Vec<PlanRevisionLineageRecord>> {
+        let connection = self.connection();
+        let Some(head) = load_validated_head(connection, branch)? else {
+            return Ok(Vec::new());
+        };
+        let mut statement = connection.prepare(
+            "SELECT revision_seq, parent_task_ref, decomposition_fingerprint, trigger_evidence_key,
+                    planning_input_snapshot_id, planning_input_fingerprint,
+                    planning_run_id, planning_run_generation
+             FROM plan_revision_lineage WHERE plan_branch_id = ?1 ORDER BY revision_seq",
+        )?;
+        let rows = statement.query_map(params![branch.as_str()], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, i64>(7)?,
+            ))
+        })?;
+        let mut lineage = Vec::new();
+        for (expected, row) in (1_u64..).zip(rows) {
+            let (
+                raw_seq,
+                parent_task_ref,
+                fingerprint,
+                trigger_evidence_key,
+                snapshot_id,
+                input_fingerprint,
+                planning_run_id,
+                raw_generation,
+            ) = row?;
+            let revision_seq = positive_u64(raw_seq, "plan lineage revision")?;
+            if revision_seq != expected {
+                return Err(missing_lineage(branch, expected));
+            }
+            let canonical = require_canonical_sha256(&fingerprint).is_ok()
+                && require_evidence_key(&trigger_evidence_key).is_ok()
+                && require_evidence_key(&input_fingerprint).is_ok()
+                && !parent_task_ref.trim().is_empty();
+            if !canonical {
+                return Err(StorageError::Corrupt(format!(
+                    "plan branch {} revision {revision_seq} stores malformed lineage",
+                    branch.as_str()
+                )));
+            }
+            lineage.push(PlanRevisionLineageRecord {
+                revision_seq,
+                parent_task_ref,
+                decomposition_fingerprint: fingerprint,
+                trigger_evidence_key,
+                planning_input_snapshot_id: plan_domain::PlanningInputSnapshotId::new(snapshot_id)
+                    .map_err(|error| StorageError::DomainReconstruction(error.to_string()))?,
+                planning_input_fingerprint: input_fingerprint,
+                planning_run_id: plan_domain::PlanningRunId::new(planning_run_id)
+                    .map_err(|error| StorageError::DomainReconstruction(error.to_string()))?,
+                planning_run_generation: positive_u64(raw_generation, "planning run generation")?,
+            });
+        }
+        let recorded = lineage.len() as u64;
+        if recorded != head {
+            return Err(missing_lineage(branch, recorded.saturating_add(1)));
+        }
+        Ok(lineage)
+    }
+
     /// Commits one already-validated Plan mutation as an immutable revision
     /// snapshot and exactly one bounded journal fact.
     ///
@@ -84,15 +191,28 @@ impl crate::task_store::SqliteStore {
     /// independently enforce persistence invariants: exact accepted-hash /
     /// provenance binding, genesis/contiguous sequencing, durable stale-head
     /// detection, uniqueness, foreign keys and atomic state+journal outcome.
+    /// In the same transaction it requires the revision's planning cost
+    /// receipt ref to resolve to exactly the proposal's receipt, records the
+    /// revision's guardrail lineage, and resets the triggering event's L3
+    /// rejection counter.
     pub fn commit_plan_revision(
         &mut self,
         changeset: &PlanChangeSet,
         revision: &PlanRevision,
         resulting_graph: &PlanGraph,
+        lineage: &PlanRevisionLineage,
         evidence: &PlanCommitJournalEvidence,
     ) -> StorageResult<JournalEvent> {
         validate_commit_binding(changeset, revision, evidence)?;
         validate_graph_snapshot(resulting_graph)?;
+        require_evidence_key(&lineage.trigger_evidence_key)?;
+        require_evidence_key(&lineage.planning_input_fingerprint)?;
+        if lineage.parent_task_ref.trim().is_empty() {
+            return Err(StorageError::ConstraintViolation(
+                "plan revision lineage requires a non-blank parent_task_ref".to_owned(),
+            ));
+        }
+        let fingerprint = decomposition_fingerprint(&lineage.parent_task_ref, changeset);
 
         let revision_i64 = sqlite_u64(revision.revision_seq, "revision_seq")?;
         let base_i64 = sqlite_u64(revision.base_revision, "base_revision")?;
@@ -102,6 +222,17 @@ impl crate::task_store::SqliteStore {
         let transaction = self
             .connection_mut()
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // ADR-0028 stale-writer fence. The provider call happened outside
+        // this transaction; publication is authoritative only while the
+        // exact input snapshot and PlanningRun generation still own the
+        // branch. This check shares the revision write transaction.
+        enforce_publication_fence(
+            &transaction,
+            lineage,
+            &revision.plan_branch_id,
+            revision.base_revision,
+        )?;
 
         if revision.revision_seq == 1 {
             transaction.execute(
@@ -133,6 +264,23 @@ impl crate::task_store::SqliteStore {
             });
         }
 
+        let receipt_ref = &revision.proposed_by.planning_cost_receipt_ref;
+        match load_plan_cost_receipt(&transaction, receipt_ref)? {
+            Some(stored) if stored == changeset.planning_cost_receipt => {}
+            Some(_) => {
+                return Err(StorageError::ConstraintViolation(format!(
+                    "planning cost receipt {} does not match the accepted proposal receipt",
+                    receipt_ref.as_str()
+                )));
+            }
+            None => {
+                return Err(StorageError::ConstraintViolation(format!(
+                    "planning cost receipt {} does not resolve to durable evidence",
+                    receipt_ref.as_str()
+                )));
+            }
+        }
+
         transaction
             .execute(
                 "INSERT INTO plan_revisions
@@ -158,6 +306,31 @@ impl crate::task_store::SqliteStore {
 
         insert_revision_causes(&transaction, revision)?;
         insert_graph_snapshot(&transaction, revision, resulting_graph)?;
+        transaction
+            .execute(
+                "INSERT INTO plan_revision_lineage
+                 (plan_branch_id, revision_seq, parent_task_ref, decomposition_fingerprint,
+                  trigger_evidence_key, planning_input_snapshot_id,
+                  planning_input_fingerprint, planning_run_id, planning_run_generation)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    branch,
+                    revision_i64,
+                    lineage.parent_task_ref,
+                    fingerprint,
+                    lineage.trigger_evidence_key,
+                    lineage.planning_input_snapshot_id.as_str(),
+                    lineage.planning_input_fingerprint,
+                    lineage.planning_run_id.as_str(),
+                    sqlite_u64(lineage.planning_run_generation, "planning_run_generation")?,
+                ],
+            )
+            .map_err(|error| map_constraint(error, "commit plan revision lineage"))?;
+        reset_rejections(
+            &transaction,
+            &revision.plan_branch_id,
+            &lineage.trigger_evidence_key,
+        )?;
 
         let updated = transaction.execute(
             "UPDATE plan_branches SET head_revision = ?1
@@ -176,6 +349,8 @@ impl crate::task_store::SqliteStore {
                 found: nonnegative_u64(found, "plan branch head")?,
             });
         }
+
+        mark_publication_succeeded(&transaction, lineage, revision.created_at)?;
 
         let event = plan_revision_event(revision, evidence);
         let committed = insert_journal_event(&transaction, &event)?;
@@ -793,6 +968,14 @@ fn positive_u64(value: i64, field: &str) -> StorageResult<u64> {
         return Err(StorageError::Corrupt(format!("{field} stores zero")));
     }
     Ok(value)
+}
+
+fn missing_lineage(branch: &PlanBranchId, revision_seq: u64) -> StorageError {
+    StorageError::Corrupt(format!(
+        "plan branch {} revision {revision_seq} has no durable guardrail lineage; \
+         V7/revision-cycle guardrails cannot be reconstructed",
+        branch.as_str()
+    ))
 }
 
 fn domain_reconstruction(

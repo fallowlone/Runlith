@@ -452,7 +452,8 @@ impl AtomicityBlocker {
     }
 }
 
-/// Pure atomicity assessment: verdict + rationale + evidence refs.
+/// Pure atomicity assessment: verdict + rationale + evidence refs, plus the
+/// per-call cost receipt ADR-0027 §6 requires for every `PlannerPort` call.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AtomicityAssessment {
     /// Assessment verdict.
@@ -461,6 +462,8 @@ pub struct AtomicityAssessment {
     pub rationale: String,
     /// Evidence refs behind the assessment.
     pub evidence_refs: Vec<EvidenceRef>,
+    /// Tokens in/out, wall time, price class of the assessment call.
+    pub planning_cost_receipt: PlanningCostReceipt,
 }
 
 impl AtomicityAssessment {
@@ -469,6 +472,7 @@ impl AtomicityAssessment {
         verdict: AtomicityVerdict,
         rationale: String,
         evidence_refs: Vec<EvidenceRef>,
+        planning_cost_receipt: PlanningCostReceipt,
     ) -> Result<Self, PlanDomainError> {
         if rationale.trim().is_empty() {
             return Err(PlanDomainError::input("rationale must be non-empty"));
@@ -477,6 +481,7 @@ impl AtomicityAssessment {
             verdict,
             rationale,
             evidence_refs,
+            planning_cost_receipt,
         })
     }
 }
@@ -544,25 +549,62 @@ pub struct PlanningBudget {
     pub input_tokens_remaining: u32,
 }
 
+/// Provider spend evidence attached to a planner fault (ADR-0027 §6: no
+/// silent spend). It is authored by adapter control flow, never parsed from
+/// model output, and lets the trusted service charge every provider-started
+/// call even when no proposal/assessment can be returned.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlannerCallSpend {
+    /// Refused before any provider call started: zero spend.
+    NotStarted,
+    /// A provider call started and reported exact usage.
+    Measured(PlanningCostReceipt),
+    /// A provider call may have started, but exact usage is unrecoverable.
+    /// The trusted service charges conservatively; no receipt is fabricated.
+    Unmeasured,
+}
+
 /// Planner failure taxonomy (ADR-0027 §1, exact): a planner that cannot
 /// produce a valid smaller decomposition reports a fault; the orchestrator
-/// then BLOCKs or escalates. Never retried silently.
+/// then BLOCKs or escalates. Never retried silently. Variants that can occur
+/// after a provider call started carry [`PlannerCallSpend`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PlannerFault {
     /// No valid decomposition exists; carries the typed blocker.
     Unplannable {
         /// Why planning cannot proceed.
         blocker: AtomicityBlocker,
+        /// Provider spend incurred before the planner concluded.
+        spend: PlannerCallSpend,
     },
-    /// Per-evidence-event call/token envelope exhausted.
-    BudgetExhausted,
-    /// No depth headroom remains.
+    /// Per-call or per-evidence-event call/token envelope exhausted.
+    BudgetExhausted {
+        /// `NotStarted` for pre-call refusal; measured spend when the
+        /// provider-reported usage itself breached the envelope.
+        spend: PlannerCallSpend,
+    },
+    /// No depth headroom remains (always refused before any provider call).
     DepthExhausted,
     /// Provider-layer failure with a typed cause.
     ProviderFailure {
         /// Typed provider failure cause.
         typed_cause: String,
+        /// Provider spend incurred before the failure was observed.
+        spend: PlannerCallSpend,
     },
+}
+
+impl PlannerFault {
+    /// Provider spend evidence carried by this fault.
+    #[must_use]
+    pub fn spend(&self) -> PlannerCallSpend {
+        match self {
+            Self::Unplannable { spend, .. }
+            | Self::BudgetExhausted { spend }
+            | Self::ProviderFailure { spend, .. } => spend.clone(),
+            Self::DepthExhausted => PlannerCallSpend::NotStarted,
+        }
+    }
 }
 
 /// The proposal-only planning seam (ADR-0027 §1).

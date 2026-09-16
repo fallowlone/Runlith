@@ -87,6 +87,7 @@ impl Sandbox {
             )
             .unwrap();
         tasks.mark_ready(&task_id).unwrap();
+        seed_accepted_plan(&self.db, task);
     }
 
     fn repo_str(&self) -> String {
@@ -128,6 +129,43 @@ fn fixture(dir: &Path, name: &str, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     path
+}
+
+fn seed_accepted_plan(db: &Path, task: &str) {
+    let mut planning = app_services::PlanningService::open(db, app_services::SystemClock)
+        .expect("open planning service");
+    let scope = plan_domain::ScopeBound::new(vec!["repo:src".to_owned()]).unwrap();
+    let branch = plan_domain::PlanBranchId::new(format!("fixture-plan-{task}")).unwrap();
+    let planner =
+        fake_planner::FakePlanner::for_single_leaf(plan_domain::PlanNodeId::new(task).unwrap());
+    let request = plan_domain::DecompositionRequest {
+        parent_task_ref: task.to_owned(),
+        base_plan_revision: 0,
+        acceptance_criteria_refs: vec![],
+        scope_bound: scope.clone(),
+        evidence_refs: vec![plan_domain::EvidenceRef::new(format!("fixture-plan:{task}")).unwrap()],
+        depth_remaining: plan_domain::MAX_DECOMPOSITION_DEPTH,
+        budget_remaining: plan_domain::PlanningBudget {
+            calls_remaining: plan_domain::MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
+            input_tokens_remaining: plan_domain::MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
+        },
+    };
+    let policy = app_services::PlanningPolicyContext {
+        scope_bound: scope,
+        baseline_risk: plan_domain::RiskClass::Low,
+        affected_parent_criteria: vec![],
+        parent_task_ref: task.to_owned(),
+        lineage_fingerprints: vec![],
+        risk_grant: None,
+        policy_fingerprint: format!("policy:fixture:{task}"),
+    };
+    let outcome = planning
+        .propose_decomposition(&planner, &branch, request, &policy)
+        .expect("seed accepted plan");
+    assert!(matches!(
+        outcome,
+        app_services::PlanningProposalOutcome::Accepted(_)
+    ));
 }
 
 fn run_req(task: &str, execution: &str, attempt: &str, repo: &str) -> RunExecutionRequest {

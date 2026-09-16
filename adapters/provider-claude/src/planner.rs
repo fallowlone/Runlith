@@ -7,6 +7,12 @@
 //! measured/provider-reported cost evidence, and returns canonical plan-domain
 //! values. It has no storage, Task mutation, scheduler, policy, approval, or
 //! execution authority.
+//!
+//! Every fault reports [`PlannerCallSpend`]: refusals before the provider
+//! child exists are `NotStarted`; once a child may have run, provider-reported
+//! usage is preserved as a measured receipt (even when the call then breaches
+//! the envelope or returns unusable output), otherwise the spend is
+//! `Unmeasured` so the trusted service charges conservatively.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -18,16 +24,17 @@ use plan_domain::{
     call_within_envelope, compute_proposal_hash, AtomicityAssessment, AtomicityBlocker,
     AtomicityRequest, AtomicityVerdict, BudgetDelta, CriterionDecl, CriterionId,
     DecompositionRequest, EdgeAddition, EdgeRemoval, EvidenceRef, GateRef, GateUpdate,
-    NodeAddition, NodeUpdate, PlanChangeSet, PlanNodeId, PlanScope, PlannerAdapterId, PlannerFault,
-    PlannerIdentity, PlannerPort, PlanningBudget, PlanningCostReceipt, ReplanRequest, RiskClass,
-    RiskDelta, VerificationMethod, MAX_PLANNER_INPUT_TOKENS, MAX_PLANNER_WALL_CLOCK_SECS,
+    NodeAddition, NodeUpdate, PlanChangeSet, PlanNodeId, PlanScope, PlannerAdapterId,
+    PlannerCallSpend, PlannerFault, PlannerIdentity, PlannerPort, PlanningBudget,
+    PlanningCostReceipt, ReplanRequest, RiskClass, RiskDelta, VerificationMethod,
+    MAX_PLANNER_INPUT_TOKENS, MAX_PLANNER_WALL_CLOCK_SECS,
 };
 use runner::SandboxedLaunch;
 
 use crate::config::{ClaudeConfig, MAX_PROMPT_CHARS};
-use crate::executor::ClaudeExecutor;
+use crate::executor::{ClaudeExecutor, ObservedPromptRun};
 use crate::json::{parse_json, Json};
-use crate::usage::UsageProvenance;
+use crate::usage::{UsageProvenance, UsageSample};
 
 const CLAUDE_PLANNER_ADAPTER_ID: &str = "claude-planner";
 const DEFAULT_MODEL_REF: &str = "claude-code/provider-native-default";
@@ -39,6 +46,12 @@ pub struct ClaudePlanner {
     executor: ClaudeExecutor,
     identity: PlannerIdentity,
 }
+
+/// Malformed planner output detail. Converted into a typed
+/// `ProviderFailure` that carries the measured spend of the call.
+struct Malformed(String);
+
+type Parsed<T> = Result<T, Malformed>;
 
 impl ClaudePlanner {
     /// Builds an unattached planner. Production must attach a verified Runner
@@ -134,72 +147,59 @@ impl ClaudePlanner {
         self.executor.isolation_support_write_roots()
     }
 
+    /// Runs one bounded provider call. `Ok` always carries the measured
+    /// receipt; every `Err` carries the spend observed for this call.
     fn call_provider(
         &self,
         prompt: &str,
         budget: Option<PlanningBudget>,
     ) -> Result<(String, PlanningCostReceipt), PlannerFault> {
         if prompt.trim().is_empty() {
-            return provider_fault("planner prompt is blank");
+            return Err(provider_failure(
+                "planner prompt is blank",
+                PlannerCallSpend::NotStarted,
+            ));
         }
         let conservative_input_bound = prompt.len() as u64;
         if prompt.chars().count() > MAX_PROMPT_CHARS
             || conservative_input_bound > u64::from(MAX_PLANNER_INPUT_TOKENS)
         {
-            return Err(PlannerFault::BudgetExhausted);
+            return Err(budget_exhausted(PlannerCallSpend::NotStarted));
         }
         if let Some(remaining) = budget {
             if remaining.calls_remaining == 0
                 || remaining.input_tokens_remaining == 0
                 || conservative_input_bound > u64::from(remaining.input_tokens_remaining)
             {
-                return Err(PlannerFault::BudgetExhausted);
+                return Err(budget_exhausted(PlannerCallSpend::NotStarted));
             }
         }
 
         let started = Instant::now();
-        let outcome =
-            self.executor
-                .run_prompt(prompt)
-                .map_err(|error| PlannerFault::ProviderFailure {
-                    typed_cause: error.to_string(),
-                })?;
+        let (result, usage) = match self.executor.run_prompt_observed(prompt) {
+            ObservedPromptRun::NotStarted(failure) => {
+                return Err(provider_failure(
+                    failure.to_string(),
+                    PlannerCallSpend::NotStarted,
+                ));
+            }
+            ObservedPromptRun::Started { result, usage } => (result, usage),
+        };
         let wall_time_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        if outcome.usage.provenance != UsageProvenance::Reported {
-            return provider_fault("claude planner returned no provider-reported token usage");
-        }
-        let input_tokens = outcome
-            .usage
-            .total_input_tokens()
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| PlannerFault::ProviderFailure {
-                typed_cause:
-                    "claude planner total input-token usage is missing, overflowed, or out of range"
-                        .to_owned(),
-            })?;
-        let output_tokens = outcome
-            .usage
-            .output_tokens
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| PlannerFault::ProviderFailure {
-                typed_cause: "claude planner output-token usage is missing or out of range"
-                    .to_owned(),
-            })?;
-        let receipt = PlanningCostReceipt::new(
-            input_tokens,
-            output_tokens,
-            wall_time_ms,
-            PLANNER_PRICE_CLASS.to_owned(),
-        )
-        .map_err(|error| PlannerFault::ProviderFailure {
-            typed_cause: error.to_string(),
-        })?;
+        let measured = measured_receipt(&usage, wall_time_ms);
+        let spend = match &measured {
+            Ok(receipt) => PlannerCallSpend::Measured(receipt.clone()),
+            Err(_) => PlannerCallSpend::Unmeasured,
+        };
+        let outcome = result.map_err(|failure| provider_failure(failure.to_string(), spend))?;
+        let receipt =
+            measured.map_err(|detail| provider_failure(detail, PlannerCallSpend::Unmeasured))?;
         if !call_within_envelope(&receipt) {
-            return Err(PlannerFault::BudgetExhausted);
+            return Err(budget_exhausted(PlannerCallSpend::Measured(receipt)));
         }
         if let Some(remaining) = budget {
-            if input_tokens > remaining.input_tokens_remaining {
-                return Err(PlannerFault::BudgetExhausted);
+            if receipt.input_tokens > remaining.input_tokens_remaining {
+                return Err(budget_exhausted(PlannerCallSpend::Measured(receipt)));
             }
         }
         Ok((outcome.provider_result, receipt))
@@ -209,8 +209,9 @@ impl ClaudePlanner {
         &self,
         text: &str,
         allowed_evidence: &[EvidenceRef],
-    ) -> Result<AtomicityAssessment, PlannerFault> {
-        let json = parse_json(text).map_err(malformed_fault)?;
+        receipt: PlanningCostReceipt,
+    ) -> Parsed<AtomicityAssessment> {
+        let json = parse_json(text).map_err(malformed)?;
         let verdict = required_str(&json, "verdict")?;
         let rationale = required_str(&json, "rationale")?.to_owned();
         let evidence_refs = match json.get("evidence_refs") {
@@ -221,7 +222,9 @@ impl ClaudePlanner {
             .iter()
             .any(|candidate| !allowed_evidence.iter().any(|allowed| allowed == candidate))
         {
-            return provider_fault("atomicity assessment invented an evidence reference");
+            return Err(Malformed(
+                "atomicity assessment invented an evidence reference".to_owned(),
+            ));
         }
         let verdict = match verdict {
             "ATOMIC" => AtomicityVerdict::Atomic,
@@ -233,12 +236,12 @@ impl ClaudePlanner {
                         required_str(blocker, "code")?.to_owned(),
                         required_str(blocker, "detail")?.to_owned(),
                     )
-                    .map_err(domain_fault)?,
+                    .map_err(malformed)?,
                 }
             }
-            other => return provider_fault(format!("unknown atomicity verdict {other:?}")),
+            other => return Err(Malformed(format!("unknown atomicity verdict {other:?}"))),
         };
-        AtomicityAssessment::new(verdict, rationale, evidence_refs).map_err(domain_fault)
+        AtomicityAssessment::new(verdict, rationale, evidence_refs, receipt).map_err(malformed)
     }
 
     fn parse_proposal(
@@ -246,8 +249,8 @@ impl ClaudePlanner {
         text: &str,
         receipt: PlanningCostReceipt,
         source_evidence_refs: Vec<EvidenceRef>,
-    ) -> Result<PlanChangeSet, PlannerFault> {
-        let json = parse_json(text).map_err(malformed_fault)?;
+    ) -> Parsed<PlanChangeSet> {
+        let json = parse_json(text).map_err(malformed)?;
         let mut proposal = PlanChangeSet {
             base_plan_revision: required_u64(&json, "base_plan_revision")?,
             reason: required_str(&json, "reason")?.to_owned(),
@@ -277,8 +280,9 @@ impl PlannerPort for ClaudePlanner {
         input: AtomicityRequest,
     ) -> Result<AtomicityAssessment, PlannerFault> {
         let prompt = atomicity_prompt(&input);
-        let (text, _receipt) = self.call_provider(&prompt, None)?;
-        self.parse_assessment(&text, &input.evidence_refs)
+        let (text, receipt) = self.call_provider(&prompt, None)?;
+        self.parse_assessment(&text, &input.evidence_refs, receipt.clone())
+            .map_err(|detail| malformed_after_spend(detail, receipt))
     }
 
     fn propose_decomposition(
@@ -291,11 +295,12 @@ impl PlannerPort for ClaudePlanner {
         if input.budget_remaining.calls_remaining == 0
             || input.budget_remaining.input_tokens_remaining == 0
         {
-            return Err(PlannerFault::BudgetExhausted);
+            return Err(budget_exhausted(PlannerCallSpend::NotStarted));
         }
         let prompt = decomposition_prompt(&input);
         let (text, receipt) = self.call_provider(&prompt, Some(input.budget_remaining))?;
-        self.parse_proposal(&text, receipt, input.evidence_refs)
+        self.parse_proposal(&text, receipt.clone(), input.evidence_refs)
+            .map_err(|detail| malformed_after_spend(detail, receipt))
     }
 
     fn propose_replan(&self, input: ReplanRequest) -> Result<PlanChangeSet, PlannerFault> {
@@ -305,11 +310,12 @@ impl PlannerPort for ClaudePlanner {
         if input.budget_remaining.calls_remaining == 0
             || input.budget_remaining.input_tokens_remaining == 0
         {
-            return Err(PlannerFault::BudgetExhausted);
+            return Err(budget_exhausted(PlannerCallSpend::NotStarted));
         }
         let prompt = replan_prompt(&input);
         let (text, receipt) = self.call_provider(&prompt, Some(input.budget_remaining))?;
-        self.parse_proposal(&text, receipt, input.triggering_evidence_refs)
+        self.parse_proposal(&text, receipt.clone(), input.triggering_evidence_refs)
+            .map_err(|detail| malformed_after_spend(detail, receipt))
     }
 }
 
@@ -326,136 +332,151 @@ fn bound_planner_config(config: ClaudeConfig) -> Result<ClaudeConfig, String> {
     config.with_permission_mode("plan")
 }
 
-fn provider_fault<T>(detail: impl Into<String>) -> Result<T, PlannerFault> {
-    Err(PlannerFault::ProviderFailure {
+/// Builds the exact receipt from provider-reported usage. Missing,
+/// overflowing, or out-of-range values are never estimated.
+fn measured_receipt(usage: &UsageSample, wall_time_ms: u64) -> Result<PlanningCostReceipt, String> {
+    if usage.provenance != UsageProvenance::Reported {
+        return Err("claude planner returned no provider-reported token usage".to_owned());
+    }
+    let input_tokens = usage
+        .total_input_tokens()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| {
+            "claude planner total input-token usage is missing, overflowed, or out of range"
+                .to_owned()
+        })?;
+    let output_tokens = usage
+        .output_tokens
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| "claude planner output-token usage is missing or out of range".to_owned())?;
+    PlanningCostReceipt::new(
+        input_tokens,
+        output_tokens,
+        wall_time_ms,
+        PLANNER_PRICE_CLASS.to_owned(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn provider_failure(detail: impl Into<String>, spend: PlannerCallSpend) -> PlannerFault {
+    PlannerFault::ProviderFailure {
         typed_cause: detail.into(),
-    })
-}
-
-fn domain_fault(error: plan_domain::PlanDomainError) -> PlannerFault {
-    PlannerFault::ProviderFailure {
-        typed_cause: format!("malformed planner output: {error}"),
+        spend,
     }
 }
 
-fn malformed_fault(error: impl std::fmt::Display) -> PlannerFault {
-    PlannerFault::ProviderFailure {
-        typed_cause: format!("malformed planner output: {error}"),
-    }
+fn budget_exhausted(spend: PlannerCallSpend) -> PlannerFault {
+    PlannerFault::BudgetExhausted { spend }
 }
 
-fn required<'a>(json: &'a Json, key: &str) -> Result<&'a Json, PlannerFault> {
-    json.get(key).ok_or_else(|| PlannerFault::ProviderFailure {
-        typed_cause: format!("malformed planner output: missing {key:?}"),
-    })
+fn malformed_after_spend(detail: Malformed, receipt: PlanningCostReceipt) -> PlannerFault {
+    provider_failure(
+        format!("malformed planner output: {}", detail.0),
+        PlannerCallSpend::Measured(receipt),
+    )
 }
 
-fn required_str<'a>(json: &'a Json, key: &str) -> Result<&'a str, PlannerFault> {
+fn malformed(error: impl std::fmt::Display) -> Malformed {
+    Malformed(error.to_string())
+}
+
+fn required<'a>(json: &'a Json, key: &str) -> Parsed<&'a Json> {
+    json.get(key)
+        .ok_or_else(|| Malformed(format!("missing {key:?}")))
+}
+
+fn required_str<'a>(json: &'a Json, key: &str) -> Parsed<&'a str> {
     required(json, key)?
         .as_str()
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| PlannerFault::ProviderFailure {
-            typed_cause: format!("malformed planner output: {key:?} must be a non-blank string"),
-        })
+        .ok_or_else(|| Malformed(format!("{key:?} must be a non-blank string")))
 }
 
-fn required_u64(json: &Json, key: &str) -> Result<u64, PlannerFault> {
+fn required_u64(json: &Json, key: &str) -> Parsed<u64> {
     required(json, key)?
         .as_u64()
-        .ok_or_else(|| PlannerFault::ProviderFailure {
-            typed_cause: format!("malformed planner output: {key:?} must be an unsigned integer"),
-        })
+        .ok_or_else(|| Malformed(format!("{key:?} must be an unsigned integer")))
 }
 
-fn array(value: &Json) -> Result<&[Json], PlannerFault> {
+fn array(value: &Json) -> Parsed<&[Json]> {
     value
         .as_array()
-        .ok_or_else(|| PlannerFault::ProviderFailure {
-            typed_cause: "malformed planner output: expected array".to_owned(),
-        })
+        .ok_or_else(|| Malformed("expected array".to_owned()))
 }
 
-fn parse_strings(value: &Json) -> Result<Vec<String>, PlannerFault> {
+fn parse_strings(value: &Json) -> Parsed<Vec<String>> {
     array(value)?
         .iter()
         .map(|item| {
             item.as_str()
                 .filter(|text| !text.trim().is_empty())
                 .map(ToOwned::to_owned)
-                .ok_or_else(|| PlannerFault::ProviderFailure {
-                    typed_cause: "malformed planner output: array entry must be non-blank string"
-                        .to_owned(),
-                })
+                .ok_or_else(|| Malformed("array entry must be non-blank string".to_owned()))
         })
         .collect()
 }
 
-fn parse_evidence_refs(value: &Json) -> Result<Vec<EvidenceRef>, PlannerFault> {
+fn parse_evidence_refs(value: &Json) -> Parsed<Vec<EvidenceRef>> {
     parse_strings(value)?
         .into_iter()
-        .map(|value| EvidenceRef::new(value).map_err(domain_fault))
+        .map(|value| EvidenceRef::new(value).map_err(malformed))
         .collect()
 }
 
-fn parse_scope(value: &Json) -> Result<PlanScope, PlannerFault> {
-    PlanScope::new(parse_strings(value)?).map_err(domain_fault)
+fn parse_scope(value: &Json) -> Parsed<PlanScope> {
+    PlanScope::new(parse_strings(value)?).map_err(malformed)
 }
 
-fn parse_node_ids(value: &Json) -> Result<Vec<PlanNodeId>, PlannerFault> {
+fn parse_node_ids(value: &Json) -> Parsed<Vec<PlanNodeId>> {
     parse_strings(value)?
         .into_iter()
-        .map(|value| PlanNodeId::new(value).map_err(domain_fault))
+        .map(|value| PlanNodeId::new(value).map_err(malformed))
         .collect()
 }
 
-fn parse_risk(value: &str) -> Result<RiskClass, PlannerFault> {
+fn parse_risk(value: &str) -> Parsed<RiskClass> {
     match value {
         "low" => Ok(RiskClass::Low),
         "medium" => Ok(RiskClass::Medium),
         "high" => Ok(RiskClass::High),
         "critical" => Ok(RiskClass::Critical),
-        other => provider_fault(format!(
-            "malformed planner output: unknown risk class {other:?}"
-        )),
+        other => Err(Malformed(format!("unknown risk class {other:?}"))),
     }
 }
 
-fn parse_method(value: &str) -> Result<VerificationMethod, PlannerFault> {
-    VerificationMethod::from_str(value).map_err(domain_fault)
+fn parse_method(value: &str) -> Parsed<VerificationMethod> {
+    VerificationMethod::from_str(value).map_err(malformed)
 }
 
-fn parse_criteria(value: &Json) -> Result<Vec<CriterionDecl>, PlannerFault> {
+fn parse_criteria(value: &Json) -> Parsed<Vec<CriterionDecl>> {
     array(value)?
         .iter()
         .map(|item| {
             Ok(CriterionDecl::new(
-                CriterionId::new(required_str(item, "id")?.to_owned()).map_err(domain_fault)?,
+                CriterionId::new(required_str(item, "id")?.to_owned()).map_err(malformed)?,
                 parse_method(required_str(item, "method")?)?,
             ))
         })
         .collect()
 }
 
-fn parse_optional_gate(value: Option<&Json>) -> Result<Option<GateRef>, PlannerFault> {
+fn parse_optional_gate(value: Option<&Json>) -> Parsed<Option<GateRef>> {
     match value {
         None | Some(Json::Null) => Ok(None),
         Some(value) => value
             .as_str()
-            .ok_or_else(|| PlannerFault::ProviderFailure {
-                typed_cause: "malformed planner output: required_gate must be string or null"
-                    .to_owned(),
-            })
-            .and_then(|gate| GateRef::new(gate.to_owned()).map_err(domain_fault))
+            .ok_or_else(|| Malformed("required_gate must be string or null".to_owned()))
+            .and_then(|gate| GateRef::new(gate.to_owned()).map_err(malformed))
             .map(Some),
     }
 }
 
-fn parse_node_additions(value: &Json) -> Result<Vec<NodeAddition>, PlannerFault> {
+fn parse_node_additions(value: &Json) -> Parsed<Vec<NodeAddition>> {
     array(value)?
         .iter()
         .map(|item| {
             Ok(NodeAddition {
-                id: PlanNodeId::new(required_str(item, "id")?.to_owned()).map_err(domain_fault)?,
+                id: PlanNodeId::new(required_str(item, "id")?.to_owned()).map_err(malformed)?,
                 scope: parse_scope(required(item, "scope")?)?,
                 criteria: parse_criteria(required(item, "criteria")?)?,
                 risk_class: parse_risk(required_str(item, "risk_class")?)?,
@@ -465,26 +486,25 @@ fn parse_node_additions(value: &Json) -> Result<Vec<NodeAddition>, PlannerFault>
         .collect()
 }
 
-fn parse_gate_update(value: Option<&Json>) -> Result<Option<GateUpdate>, PlannerFault> {
+fn parse_gate_update(value: Option<&Json>) -> Parsed<Option<GateUpdate>> {
     match value {
         None | Some(Json::Null) => Ok(None),
-        Some(Json::Obj(_)) => {
-            let value = value.expect("matched Some");
-            if value.get("clear").and_then(Json::as_bool) == Some(true) {
+        Some(object @ Json::Obj(_)) => {
+            if object.get("clear").and_then(Json::as_bool) == Some(true) {
                 return Ok(Some(GateUpdate::Clear));
             }
-            let gate = required_str(value, "set")?;
+            let gate = required_str(object, "set")?;
             Ok(Some(GateUpdate::Set(
-                GateRef::new(gate.to_owned()).map_err(domain_fault)?,
+                GateRef::new(gate.to_owned()).map_err(malformed)?,
             )))
         }
-        Some(_) => provider_fault(
-            "malformed planner output: node update required_gate must be null or object",
-        ),
+        Some(_) => Err(Malformed(
+            "node update required_gate must be null or object".to_owned(),
+        )),
     }
 }
 
-fn parse_node_updates(value: &Json) -> Result<Vec<NodeUpdate>, PlannerFault> {
+fn parse_node_updates(value: &Json) -> Parsed<Vec<NodeUpdate>> {
     array(value)?
         .iter()
         .map(|item| {
@@ -495,16 +515,12 @@ fn parse_node_updates(value: &Json) -> Result<Vec<NodeUpdate>, PlannerFault> {
             let risk_class = match item.get("risk_class") {
                 None | Some(Json::Null) => None,
                 Some(risk) => Some(parse_risk(risk.as_str().ok_or_else(|| {
-                    PlannerFault::ProviderFailure {
-                        typed_cause:
-                            "malformed planner output: node update risk_class must be string"
-                                .to_owned(),
-                    }
+                    Malformed("node update risk_class must be string".to_owned())
                 })?)?),
             };
             Ok(NodeUpdate {
                 target: PlanNodeId::new(required_str(item, "target")?.to_owned())
-                    .map_err(domain_fault)?,
+                    .map_err(malformed)?,
                 scope,
                 risk_class,
                 required_gate: parse_gate_update(item.get("required_gate"))?,
@@ -513,39 +529,36 @@ fn parse_node_updates(value: &Json) -> Result<Vec<NodeUpdate>, PlannerFault> {
         .collect()
 }
 
-fn parse_edge_additions(value: &Json) -> Result<Vec<EdgeAddition>, PlannerFault> {
+fn parse_edge_additions(value: &Json) -> Parsed<Vec<EdgeAddition>> {
     array(value)?
         .iter()
         .map(|item| {
             Ok(EdgeAddition {
-                from: PlanNodeId::new(required_str(item, "from")?.to_owned())
-                    .map_err(domain_fault)?,
-                to: PlanNodeId::new(required_str(item, "to")?.to_owned()).map_err(domain_fault)?,
+                from: PlanNodeId::new(required_str(item, "from")?.to_owned()).map_err(malformed)?,
+                to: PlanNodeId::new(required_str(item, "to")?.to_owned()).map_err(malformed)?,
             })
         })
         .collect()
 }
 
-fn parse_edge_removals(value: &Json) -> Result<Vec<EdgeRemoval>, PlannerFault> {
+fn parse_edge_removals(value: &Json) -> Parsed<Vec<EdgeRemoval>> {
     array(value)?
         .iter()
         .map(|item| {
             Ok(EdgeRemoval {
-                from: PlanNodeId::new(required_str(item, "from")?.to_owned())
-                    .map_err(domain_fault)?,
-                to: PlanNodeId::new(required_str(item, "to")?.to_owned()).map_err(domain_fault)?,
+                from: PlanNodeId::new(required_str(item, "from")?.to_owned()).map_err(malformed)?,
+                to: PlanNodeId::new(required_str(item, "to")?.to_owned()).map_err(malformed)?,
             })
         })
         .collect()
 }
 
-fn parse_risk_delta(value: &Json) -> Result<Vec<RiskDelta>, PlannerFault> {
+fn parse_risk_delta(value: &Json) -> Parsed<Vec<RiskDelta>> {
     array(value)?
         .iter()
         .map(|item| {
             Ok(RiskDelta {
-                node: PlanNodeId::new(required_str(item, "node")?.to_owned())
-                    .map_err(domain_fault)?,
+                node: PlanNodeId::new(required_str(item, "node")?.to_owned()).map_err(malformed)?,
                 from: parse_risk(required_str(item, "from")?)?,
                 to: parse_risk(required_str(item, "to")?)?,
             })
@@ -553,39 +566,29 @@ fn parse_risk_delta(value: &Json) -> Result<Vec<RiskDelta>, PlannerFault> {
         .collect()
 }
 
-fn parse_budget_delta(value: &Json) -> Result<BudgetDelta, PlannerFault> {
+fn parse_budget_delta(value: &Json) -> Parsed<BudgetDelta> {
     let planning = required(value, "planning_cost_movement")?
         .as_i64()
-        .ok_or_else(|| PlannerFault::ProviderFailure {
-            typed_cause:
-                "malformed planner output: planning_cost_movement must be a signed integer"
-                    .to_owned(),
-        })?;
+        .ok_or_else(|| Malformed("planning_cost_movement must be a signed integer".to_owned()))?;
     let execution = required(value, "expected_execution_cost_movement")?
         .as_i64()
-        .ok_or_else(|| PlannerFault::ProviderFailure {
-            typed_cause:
-                "malformed planner output: expected_execution_cost_movement must be a signed integer"
-                    .to_owned(),
+        .ok_or_else(|| {
+            Malformed("expected_execution_cost_movement must be a signed integer".to_owned())
         })?;
     Ok(BudgetDelta::new(planning, execution))
 }
 
-fn parse_coverage_map(
-    value: &Json,
-) -> Result<BTreeMap<CriterionId, Vec<CriterionId>>, PlannerFault> {
+fn parse_coverage_map(value: &Json) -> Parsed<BTreeMap<CriterionId, Vec<CriterionId>>> {
     let object = value
         .as_object()
-        .ok_or_else(|| PlannerFault::ProviderFailure {
-            typed_cause: "malformed planner output: coverage_map must be an object".to_owned(),
-        })?;
+        .ok_or_else(|| Malformed("coverage_map must be an object".to_owned()))?;
     object
         .iter()
         .map(|(parent, children)| {
-            let parent = CriterionId::new(parent.clone()).map_err(domain_fault)?;
+            let parent = CriterionId::new(parent.clone()).map_err(malformed)?;
             let children = parse_strings(children)?
                 .into_iter()
-                .map(|child| CriterionId::new(child).map_err(domain_fault))
+                .map(|child| CriterionId::new(child).map_err(malformed))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok((parent, children))
         })
@@ -751,5 +754,20 @@ mod tests {
     #[test]
     fn json_string_escapes_provider_input_without_shell_semantics() {
         assert_eq!(json_string("a\"b\\c\n"), "\"a\\\"b\\\\c\\n\"");
+    }
+
+    #[test]
+    fn measured_receipt_never_estimates_partial_usage() {
+        let full = UsageSample::reported(Some(5), Some(40_000), None, Some(9));
+        let receipt = measured_receipt(&full, 7).expect("exact receipt");
+        assert_eq!((receipt.input_tokens, receipt.output_tokens), (40_005, 9));
+        for partial in [
+            UsageSample::unknown(),
+            UsageSample::reported(None, Some(10), None, Some(9)),
+            UsageSample::reported(Some(10), None, None, None),
+            UsageSample::reported(Some(u64::from(u32::MAX) + 1), None, None, Some(1)),
+        ] {
+            assert!(measured_receipt(&partial, 7).is_err());
+        }
     }
 }

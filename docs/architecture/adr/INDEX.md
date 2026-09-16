@@ -32,5 +32,6 @@
 | [ADR-0025](./ADR-0025-g5-post-admission-recovery.md) | G5 post-admission entry recovery path (explicit resume, pre-admission validation) | Accepted | recovery, reconciliation, resume, entry validation, ipc v2 additive, g5 sequencing |
 | [ADR-0026](./ADR-0026-g6-security-authority-and-capability-contracts.md) | G6 security authority and capability contracts | Accepted | policy, capabilities, approvals, secrets, audit, runners, g6 sequencing |
 | [ADR-0027](./ADR-0027-g7-planning-orchestration-contract.md) | G7 planning/orchestration contract (`PlannerPort`, `PlanChangeSet`, validation, revision provenance, guardrails, vocabulary reconcile, G6 follow-up re-homing) | Accepted | planning, orchestration, planner seam, plan revisions, guardrails, human decisions, g7 sequencing |
+| [ADR-0028](./ADR-0028-g7-planning-input-run-and-execution-fencing.md) | G7 planning input/run separation, stale-writer fencing, durable spend accounting, and mandatory accepted-Plan execution admission | Accepted | planning inputs, planning runs, plan revisions, execution admission, stale fencing, g7 sequencing |
 
 Coverage register (not an ADR): [COVERAGE.md](./COVERAGE.md).
