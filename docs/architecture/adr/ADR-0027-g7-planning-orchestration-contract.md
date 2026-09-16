@@ -69,10 +69,13 @@ names and semantics below are normative and stable):
 - `AtomicityRequest { task_ref, acceptance_criteria_refs,
   scope_bound, evidence_refs, execution_policy_ref }` — everything the
   planner may read; no graph handles, no policy handles.
-- `AtomicityAssessment { verdict, rationale, evidence_refs }` where
+- `AtomicityAssessment { verdict, rationale, evidence_refs,
+  planning_cost_receipt }` where
   `verdict ∈ { ATOMIC, DECOMPOSABLE, BLOCKED }`; `BLOCKED` carries a
   typed blocker. Assessment is pure: it performs zero durable writes
-  (a test calling it twice must observe zero new journal rows).
+  (a test calling it twice must observe zero new journal rows). The
+  receipt is provider-usage evidence for this `PlannerPort` call, not
+  authority and not planner-authored business state.
 - `DecompositionRequest { parent_task_ref, base_plan_revision,
   acceptance_criteria_refs, scope_bound, evidence_refs,
   depth_remaining, budget_remaining }` — the planner receives its
@@ -84,11 +87,19 @@ names and semantics below are normative and stable):
   regenerating the whole project plan is forbidden input (ADR-0017:
   revise the affected branch).
 - `PlanChangeSet` — §2 below. Returned changesets carry no authority.
-- `PlannerFault ∈ { UNPLANNABLE { blocker }, BUDGET_EXHAUSTED,
-  DEPTH_EXHAUSTED, PROVIDER_FAILURE { typed_cause } }` — a planner
-  that cannot produce a valid smaller decomposition reports a fault;
-  the orchestrator then BLOCKs or escalates. It never retries silently
-  (INV-050, INV-091).
+- `PlannerCallSpend ∈ { NOT_STARTED, MEASURED { receipt }, UNMEASURED }`
+  is adapter-authored control-flow evidence. `NOT_STARTED` means no
+  provider process/call crossed its execution boundary; `MEASURED`
+  carries the provider-reported `planning_cost_receipt`; `UNMEASURED`
+  means a provider call may have started but exact usage cannot be
+  recovered. Model/provider text cannot choose this value.
+- `PlannerFault ∈ { UNPLANNABLE { blocker, spend },
+  BUDGET_EXHAUSTED { spend }, DEPTH_EXHAUSTED,
+  PROVIDER_FAILURE { typed_cause, spend } }` — a planner that cannot
+  produce a valid smaller decomposition reports a fault; the
+  orchestrator then BLOCKs or escalates. `DEPTH_EXHAUSTED` is always a
+  pre-call `NOT_STARTED` refusal. It never retries silently (INV-050,
+  INV-091).
 
 `assess_atomicity` / `propose_decomposition` / `propose_replan` map
 1:1 onto the Source of Truth §21.1.1 seam; no fourth method is added
@@ -264,6 +275,29 @@ path, so 120 s keeps the propose→validate loop interactive over
 escalation, per the Human Attention Queue principle (escalate cost
 is bounded and visible before it accrues further).
 
+TASK-0078 accounting amendment: call/token guardrails are durable
+application state, not caller-memory state. Before invoking
+`PlannerPort`, the trusted planning service reserves one call slot and
+the maximum per-call input charge (32,000 tokens) for the exact
+`(plan_branch, triggering_evidence)` cycle. The call slot remains
+consumed for every reserved `PlannerPort` invocation, including a
+`NOT_STARTED` refusal, so repeated policy/runtime refusals cannot form
+an unbounded loop. Settlement then replaces only the token reservation:
+
+- `NOT_STARTED` → zero input-token charge and no receipt;
+- `MEASURED { receipt }` → charge the reported input tokens and persist
+  that exact receipt under a product-owned call identity;
+- `UNMEASURED` → retain the conservative 32,000-token charge and do not
+  fabricate a receipt.
+
+If the process crashes after reservation but before settlement, the
+conservative reservation remains durable. Plan revisions may reference
+only a measured receipt that already resolves in durable planning-cost
+storage; missing or mismatched receipt provenance fails closed. Accepted
+revision lineage and per-evidence call/token/L3 counters must survive
+restart so V7, revision-per-cycle and budget checks cannot be reset by
+recreating an application-service object.
+
 ### 7. Vocabulary reconcile (zero undecided rows)
 
 | Term | Verdict | Rationale |
@@ -355,7 +389,9 @@ containment), V5 (no policy/approval deltas; mandatory
 to the exact `proposal_hash` before persistence of any
 risk-escalated revision), and the dual enforcement points (§5).
 Planner identity and cost receipts are provenance, never authority;
-provider/planner text cannot author audit facts (INV-152 —
+`PlannerCallSpend` and receipt identity are derived by trusted adapter /
+application control flow, never parsed from planner output. Provider/
+planner text cannot author audit facts (INV-152 —
 planning evidence flows through the Event Journal, never directly
 into the Security Audit). Approval binding gains a `proposal_hash`
 field (§8/F1) under TASK-0062 exact-binding semantics: stale or
@@ -375,7 +411,11 @@ contract suite — no change to Task, Execution/Attempt, Storage,
 Workspace, orchestration, completion, journal, or IPC semantics
 (ADR-0024 §10 pattern). Numeric bounds (§5) and the call envelope
 (§6) are policy-owned tunables: changing them needs no domain-code
-restructure. No G6 artifact is migrated or reinterpreted; no
+restructure. Implementations may add durable storage for the §6
+reservation/settlement and revision-lineage state, but that storage is
+owned by the planning boundary and does not create a second authority
+for Task, Policy, Approval, Execution, or provider state. No G6
+artifact is migrated or reinterpreted; no
 G8/G9 contract is preempted (deferral rows in §7 name their owning
 gates). The normative planning contract lives in this ADR alone —
 no `planning/` doc files were required, so none were added.
