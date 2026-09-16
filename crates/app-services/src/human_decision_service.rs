@@ -65,6 +65,7 @@ impl<C: Clock> HumanDecisionService<C> {
                 recommendation: request.recommendation,
                 evidence: request.evidence,
                 proposal_hash: request.proposal_hash,
+                approved_proposal: None,
                 plan_head: request.plan_head,
                 planning_input_snapshot_id: request.planning_input_snapshot_id,
                 planning_input_fingerprint: request.planning_input_fingerprint,
@@ -236,15 +237,57 @@ impl<C: Clock> HumanDecisionService<C> {
             },
             policy,
             Some(id),
-        )?;
-        self.store
-            .mark_human_decision_consumed_after_application(
-                id,
-                HumanContinuation::Replan,
-                self.clock.now_millis(),
-            )
-            .map_err(PlanningServiceError::Storage)?;
-        Ok(outcome)
+        );
+        match outcome {
+            Ok(PlanningProposalOutcome::Accepted(accepted)) => {
+                self.store
+                    .mark_human_decision_consumed_after_application(
+                        id,
+                        HumanContinuation::Replan,
+                        self.clock.now_millis(),
+                    )
+                    .map_err(PlanningServiceError::Storage)?;
+                Ok(PlanningProposalOutcome::Accepted(accepted))
+            }
+            Ok(outcome) => {
+                // A continuation that did not publish has not succeeded.
+                // Fence this exact authority so a later trusted planning
+                // pass may create a replacement; retain the row as evidence.
+                self.supersede_after_failed_application(id)?;
+                Ok(outcome)
+            }
+            Err(error) => {
+                // Planner/persistence failures after a human chose REPLAN
+                // must not leave a resolved row permanently wedging scope.
+                // The supersession itself is durable and fail-closed.
+                self.supersede_after_failed_application(id)?;
+                Err(error)
+            }
+        }
+    }
+
+    fn supersede_after_failed_application(
+        &mut self,
+        id: &HumanDecisionRequestId,
+    ) -> Result<(), PlanningServiceError> {
+        let Some(current) = self
+            .store
+            .get_human_decision(id)
+            .map_err(PlanningServiceError::Storage)?
+        else {
+            return Err(PlanningServiceError::Storage(StorageError::NotFound(
+                format!("human decision {}", id.as_str()),
+            )));
+        };
+        if matches!(
+            current.status,
+            HumanDecisionStatus::Pending | HumanDecisionStatus::Resolved
+        ) {
+            self.store
+                .supersede_unusable_human_decision(id)
+                .map_err(PlanningServiceError::Storage)?;
+        }
+        Ok(())
     }
 
     /// Current bounded control-plane blocker for one Task/Plan scope.

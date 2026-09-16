@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package ai_engineering_os.ipc;
+
+// G7 planning control plane (protocol v5).  This envelope requests trusted
+// application-service operations.  It deliberately carries no PlanRevision,
+// graph, approval grant, provider identity, or durable state transition.
+import "task_core.proto";
+
+message PlanningContext {
+  string task_id = 1;
+  string plan_branch_id = 2;
+  repeated string scope_roots = 3;
+  repeated string acceptance_criterion_ids = 4;
+  string policy_fingerprint = 5;
+  string evidence_ref = 6;
+}
+
+message TriggerPlanningRequest {
+  PlanningContext context = 1;
+}
+
+message ApplyHumanContinuationRequest {
+  string request_id = 1;
+  // Required for REPLAN and for risk-gated RESUME. The daemon validates the
+  // context against the durable request before any planning/publication work;
+  // a risk RESUME publishes the stored approved proposal without PlannerPort.
+  optional PlanningContext context = 2;
+}
+
+message PlanningOperationResponse {
+  string outcome = 1;
+  optional string plan_branch_id = 2;
+  optional uint64 revision_seq = 3;
+  optional string human_decision_request_id = 4;
+  string detail = 5;
+}
+
+message PlanningCoreRequest {
+  oneof payload {
+    TriggerPlanningRequest trigger = 1;
+    ApplyHumanContinuationRequest apply_human_continuation = 2;
+  }
+}
+
+message PlanningCoreResponse {
+  oneof payload {
+    PlanningOperationResponse operation = 1;
+    BusinessError error = 2;
+  }
+}

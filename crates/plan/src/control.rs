@@ -19,6 +19,9 @@ pub struct PlanningInputSnapshot {
     pub id: PlanningInputSnapshotId,
     pub plan_branch_id: PlanBranchId,
     pub task_ref: String,
+    /// Canonical Task identities that Runlith authorized for this planning
+    /// scope. This is trusted application input, never planner output.
+    pub trusted_candidate_task_refs: Vec<String>,
     pub expected_plan_head: u64,
     pub scope_bound: ScopeBound,
     pub baseline_risk: RiskClass,
@@ -38,6 +41,38 @@ impl PlanningInputSnapshot {
     pub fn new(
         plan_branch_id: PlanBranchId,
         task_ref: String,
+        expected_plan_head: u64,
+        scope_bound: ScopeBound,
+        baseline_risk: RiskClass,
+        affected_parent_criteria: Vec<AffectedParentCriterion>,
+        triggering_evidence: Vec<EvidenceRef>,
+        lineage_fingerprints: Vec<String>,
+        risk_grant: Option<RiskEscalationGrant>,
+        policy_fingerprint: String,
+    ) -> Result<Self, PlanDomainError> {
+        Self::new_with_candidates(
+            plan_branch_id,
+            task_ref,
+            Vec::new(),
+            expected_plan_head,
+            scope_bound,
+            baseline_risk,
+            affected_parent_criteria,
+            triggering_evidence,
+            lineage_fingerprints,
+            risk_grant,
+            policy_fingerprint,
+        )
+    }
+
+    /// Builds a snapshot whose planning identities are derived by a trusted
+    /// application service. The pure planning domain treats these as opaque
+    /// references; it never resolves or mints canonical Tasks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_candidates(
+        plan_branch_id: PlanBranchId,
+        task_ref: String,
+        mut trusted_candidate_task_refs: Vec<String>,
         expected_plan_head: u64,
         scope_bound: ScopeBound,
         baseline_risk: RiskClass,
@@ -73,6 +108,17 @@ impl PlanningInputSnapshot {
         triggering_evidence.dedup();
         lineage_fingerprints.sort();
         lineage_fingerprints.dedup();
+        trusted_candidate_task_refs.sort();
+        trusted_candidate_task_refs.dedup();
+        if trusted_candidate_task_refs
+            .iter()
+            .any(|task_ref| task_ref.trim().is_empty() || task_ref.chars().any(char::is_control))
+        {
+            return Err(PlanDomainError::InvalidInput(
+                "trusted candidate task refs must be non-blank with no control characters"
+                    .to_owned(),
+            ));
+        }
         for fingerprint in &lineage_fingerprints {
             require_sha256("lineage fingerprint", fingerprint)?;
         }
@@ -83,6 +129,7 @@ impl PlanningInputSnapshot {
         let input_fingerprint = fingerprint(
             &plan_branch_id,
             &task_ref,
+            &trusted_candidate_task_refs,
             expected_plan_head,
             &scope_bound,
             baseline_risk,
@@ -103,6 +150,7 @@ impl PlanningInputSnapshot {
             id,
             plan_branch_id,
             task_ref,
+            trusted_candidate_task_refs,
             expected_plan_head,
             scope_bound,
             baseline_risk,
@@ -120,6 +168,7 @@ impl PlanningInputSnapshot {
 fn fingerprint(
     branch: &PlanBranchId,
     task_ref: &str,
+    candidate_task_refs: &[String],
     expected_plan_head: u64,
     scope_bound: &ScopeBound,
     baseline_risk: RiskClass,
@@ -133,6 +182,10 @@ fn fingerprint(
     push_field(&mut hasher, b"runlith-planning-input-v1");
     push_str(&mut hasher, branch.as_str());
     push_str(&mut hasher, task_ref);
+    hasher.update((candidate_task_refs.len() as u64).to_be_bytes());
+    for task_ref in candidate_task_refs {
+        push_str(&mut hasher, task_ref);
+    }
     hasher.update(expected_plan_head.to_be_bytes());
     let roots = scope_bound.roots();
     hasher.update((roots.len() as u64).to_be_bytes());

@@ -627,6 +627,13 @@ fn persist_snapshot(
         snapshot.id.as_str(),
         snapshot.lineage_fingerprints.clone(),
     )?;
+    persist_ordered_values(
+        tx,
+        "planning_input_candidate_tasks",
+        "task_ref",
+        snapshot.id.as_str(),
+        snapshot.trusted_candidate_task_refs.clone(),
+    )?;
     Ok(())
 }
 

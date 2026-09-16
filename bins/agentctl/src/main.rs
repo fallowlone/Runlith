@@ -13,15 +13,17 @@ use std::process::ExitCode;
 use agentctl::{resolve_production_endpoint, spawn_sibling_daemon, ClientError};
 use ipc_contracts::proto::{
     execution_core_request, execution_core_response, human_decision_core_request,
-    human_decision_core_response, policy_core_request, policy_core_response, task_core_request,
-    task_core_response, AddDependencyRequest, ApprovalDecision, CancelExecutionRequest,
+    human_decision_core_response, planning_core_request, planning_core_response,
+    policy_core_request, policy_core_response, task_core_request, task_core_response,
+    AddDependencyRequest, ApplyHumanContinuationRequest, ApprovalDecision, CancelExecutionRequest,
     CreateProjectRequest, CreateTaskRequest, DecideApprovalRequest, DecideHumanDecisionRequest,
     ExecutionCoreRequest, ExecutionCoreResponse, GetApprovalRequest, GetExecutionRequest,
     GetHumanDecisionRequest, GetProjectRequest, GetTaskRequest, HumanContinuationDecision,
     HumanDecisionCoreRequest, HumanDecisionCoreResponse, HumanDecisionDto, LifecycleRequest,
     ListDependenciesRequest, ListHumanDecisionsRequest, ListProjectsRequest,
-    ListTasksForProjectRequest, PolicyCoreRequest, PolicyCoreResponse, ResumeExecutionRequest,
-    RunExecutionRequest, TaskCoreRequest, TaskCoreResponse, TaskLifecycleOp,
+    ListTasksForProjectRequest, PlanningContext, PlanningCoreRequest, PolicyCoreRequest,
+    PolicyCoreResponse, ResumeExecutionRequest, RunExecutionRequest, TaskCoreRequest,
+    TaskCoreResponse, TaskLifecycleOp, TriggerPlanningRequest,
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -36,8 +38,9 @@ async fn main() -> ExitCode {
         Some("execution") => cmd_execution(args.collect()).await,
         Some("approval") => cmd_approval(args.collect()).await,
         Some("human-decision") => cmd_human_decision(args.collect()).await,
+        Some("planning") => cmd_planning(args.collect()).await,
         _ => {
-            eprintln!("usage: agentctl <start|ping|shutdown|project|task|execution|approval|human-decision> ...");
+            eprintln!("usage: agentctl <start|ping|shutdown|project|task|execution|approval|human-decision|planning> ...");
             eprintln!("  agentctl project create <id> <name>");
             eprintln!("  agentctl project get <id>");
             eprintln!("  agentctl project list");
@@ -56,6 +59,8 @@ async fn main() -> ExitCode {
             eprintln!("  agentctl human-decision list");
             eprintln!("  agentctl human-decision get <request-id>");
             eprintln!("  agentctl human-decision decide <request-id> <resume|replan|abort>");
+            eprintln!("  agentctl planning trigger <task-id> <branch-id> <scope-root> <criterion-id> <policy-fingerprint> <evidence-ref>");
+            eprintln!("  agentctl planning apply <human-decision-id> [<task-id> <branch-id> <scope-root> <criterion-id> <policy-fingerprint> <evidence-ref>]");
             ExitCode::FAILURE
         }
     }
@@ -664,6 +669,95 @@ fn print_human_decision(decision: HumanDecisionDto) {
     if let Some(consumed_at_ms) = decision.consumed_at_ms {
         println!("consumed_at_ms {consumed_at_ms}");
     }
+}
+
+fn planning_context(values: &[String]) -> Result<PlanningContext, ()> {
+    let [task_id, plan_branch_id, scope_root, criterion, policy_fingerprint, evidence_ref] = values
+    else {
+        return Err(());
+    };
+    Ok(PlanningContext {
+        task_id: task_id.clone(),
+        plan_branch_id: plan_branch_id.clone(),
+        scope_roots: vec![scope_root.clone()],
+        acceptance_criterion_ids: vec![criterion.clone()],
+        policy_fingerprint: policy_fingerprint.clone(),
+        evidence_ref: evidence_ref.clone(),
+    })
+}
+
+fn planning_request(args: &[String]) -> Result<PlanningCoreRequest, ()> {
+    match args {
+        [verb, rest @ ..] if verb == "trigger" => Ok(PlanningCoreRequest {
+            payload: Some(planning_core_request::Payload::Trigger(
+                TriggerPlanningRequest {
+                    context: Some(planning_context(rest)?),
+                },
+            )),
+        }),
+        [verb, id] if verb == "apply" => Ok(PlanningCoreRequest {
+            payload: Some(planning_core_request::Payload::ApplyHumanContinuation(
+                ApplyHumanContinuationRequest {
+                    request_id: id.clone(),
+                    context: None,
+                },
+            )),
+        }),
+        [verb, id, rest @ ..] if verb == "apply" => Ok(PlanningCoreRequest {
+            payload: Some(planning_core_request::Payload::ApplyHumanContinuation(
+                ApplyHumanContinuationRequest {
+                    request_id: id.clone(),
+                    context: Some(planning_context(rest)?),
+                },
+            )),
+        }),
+        _ => Err(()),
+    }
+}
+
+#[cfg(unix)]
+async fn cmd_planning(args: Vec<String>) -> ExitCode {
+    let endpoint = match resolve_production_endpoint() {
+        Ok(value) => value,
+        Err(error) => return fail(&error),
+    };
+    let request = match planning_request(&args) {
+        Ok(value) => value,
+        Err(()) => {
+            eprintln!("usage: agentctl planning trigger <task-id> <branch-id> <scope-root> <criterion-id> <policy-fingerprint> <evidence-ref> | apply <human-decision-id> [context]");
+            return ExitCode::FAILURE;
+        }
+    };
+    match agentctl::planning_request(&endpoint, spawn_sibling_daemon, request).await {
+        Ok(response) => match response.payload {
+            Some(planning_core_response::Payload::Operation(operation)) => {
+                println!(
+                    "planning {} branch={} revision={} decision={} {}",
+                    operation.outcome,
+                    operation.plan_branch_id.unwrap_or_default(),
+                    operation
+                        .revision_seq
+                        .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+                    operation.human_decision_request_id.unwrap_or_default(),
+                    operation.detail
+                );
+                ExitCode::SUCCESS
+            }
+            Some(planning_core_response::Payload::Error(error)) => {
+                fail(&ClientError::HumanDecisionAmbiguous(error.message))
+            }
+            None => fail(&ClientError::HumanDecisionAmbiguous(
+                "empty planning response".to_owned(),
+            )),
+        },
+        Err(error) => fail(&error),
+    }
+}
+
+#[cfg(windows)]
+async fn cmd_planning(_args: Vec<String>) -> ExitCode {
+    eprintln!("agentctl: planning control is unavailable on this build");
+    ExitCode::FAILURE
 }
 
 fn human_continuation_name(value: i32) -> &'static str {

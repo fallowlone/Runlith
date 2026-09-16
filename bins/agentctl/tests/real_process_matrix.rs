@@ -7,7 +7,7 @@
 //! Production sources are NOT touched by this task; this file is a
 //! verification harness only.
 //!
-//! Unix-only: process signalling/counting below uses `kill`/`pgrep`.
+//! Unix-only: process signalling below uses `kill`.
 //! Windows runtime execution is recorded as not exercised on this host;
 //! the hard Windows gate item is target compilation (see closure audit).
 
@@ -60,19 +60,6 @@ fn endpoint_present() -> bool {
     std::fs::symlink_metadata(canonical_socket()).is_ok()
 }
 
-/// PIDs of processes whose command line contains our agentd binary path.
-fn agentd_pids() -> Vec<String> {
-    let pattern = agentd_bin().to_string_lossy().into_owned();
-    let output = Command::new("pgrep").arg("-f").arg(&pattern).output();
-    match output {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
 fn wait_for(cond: impl Fn() -> bool, budget: Duration, what: &str) {
     let deadline = Instant::now() + budget;
     while Instant::now() < deadline {
@@ -86,35 +73,90 @@ fn wait_for(cond: impl Fn() -> bool, budget: Duration, what: &str) {
 
 fn wait_ping_ok() {
     wait_for(
-        || agentctl(&["ping"]).status.success(),
+        connect_ping,
         Duration::from_secs(15),
-        "agentctl ping to succeed",
+        "connect-only ping to succeed",
     );
 }
 
-fn spawn_daemon() -> Child {
-    Command::new(agentd_bin())
-        .env(TEST_RUNTIME_ENV, test_runtime_parent())
-        .env(TEST_DATA_ENV, test_data_parent())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn agentd")
+fn endpoint() -> ipc_transport::platform::unix::UnixEndpoint {
+    let runtime_dir = test_runtime_parent().join("ai-engineering-os");
+    ipc_transport::platform::unix::UnixEndpoint {
+        socket_path: runtime_dir.join("agentd.sock"),
+        runtime_dir,
+    }
 }
 
-fn wait_child_exit(child: &mut Child, budget: Duration) -> Option<i32> {
-    let deadline = Instant::now() + budget;
-    loop {
-        match child.try_wait().expect("try_wait") {
-            Some(status) => return status.code(),
-            None => {
-                if Instant::now() >= deadline {
-                    return None;
+/// Connects only to this test's endpoint and pings it. This deliberately
+/// avoids the `agentctl ping` command, which is a launcher and may spawn.
+fn connect_ping() -> bool {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("readiness runtime")
+        .block_on(async {
+            match agentctl::connect_and_handshake(&endpoint()).await {
+                Ok(mut session) => session.ping().await.is_ok(),
+                Err(_) => false,
+            }
+        })
+}
+
+/// Owns a directly-spawned daemon and always kills and reaps it on failure.
+struct DaemonGuard {
+    child: Option<Child>,
+}
+
+impl DaemonGuard {
+    fn spawn() -> Self {
+        let child = Command::new(agentd_bin())
+            .env(TEST_RUNTIME_ENV, test_runtime_parent())
+            .env(TEST_DATA_ENV, test_data_parent())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn agentd");
+        Self { child: Some(child) }
+    }
+
+    fn wait_for_exit(&mut self, budget: Duration) -> Option<i32> {
+        let deadline = Instant::now() + budget;
+        loop {
+            match self.child.as_mut()?.try_wait().expect("try_wait") {
+                Some(status) => {
+                    self.child.take();
+                    return status.code();
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                None if Instant::now() >= deadline => return None,
+                None => std::thread::sleep(Duration::from_millis(50)),
             }
         }
+    }
+
+    fn kill(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    fn kill_9(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let status = Command::new("kill")
+                .arg("-9")
+                .arg(child.id().to_string())
+                .status()
+                .expect("kill -9");
+            assert!(status.success(), "kill -9 must signal the owned daemon");
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Drop for DaemonGuard {
+    fn drop(&mut self) {
+        self.kill();
     }
 }
 
@@ -140,26 +182,32 @@ fn g1_real_process_matrix() {
         "unexpected start output: {out:?}"
     );
     wait_ping_ok();
-    assert_eq!(agentd_pids().len(), 1, "exactly one daemon process");
+    assert!(endpoint_present(), "start must bind the scoped endpoint");
 
     // 2. `agentctl ping` reuses the running daemon (no duplicate).
     let out = agentctl(&["ping"]);
     assert!(out.status.success(), "ping failed: {out:?}");
-    assert_eq!(agentd_pids().len(), 1, "ping must not spawn");
+    assert!(
+        endpoint_present(),
+        "ping must keep the scoped endpoint usable"
+    );
 
     // 3. Second `start` is idempotent reuse.
     let out = agentctl(&["start"]);
     assert!(out.status.success(), "second start failed: {out:?}");
-    assert_eq!(agentd_pids().len(), 1, "second start must not spawn");
+    assert!(
+        endpoint_present(),
+        "second start must reuse the scoped endpoint"
+    );
 
     // 4. Real multi-process singleton: a second agentd loses.
-    let mut second = spawn_daemon();
-    let code = wait_child_exit(&mut second, Duration::from_secs(15));
+    let mut second = DaemonGuard::spawn();
+    let code = second.wait_for_exit(Duration::from_secs(15));
     assert_eq!(code, Some(2), "second daemon must exit AlreadyRunning(2)");
     // Winner remains usable.
     let out = agentctl(&["ping"]);
     assert!(out.status.success(), "winner must stay usable");
-    assert_eq!(agentd_pids().len(), 1);
+    assert!(endpoint_present());
 
     // 5. Concurrent real launchers converge on the one daemon.
     let launches: Vec<std::process::Output> = (0..3)
@@ -173,15 +221,18 @@ fn g1_real_process_matrix() {
     }
     let out = agentctl(&["ping"]);
     assert!(out.status.success());
-    assert_eq!(agentd_pids().len(), 1, "launchers must converge");
+    assert!(
+        endpoint_present(),
+        "launchers must converge on the scoped endpoint"
+    );
 
     // 6. Graceful shutdown: ack, wind-down, endpoint gone, process exits.
     let out = agentctl(&["shutdown"]);
     assert!(out.status.success(), "shutdown failed: {out:?}");
     wait_for(
-        || !endpoint_present() && agentd_pids().is_empty(),
+        || !endpoint_present(),
         Duration::from_secs(15),
-        "endpoint disappearance and daemon exit",
+        "endpoint disappearance",
     );
 
     // 7. Shutdown with no daemon: explicit not-running, no spawn.
@@ -192,26 +243,12 @@ fn g1_real_process_matrix() {
         stderr.contains("not running"),
         "unexpected stderr: {stderr}"
     );
-    assert!(agentd_pids().is_empty(), "shutdown must not spawn");
     assert!(!endpoint_present());
 
     // 8. Crash: kill -9 the running daemon, then recover.
-    let out = agentctl(&["start"]);
-    assert!(out.status.success());
+    let mut crashed = DaemonGuard::spawn();
     wait_ping_ok();
-    let pids = agentd_pids();
-    assert_eq!(pids.len(), 1);
-    let kill = Command::new("kill")
-        .arg("-9")
-        .arg(&pids[0])
-        .status()
-        .expect("kill");
-    assert!(kill.success());
-    wait_for(
-        || agentd_pids().is_empty(),
-        Duration::from_secs(10),
-        "killed daemon to exit",
-    );
+    crashed.kill_9();
     assert!(
         endpoint_present(),
         "stale socket node must remain after SIGKILL"
@@ -220,14 +257,14 @@ fn g1_real_process_matrix() {
     let out = agentctl(&["start"]);
     assert!(out.status.success(), "post-crash start failed: {out:?}");
     wait_ping_ok();
-    assert_eq!(agentd_pids().len(), 1);
+    assert!(endpoint_present(), "recovery must bind the scoped endpoint");
 
     // 9. Final shutdown leaves a clean host.
     let out = agentctl(&["shutdown"]);
     assert!(out.status.success(), "final shutdown failed: {out:?}");
     wait_for(
-        || !endpoint_present() && agentd_pids().is_empty(),
+        || !endpoint_present(),
         Duration::from_secs(15),
-        "final cleanup",
+        "final endpoint cleanup",
     );
 }

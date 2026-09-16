@@ -1508,6 +1508,15 @@ items:
       through the production path with bounded cost; FakePlanner and
       real adapter pass the same contract suite; guardrail violations
       refuse typed before mutation; workspace green.
+    outcome: >-
+      Implemented the production Claude-backed PlannerPort, shared FakePlanner
+      contract coverage, durable planning input/run fencing, bounded spend and
+      guardrail accounting, and accepted-Plan execution admission through the
+      trusted application-service boundary. Follow-up hardening in 87917ac
+      closed the durable orchestration gaps found during acceptance review.
+      TASK-0081 later identified independent G7 closure defects outside this
+      task's recorded acceptance evidence; those defects are assigned to
+      TASK-0082 and do not rewrite TASK-0078 history.
     depends_on:
       - TASK-0077
     blocked_by: []
@@ -1528,6 +1537,15 @@ items:
     exit_criteria_summary: Blocked scope waits while unrelated work
       continues; stale/widened decisions refuse; restart durability
       proven; workspace green.
+    outcome: >-
+      Implemented the durable bounded HumanDecisionRequest lifecycle with
+      provider-neutral RESUME/REPLAN/ABORT decisions, exact stale-state
+      validation, restart durability, minimal owner-scope blocking, and v4
+      IPC/CLI inspection and decision operations. The implementation commit
+      did not advance product/version.toml to task0079; TASK-0082 records and
+      repairs that governance/version bookkeeping drift without rewriting Git
+      history. TASK-0081 subsequently identified recovery, production-path,
+      audit-evidence, and measured-receipt gaps assigned to TASK-0082.
     depends_on:
       - TASK-0077
     blocked_by: []
@@ -1607,4 +1625,49 @@ items:
       - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
       - docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md
       - docs/development/G7_FAILURE_MATRIX.md
+      - docs/development/G7_CLOSURE_AUDIT.md
+
+  - id: TASK-0082
+    gate: G7
+    title: G7 Closure Remediation
+    objective: Remediate the four TASK-0081 G7 closure blockers by binding
+      Plan-node identity to trusted Task scope, exposing planning and Human
+      Decision continuation through the shipped versioned control plane,
+      adding a durable stale/expired/failed-decision recovery path, and
+      publishing the exact approved V9 changeset on RESUME without a second
+      Planner invocation. Restore hermetic binary verification and close the
+      bounded F-01/F-02/F-08 fold-ins required for a meaningful independent
+      G7 re-audit.
+    scope: >-
+      G7 closure remediation only: planning identity, Human Decision
+      lifecycle/persistence, trusted agentd IPC/agentctl operations, Security
+      Audit evidence, TEST-H hermeticity, and directly related tests and
+      governance bookkeeping. No G8/G9, UI, Council, or provider expansion.
+    exit_criteria_summary: All four accepted G7 blockers are deterministically
+      prevented through production boundaries; stale/expired Human Decisions
+      have a durable trusted supersession path; V9 RESUME publishes the exact
+      approved immutable changeset once without Planner replay; shipped
+      agentctl/agentd can plan and apply a continuation without direct SQLite
+      planning seeding; TEST-H is hermetic under repetition; mandatory
+      workspace verification is green; branch is committed and ready for an
+      independent fresh-context G7 closure re-audit.
+    outcome: >-
+      READY_FOR_INDEPENDENT_REAUDIT. Bound planner node identity to the owning
+      canonical Task/descendant set; added protocol-v5 agentctl/agentd planning
+      and continuation operations with shipped-binary acceptance coverage;
+      added durable evidence-preserving supersession for stale, expired and
+      failed Human Decisions; and made V9 RESUME publish the exact approved
+      durable PlanChangeSet without replaying PlannerPort. Human Decision
+      lifecycle facts now append to Security Audit transactionally, historical
+      TASK-0078/TASK-0079 bookkeeping and version documentation are reconciled,
+      and the TEST-H daemon harness is ownership-scoped and stable under
+      repetition. TASK-0082 remediates the accepted TASK-0081 findings but does
+      not declare G7 closed; a fresh independent closure audit is still required.
+    depends_on:
+      - TASK-0081
+    blocked_by: []
+    references:
+      - AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md
       - docs/development/G7_CLOSURE_AUDIT.md

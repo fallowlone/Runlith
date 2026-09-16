@@ -37,7 +37,7 @@ use plan_domain::{
     MAX_PLANNER_WALL_CLOCK_SECS, MAX_REVISIONS_PER_CYCLE_PER_BRANCH,
 };
 use storage_sqlite::{
-    NewHumanDecisionRequest, PlanCommitJournalEvidence, PlanRevisionLineage,
+    ApprovedPlanProposal, NewHumanDecisionRequest, PlanCommitJournalEvidence, PlanRevisionLineage,
     PlanRevisionLineageRecord, PlannerCallSettlement, PlanningRunRecord, PlanningRunState,
     SqliteStore, StorageError,
 };
@@ -158,6 +158,9 @@ impl AcceptedPlanRevision {
 /// Task state. Detected before durable acceptance; nothing is committed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PlanApplicabilityRefusal {
+    /// A planner referenced a canonical Task outside the identity set that
+    /// Runlith bound to this planning snapshot.
+    UntrustedNodeIdentity { node: String },
     /// The selected Task is not represented by the candidate graph.
     TaskNotInPlan { task_id: TaskId },
     /// The selected Task is represented but has no canonical Task.
@@ -651,6 +654,166 @@ impl<C: Clock> PlanningService<C> {
         self.conclude_proposal(branch, base, metered, policy, None)
     }
 
+    /// Publishes the exact immutable proposal previously bound to a resolved
+    /// V9 RESUME decision. No PlannerPort is accepted by this API, so RESUME
+    /// cannot accidentally replay a provider call or depend on incidental
+    /// measured receipt metadata being reproduced.
+    pub fn resume_approved_risk_proposal(
+        &mut self,
+        id: &HumanDecisionRequestId,
+        policy: &PlanningPolicyContext,
+    ) -> Result<PlanningProposalOutcome, PlanningServiceError> {
+        validate_policy_context(policy)?;
+        let record = match self
+            .store
+            .validate_human_decision_current(id, self.clock.now_millis())
+        {
+            Ok(record) => record,
+            Err(StorageError::HumanDecisionStale { .. }) => {
+                self.store.supersede_unusable_human_decision(id)?;
+                return Err(PlanningServiceError::Storage(
+                    StorageError::HumanDecisionStale {
+                        request_id: id.as_str().to_owned(),
+                        reason: "V9 RESUME decision is stale".to_owned(),
+                    },
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if record.reason != HumanDecisionReason::RiskEscalation
+            || record.status != HumanDecisionStatus::Resolved
+            || record.selected != Some(HumanContinuation::Resume)
+        {
+            return Err(PlanningServiceError::Storage(
+                StorageError::HumanDecisionState {
+                    request_id: id.as_str().to_owned(),
+                    state: record.status.as_str().to_owned(),
+                },
+            ));
+        }
+        if policy.parent_task_ref != record.task_id.as_str()
+            || policy.risk_grant.is_some()
+            || policy.risk_decision_id.is_some()
+            || !self.store.planning_input_policy_matches(
+                &record.precondition.planning_input_snapshot_id,
+                &policy.parent_task_ref,
+                &policy.scope_bound,
+                policy.baseline_risk,
+                &policy.affected_parent_criteria,
+                &policy.lineage_fingerprints,
+                None,
+                &policy.policy_fingerprint,
+            )?
+        {
+            self.store.supersede_unusable_human_decision(id)?;
+            return Err(PlanningServiceError::Storage(
+                StorageError::HumanDecisionStale {
+                    request_id: id.as_str().to_owned(),
+                    reason: "current planning policy no longer matches approved proposal"
+                        .to_owned(),
+                },
+            ));
+        }
+        let approved = self
+            .store
+            .get_approved_human_decision_proposal(id)?
+            .ok_or_else(|| {
+                PlanningServiceError::Storage(StorageError::Corrupt(format!(
+                    "risk decision {} has no durable approved proposal",
+                    id.as_str()
+                )))
+            })?;
+        if record.proposal_hash.as_deref() != Some(approved.changeset.proposal_hash.as_str()) {
+            return Err(PlanningServiceError::Storage(StorageError::Corrupt(
+                format!(
+                    "risk decision {} approved proposal binding changed",
+                    id.as_str()
+                ),
+            )));
+        }
+        let expires_at_ms = record.expires_at_ms.ok_or_else(|| {
+            PlanningServiceError::Storage(StorageError::Corrupt(format!(
+                "risk decision {} has no expiry",
+                id.as_str()
+            )))
+        })?;
+        let mut resumed_policy = policy.clone();
+        resumed_policy.risk_grant = Some(RiskEscalationGrant {
+            proposal_hash: approved.changeset.proposal_hash.clone(),
+            expires_at_ms,
+            consumed: false,
+        });
+        resumed_policy.risk_decision_id = Some(id.clone());
+
+        let base = self.prepare_approved_proposal(
+            &record.plan_branch_id,
+            &approved.changeset.source_evidence_refs,
+            &resumed_policy,
+        )?;
+        let run = base.run.clone();
+        let outcome = self.validate_persist_proposal(
+            &record.plan_branch_id,
+            base,
+            approved.changeset,
+            approved.receipt_ref,
+            &resumed_policy,
+            None,
+        );
+        match &outcome {
+            Ok(PlanningProposalOutcome::Accepted(_)) => {}
+            Ok(_) => {
+                self.finish_run(&run, PlanningRunState::Refused)?;
+                self.store.supersede_unusable_human_decision(id)?;
+            }
+            Err(PlanningServiceError::Storage(StorageError::PlanningRunStale { .. }))
+            | Err(PlanningServiceError::Storage(StorageError::PlanningInputStale { .. }))
+            | Err(PlanningServiceError::Storage(StorageError::HumanDecisionStale { .. })) => {
+                self.store.supersede_unusable_human_decision(id)?;
+            }
+            Err(_) => {
+                self.finish_run(&run, PlanningRunState::Failed)?;
+                self.store.supersede_unusable_human_decision(id)?;
+            }
+        }
+        outcome
+    }
+
+    /// Rehydrates all authoritative publication inputs for a stored proposal
+    /// without applying planner-call quotas or reserving new provider spend.
+    fn prepare_approved_proposal(
+        &mut self,
+        branch: &PlanBranchId,
+        triggering_evidence: &[EvidenceRef],
+        policy: &PlanningPolicyContext,
+    ) -> Result<ProposalBase, PlanningServiceError> {
+        let trigger_key = trigger_key(triggering_evidence)?;
+        let (head, graph) = self.load_base(branch)?;
+        let lineage = self.store.get_plan_lineage(branch)?;
+        let remaining_depth = remaining_depth(&graph);
+        let state = self.guardrail_snapshot(branch, &trigger_key, &lineage)?;
+        let (snapshot, run) = self.start_control_run(
+            branch,
+            triggering_evidence,
+            policy,
+            head,
+            &lineage,
+            &trigger_key,
+        )?;
+        Ok(ProposalBase {
+            head,
+            graph,
+            lineage_fingerprints: lineage
+                .into_iter()
+                .map(|record| record.decomposition_fingerprint)
+                .collect(),
+            state,
+            trigger_key,
+            remaining_depth,
+            snapshot,
+            run,
+        })
+    }
+
     fn load_base(&self, branch: &PlanBranchId) -> Result<(u64, PlanGraph), PlanningServiceError> {
         let Some(head) = self.store.get_plan_head(branch)? else {
             return Ok((0, PlanGraph::new(vec![], vec![])?));
@@ -749,9 +912,10 @@ impl<C: Clock> PlanningService<C> {
         );
         lineage_fingerprints.sort();
         lineage_fingerprints.dedup();
-        let snapshot = PlanningInputSnapshot::new(
+        let snapshot = PlanningInputSnapshot::new_with_candidates(
             branch.clone(),
             policy.parent_task_ref.clone(),
+            trusted_candidate_task_refs(&self.store, policy)?,
             head,
             policy.scope_bound.clone(),
             policy.baseline_risk,
@@ -773,7 +937,7 @@ impl<C: Clock> PlanningService<C> {
     /// the trusted application layer: a bound V9 RESUME grant or the exact
     /// REPLAN request currently being consumed.
     fn planning_human_gate(
-        &self,
+        &mut self,
         branch: &PlanBranchId,
         policy: &PlanningPolicyContext,
         replan_decision_id: Option<&HumanDecisionRequestId>,
@@ -785,9 +949,20 @@ impl<C: Clock> PlanningService<C> {
         else {
             return Ok(None);
         };
-        let current = self
+        let current = match self
             .store
-            .validate_human_decision_current(&record.id, self.clock.now_millis())?;
+            .validate_human_decision_current(&record.id, self.clock.now_millis())
+        {
+            Ok(current) => current,
+            Err(StorageError::HumanDecisionStale { .. }) => {
+                // A stale request is never made current again.  Superseding
+                // it here is the trusted return path which lets this normal
+                // planning pass create a bounded replacement if needed.
+                self.store.supersede_unusable_human_decision(&record.id)?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        };
         match current.status {
             HumanDecisionStatus::Pending => Ok(Some(current)),
             HumanDecisionStatus::Resolved
@@ -878,6 +1053,7 @@ impl<C: Clock> PlanningService<C> {
                 recommendation: None,
                 evidence: evidence.to_vec(),
                 proposal_hash: None,
+                approved_proposal: None,
                 plan_head: snapshot.expected_plan_head,
                 planning_input_snapshot_id: snapshot.id.clone(),
                 planning_input_fingerprint: snapshot.input_fingerprint.clone(),
@@ -1197,6 +1373,10 @@ impl<C: Clock> PlanningService<C> {
                             recommendation: None,
                             evidence: proposal.source_evidence_refs.clone(),
                             proposal_hash: Some(proposal.proposal_hash.clone()),
+                            approved_proposal: Some(ApprovedPlanProposal {
+                                changeset: proposal.clone(),
+                                receipt_ref: receipt_ref.clone(),
+                            }),
                             plan_head: trusted_base_head,
                             planning_input_snapshot_id: snapshot.id.clone(),
                             planning_input_fingerprint: snapshot.input_fingerprint.clone(),
@@ -1242,6 +1422,16 @@ impl<C: Clock> PlanningService<C> {
         // can only make an accepted plan wait, because plan-gated scheduling
         // re-derives predecessor and Task readiness before admission.
         let candidate = apply_validated_changeset(&base_graph, &proposal)?;
+        if let Some(refusal) = trusted_node_identity_refusal(&candidate, &snapshot) {
+            return self.record_rejection_with_human_intervention(
+                branch,
+                &trigger_key,
+                PlanningProposalOutcome::NotApplicable(refusal),
+                policy,
+                &snapshot,
+                &proposal.source_evidence_refs,
+            );
+        }
         if let Some(task_id) = target {
             if let Some(refusal) = target_applicability(&self.store, &candidate, task_id)? {
                 return self.record_rejection_with_human_intervention(
@@ -1568,6 +1758,57 @@ fn policy_task_id(policy: &PlanningPolicyContext) -> Result<TaskId, PlanningServ
             "planning policy parent_task_ref is not a valid Task id: {error}"
         ))
     })
+}
+
+/// Resolves the only canonical Task identities a planner may name for one
+/// branch: its owning parent Task and descendants linked through the existing
+/// Task parent relation. The result is sorted by the domain snapshot builder
+/// before it is fingerprinted and persisted with the planning run.
+fn trusted_candidate_task_refs(
+    store: &SqliteStore,
+    policy: &PlanningPolicyContext,
+) -> Result<Vec<String>, PlanningServiceError> {
+    let parent_id = policy_task_id(policy)?;
+    let parent = store.get_task(&parent_id)?.ok_or_else(|| {
+        PlanningServiceError::InvalidContext(format!(
+            "planning policy parent task {} does not exist",
+            parent_id.as_str()
+        ))
+    })?;
+    let tasks = store.list_tasks_for_project(parent.project_id())?;
+    let mut candidates = BTreeSet::from([parent_id.as_str().to_owned()]);
+    let mut frontier = BTreeSet::from([parent_id]);
+    while !frontier.is_empty() {
+        let next: BTreeSet<TaskId> = tasks
+            .iter()
+            .filter(|task| {
+                task.parent()
+                    .is_some_and(|parent| frontier.contains(parent))
+            })
+            .map(|task| task.id().clone())
+            .filter(|id| candidates.insert(id.as_str().to_owned()))
+            .collect();
+        frontier = next;
+    }
+    Ok(candidates.into_iter().collect())
+}
+
+fn trusted_node_identity_refusal(
+    candidate: &PlanGraph,
+    snapshot: &PlanningInputSnapshot,
+) -> Option<PlanApplicabilityRefusal> {
+    let trusted: BTreeSet<&str> = snapshot
+        .trusted_candidate_task_refs
+        .iter()
+        .map(String::as_str)
+        .collect();
+    candidate
+        .nodes
+        .iter()
+        .find(|node| !trusted.contains(node.id.as_str()))
+        .map(|node| PlanApplicabilityRefusal::UntrustedNodeIdentity {
+            node: node.id.as_str().to_owned(),
+        })
 }
 
 fn human_reason_for_guardrail(trip: &GuardrailTrip) -> Option<HumanDecisionReason> {

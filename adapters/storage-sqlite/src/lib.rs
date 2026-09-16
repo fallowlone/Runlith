@@ -15,6 +15,7 @@
 //! service and no scheduler/provider/session concepts.
 
 mod approval_store;
+mod approved_proposal_codec;
 mod audit_store;
 mod entry_store;
 mod error;
@@ -44,7 +45,7 @@ pub use event::{
     AttemptOutcome, EventId, EventType, JournalEvent, NewJournalEvent, PlanRevisionJournalPayload,
     EVENT_SCHEMA_VERSION,
 };
-pub use human_decision_store::NewHumanDecisionRequest;
+pub use human_decision_store::{ApprovedPlanProposal, NewHumanDecisionRequest};
 pub use migration::SUPPORTED_SCHEMA_VERSION;
 pub use plan_guardrail_store::{PlanGuardrailEvent, PlannerCallSettlement};
 pub use plan_store::{PlanCommitJournalEvidence, PlanRevisionLineage, PlanRevisionLineageRecord};

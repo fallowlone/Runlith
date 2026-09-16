@@ -2,15 +2,29 @@
 
 use plan_domain::{
     EvidenceRef, HumanContinuation, HumanDecisionPrecondition, HumanDecisionReason,
-    HumanDecisionRequest, HumanDecisionRequestId, HumanDecisionStatus, PlanBranchId,
-    PlanningInputSnapshotId, RiskClass, ScopeBound, HUMAN_DECISION_VERSION,
+    HumanDecisionRequest, HumanDecisionRequestId, HumanDecisionStatus, PlanBranchId, PlanChangeSet,
+    PlanningCostReceiptRef, PlanningInputSnapshotId, RiskClass, ScopeBound, HUMAN_DECISION_VERSION,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use security_audit::{
+    NewSecurityAuditRecord, SecurityAuditAuthor, SecurityAuditEvent, SecurityAuditOutcome,
+    SecurityAuditSubject, SecurityAuditSubjectKind,
+};
 use task_domain::{TaskId, TaskState};
 
+use crate::audit_store::append_security_audit_in_transaction;
 use crate::error::{StorageError, StorageResult};
 use crate::event::decode_state;
+use crate::plan_cost_store::load_plan_cost_receipt;
 use crate::task_store::SqliteStore;
+
+type ApprovedProposalRow = (Option<Vec<u8>>, Option<String>, Option<String>);
+
+#[derive(Clone, Debug)]
+pub struct ApprovedPlanProposal {
+    pub changeset: PlanChangeSet,
+    pub receipt_ref: PlanningCostReceiptRef,
+}
 
 #[derive(Clone, Debug)]
 pub struct NewHumanDecisionRequest {
@@ -23,6 +37,7 @@ pub struct NewHumanDecisionRequest {
     pub recommendation: Option<HumanContinuation>,
     pub evidence: Vec<EvidenceRef>,
     pub proposal_hash: Option<String>,
+    pub approved_proposal: Option<ApprovedPlanProposal>,
     pub plan_head: u64,
     pub planning_input_snapshot_id: PlanningInputSnapshotId,
     pub planning_input_fingerprint: String,
@@ -37,6 +52,12 @@ impl SqliteStore {
         created_at_ms: u64,
     ) -> StorageResult<HumanDecisionRequest> {
         normalize_new(&mut request)?;
+        let approved = request.approved_proposal.as_ref().map(|approved| {
+            (
+                crate::approved_proposal_codec::encode(&approved.changeset),
+                approved.receipt_ref.as_str().to_owned(),
+            )
+        });
         let tx = self
             .connection_mut()
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -49,6 +70,22 @@ impl SqliteStore {
         )?;
         let task_state = current_task_state(&tx, &request.task_id)?;
         let task_event_seq = latest_task_event_seq_tx(&tx, &request.task_id)?;
+
+        if let Some(approved) = &request.approved_proposal {
+            let stored_receipt =
+                load_plan_cost_receipt(&tx, &approved.receipt_ref)?.ok_or_else(|| {
+                    StorageError::ConstraintViolation(format!(
+                        "approved proposal receipt {} is not durable",
+                        approved.receipt_ref.as_str()
+                    ))
+                })?;
+            if stored_receipt != approved.changeset.planning_cost_receipt {
+                return Err(StorageError::ConstraintViolation(format!(
+                    "approved proposal receipt {} does not match proposal evidence",
+                    approved.receipt_ref.as_str()
+                )));
+            }
+        }
 
         // A newer request for the same bounded owner scope fences every
         // unresolved predecessor. Old decisions can no longer be replayed.
@@ -72,9 +109,10 @@ impl SqliteStore {
               recommendation, proposal_hash, status, selected_continuation, decided_by,
               created_at_ms, expires_at_ms, decided_at_ms, consumed_at_ms, task_state,
               task_event_seq, plan_head, planning_input_snapshot_id,
-              planning_input_fingerprint, policy_fingerprint)
+              planning_input_fingerprint, policy_fingerprint,
+              approved_changeset, approved_receipt_ref)
              VALUES (?1, ?2, 1, ?3, ?4, ?5, ?6, ?7, ?8, 'PENDING', NULL, NULL,
-                     ?9, ?10, NULL, NULL, ?11, ?12, ?13, ?14, ?15, ?16)",
+                     ?9, ?10, NULL, NULL, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 seq,
                 id.as_str(),
@@ -95,6 +133,8 @@ impl SqliteStore {
                 request.planning_input_snapshot_id.as_str(),
                 request.planning_input_fingerprint,
                 request.policy_fingerprint,
+                approved.as_ref().map(|value| value.0.as_slice()),
+                approved.as_ref().map(|value| value.1.as_str()),
             ],
         )?;
         insert_values(
@@ -128,6 +168,18 @@ impl SqliteStore {
             id.as_str(),
             &evidence,
         )?;
+        append_human_decision_audit(
+            &tx,
+            HumanDecisionAuditFact {
+                event: SecurityAuditEvent::HumanDecisionRequested,
+                outcome: SecurityAuditOutcome::Requested,
+                id: &id,
+                task_id: &request.task_id,
+                policy_fingerprint: &request.policy_fingerprint,
+                reason_code: request.reason.as_str(),
+                occurred_at_ms: created_at_ms,
+            },
+        )?;
         tx.commit()?;
         self.get_human_decision(&id)?.ok_or_else(|| {
             StorageError::Corrupt(format!(
@@ -142,6 +194,63 @@ impl SqliteStore {
         id: &HumanDecisionRequestId,
     ) -> StorageResult<Option<HumanDecisionRequest>> {
         load_request(self.connection(), id.as_str())
+    }
+
+    /// Loads the immutable proposal approved by one V9 risk decision. The
+    /// adapter codec is verified against the canonical proposal hash and the
+    /// durable measured receipt before returning any value to app-services.
+    pub fn get_approved_human_decision_proposal(
+        &self,
+        id: &HumanDecisionRequestId,
+    ) -> StorageResult<Option<ApprovedPlanProposal>> {
+        let row: Option<ApprovedProposalRow> = self
+            .connection()
+            .query_row(
+                "SELECT approved_changeset, approved_receipt_ref, proposal_hash
+                 FROM human_decision_requests WHERE request_id = ?1",
+                params![id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((blob, receipt_ref, proposal_hash)) = row else {
+            return Ok(None);
+        };
+        let (blob, receipt_ref) = match (blob, receipt_ref) {
+            (None, None) => return Ok(None),
+            (Some(blob), Some(receipt_ref)) => (blob, receipt_ref),
+            _ => {
+                return Err(StorageError::Corrupt(format!(
+                    "human decision {} has a partial approved proposal binding",
+                    id.as_str()
+                )))
+            }
+        };
+        let changeset = crate::approved_proposal_codec::decode(&blob)?;
+        if proposal_hash.as_deref() != Some(changeset.proposal_hash.as_str()) {
+            return Err(StorageError::Corrupt(format!(
+                "human decision {} approved proposal hash binding changed",
+                id.as_str()
+            )));
+        }
+        let receipt_ref = PlanningCostReceiptRef::new(receipt_ref)
+            .map_err(|error| StorageError::DomainReconstruction(error.to_string()))?;
+        let receipt =
+            load_plan_cost_receipt(self.connection(), &receipt_ref)?.ok_or_else(|| {
+                StorageError::Corrupt(format!(
+                    "human decision {} approved proposal receipt is missing",
+                    id.as_str()
+                ))
+            })?;
+        if receipt != changeset.planning_cost_receipt {
+            return Err(StorageError::Corrupt(format!(
+                "human decision {} approved proposal receipt changed",
+                id.as_str()
+            )));
+        }
+        Ok(Some(ApprovedPlanProposal {
+            changeset,
+            receipt_ref,
+        }))
     }
 
     pub fn list_pending_human_decisions(&self) -> StorageResult<Vec<HumanDecisionRequest>> {
@@ -252,6 +361,24 @@ impl SqliteStore {
                 state: "concurrent transition".to_owned(),
             });
         }
+        let record = load_request(&tx, id.as_str())?.ok_or_else(|| {
+            StorageError::Corrupt(format!(
+                "human decision {} vanished during resolve",
+                id.as_str()
+            ))
+        })?;
+        append_human_decision_audit(
+            &tx,
+            HumanDecisionAuditFact {
+                event: SecurityAuditEvent::HumanDecisionDecided,
+                outcome: SecurityAuditOutcome::Resolved,
+                id,
+                task_id: &record.task_id,
+                policy_fingerprint: &record.precondition.policy_fingerprint,
+                reason_code: selected.as_str(),
+                occurred_at_ms: decided_at_ms,
+            },
+        )?;
         tx.commit()?;
         self.get_human_decision(id)?.ok_or_else(|| {
             StorageError::Corrupt(format!(
@@ -296,6 +423,24 @@ impl SqliteStore {
                 },
             });
         }
+        let record = load_request(&tx, id.as_str())?.ok_or_else(|| {
+            StorageError::Corrupt(format!(
+                "human decision {} vanished during consume",
+                id.as_str()
+            ))
+        })?;
+        append_human_decision_audit(
+            &tx,
+            HumanDecisionAuditFact {
+                event: SecurityAuditEvent::HumanDecisionApplied,
+                outcome: SecurityAuditOutcome::Consumed,
+                id,
+                task_id: &record.task_id,
+                policy_fingerprint: &record.precondition.policy_fingerprint,
+                reason_code: selected.as_str(),
+                occurred_at_ms: consumed_at_ms,
+            },
+        )?;
         tx.commit()?;
         self.get_human_decision(id)?.ok_or_else(|| {
             StorageError::Corrupt(format!(
@@ -317,7 +462,10 @@ impl SqliteStore {
         selected: HumanContinuation,
         consumed_at_ms: u64,
     ) -> StorageResult<HumanDecisionRequest> {
-        let updated = self.connection_mut().execute(
+        let tx = self
+            .connection_mut()
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let updated = tx.execute(
             "UPDATE human_decision_requests SET status = 'CONSUMED', consumed_at_ms = ?1
              WHERE request_id = ?2 AND status = 'RESOLVED' AND selected_continuation = ?3",
             params![
@@ -327,9 +475,8 @@ impl SqliteStore {
             ],
         )?;
         if updated != 1 {
-            let state = self
-                .get_human_decision(id)?
-                .map(|record| record.status.as_str().to_owned());
+            let state =
+                load_request(&tx, id.as_str())?.map(|record| record.status.as_str().to_owned());
             return Err(match state {
                 None => StorageError::NotFound(format!("human decision {}", id.as_str())),
                 Some(state) => StorageError::HumanDecisionState {
@@ -338,12 +485,26 @@ impl SqliteStore {
                 },
             });
         }
-        self.get_human_decision(id)?.ok_or_else(|| {
+        let record = load_request(&tx, id.as_str())?.ok_or_else(|| {
             StorageError::Corrupt(format!(
                 "human decision {} vanished after consume",
                 id.as_str()
             ))
-        })
+        })?;
+        append_human_decision_audit(
+            &tx,
+            HumanDecisionAuditFact {
+                event: SecurityAuditEvent::HumanDecisionApplied,
+                outcome: SecurityAuditOutcome::Consumed,
+                id,
+                task_id: &record.task_id,
+                policy_fingerprint: &record.precondition.policy_fingerprint,
+                reason_code: selected.as_str(),
+                occurred_at_ms: consumed_at_ms,
+            },
+        )?;
+        tx.commit()?;
+        Ok(record)
     }
 
     pub fn validate_human_decision_current(
@@ -354,6 +515,77 @@ impl SqliteStore {
         validate_current_connection(self.connection(), id.as_str(), now_ms)?;
         self.get_human_decision(id)?
             .ok_or_else(|| StorageError::NotFound(format!("human decision {}", id.as_str())))
+    }
+
+    /// Fences an unusable request without erasing it.  This is deliberately
+    /// narrower than ordinary replacement: callers must first have observed
+    /// a stale/failed continuation at the trusted application boundary.
+    ///
+    /// Keeping the row (and its original selection, if any) provides durable
+    /// evidence while allowing a later canonical planning pass to create a
+    /// replacement for the same bounded owner scope.
+    pub fn supersede_unusable_human_decision(
+        &mut self,
+        id: &HumanDecisionRequestId,
+    ) -> StorageResult<HumanDecisionRequest> {
+        let tx = self
+            .connection_mut()
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let status: Option<String> = tx
+            .query_row(
+                "SELECT status FROM human_decision_requests WHERE request_id = ?1",
+                params![id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(status) = status else {
+            return Err(StorageError::NotFound(format!(
+                "human decision {}",
+                id.as_str()
+            )));
+        };
+        if status != "PENDING" && status != "RESOLVED" {
+            return Err(StorageError::HumanDecisionState {
+                request_id: id.as_str().to_owned(),
+                state: status,
+            });
+        }
+        let updated = tx.execute(
+            "UPDATE human_decision_requests SET status = 'SUPERSEDED'
+             WHERE request_id = ?1 AND status IN ('PENDING', 'RESOLVED')",
+            params![id.as_str()],
+        )?;
+        if updated != 1 {
+            return Err(StorageError::HumanDecisionState {
+                request_id: id.as_str().to_owned(),
+                state: "concurrent transition".to_owned(),
+            });
+        }
+        let record = load_request(&tx, id.as_str())?.ok_or_else(|| {
+            StorageError::Corrupt(format!(
+                "human decision {} vanished during supersession",
+                id.as_str()
+            ))
+        })?;
+        append_human_decision_audit(
+            &tx,
+            HumanDecisionAuditFact {
+                event: SecurityAuditEvent::HumanDecisionSuperseded,
+                outcome: SecurityAuditOutcome::Superseded,
+                id,
+                task_id: &record.task_id,
+                policy_fingerprint: &record.precondition.policy_fingerprint,
+                reason_code: record.reason.as_str(),
+                occurred_at_ms: record.decided_at_ms.unwrap_or(record.created_at_ms),
+            },
+        )?;
+        tx.commit()?;
+        self.get_human_decision(id)?.ok_or_else(|| {
+            StorageError::Corrupt(format!(
+                "human decision {} vanished after supersession",
+                id.as_str()
+            ))
+        })
     }
 
     pub fn latest_task_event_seq(&self, task_id: &TaskId) -> StorageResult<u64> {
@@ -521,6 +753,59 @@ pub(crate) fn consume_risk_decision_for_plan_commit(
             state: "grant already consumed or no longer resolved".to_owned(),
         });
     }
+    append_human_decision_audit(
+        tx,
+        HumanDecisionAuditFact {
+            event: SecurityAuditEvent::HumanDecisionApplied,
+            outcome: SecurityAuditOutcome::Consumed,
+            id,
+            task_id: &record.task_id,
+            policy_fingerprint: &record.precondition.policy_fingerprint,
+            reason_code: HumanContinuation::Resume.as_str(),
+            occurred_at_ms: binding.consumed_at_ms,
+        },
+    )?;
+    Ok(())
+}
+
+struct HumanDecisionAuditFact<'a> {
+    event: SecurityAuditEvent,
+    outcome: SecurityAuditOutcome,
+    id: &'a HumanDecisionRequestId,
+    task_id: &'a TaskId,
+    policy_fingerprint: &'a str,
+    reason_code: &'a str,
+    occurred_at_ms: u64,
+}
+
+fn append_human_decision_audit(
+    tx: &Transaction<'_>,
+    fact: HumanDecisionAuditFact<'_>,
+) -> StorageResult<()> {
+    append_security_audit_in_transaction(
+        tx,
+        &NewSecurityAuditRecord {
+            event: fact.event,
+            author: SecurityAuditAuthor::HumanDecisionService,
+            outcome: Some(fact.outcome),
+            occurred_at_ms: fact.occurred_at_ms,
+            correlation_id: format!("human-decision:{}", fact.id.as_str()),
+            causation_id: None,
+            operation_id: None,
+            task_id: Some(fact.task_id.as_str().to_owned()),
+            execution_id: None,
+            attempt_id: None,
+            subject: Some(SecurityAuditSubject {
+                kind: SecurityAuditSubjectKind::HumanDecision,
+                id: fact.id.as_str().to_owned(),
+            }),
+            policy_fingerprint: Some(fact.policy_fingerprint.to_owned()),
+            rule_id: None,
+            reason_code: Some(fact.reason_code.to_owned()),
+            approval_request_id: None,
+            capabilities: Vec::new(),
+        },
+    )?;
     Ok(())
 }
 
@@ -544,6 +829,7 @@ struct PlanningInputBinding {
     criteria: Vec<(String, String)>,
     evidence: Vec<String>,
     lineage: Vec<String>,
+    candidate_task_refs: Vec<String>,
 }
 
 fn load_planning_input_binding(
@@ -638,6 +924,12 @@ fn load_planning_input_binding(
             "fingerprint",
             snapshot_id,
         )?,
+        candidate_task_refs: load_snapshot_values(
+            connection,
+            "planning_input_candidate_tasks",
+            "task_ref",
+            snapshot_id,
+        )?,
     })
 }
 
@@ -654,6 +946,7 @@ fn same_planning_input_except_risk_grant(
         && left.criteria == right.criteria
         && left.evidence == right.evidence
         && left.lineage == right.lineage
+        && left.candidate_task_refs == right.candidate_task_refs
 }
 
 fn load_snapshot_values(

@@ -436,6 +436,18 @@ where
                     return ConnectionOutcome::Ended;
                 }
             }
+            Ok(ReadyRequest::Planning(request)) => {
+                let response = match (&services.execution, &services.human_decision) {
+                    (Some(composition), Some(handle)) => {
+                        let mut decisions = handle.lock().await;
+                        planning::dispatch_control(composition, &mut decisions, request)
+                    }
+                    _ => planning::unavailable(),
+                };
+                if session.respond_planning(response).await.is_err() {
+                    return ConnectionOutcome::Ended;
+                }
+            }
             Err(_) => return ConnectionOutcome::Ended,
         }
     }

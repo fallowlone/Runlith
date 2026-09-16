@@ -18,6 +18,7 @@ fn main() {
     println!("cargo:rerun-if-changed=proto/execution_core.proto");
     println!("cargo:rerun-if-changed=proto/policy_core.proto");
     println!("cargo:rerun-if-changed=proto/human_decision_core.proto");
+    println!("cargo:rerun-if-changed=proto/planning_core.proto");
     prost_build::compile_protos(
         &[
             "proto/agentd_control.proto",
@@ -25,6 +26,7 @@ fn main() {
             "proto/execution_core.proto",
             "proto/policy_core.proto",
             "proto/human_decision_core.proto",
+            "proto/planning_core.proto",
         ],
         &["proto/"],
     )

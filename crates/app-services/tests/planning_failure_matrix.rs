@@ -66,12 +66,17 @@ impl TestDb {
             )
             .expect("create project");
         for name in names {
-            let task = Task::draft(
-                TaskId::new(*name).expect("task id"),
+            let id = TaskId::new(*name).expect("task id");
+            let mut task = Task::draft(
+                id,
                 project_id.clone(),
                 "G7 failure-matrix fixture".to_owned(),
             )
             .expect("draft task");
+            if task.id().as_str() != "TASK-0080" {
+                task.set_parent(TaskId::new("TASK-0080").unwrap())
+                    .expect("set task parent");
+            }
             tasks.create_task(&task).expect("create task");
             tasks.mark_ready(task.id()).expect("mark ready");
         }

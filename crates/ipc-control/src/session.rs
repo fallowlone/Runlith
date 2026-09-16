@@ -26,8 +26,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::error::{ControlError, ControlResult};
 use crate::negotiation::{
     default_client_build_version, evaluate_handshake, rejection_for, validate_business_allowed,
-    validate_execution_allowed, validate_human_decision_allowed, validate_policy_allowed,
-    ServerConfig,
+    validate_execution_allowed, validate_human_decision_allowed, validate_planning_allowed,
+    validate_policy_allowed, ServerConfig,
 };
 
 /// Deadline for a full client/server handshake exchange.
@@ -73,6 +73,8 @@ pub enum ReadyRequest {
     Policy(ipc_contracts::proto::PolicyCoreRequest),
     /// Decoded G7 Human Decision Queue request on a version-4 session.
     HumanDecision(ipc_contracts::proto::HumanDecisionCoreRequest),
+    /// Decoded G7 planning operation on a version-5 session.
+    Planning(ipc_contracts::proto::PlanningCoreRequest),
 }
 
 /// Client-side handshake outcome.
@@ -186,6 +188,7 @@ impl ClientConfig {
                 ipc_contracts::IPC_PROTOCOL_VERSION_V2,
                 ipc_contracts::IPC_PROTOCOL_VERSION_V3,
                 ipc_contracts::IPC_PROTOCOL_VERSION_V4,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V5,
             ],
             client_kind: client_kind.into(),
             client_build_version: default_client_build_version(),
@@ -267,6 +270,12 @@ where
     pub fn human_decision_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_human_decision_allowed)
+    }
+
+    #[must_use]
+    pub fn planning_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_planning_allowed)
     }
 
     /// Unwraps into the framed transport for lifecycle-owned exchanges
@@ -473,6 +482,23 @@ where
         }
     }
 
+    pub async fn respond_planning(
+        &mut self,
+        response: ipc_contracts::proto::PlanningCoreResponse,
+    ) -> ControlResult<()> {
+        self.require_ready()?;
+        let frame = bytes::Bytes::from(
+            ControlResponse {
+                payload: Some(control_response::Payload::PlanningCore(response)),
+            }
+            .encode_to_vec(),
+        );
+        match self.transport.write_frame(frame).await {
+            Ok(()) => Ok(()),
+            Err(error) => self.fail(error.into()),
+        }
+    }
+
     /// Sends the existing `ShutdownResponse` acknowledgement for a
     /// previously observed [`ReadyRequest::Shutdown`].
     ///
@@ -530,6 +556,12 @@ where
     pub fn human_decision_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_human_decision_allowed)
+    }
+
+    #[must_use]
+    pub fn planning_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_planning_allowed)
     }
 
     /// Reads the first request (within [`HANDSHAKE_TIMEOUT`]), requires it
@@ -688,6 +720,15 @@ where
                     .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
                 match validate_human_decision_allowed(negotiated) {
                     Ok(()) => Ok(ReadyRequest::HumanDecision(request)),
+                    Err(error) => self.fail(error),
+                }
+            }
+            Some(control_request::Payload::PlanningCore(request)) => {
+                let negotiated = self
+                    .negotiated_version
+                    .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
+                match validate_planning_allowed(negotiated) {
+                    Ok(()) => Ok(ReadyRequest::Planning(request)),
                     Err(error) => self.fail(error),
                 }
             }
