@@ -1338,6 +1338,7 @@ fn provider_failure_without_usage_is_charged_conservatively_without_receipt() {
         None,
         "no exact usage exists, so no measured receipt may be fabricated"
     );
+    assert_no_plan_persisted(&db);
 }
 
 // ---------------------------------------------------------------------------
