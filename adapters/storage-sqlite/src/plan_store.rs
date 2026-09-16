@@ -213,6 +213,7 @@ impl crate::task_store::SqliteStore {
             lineage,
             evidence,
             None,
+            false,
         )
     }
 
@@ -220,6 +221,11 @@ impl crate::task_store::SqliteStore {
     /// exact durable V9 HumanDecisionRequest when risk escalation required
     /// human RESUME. The decision update and revision/journal writes share
     /// one SQLite transaction, so neither can commit without the other.
+    ///
+    /// `canonical_task_authority` is set when the bound snapshot was derived
+    /// from canonical Task state (every production planning path). The same
+    /// transaction then requires that Task-owned authority to be unchanged.
+    #[allow(clippy::too_many_arguments)]
     pub fn commit_plan_revision_with_human_decision(
         &mut self,
         changeset: &PlanChangeSet,
@@ -228,6 +234,7 @@ impl crate::task_store::SqliteStore {
         lineage: &PlanRevisionLineage,
         evidence: &PlanCommitJournalEvidence,
         risk_decision: Option<&HumanDecisionRequestId>,
+        canonical_task_authority: bool,
     ) -> StorageResult<JournalEvent> {
         validate_commit_binding(changeset, revision, evidence)?;
         validate_graph_snapshot(resulting_graph)?;
@@ -258,6 +265,7 @@ impl crate::task_store::SqliteStore {
             lineage,
             &revision.plan_branch_id,
             revision.base_revision,
+            canonical_task_authority,
         )?;
 
         if let Some(decision_id) = risk_decision {

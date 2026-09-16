@@ -9,6 +9,7 @@ use ipc_contracts::proto::{HandshakeRejected, HandshakeRequest};
 use ipc_contracts::{
     IPC_PROTOCOL_VERSION_V0, IPC_PROTOCOL_VERSION_V1, IPC_PROTOCOL_VERSION_V2,
     IPC_PROTOCOL_VERSION_V3, IPC_PROTOCOL_VERSION_V4, IPC_PROTOCOL_VERSION_V5,
+    IPC_PROTOCOL_VERSION_V6,
 };
 
 use crate::error::{ControlError, ControlResult};
@@ -84,6 +85,11 @@ pub fn is_planning_allowed(negotiated_version: u32) -> bool {
     ipc_contracts::supports_planning_ipc(negotiated_version)
 }
 
+#[must_use]
+pub fn is_task_authoring_allowed(negotiated_version: u32) -> bool {
+    ipc_contracts::supports_task_authoring_ipc(negotiated_version)
+}
+
 /// Enforces the version gate for one business request: `Ok` on v1+,
 /// [`ControlError::UnsupportedProtocol`] otherwise.
 pub fn validate_business_allowed(negotiated_version: u32) -> ControlResult<()> {
@@ -141,6 +147,17 @@ pub fn validate_planning_allowed(negotiated_version: u32) -> ControlResult<()> {
         Err(ControlError::UnsupportedProtocol {
             negotiated: negotiated_version,
             required: IPC_PROTOCOL_VERSION_V5,
+        })
+    }
+}
+
+pub fn validate_task_authoring_allowed(negotiated_version: u32) -> ControlResult<()> {
+    if is_task_authoring_allowed(negotiated_version) {
+        Ok(())
+    } else {
+        Err(ControlError::UnsupportedProtocol {
+            negotiated: negotiated_version,
+            required: IPC_PROTOCOL_VERSION_V6,
         })
     }
 }
@@ -282,8 +299,8 @@ impl ServerConfig {
     }
 
     /// G7 daemon configuration: v4 adds bounded Human Decision Queue
-    /// observation/resolution and v5 adds planning operations while preserving
-    /// all historical surfaces.
+    /// observation/resolution, v5 adds planning operations and v6 adds Task
+    /// planning-metadata authoring while preserving all historical surfaces.
     pub fn g7_default() -> Self {
         Self {
             supported_versions: vec![
@@ -293,6 +310,7 @@ impl ServerConfig {
                 IPC_PROTOCOL_VERSION_V3,
                 IPC_PROTOCOL_VERSION_V4,
                 IPC_PROTOCOL_VERSION_V5,
+                IPC_PROTOCOL_VERSION_V6,
             ],
             daemon_build_version: default_daemon_build_version(),
             supported_capabilities: Vec::new(),
@@ -469,7 +487,7 @@ mod tests {
     fn g6_daemon_adds_v3_policy_without_weakening_older_profiles() {
         let g6 = ServerConfig::g6_default();
         assert_eq!(g6.supported_versions, vec![0, 1, 2, 3]);
-        assert_eq!(IPC_PROTOCOL_VERSION, ipc_contracts::IPC_PROTOCOL_VERSION_V5);
+        assert_eq!(IPC_PROTOCOL_VERSION, ipc_contracts::IPC_PROTOCOL_VERSION_V6);
         assert!(validate_policy_allowed(3).is_ok());
         assert!(validate_policy_allowed(2).is_err());
         assert!(!is_policy_allowed(0));
@@ -488,7 +506,7 @@ mod tests {
     #[test]
     fn g7_daemon_adds_v4_human_decisions_without_weakening_older_profiles() {
         let g7 = ServerConfig::g7_default();
-        assert_eq!(g7.supported_versions, vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(g7.supported_versions, vec![0, 1, 2, 3, 4, 5, 6]);
         assert!(validate_human_decision_allowed(4).is_ok());
         assert!(validate_human_decision_allowed(3).is_err());
         assert!(is_business_allowed(4));
@@ -520,6 +538,33 @@ mod tests {
         let params = evaluate_handshake(&v5, &daemon).expect("v5 client negotiates");
         assert_eq!(params.selected_version, 5);
         assert!(validate_planning_allowed(params.selected_version).is_ok());
+    }
+
+    #[test]
+    fn v6_task_authoring_is_unavailable_to_historical_clients() {
+        let daemon = ServerConfig::g7_default();
+        let v5 = request(&[0, 1, 2, 3, 4, 5], "agentctl", "0.1.0", &[]);
+        let params = evaluate_handshake(&v5, &daemon).expect("v5 remains compatible");
+        assert_eq!(params.selected_version, 5);
+        assert!(is_planning_allowed(params.selected_version));
+        assert!(!is_task_authoring_allowed(params.selected_version));
+        assert!(matches!(
+            validate_task_authoring_allowed(params.selected_version),
+            Err(ControlError::UnsupportedProtocol {
+                negotiated: 5,
+                required: 6
+            })
+        ));
+
+        let v6 = request(&[0, 1, 2, 3, 4, 5, 6], "agentctl", "0.1.0", &[]);
+        let params = evaluate_handshake(&v6, &daemon).expect("v6 client negotiates");
+        assert_eq!(params.selected_version, 6);
+        assert!(validate_task_authoring_allowed(6).is_ok());
+        assert!(validate_planning_allowed(6).is_ok());
+        assert!(validate_human_decision_allowed(6).is_ok());
+        assert!(validate_policy_allowed(6).is_ok());
+        assert!(validate_execution_allowed(6).is_ok());
+        assert!(validate_business_allowed(6).is_ok());
     }
 
     #[test]

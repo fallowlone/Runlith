@@ -20,7 +20,8 @@ use ipc_contracts::proto::{
     control_request, control_response, ControlRequest, ControlResponse, ExecutionCoreRequest,
     ExecutionCoreResponse, HumanDecisionCoreRequest, HumanDecisionCoreResponse,
     PlanningCoreRequest, PlanningCoreResponse, PolicyCoreRequest, PolicyCoreResponse,
-    ShutdownRequest, TaskCoreRequest, TaskCoreResponse,
+    ShutdownRequest, TaskAuthoringCoreRequest, TaskAuthoringCoreResponse, TaskCoreRequest,
+    TaskCoreResponse,
 };
 use ipc_control::{ClientConfig, ClientSession, ControlError, CLIENT_KIND_AGENTCTL};
 use ipc_transport::{FramedTransport, TransportError};
@@ -915,6 +916,83 @@ where
         Some(control_response::Payload::PlanningCore(response)) => Ok(response),
         other => Err(ClientError::HumanDecisionAmbiguous(format!(
             "unexpected planning reply ({other:?}); endpoint {absence}; not replaying"
+        ))),
+    }
+}
+
+/// Performs a protocol-v6 handshake for Task planning-metadata authoring.
+#[cfg(unix)]
+async fn handshake_stream_v6<S>(stream: S) -> Result<ClientSession<S>, ClientError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut session = ClientSession::new(
+        FramedTransport::new(stream),
+        ClientConfig::task_authoring_default(CLIENT_KIND_AGENTCTL),
+    );
+    session
+        .perform_handshake()
+        .await
+        .map_err(classify_control)?;
+    if !session.task_authoring_allowed() {
+        return Err(ClientError::Control(ControlError::UnsupportedProtocol {
+            negotiated: session.negotiated_version().unwrap_or(0),
+            required: ipc_contracts::IPC_PROTOCOL_VERSION_V6,
+        }));
+    }
+    Ok(session)
+}
+
+/// Sends one protocol-v6 Task authoring mutation. A lost or ambiguous reply
+/// is [`ClientError::BusinessAmbiguous`]; creation is never replayed, and the
+/// caller re-probes with `task get`.
+#[cfg(unix)]
+pub async fn task_authoring_request(
+    endpoint: &UnixEndpoint,
+    spawn: impl FnOnce() -> io::Result<Child>,
+    request: TaskAuthoringCoreRequest,
+) -> Result<TaskAuthoringCoreResponse, ClientError> {
+    let session = connect_or_start_with(spawn, || async {
+        let stream = transport_connect(endpoint)
+            .await
+            .map_err(classify_transport)?;
+        handshake_stream_v6(stream).await
+    })
+    .await?;
+    let absence = absence_note(endpoint);
+    let mut transport = session.into_inner();
+    let frame = Bytes::from(
+        ControlRequest {
+            payload: Some(control_request::Payload::TaskAuthoringCore(request)),
+        }
+        .encode_to_vec(),
+    );
+    transport.write_frame(frame).await.map_err(|error| {
+        ClientError::BusinessAmbiguous(format!(
+            "TaskAuthoringCoreRequest send failed ({error}); endpoint {absence}; not replaying"
+        ))
+    })?;
+    let frame = tokio::time::timeout(BUSINESS_RESPONSE_TIMEOUT, transport.read_frame())
+        .await
+        .map_err(|_| {
+            ClientError::BusinessAmbiguous(format!(
+                "task authoring response timeout; endpoint {absence}; not replaying"
+            ))
+        })?
+        .map_err(|error| {
+            ClientError::BusinessAmbiguous(format!(
+                "task authoring response lost ({error}); endpoint {absence}; not replaying"
+            ))
+        })?;
+    let response = ControlResponse::decode(&frame[..]).map_err(|error| {
+        ClientError::BusinessAmbiguous(format!(
+            "task authoring response undecodable ({error}); endpoint {absence}; not replaying"
+        ))
+    })?;
+    match response.payload {
+        Some(control_response::Payload::TaskAuthoringCore(response)) => Ok(response),
+        other => Err(ClientError::BusinessAmbiguous(format!(
+            "unexpected task authoring reply ({other:?}); endpoint {absence}; not replaying"
         ))),
     }
 }

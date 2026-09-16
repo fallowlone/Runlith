@@ -16,10 +16,12 @@
 
 use app_services::{ServiceError, TaskService};
 use ipc_contracts::proto::{
-    task_core_request, task_core_response, AddDependencyResponse, BusinessError, BusinessErrorCode,
-    CreateProjectResponse, CreateTaskResponse, GetProjectResponse, GetTaskResponse,
-    LifecycleResponse, ListDependenciesResponse, ListProjectsResponse, ListTasksResponse,
-    ProjectDto, TaskCoreRequest, TaskCoreResponse, TaskDto, TaskLifecycleOp,
+    task_authoring_core_request, task_authoring_core_response, task_core_request,
+    task_core_response, AddDependencyResponse, BusinessError, BusinessErrorCode,
+    CreatePlanningTaskResponse, CreateProjectResponse, CreateTaskResponse, GetProjectResponse,
+    GetTaskResponse, LifecycleResponse, ListDependenciesResponse, ListProjectsResponse,
+    ListTasksResponse, PlanningTaskDto, ProjectDto, TaskAuthoringCoreRequest,
+    TaskAuthoringCoreResponse, TaskCoreRequest, TaskCoreResponse, TaskDto, TaskLifecycleOp,
 };
 use storage_sqlite::StorageError;
 use task_domain::{DomainError, Project, ProjectId, Task, TaskId};
@@ -207,6 +209,68 @@ fn dispatch_lifecycle<C: app_services::Clock>(
     }
 }
 
+/// Dispatches one protocol-v6 Task authoring request. The wire carries only
+/// client intent; `TaskService` validates DRAFT creation, bounds and G7
+/// planning derivability and mints the `task.created` evidence. The
+/// response echoes the committed canonical Task, never client values.
+pub fn dispatch_task_authoring<C: app_services::Clock>(
+    service: &mut TaskService<C>,
+    request: TaskAuthoringCoreRequest,
+) -> TaskAuthoringCoreResponse {
+    let authoring_error = |error: ServiceError| {
+        let (code, message) = map_error(&error);
+        TaskAuthoringCoreResponse {
+            payload: Some(task_authoring_core_response::Payload::Error(
+                BusinessError {
+                    code: code as i32,
+                    message,
+                },
+            )),
+        }
+    };
+    let Some(task_authoring_core_request::Payload::CreatePlanningTask(req)) = request.payload
+    else {
+        return TaskAuthoringCoreResponse {
+            payload: Some(task_authoring_core_response::Payload::Error(
+                BusinessError {
+                    code: BusinessErrorCode::InvalidArgument as i32,
+                    message: "empty task authoring request".to_owned(),
+                },
+            )),
+        };
+    };
+    let ids = TaskId::new(req.id).and_then(|id| Ok((id, ProjectId::new(req.project_id)?)));
+    let (id, project_id) = match ids {
+        Ok(ids) => ids,
+        Err(error) => return authoring_error(ServiceError::Domain(error)),
+    };
+    match service.create_planning_task(
+        id,
+        project_id,
+        req.objective,
+        req.allowed_paths,
+        req.acceptance_criteria,
+        req.baseline_risk,
+    ) {
+        Ok((task, _)) => {
+            let facts = task.snapshot();
+            TaskAuthoringCoreResponse {
+                payload: Some(task_authoring_core_response::Payload::CreatePlanningTask(
+                    CreatePlanningTaskResponse {
+                        task: Some(PlanningTaskDto {
+                            task: Some(task_dto(&task)),
+                            allowed_paths: facts.allowed_paths,
+                            acceptance_criteria: facts.acceptance,
+                            baseline_risk: facts.risk.unwrap_or_default(),
+                        }),
+                    },
+                )),
+            }
+        }
+        Err(error) => authoring_error(error),
+    }
+}
+
 fn domain_project(id: &str, name: &str) -> Result<Project, ServiceError> {
     Ok(Project::new(ProjectId::new(id)?, name)?)
 }
@@ -246,6 +310,19 @@ pub fn unavailable() -> TaskCoreResponse {
             code: BusinessErrorCode::Internal as i32,
             message: "business service unavailable".to_owned(),
         })),
+    }
+}
+
+/// Typed unavailable response for control-only compositions (no database).
+#[must_use]
+pub fn task_authoring_unavailable() -> TaskAuthoringCoreResponse {
+    TaskAuthoringCoreResponse {
+        payload: Some(task_authoring_core_response::Payload::Error(
+            BusinessError {
+                code: BusinessErrorCode::Internal as i32,
+                message: "business service unavailable".to_owned(),
+            },
+        )),
     }
 }
 
@@ -715,6 +792,154 @@ mod tests {
             assert!(input.is_char_boundary(end), "cut must be a boundary");
             assert!(end <= max, "cut must respect the bound");
         }
+    }
+
+    fn planning_task_request(
+        id: &str,
+        allowed_paths: &[&str],
+        acceptance: &[&str],
+        risk: &str,
+    ) -> TaskAuthoringCoreRequest {
+        TaskAuthoringCoreRequest {
+            payload: Some(task_authoring_core_request::Payload::CreatePlanningTask(
+                ipc_contracts::proto::CreatePlanningTaskRequest {
+                    id: id.to_owned(),
+                    project_id: "P-1".to_owned(),
+                    objective: "authored planning task".to_owned(),
+                    allowed_paths: allowed_paths.iter().map(ToString::to_string).collect(),
+                    acceptance_criteria: acceptance.iter().map(ToString::to_string).collect(),
+                    baseline_risk: risk.to_owned(),
+                },
+            )),
+        }
+    }
+
+    fn authoring_error(response: TaskAuthoringCoreResponse) -> BusinessError {
+        match response.payload {
+            Some(task_authoring_core_response::Payload::Error(error)) => error,
+            other => panic!("expected typed authoring error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v6_authoring_commits_canonical_planning_metadata_with_server_evidence() {
+        let mut service = service();
+        dispatch(&mut service, create_project_request("P-1", "Runlith"));
+        let response = dispatch_task_authoring(
+            &mut service,
+            planning_task_request(
+                "T-PLAN",
+                &[" repo:src ", "repo:docs", "repo:src"],
+                &["criterion-a", "criterion-a"],
+                "medium",
+            ),
+        );
+        let dto = match response.payload {
+            Some(task_authoring_core_response::Payload::CreatePlanningTask(created)) => {
+                created.task.expect("planning task dto")
+            }
+            other => panic!("expected created planning task, got {other:?}"),
+        };
+        assert_eq!(dto.task.as_ref().unwrap().state, "DRAFT");
+        assert_eq!(dto.allowed_paths, ["repo:src", "repo:docs"]);
+        assert_eq!(dto.acceptance_criteria, ["criterion-a"]);
+        assert_eq!(dto.baseline_risk, "medium");
+
+        let task_id = TaskId::new("T-PLAN").unwrap();
+        let stored = service.get_task(&task_id).unwrap().expect("stored task");
+        let facts = stored.snapshot();
+        assert_eq!(facts.allowed_paths, dto.allowed_paths);
+        assert_eq!(facts.acceptance, dto.acceptance_criteria);
+        assert_eq!(facts.risk.as_deref(), Some("medium"));
+        assert_eq!(stored.state(), TaskState::Draft);
+        let events = service.list_events_for_task(&task_id).unwrap();
+        assert_eq!(events.len(), 1, "authoring is exactly one creation fact");
+        assert_eq!(events[0].fact.event_type, EventType::TaskCreated);
+        assert_eq!(
+            events[0].fact.provenance,
+            "task-application-service/create_task"
+        );
+    }
+
+    #[test]
+    fn v6_authoring_refuses_invalid_metadata_without_persistence() {
+        let mut service = service();
+        dispatch(&mut service, create_project_request("P-1", "Runlith"));
+        for (id, paths, acceptance, risk) in [
+            ("T-NO-SCOPE", &[][..], &["c"][..], "low"),
+            ("T-NO-ACCEPTANCE", &["repo:src"][..], &[][..], "low"),
+            ("T-NO-RISK", &["repo:src"][..], &["c"][..], ""),
+            ("T-BAD-RISK", &["repo:src"][..], &["c"][..], "LOW"),
+            ("T-ESCAPE", &["repo:../outside"][..], &["c"][..], "low"),
+            ("T-ABSOLUTE", &["repo:/etc"][..], &["c"][..], "low"),
+            ("T-NO-WORKSPACE", &["src"][..], &["c"][..], "low"),
+            ("T-CONTROL", &["repo:src"][..], &["bad\u{1b}"][..], "low"),
+        ] {
+            let error = authoring_error(dispatch_task_authoring(
+                &mut service,
+                planning_task_request(id, paths, acceptance, risk),
+            ));
+            assert_eq!(
+                error.code,
+                BusinessErrorCode::InvalidArgument as i32,
+                "{id}: {}",
+                error.message
+            );
+            let task_id = TaskId::new(id).unwrap();
+            assert!(service.get_task(&task_id).unwrap().is_none(), "{id}");
+            assert!(service.list_events_for_task(&task_id).unwrap().is_empty());
+        }
+
+        let oversized: Vec<String> = (0..=task_domain::MAX_TASK_ALLOWED_PATHS)
+            .map(|index| format!("repo:src/{index}"))
+            .collect();
+        let oversized: Vec<&str> = oversized.iter().map(String::as_str).collect();
+        let error = authoring_error(dispatch_task_authoring(
+            &mut service,
+            planning_task_request("T-OVERSIZED", &oversized, &["c"], "low"),
+        ));
+        assert_eq!(error.code, BusinessErrorCode::InvalidArgument as i32);
+
+        let missing_project = TaskAuthoringCoreRequest {
+            payload: Some(task_authoring_core_request::Payload::CreatePlanningTask(
+                ipc_contracts::proto::CreatePlanningTaskRequest {
+                    id: "T-ORPHAN".to_owned(),
+                    project_id: "P-MISSING".to_owned(),
+                    objective: "orphan".to_owned(),
+                    allowed_paths: vec!["repo:src".to_owned()],
+                    acceptance_criteria: vec!["c".to_owned()],
+                    baseline_risk: "low".to_owned(),
+                },
+            )),
+        };
+        authoring_error(dispatch_task_authoring(&mut service, missing_project));
+        assert!(service
+            .get_task(&TaskId::new("T-ORPHAN").unwrap())
+            .unwrap()
+            .is_none());
+
+        dispatch_task_authoring(
+            &mut service,
+            planning_task_request("T-ONCE", &["repo:src"], &["c"], "low"),
+        );
+        let duplicate = authoring_error(dispatch_task_authoring(
+            &mut service,
+            planning_task_request("T-ONCE", &["repo:other"], &["d"], "critical"),
+        ));
+        assert_eq!(duplicate.code, BusinessErrorCode::AlreadyExists as i32);
+        let unchanged = service
+            .get_task(&TaskId::new("T-ONCE").unwrap())
+            .unwrap()
+            .unwrap()
+            .snapshot();
+        assert_eq!(unchanged.allowed_paths, ["repo:src"]);
+        assert_eq!(unchanged.risk.as_deref(), Some("low"));
+
+        let empty = authoring_error(dispatch_task_authoring(
+            &mut service,
+            TaskAuthoringCoreRequest { payload: None },
+        ));
+        assert_eq!(empty.code, BusinessErrorCode::InvalidArgument as i32);
     }
 
     #[test]

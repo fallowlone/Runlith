@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package ai_engineering_os.ipc;
+
+// G7 Task authoring (protocol v6, TASK-0084).
+//
+// Creates a DRAFT Task together with the Task-owned planning metadata that
+// trusted G7 planning derives authority from: allowed scope paths,
+// acceptance obligations and baseline risk. The trusted TaskService validates
+// every value (bounds, DRAFT creation, planning derivability) and commits the
+// Task with its server-minted `task.created` journal evidence atomically.
+//
+// Authority rules:
+// - The historical protocol-v1 `CreateTaskRequest` is unchanged; this is a
+//   separate v6-only operation, so a v0-v5 session can never author metadata.
+// - The client never supplies event ids, timestamps, provenance, lifecycle
+//   state, Policy fingerprints, planning snapshots, Plan branches or graphs.
+// - There is no later edit operation: authored planning intent is fixed for
+//   the Task's lifetime on the supported control plane.
+import "task_core.proto";
+
+message CreatePlanningTaskRequest {
+  string id = 1;
+  string project_id = 2;
+  string objective = 3;
+  // Scope roots in `workspace:relative/path` form.
+  repeated string allowed_paths = 4;
+  // Acceptance obligation identities.
+  repeated string acceptance_criteria = 5;
+  // One of `low`, `medium`, `high`, `critical`.
+  string baseline_risk = 6;
+}
+
+// Canonical committed view: the stored Task plus the planning metadata the
+// server persisted (trimmed and de-duplicated).
+message PlanningTaskDto {
+  TaskDto task = 1;
+  repeated string allowed_paths = 2;
+  repeated string acceptance_criteria = 3;
+  string baseline_risk = 4;
+}
+
+message CreatePlanningTaskResponse {
+  PlanningTaskDto task = 1;
+}
+
+message TaskAuthoringCoreRequest {
+  oneof payload {
+    CreatePlanningTaskRequest create_planning_task = 1;
+  }
+}
+
+message TaskAuthoringCoreResponse {
+  oneof payload {
+    CreatePlanningTaskResponse create_planning_task = 1;
+    BusinessError error = 2;
+  }
+}

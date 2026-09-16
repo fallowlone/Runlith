@@ -207,6 +207,58 @@ or Security Audit table becomes a second source of planning truth.
 Planner adapters remain replaceable behind `PlannerPort`; the durable
 snapshot/run contracts are product-owned and provider-neutral.
 
+## Amendment — TASK-0084 canonical Task authority (2026-09-16)
+
+### Problem
+
+After TASK-0083, `PlanningInputSnapshot` captured canonical Task scope,
+acceptance, baseline risk and trusted candidate Tasks, but §2 only fenced
+snapshot identity, run generation and Plan head. `PlannerPort` runs outside
+SQLite, so a Task write during the call left all three unchanged and a stale
+proposal still published. Separately, the shipped control plane could create
+only objective-only Tasks, so G7 planning authority could only be seeded by
+test-side SQLite writes, contrary to ADR-0016.
+
+### Decision
+
+1. §2 gains a sixth publication precondition for every Task-derived planning
+   context (all production paths use `canonical_policy_context`): inside the
+   same `BEGIN IMMEDIATE` transaction as the revision commit, storage reloads
+   the owning Task and its project through the Task repository, re-derives
+   planning authority, and requires scope roots, baseline risk, acceptance
+   criteria and the trusted candidate Task set to equal the persisted
+   snapshot. A missing Task, underivable facts or any difference is
+   `PlanningInputStale`; nothing is written and no Human Decision is consumed.
+   Task tables remain the only owner of these facts.
+2. The derivation (`plan_domain::TaskPlanningAuthority` and
+   `trusted_candidate_task_refs`) is one pure function over plain Task facts,
+   shared by policy derivation, the publication fence and authoring
+   validation.
+3. Protocol v6 adds `task_authoring_core.CreatePlanningTask`: `TaskService`
+   creates a DRAFT Task whose scope/acceptance/risk are validated (bounds,
+   DRAFT-only domain operation, planning derivability) and committed with the
+   server-minted `task.created` event. No edit operation exists; historical
+   `CreateTaskRequest` and v0-v5 sessions are unchanged.
+
+### Alternatives considered
+
+- Fence on a Task version counter: rejected; out-of-band writes that bypass the
+  counter would still publish, and descendant membership spans many Tasks.
+- DRAFT-only metadata edit operation: rejected for G7; it needs a new journal
+  event type (CHECK-constrained journal rebuild) and adds a mutation path
+  planning must race against, while creation-time authoring is sufficient.
+- Adding fields to protocol-v1 `CreateTaskRequest`: rejected; an older daemon
+  would silently drop them and historical wire authority would change.
+
+### Consequences, security and migration impact
+
+Stale Task authority can no longer publish, and the shipped CLI supports
+`task create-planned -> task ready -> planning trigger -> execution run`
+without direct database access. Hand-built trusted fixture contexts (tests
+only) are not Task-derived and are not fenced by this precondition. Clients
+still cannot supply Policy fingerprints, snapshots, graphs, provenance or
+state. No schema migration: authoring writes existing Task columns.
+
 ## References
 
 - ADR-0017 — adaptive planning is proposal-driven and revisioned.

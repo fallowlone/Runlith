@@ -14,16 +14,18 @@ use agentctl::{resolve_production_endpoint, spawn_sibling_daemon, ClientError};
 use ipc_contracts::proto::{
     execution_core_request, execution_core_response, human_decision_core_request,
     human_decision_core_response, planning_core_request, planning_core_response,
-    policy_core_request, policy_core_response, task_core_request, task_core_response,
-    AddDependencyRequest, ApplyHumanContinuationRequest, ApprovalDecision, CancelExecutionRequest,
-    CreateProjectRequest, CreateTaskRequest, DecideApprovalRequest, DecideHumanDecisionRequest,
-    ExecutionCoreRequest, ExecutionCoreResponse, GetApprovalRequest, GetExecutionRequest,
-    GetHumanDecisionRequest, GetProjectRequest, GetTaskRequest, HumanContinuationDecision,
-    HumanDecisionCoreRequest, HumanDecisionCoreResponse, HumanDecisionDto, LifecycleRequest,
-    ListDependenciesRequest, ListHumanDecisionsRequest, ListProjectsRequest,
-    ListTasksForProjectRequest, PlanningContext, PlanningCoreRequest, PolicyCoreRequest,
-    PolicyCoreResponse, ResumeExecutionRequest, RunExecutionRequest, TaskCoreRequest,
-    TaskCoreResponse, TaskLifecycleOp, TriggerPlanningRequest,
+    policy_core_request, policy_core_response, task_authoring_core_request,
+    task_authoring_core_response, task_core_request, task_core_response, AddDependencyRequest,
+    ApplyHumanContinuationRequest, ApprovalDecision, CancelExecutionRequest,
+    CreatePlanningTaskRequest, CreateProjectRequest, CreateTaskRequest, DecideApprovalRequest,
+    DecideHumanDecisionRequest, ExecutionCoreRequest, ExecutionCoreResponse, GetApprovalRequest,
+    GetExecutionRequest, GetHumanDecisionRequest, GetProjectRequest, GetTaskRequest,
+    HumanContinuationDecision, HumanDecisionCoreRequest, HumanDecisionCoreResponse,
+    HumanDecisionDto, LifecycleRequest, ListDependenciesRequest, ListHumanDecisionsRequest,
+    ListProjectsRequest, ListTasksForProjectRequest, PlanningContext, PlanningCoreRequest,
+    PolicyCoreRequest, PolicyCoreResponse, ResumeExecutionRequest, RunExecutionRequest,
+    TaskAuthoringCoreRequest, TaskCoreRequest, TaskCoreResponse, TaskLifecycleOp,
+    TriggerPlanningRequest,
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -45,6 +47,7 @@ async fn main() -> ExitCode {
             eprintln!("  agentctl project get <id>");
             eprintln!("  agentctl project list");
             eprintln!("  agentctl task create <id> <project-id> <objective>");
+            eprintln!("  {TASK_CREATE_PLANNED_USAGE}");
             eprintln!("  agentctl task get <id>");
             eprintln!("  agentctl task list <project-id>");
             eprintln!("  agentctl task dependency add <task-id> <depends-on-id>");
@@ -312,9 +315,103 @@ fn usage_project() -> ExitCode {
 
 fn usage_task() -> ExitCode {
     eprintln!(
-        "usage: agentctl task <create|get|list|dependency|ready|claim|start|resume|block|submit|review|verify-begin|verify-fail|verify-succeed> ..."
+        "usage: agentctl task <create|create-planned|get|list|dependency|ready|claim|start|resume|block|submit|review|verify-begin|verify-fail|verify-succeed> ..."
     );
     ExitCode::FAILURE
+}
+
+const TASK_CREATE_PLANNED_USAGE: &str = "agentctl task create-planned <id> <project-id> <objective> --scope <workspace:path>... --acceptance <criterion-id>... --risk <low|medium|high|critical>";
+
+/// Parses the protocol-v6 authoring command. Positional words up to the first
+/// flag form the objective; every flag takes exactly one value. The client
+/// only carries intent: the daemon validates and canonicalizes all values.
+#[cfg(unix)]
+fn create_planned_task_request(args: &[String]) -> Result<TaskAuthoringCoreRequest, ()> {
+    let [id, project_id, rest @ ..] = args else {
+        return Err(());
+    };
+    let objective_len = rest
+        .iter()
+        .position(|arg| arg.starts_with("--"))
+        .unwrap_or(rest.len());
+    let (objective, mut flags) = rest.split_at(objective_len);
+    let mut request = CreatePlanningTaskRequest {
+        id: id.clone(),
+        project_id: project_id.clone(),
+        objective: objective.join(" "),
+        ..CreatePlanningTaskRequest::default()
+    };
+    let mut risk = None;
+    while let [flag, value, remaining @ ..] = flags {
+        match flag.as_str() {
+            "--scope" => request.allowed_paths.push(value.clone()),
+            "--acceptance" => request.acceptance_criteria.push(value.clone()),
+            "--risk" if risk.is_none() => risk = Some(value.clone()),
+            _ => return Err(()),
+        }
+        flags = remaining;
+    }
+    if !flags.is_empty() || id.is_empty() || project_id.is_empty() || objective.is_empty() {
+        return Err(());
+    }
+    request.baseline_risk = risk.ok_or(())?;
+    Ok(TaskAuthoringCoreRequest {
+        payload: Some(task_authoring_core_request::Payload::CreatePlanningTask(
+            request,
+        )),
+    })
+}
+
+#[cfg(unix)]
+async fn run_create_planned_task(
+    endpoint: &ipc_transport::platform::unix::UnixEndpoint,
+    args: &[String],
+) -> ExitCode {
+    let Ok(request) = create_planned_task_request(args) else {
+        eprintln!("usage: {TASK_CREATE_PLANNED_USAGE}");
+        return ExitCode::FAILURE;
+    };
+    let response =
+        match agentctl::task_authoring_request(endpoint, spawn_sibling_daemon, request).await {
+            Ok(response) => response,
+            Err(error) => return fail(&error),
+        };
+    match response.payload {
+        Some(task_authoring_core_response::Payload::CreatePlanningTask(created)) => {
+            match created
+                .task
+                .and_then(|mut planned| Some((planned.task.take()?, planned)))
+            {
+                Some((task, planned)) => {
+                    println!(
+                        "task {} {} {} {:?} scope={} acceptance={} risk={}",
+                        task.id,
+                        task.project_id,
+                        task.state,
+                        task.objective,
+                        planned.allowed_paths.join(","),
+                        planned.acceptance_criteria.join(","),
+                        planned.baseline_risk
+                    );
+                    ExitCode::SUCCESS
+                }
+                None => fail(&ClientError::BusinessAmbiguous(
+                    "daemon omitted the planning task dto".to_owned(),
+                )),
+            }
+        }
+        Some(task_authoring_core_response::Payload::Error(error)) => {
+            eprintln!(
+                "error {}: {}",
+                business_error_name(error.code),
+                error.message
+            );
+            ExitCode::FAILURE
+        }
+        None => fail(&ClientError::BusinessAmbiguous(
+            "daemon sent an empty task authoring response".to_owned(),
+        )),
+    }
 }
 
 #[cfg(unix)]
@@ -349,6 +446,9 @@ async fn cmd_task(args: Vec<String>) -> ExitCode {
         Ok(endpoint) => endpoint,
         Err(error) => return fail(&error),
     };
+    if args.first().map(String::as_str) == Some("create-planned") {
+        return run_create_planned_task(&endpoint, &args[1..]).await;
+    }
     let request = match task_request(&args) {
         Ok(request) => request,
         Err(_) => return usage_task(),
@@ -362,6 +462,10 @@ async fn cmd_task(args: Vec<String>) -> ExitCode {
         Ok(pipe_name) => pipe_name,
         Err(error) => return fail(&error),
     };
+    if args.first().map(String::as_str) == Some("create-planned") {
+        eprintln!("agentctl: task authoring is unavailable on this build");
+        return ExitCode::FAILURE;
+    }
     let request = match task_request(&args) {
         Ok(request) => request,
         Err(_) => return usage_task(),

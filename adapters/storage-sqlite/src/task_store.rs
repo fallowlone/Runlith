@@ -236,32 +236,12 @@ impl SqliteStore {
     /// Stored content that cannot form a valid domain object fails as
     /// corruption/reconstruction error — never silently repaired.
     pub fn get_task(&self, id: &TaskId) -> StorageResult<Option<Task>> {
-        Ok(match self.load_snapshot(id.as_str())? {
-            None => None,
-            Some(snapshot) => Some(Task::restore(snapshot).map_err(|error| {
-                StorageError::DomainReconstruction(format!("stored task {id}: {error}"))
-            })?),
-        })
+        load_task(&self.connection, id)
     }
 
     /// Lists every stored task of one project, fully hydrated, in id order.
     pub fn list_tasks_for_project(&self, project_id: &ProjectId) -> StorageResult<Vec<Task>> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT id FROM tasks WHERE project_id = ?1 ORDER BY id")?;
-        let ids: Vec<String> = statement
-            .query_map(params![project_id.as_str()], |row| row.get(0))?
-            .collect::<Result<_, _>>()?;
-        let mut tasks = Vec::with_capacity(ids.len());
-        for id in &ids {
-            let snapshot = self.load_snapshot(id)?.ok_or_else(|| {
-                StorageError::Corrupt(format!("task row {id} vanished mid-listing"))
-            })?;
-            tasks.push(Task::restore(snapshot).map_err(|error| {
-                StorageError::DomainReconstruction(format!("stored task {id}: {error}"))
-            })?);
-        }
-        Ok(tasks)
+        list_project_tasks(&self.connection, project_id)
     }
 
     /// Persists a validated task, inserting or replacing its stored image
@@ -569,119 +549,149 @@ impl SqliteStore {
         }
         Ok(())
     }
+}
 
-    fn load_snapshot(&self, id: &str) -> StorageResult<Option<TaskSnapshot>> {
-        let row: Option<TaskRow> = self
-            .connection
-            .query_row(
-                "SELECT id, project_id, objective, parent_id, state, kind, risk
+/// Task repository read over any connection, including an open transaction.
+/// Other storage modules that must observe canonical Task state inside their
+/// own atomic boundary use this instead of reading Task tables themselves.
+pub(crate) fn load_task(connection: &Connection, id: &TaskId) -> StorageResult<Option<Task>> {
+    Ok(match load_task_snapshot(connection, id.as_str())? {
+        None => None,
+        Some(snapshot) => Some(Task::restore(snapshot).map_err(|error| {
+            StorageError::DomainReconstruction(format!("stored task {id}: {error}"))
+        })?),
+    })
+}
+
+/// Project listing counterpart of [`load_task`], in id order.
+pub(crate) fn list_project_tasks(
+    connection: &Connection,
+    project_id: &ProjectId,
+) -> StorageResult<Vec<Task>> {
+    let mut statement =
+        connection.prepare("SELECT id FROM tasks WHERE project_id = ?1 ORDER BY id")?;
+    let ids: Vec<String> = statement
+        .query_map(params![project_id.as_str()], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    let mut tasks = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let snapshot = load_task_snapshot(connection, id)?
+            .ok_or_else(|| StorageError::Corrupt(format!("task row {id} vanished mid-listing")))?;
+        tasks.push(Task::restore(snapshot).map_err(|error| {
+            StorageError::DomainReconstruction(format!("stored task {id}: {error}"))
+        })?);
+    }
+    Ok(tasks)
+}
+
+fn load_task_snapshot(connection: &Connection, id: &str) -> StorageResult<Option<TaskSnapshot>> {
+    let row: Option<TaskRow> = connection
+        .query_row(
+            "SELECT id, project_id, objective, parent_id, state, kind, risk
                  FROM tasks WHERE id = ?1",
-                params![id],
-                |row| {
-                    Ok(TaskRow {
-                        id: row.get(0)?,
-                        project_id: row.get(1)?,
-                        objective: row.get(2)?,
-                        parent_id: row.get(3)?,
-                        state: row.get(4)?,
-                        kind: row.get(5)?,
-                        risk: row.get(6)?,
-                    })
-                },
-            )
-            .optional()?;
-        let row = match row {
-            None => return Ok(None),
-            Some(row) => row,
-        };
-        let id = TaskId::new(row.id).map_err(|error| {
-            StorageError::DomainReconstruction(format!("stored task id: {error}"))
-        })?;
-        let project_id = ProjectId::new(row.project_id).map_err(|error| {
-            StorageError::DomainReconstruction(format!("stored project id: {error}"))
-        })?;
-        // A task in a project that has no row is corrupt data (foreign keys
-        // stop this on write; this stops it on read when the database was
-        // mutated behind the adapter's back).
-        let project_exists: bool = self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
-            params![project_id.as_str()],
-            |row| row.get(0),
-        )?;
-        if !project_exists {
-            return Err(StorageError::Corrupt(format!(
-                "task {id} references missing project {project_id}"
-            )));
-        }
-        let state = decode_state(&row.state)?;
-        let parent = row
-            .parent_id
-            .map(|parent| {
-                TaskId::new(parent).map_err(|error| {
-                    StorageError::DomainReconstruction(format!("stored parent reference: {error}"))
+            params![id],
+            |row| {
+                Ok(TaskRow {
+                    id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    objective: row.get(2)?,
+                    parent_id: row.get(3)?,
+                    state: row.get(4)?,
+                    kind: row.get(5)?,
+                    risk: row.get(6)?,
                 })
+            },
+        )
+        .optional()?;
+    let row = match row {
+        None => return Ok(None),
+        Some(row) => row,
+    };
+    let id = TaskId::new(row.id)
+        .map_err(|error| StorageError::DomainReconstruction(format!("stored task id: {error}")))?;
+    let project_id = ProjectId::new(row.project_id).map_err(|error| {
+        StorageError::DomainReconstruction(format!("stored project id: {error}"))
+    })?;
+    // A task in a project that has no row is corrupt data (foreign keys
+    // stop this on write; this stops it on read when the database was
+    // mutated behind the adapter's back).
+    let project_exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+        params![project_id.as_str()],
+        |row| row.get(0),
+    )?;
+    if !project_exists {
+        return Err(StorageError::Corrupt(format!(
+            "task {id} references missing project {project_id}"
+        )));
+    }
+    let state = decode_state(&row.state)?;
+    let parent = row
+        .parent_id
+        .map(|parent| {
+            TaskId::new(parent).map_err(|error| {
+                StorageError::DomainReconstruction(format!("stored parent reference: {error}"))
             })
-            .transpose()?;
-        let mut strings: std::collections::BTreeMap<&'static str, Vec<(i64, String)>> =
-            std::collections::BTreeMap::new();
-        {
-            let mut statement = self
-                .connection
-                .prepare("SELECT slot, position, value FROM task_strings WHERE task_id = ?1")?;
-            let rows = statement.query_map(params![id.as_str()], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?;
-            for row in rows {
-                let (slot, position, value) = row?;
-                match slot.as_str() {
-                    "acceptance" | "allowed_path" | "forbidden_path" | "verification"
-                    | "required_review" | "artifact" => {
-                        strings
-                            .entry(owned_slot(&slot))
-                            .or_default()
-                            .push((position, value));
-                    }
-                    other => {
-                        return Err(StorageError::Corrupt(format!(
-                            "task {id} stores unknown metadata slot {other:?}"
-                        )));
-                    }
+        })
+        .transpose()?;
+    let mut strings: std::collections::BTreeMap<&'static str, Vec<(i64, String)>> =
+        std::collections::BTreeMap::new();
+    {
+        let mut statement = connection
+            .prepare("SELECT slot, position, value FROM task_strings WHERE task_id = ?1")?;
+        let rows = statement.query_map(params![id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (slot, position, value) = row?;
+            match slot.as_str() {
+                "acceptance" | "allowed_path" | "forbidden_path" | "verification"
+                | "required_review" | "artifact" => {
+                    strings
+                        .entry(owned_slot(&slot))
+                        .or_default()
+                        .push((position, value));
+                }
+                other => {
+                    return Err(StorageError::Corrupt(format!(
+                        "task {id} stores unknown metadata slot {other:?}"
+                    )));
                 }
             }
         }
-        let mut depends_on = Vec::new();
-        {
-            let mut statement = self.connection.prepare(
-                "SELECT depends_on_id FROM task_dependencies WHERE task_id = ?1 ORDER BY depends_on_id",
-            )?;
-            let rows = statement.query_map(params![id.as_str()], |row| row.get::<_, String>(0))?;
-            for row in rows {
-                depends_on.push(TaskId::new(row?).map_err(|error| {
-                    StorageError::DomainReconstruction(format!("stored dependency target: {error}"))
-                })?);
-            }
-        }
-        Ok(Some(TaskSnapshot {
-            id,
-            project_id,
-            objective: row.objective,
-            parent,
-            depends_on,
-            acceptance: ordered_values(&strings, "acceptance"),
-            allowed_paths: ordered_values(&strings, "allowed_path"),
-            forbidden_paths: ordered_values(&strings, "forbidden_path"),
-            verification: ordered_values(&strings, "verification"),
-            required_review: ordered_values(&strings, "required_review"),
-            risk: row.risk,
-            artifacts: ordered_values(&strings, "artifact"),
-            kind: row.kind,
-            state,
-        }))
     }
+    let mut depends_on = Vec::new();
+    {
+        let mut statement = connection.prepare(
+            "SELECT depends_on_id FROM task_dependencies WHERE task_id = ?1 ORDER BY depends_on_id",
+        )?;
+        let rows = statement.query_map(params![id.as_str()], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            depends_on.push(TaskId::new(row?).map_err(|error| {
+                StorageError::DomainReconstruction(format!("stored dependency target: {error}"))
+            })?);
+        }
+    }
+    Ok(Some(TaskSnapshot {
+        id,
+        project_id,
+        objective: row.objective,
+        parent,
+        depends_on,
+        acceptance: ordered_values(&strings, "acceptance"),
+        allowed_paths: ordered_values(&strings, "allowed_path"),
+        forbidden_paths: ordered_values(&strings, "forbidden_path"),
+        verification: ordered_values(&strings, "verification"),
+        required_review: ordered_values(&strings, "required_review"),
+        risk: row.risk,
+        artifacts: ordered_values(&strings, "artifact"),
+        kind: row.kind,
+        state,
+    }))
 }
 
 struct TaskRow {

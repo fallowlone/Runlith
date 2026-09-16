@@ -448,6 +448,18 @@ where
                     return ConnectionOutcome::Ended;
                 }
             }
+            Ok(ReadyRequest::TaskAuthoring(request)) => {
+                let response = match &services.business {
+                    Some(handle) => {
+                        let mut service = handle.lock().await;
+                        dispatch::dispatch_task_authoring(&mut service, request)
+                    }
+                    None => dispatch::task_authoring_unavailable(),
+                };
+                if session.respond_task_authoring(response).await.is_err() {
+                    return ConnectionOutcome::Ended;
+                }
+            }
             Err(_) => return ConnectionOutcome::Ended,
         }
     }

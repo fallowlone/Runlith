@@ -16,6 +16,7 @@ import "execution_core.proto";
 import "policy_core.proto";
 import "human_decision_core.proto";
 import "planning_core.proto";
+import "task_authoring_core.proto";
 
 // A single inbound control message from a local client to agentd.
 message ControlRequest {
@@ -35,6 +36,8 @@ message ControlRequest {
     HumanDecisionCoreRequest human_decision_core = 7;
     // G7 trusted planning operations. Valid only on protocol-v5 sessions.
     PlanningCoreRequest planning_core = 8;
+    // G7 Task planning-metadata authoring. Valid only on protocol-v6 sessions.
+    TaskAuthoringCoreRequest task_authoring_core = 9;
   }
 }
 
@@ -53,6 +56,8 @@ message ControlResponse {
     // G7 bounded Human Decision Queue response. Protocol v4 only.
     HumanDecisionCoreResponse human_decision_core = 7;
     PlanningCoreResponse planning_core = 8;
+    // G7 Task planning-metadata authoring response. Protocol v6 only.
+    TaskAuthoringCoreResponse task_authoring_core = 9;
   }
 }
 

@@ -25,14 +25,14 @@ use std::path::Path;
 
 use plan_domain::{
     call_within_envelope, l3_no_progress_tripped, planning_evidence_key, validate_proposal,
-    AffectedParentCriterion, AtomicityAssessment, AtomicityBlocker, AtomicityRequest, CriterionId,
+    AffectedParentCriterion, AtomicityAssessment, AtomicityBlocker, AtomicityRequest,
     DecompositionRequest, EvidenceRef, GuardrailTrip, HumanContinuation, HumanDecisionReason,
     HumanDecisionRequest, HumanDecisionRequestId, HumanDecisionStatus, PlanBranchId, PlanChangeSet,
     PlanDomainError, PlanGraph, PlanRevision, PlannerCallSpend, PlannerFault, PlannerPort,
     PlanningBudget, PlanningCostReceipt, PlanningCostReceiptRef, PlanningInputSnapshot,
     PlanningInputSnapshotId, ReplanRequest, RevisionProposedBy, RiskClass, RiskEscalationGrant,
-    ScopeBound, ValidatedBy, ValidationContext, ValidationOutcome, ValidationRefusal,
-    VerificationMethod, MAX_DECOMPOSITION_DEPTH, MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
+    ScopeBound, TaskPlanningAuthority, ValidatedBy, ValidationContext, ValidationOutcome,
+    ValidationRefusal, MAX_DECOMPOSITION_DEPTH, MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
     MAX_PLANNER_CUMULATIVE_INPUT_TOKENS, MAX_PLANNER_INPUT_TOKENS, MAX_PLANNER_OUTPUT_TOKENS,
     MAX_PLANNER_WALL_CLOCK_SECS, MAX_REVISIONS_PER_CYCLE_PER_BRANCH,
 };
@@ -68,6 +68,13 @@ pub struct PlanningPolicyContext {
     pub baseline_risk: RiskClass,
     pub affected_parent_criteria: Vec<AffectedParentCriterion>,
     pub parent_task_ref: String,
+    /// True only for contexts produced by
+    /// [`PlanningService::canonical_policy_context`], which every production
+    /// planning path uses. Plan publication then re-derives the Task-owned
+    /// scope/acceptance/risk/candidate authority inside the publishing
+    /// transaction and refuses stale snapshots. Hand-built trusted fixture
+    /// contexts are not Task-derived and leave this false.
+    pub canonical_task_authority: bool,
     pub lineage_fingerprints: Vec<String>,
     pub risk_grant: Option<RiskEscalationGrant>,
     /// Durable HumanDecisionRequest that produced `risk_grant`. V9 plan
@@ -287,63 +294,25 @@ impl<C: Clock> PlanningService<C> {
                 task_id.as_str()
             ))
         })?;
-        let snapshot = task.snapshot();
-        if snapshot.allowed_paths.is_empty() {
-            return Err(PlanningServiceError::InvalidContext(format!(
-                "canonical planning Task {} has no authorized scope",
+        let facts = task.snapshot();
+        let authority = TaskPlanningAuthority::derive(
+            &facts.allowed_paths,
+            &facts.forbidden_paths,
+            &facts.acceptance,
+            facts.risk.as_deref(),
+        )
+        .map_err(|PlanDomainError::InvalidInput(detail)| {
+            PlanningServiceError::InvalidContext(format!(
+                "canonical planning Task {} {detail}",
                 task_id.as_str()
-            )));
-        }
-        if !snapshot.forbidden_paths.is_empty() {
-            return Err(PlanningServiceError::InvalidContext(format!(
-                "canonical planning Task {} has forbidden-path constraints that the G7 ScopeBound cannot represent",
-                task_id.as_str()
-            )));
-        }
-        if snapshot.acceptance.is_empty() {
-            return Err(PlanningServiceError::InvalidContext(format!(
-                "canonical planning Task {} has no acceptance obligations",
-                task_id.as_str()
-            )));
-        }
-        let baseline_risk = snapshot
-            .risk
-            .as_deref()
-            .ok_or_else(|| {
-                PlanningServiceError::InvalidContext(format!(
-                    "canonical planning Task {} has no baseline risk",
-                    task_id.as_str()
-                ))
-            })
-            .and_then(|risk| {
-                RiskClass::parse(risk).map_err(|error| {
-                    PlanningServiceError::InvalidContext(format!(
-                        "canonical planning Task {} has invalid baseline risk: {error}",
-                        task_id.as_str()
-                    ))
-                })
-            })?;
-        let affected_parent_criteria = snapshot
-            .acceptance
-            .into_iter()
-            .map(|criterion| {
-                CriterionId::new(criterion)
-                    .map(|id| AffectedParentCriterion {
-                        id,
-                        // G7 v1 has no criterion-to-proof-method field in the
-                        // Task contract. Keep the existing product-owned v1
-                        // planning default at the trusted boundary; clients no
-                        // longer choose this value.
-                        method: VerificationMethod::AutomatedTest,
-                    })
-                    .map_err(PlanningServiceError::Domain)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            ))
+        })?;
         let policy = PlanningPolicyContext {
-            scope_bound: ScopeBound::new(snapshot.allowed_paths)?,
-            baseline_risk,
-            affected_parent_criteria,
+            scope_bound: authority.scope_bound,
+            baseline_risk: authority.baseline_risk,
+            affected_parent_criteria: authority.affected_parent_criteria,
             parent_task_ref: task_id.as_str().to_owned(),
+            canonical_task_authority: true,
             lineage_fingerprints: Vec::new(),
             risk_grant: None,
             risk_decision_id: None,
@@ -1631,6 +1600,7 @@ impl<C: Clock> PlanningService<C> {
             &lineage,
             &evidence,
             risk_decision,
+            policy.canonical_task_authority,
         ) {
             Ok(_) => {}
             Err(StorageError::PlanStale { found, .. }) => {
@@ -1905,21 +1875,12 @@ fn trusted_candidate_task_refs(
         ))
     })?;
     let tasks = store.list_tasks_for_project(parent.project_id())?;
-    let mut candidates = BTreeSet::from([parent_id.as_str().to_owned()]);
-    let mut frontier = BTreeSet::from([parent_id]);
-    while !frontier.is_empty() {
-        let next: BTreeSet<TaskId> = tasks
+    Ok(plan_domain::trusted_candidate_task_refs(
+        parent_id.as_str(),
+        tasks
             .iter()
-            .filter(|task| {
-                task.parent()
-                    .is_some_and(|parent| frontier.contains(parent))
-            })
-            .map(|task| task.id().clone())
-            .filter(|id| candidates.insert(id.as_str().to_owned()))
-            .collect();
-        frontier = next;
-    }
-    Ok(candidates.into_iter().collect())
+            .map(|task| (task.id().as_str(), task.parent().map(TaskId::as_str))),
+    ))
 }
 
 fn trusted_node_identity_refusal(

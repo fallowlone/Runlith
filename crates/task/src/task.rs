@@ -249,6 +249,34 @@ impl Task {
         Ok(())
     }
 
+    /// Authors the Task-owned planning metadata: allowed scope paths,
+    /// acceptance obligations and baseline risk. Authoring belongs to
+    /// `DRAFT`; once work is declared READY this intent is frozen. Values are
+    /// trimmed, bounded and de-duplicated; any prior values are replaced
+    /// atomically, so a refused call leaves the Task unchanged.
+    pub fn define_planning_metadata(
+        &mut self,
+        allowed_paths: Vec<String>,
+        acceptance: Vec<String>,
+        risk: impl Into<String>,
+    ) -> DomainResult<()> {
+        if self.state != TaskState::Draft {
+            return Err(DomainError::transition(format!(
+                "planning metadata can only be authored while DRAFT; task {} is {}",
+                self.id, self.state
+            )));
+        }
+        let allowed_paths =
+            bounded_metadata_list("allowed path", allowed_paths, MAX_TASK_ALLOWED_PATHS)?;
+        let acceptance =
+            bounded_metadata_list("acceptance criterion", acceptance, MAX_TASK_ACCEPTANCE)?;
+        let risk = bounded_metadata_item("risk", risk.into())?;
+        self.allowed_paths = allowed_paths;
+        self.acceptance = acceptance;
+        self.risk = Some(risk);
+        Ok(())
+    }
+
     /// Appends one acceptance criterion (durable intent; tests are evidence,
     /// never the criteria themselves).
     pub fn add_acceptance(&mut self, criterion: impl Into<String>) -> DomainResult<()> {
@@ -428,6 +456,53 @@ pub struct TaskSnapshot {
     /// Current lifecycle state (any canonical state; restore is not a
     /// transition).
     pub state: TaskState,
+}
+
+/// Upper bound on authored allowed scope paths per Task.
+pub const MAX_TASK_ALLOWED_PATHS: usize = 32;
+/// Upper bound on authored acceptance obligations per Task.
+pub const MAX_TASK_ACCEPTANCE: usize = 64;
+/// Upper bound in bytes on one authored planning metadata value.
+pub const MAX_TASK_METADATA_ITEM_LEN: usize = 256;
+
+fn bounded_metadata_list(
+    field: &str,
+    values: Vec<String>,
+    max_items: usize,
+) -> DomainResult<Vec<String>> {
+    if values.is_empty() {
+        return Err(DomainError::input(format!(
+            "at least one {field} is required"
+        )));
+    }
+    if values.len() > max_items {
+        return Err(DomainError::input(format!(
+            "at most {max_items} {field} values are allowed"
+        )));
+    }
+    let mut out: Vec<String> = Vec::with_capacity(values.len());
+    for value in values {
+        let value = bounded_metadata_item(field, value)?;
+        if !out.contains(&value) {
+            out.push(value);
+        }
+    }
+    Ok(out)
+}
+
+fn bounded_metadata_item(field: &str, value: String) -> DomainResult<String> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(DomainError::input(format!(
+            "{field} must be non-blank with no control characters"
+        )));
+    }
+    if value.len() > MAX_TASK_METADATA_ITEM_LEN {
+        return Err(DomainError::input(format!(
+            "{field} exceeds {MAX_TASK_METADATA_ITEM_LEN} bytes"
+        )));
+    }
+    Ok(value.to_owned())
 }
 
 /// Commands carrying a reason/summary/verdict must not be blank: every
@@ -691,6 +766,59 @@ mod tests {
         task.add_acceptance("tests pass").unwrap();
         assert_eq!(task.acceptance(), ["compiles", "tests pass"]);
         assert!(task.add_acceptance("  ").is_err());
+    }
+
+    #[test]
+    fn planning_metadata_is_authored_only_while_draft_and_bounded() {
+        let mut task = draft_task("T-1");
+        task.define_planning_metadata(
+            vec![" repo:src ".into(), "repo:src".into()],
+            vec!["criterion-a".into()],
+            " low ",
+        )
+        .unwrap();
+        let snapshot = task.snapshot();
+        assert_eq!(snapshot.allowed_paths, ["repo:src"]);
+        assert_eq!(snapshot.acceptance, ["criterion-a"]);
+        assert_eq!(snapshot.risk.as_deref(), Some("low"));
+        assert_eq!(task.state(), TaskState::Draft);
+
+        for (paths, acceptance, risk) in [
+            (vec![], vec!["c".to_owned()], "low"),
+            (vec!["repo:src".to_owned()], vec![], "low"),
+            (vec!["repo:src".to_owned()], vec!["c".to_owned()], " "),
+            (vec![" ".to_owned()], vec!["c".to_owned()], "low"),
+            (vec!["repo:\u{0}".to_owned()], vec!["c".to_owned()], "low"),
+            (
+                vec!["x".repeat(MAX_TASK_METADATA_ITEM_LEN + 1)],
+                vec!["c".to_owned()],
+                "low",
+            ),
+            (
+                (0..=MAX_TASK_ALLOWED_PATHS)
+                    .map(|i| format!("repo:{i}"))
+                    .collect(),
+                vec!["c".to_owned()],
+                "low",
+            ),
+        ] {
+            assert!(matches!(
+                task.define_planning_metadata(paths, acceptance, risk),
+                Err(DomainError::InvalidInput(_))
+            ));
+        }
+        assert_eq!(
+            task.snapshot(),
+            snapshot,
+            "refusals leave metadata unchanged"
+        );
+
+        task.mark_ready().unwrap();
+        assert!(matches!(
+            task.define_planning_metadata(vec!["repo:other".into()], vec!["c".into()], "high"),
+            Err(DomainError::InvalidTransition(_))
+        ));
+        assert_eq!(task.snapshot().allowed_paths, ["repo:src"]);
     }
 
     #[test]

@@ -1,8 +1,9 @@
 //! Durable planning-input and planning-run control state (ADR-0028).
 
 use plan_domain::{
-    AffectedParentCriterion, PlanBranchId, PlanningInputSnapshot, PlanningInputSnapshotId,
-    PlanningRunId, RiskClass, RiskEscalationGrant, ScopeBound,
+    trusted_candidate_task_refs, AffectedParentCriterion, PlanBranchId, PlanningInputSnapshot,
+    PlanningInputSnapshotId, PlanningRunId, RiskClass, RiskEscalationGrant, ScopeBound,
+    TaskPlanningAuthority,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use task_domain::TaskId;
@@ -10,7 +11,7 @@ use task_domain::TaskId;
 use crate::error::{StorageError, StorageResult};
 use crate::plan_guardrail_store::require_evidence_key;
 use crate::plan_store::PlanRevisionLineage;
-use crate::task_store::SqliteStore;
+use crate::task_store::{list_project_tasks, load_task, SqliteStore};
 
 type StoredPlanningInputRow = (
     String,
@@ -472,6 +473,7 @@ pub(crate) fn enforce_publication_fence(
     lineage: &PlanRevisionLineage,
     branch: &PlanBranchId,
     expected_plan_head: u64,
+    canonical_task_authority: bool,
 ) -> StorageResult<()> {
     let current_input: Option<(String, String)> = connection
         .query_row(
@@ -489,6 +491,9 @@ pub(crate) fn enforce_publication_fence(
             branch: branch.as_str().to_owned(),
             expected_fingerprint: lineage.planning_input_fingerprint.clone(),
         });
+    }
+    if canonical_task_authority {
+        require_current_task_authority(connection, lineage, branch)?;
     }
 
     require_current_run(
@@ -516,6 +521,116 @@ pub(crate) fn enforce_publication_fence(
         });
     }
     Ok(())
+}
+
+/// TASK-0084: the planner call runs outside SQLite, so the canonical Task
+/// facts captured by the bound snapshot may change before publication. This
+/// re-derives Task-owned planning authority through the Task repository on
+/// the publication transaction and requires it to equal the persisted
+/// snapshot. Task tables stay the only owner of those facts; the snapshot is
+/// only the expected precondition. Any mismatch, missing Task or
+/// underivable authority is `PlanningInputStale` before any Plan write.
+fn require_current_task_authority(
+    connection: &Connection,
+    lineage: &PlanRevisionLineage,
+    branch: &PlanBranchId,
+) -> StorageResult<()> {
+    let stale = || StorageError::PlanningInputStale {
+        branch: branch.as_str().to_owned(),
+        expected_fingerprint: lineage.planning_input_fingerprint.clone(),
+    };
+    let snapshot_id = lineage.planning_input_snapshot_id.as_str();
+    let (task_ref, stored_risk): (String, String) = connection
+        .query_row(
+            "SELECT task_ref, baseline_risk FROM planning_input_snapshots
+             WHERE snapshot_id = ?1 AND input_fingerprint = ?2",
+            params![snapshot_id, lineage.planning_input_fingerprint],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(stale)?;
+    if task_ref != lineage.parent_task_ref {
+        return Err(stale());
+    }
+    let root_id = TaskId::new(task_ref.clone()).map_err(|_| stale())?;
+    let Some(root) = load_task(connection, &root_id)? else {
+        return Err(stale());
+    };
+    let facts = root.snapshot();
+    let current = TaskPlanningAuthority::derive(
+        &facts.allowed_paths,
+        &facts.forbidden_paths,
+        &facts.acceptance,
+        facts.risk.as_deref(),
+    )
+    .map_err(|_| stale())?;
+    let current_criteria: Vec<(String, String)> = current
+        .affected_parent_criteria
+        .iter()
+        .map(|criterion| {
+            (
+                criterion.id.as_str().to_owned(),
+                criterion.method.as_str().to_owned(),
+            )
+        })
+        .collect();
+    let project_tasks = list_project_tasks(connection, root.project_id())?;
+    let current_candidates = trusted_candidate_task_refs(
+        &task_ref,
+        project_tasks
+            .iter()
+            .map(|task| (task.id().as_str(), task.parent().map(TaskId::as_str))),
+    );
+
+    if stored_risk != risk_name(current.baseline_risk)
+        || snapshot_values(
+            connection,
+            "planning_input_scope_roots",
+            "scope_root",
+            snapshot_id,
+        )? != current.scope_bound.roots()
+        || snapshot_criteria(connection, snapshot_id)? != current_criteria
+        || snapshot_values(
+            connection,
+            "planning_input_candidate_tasks",
+            "task_ref",
+            snapshot_id,
+        )? != current_candidates
+    {
+        return Err(stale());
+    }
+    Ok(())
+}
+
+fn snapshot_values(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    snapshot_id: &str,
+) -> StorageResult<Vec<String>> {
+    // Table/column names are compile-time constants from the caller above.
+    let select = format!("SELECT {column} FROM {table} WHERE snapshot_id = ?1 ORDER BY position");
+    let mut statement = connection.prepare(&select)?;
+    let values = statement
+        .query_map(params![snapshot_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(values)
+}
+
+fn snapshot_criteria(
+    connection: &Connection,
+    snapshot_id: &str,
+) -> StorageResult<Vec<(String, String)>> {
+    let mut statement = connection.prepare(
+        "SELECT criterion_id, verification_method FROM planning_input_criteria
+         WHERE snapshot_id = ?1 ORDER BY position",
+    )?;
+    let criteria = statement
+        .query_map(params![snapshot_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(criteria)
 }
 
 pub(crate) fn mark_publication_succeeded(

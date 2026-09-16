@@ -27,7 +27,7 @@ use crate::error::{ControlError, ControlResult};
 use crate::negotiation::{
     default_client_build_version, evaluate_handshake, rejection_for, validate_business_allowed,
     validate_execution_allowed, validate_human_decision_allowed, validate_planning_allowed,
-    validate_policy_allowed, ServerConfig,
+    validate_policy_allowed, validate_task_authoring_allowed, ServerConfig,
 };
 
 /// Deadline for a full client/server handshake exchange.
@@ -75,6 +75,8 @@ pub enum ReadyRequest {
     HumanDecision(ipc_contracts::proto::HumanDecisionCoreRequest),
     /// Decoded G7 planning operation on a version-5 session.
     Planning(ipc_contracts::proto::PlanningCoreRequest),
+    /// Decoded G7 Task planning-metadata authoring on a version-6 session.
+    TaskAuthoring(ipc_contracts::proto::TaskAuthoringCoreRequest),
 }
 
 /// Client-side handshake outcome.
@@ -195,6 +197,16 @@ impl ClientConfig {
             requested_capabilities: Vec::new(),
         }
     }
+
+    /// G7 Task authoring client profile. Offers every version through v6 and
+    /// requires `task_authoring_allowed` before use.
+    pub fn task_authoring_default(client_kind: impl Into<String>) -> Self {
+        let mut config = Self::human_decision_default(client_kind);
+        config
+            .supported_versions
+            .push(ipc_contracts::IPC_PROTOCOL_VERSION_V6);
+        config
+    }
 }
 
 /// Client side of the bootstrap control protocol.
@@ -276,6 +288,12 @@ where
     pub fn planning_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_planning_allowed)
+    }
+
+    #[must_use]
+    pub fn task_authoring_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_task_authoring_allowed)
     }
 
     /// Unwraps into the framed transport for lifecycle-owned exchanges
@@ -499,6 +517,23 @@ where
         }
     }
 
+    pub async fn respond_task_authoring(
+        &mut self,
+        response: ipc_contracts::proto::TaskAuthoringCoreResponse,
+    ) -> ControlResult<()> {
+        self.require_ready()?;
+        let frame = bytes::Bytes::from(
+            ControlResponse {
+                payload: Some(control_response::Payload::TaskAuthoringCore(response)),
+            }
+            .encode_to_vec(),
+        );
+        match self.transport.write_frame(frame).await {
+            Ok(()) => Ok(()),
+            Err(error) => self.fail(error.into()),
+        }
+    }
+
     /// Sends the existing `ShutdownResponse` acknowledgement for a
     /// previously observed [`ReadyRequest::Shutdown`].
     ///
@@ -562,6 +597,12 @@ where
     pub fn planning_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_planning_allowed)
+    }
+
+    #[must_use]
+    pub fn task_authoring_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_task_authoring_allowed)
     }
 
     /// Reads the first request (within [`HANDSHAKE_TIMEOUT`]), requires it
@@ -729,6 +770,15 @@ where
                     .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
                 match validate_planning_allowed(negotiated) {
                     Ok(()) => Ok(ReadyRequest::Planning(request)),
+                    Err(error) => self.fail(error),
+                }
+            }
+            Some(control_request::Payload::TaskAuthoringCore(request)) => {
+                let negotiated = self
+                    .negotiated_version
+                    .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
+                match validate_task_authoring_allowed(negotiated) {
+                    Ok(()) => Ok(ReadyRequest::TaskAuthoring(request)),
                     Err(error) => self.fail(error),
                 }
             }
@@ -1434,6 +1484,90 @@ mod tests {
             }
             .encode_to_vec(),
         )
+    }
+
+    fn task_authoring_core_frame() -> Bytes {
+        use ipc_contracts::proto::{
+            task_authoring_core_request, CreatePlanningTaskRequest, TaskAuthoringCoreRequest,
+        };
+        Bytes::from(
+            ControlRequest {
+                payload: Some(control_request::Payload::TaskAuthoringCore(
+                    TaskAuthoringCoreRequest {
+                        payload: Some(task_authoring_core_request::Payload::CreatePlanningTask(
+                            CreatePlanningTaskRequest {
+                                id: "T-1".to_owned(),
+                                project_id: "P-1".to_owned(),
+                                objective: "author".to_owned(),
+                                allowed_paths: vec!["repo:src".to_owned()],
+                                acceptance_criteria: vec!["criterion".to_owned()],
+                                baseline_risk: "low".to_owned(),
+                            },
+                        )),
+                    },
+                )),
+            }
+            .encode_to_vec(),
+        )
+    }
+
+    async fn g7_session_after_handshake(
+        versions: Vec<u32>,
+    ) -> (FramedTransport<Duplex>, ServerSession<Duplex>) {
+        let (mut raw_client, raw_server) = raw_pair();
+        let mut server = ServerSession::new(raw_server, ServerConfig::g7_default());
+        raw_client
+            .write_frame(handshake_request_frame(HandshakeRequest {
+                supported_protocol_versions: versions,
+                client_kind: CLIENT_KIND_AGENTCTL.to_owned(),
+                client_build_version: "test".to_owned(),
+                requested_capabilities: Vec::new(),
+            }))
+            .await
+            .expect("write handshake");
+        server.run_handshake().await.expect("ready");
+        (raw_client, server)
+    }
+
+    #[tokio::test]
+    async fn v5_session_rejects_task_authoring_and_v6_surfaces_it_without_executing() {
+        let (mut raw_client, mut server) = g7_session_after_handshake(vec![0, 1, 2, 3, 4, 5]).await;
+        assert_eq!(server.negotiated_version(), Some(5));
+        assert!(server.planning_allowed());
+        assert!(!server.task_authoring_allowed());
+        raw_client
+            .write_frame(task_authoring_core_frame())
+            .await
+            .expect("write");
+        assert!(matches!(
+            server.next_request().await,
+            Err(ControlError::UnsupportedProtocol {
+                negotiated: 5,
+                required: 6
+            })
+        ));
+
+        let (mut raw_client, mut server) =
+            g7_session_after_handshake(vec![0, 1, 2, 3, 4, 5, 6]).await;
+        assert_eq!(server.negotiated_version(), Some(6));
+        assert!(server.task_authoring_allowed());
+        assert!(server.planning_allowed());
+        raw_client
+            .write_frame(task_authoring_core_frame())
+            .await
+            .expect("write");
+        assert!(matches!(
+            server.next_request().await,
+            Ok(ReadyRequest::TaskAuthoring(_))
+        ));
+    }
+
+    #[test]
+    fn task_authoring_client_profile_extends_the_g7_profile_with_v6() {
+        let config = ClientConfig::task_authoring_default(CLIENT_KIND_AGENTCTL);
+        assert_eq!(config.supported_versions, vec![0, 1, 2, 3, 4, 5, 6]);
+        let historical = ClientConfig::human_decision_default(CLIENT_KIND_AGENTCTL);
+        assert_eq!(historical.supported_versions, vec![0, 1, 2, 3, 4, 5]);
     }
 
     #[tokio::test]
