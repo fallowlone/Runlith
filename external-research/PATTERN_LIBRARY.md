@@ -625,3 +625,51 @@ Reusable architecture concepts observed in external repositories. This is not an
 **Decision:** `EXTERNAL_VALIDATION`.
 
 **Relevant Runlith architecture:** G8 Side-Effect Execution Protocol; `INV-066`, `INV-091`, `INV-145`, `INV-153`.
+
+## P-029 — Explicit retirement criteria for model-compensating harness scaffolding
+
+**Pattern:** When a harness component exists specifically to compensate for a current model limitation, record why it exists and the measurable capability/quality condition under which it can be removed. Treat removal as a verified simplification decision rather than permanent accretion.
+
+**Source repository:** `ai-boost/awesome-harness-engineering`
+
+**Source revision:** `9c0dd218b5db8a4f38e82607276f72d98f266ad3`
+
+**Evidence:** `templates/HARNESS_CHECKLIST.md:50-57` explicitly asks for the component, why it exists, and when it can be removed.
+
+**Problem solved:** Prompt workarounds, compatibility shims, special routing rules and model-specific scaffolding can remain long after the limitation that justified them disappears, adding context cost, maintenance and hidden coupling.
+
+**Mechanism:** Attach an existence rationale and retirement trigger to compensating scaffolding; periodically re-evaluate that trigger under representative workloads and remove only after quality/security/robustness non-regression.
+
+**Tradeoffs:** Capability improvements are workload-specific and can regress. This pattern must never be generalized to structural trust boundaries: deterministic Policy, runtime isolation, completion authority, audit/provenance, privacy and durable state remain necessary even when models improve.
+
+**Runlith status:** `NOVEL_GAP` in engineering governance, not a missing runtime subsystem. Runlith already has quality non-regression and complexity/simplification principles but no general decommission criterion for model-compensating scaffolding was found.
+
+**Decision:** `ADAPT`.
+
+**Relevant Runlith architecture:** Execution Efficiency Architecture / quality non-regression; architecture fitness/complexity budgets; provider-neutral replacement principles.
+
+**Runlith differentiation:** Scope retirement metadata only to replaceable compensating mechanisms and require reproducible evidence before deletion. Security, authority, durability, audit and verification invariants are excluded from model-capability retirement logic.
+
+## P-030 — Evaluation environment is part of verification evidence identity
+
+**Pattern:** Bind evaluation results to the materially relevant harness/runtime environment and treat hidden-answer or benchmark contamination as an evidence-integrity failure. Network/tool/resource access used during evaluation is part of what was measured, not invisible infrastructure.
+
+**Source repository:** `ai-boost/awesome-harness-engineering`
+
+**Source revision:** `9c0dd218b5db8a4f38e82607276f72d98f266ad3`
+
+**Evidence:** curated research annotations in `README.md:565-575` summarize environment-sensitive agent evals, model-harness pairing as the measurement unit and a documented benchmark-answer leakage case in a web-enabled environment. Direct repository evidence reinforces the reproducibility concern: `verify_urls.py:18-25` depends on undeclared `aiohttp`, and the frozen checkout failed to start in the review environment because that dependency was absent.
+
+**Problem solved:** A pass/score can be non-comparable or invalid when resource limits, tools, network access, harness configuration or access to held-out evidence differ between runs.
+
+**Mechanism:** version/fingerprint the relevant evaluator environment; constrain network/tool/fixture access according to evaluation policy; mark evidence contaminated/invalid when forbidden answer channels are used or provenance cannot be established.
+
+**Tradeoffs:** Over-fingerprinting makes results needlessly incomparable; blanket network isolation breaks legitimate integration tests. The contract must distinguish properties that affect evidence validity from ordinary telemetry and choose isolation by task/eval policy.
+
+**Runlith status:** `NEEDS_ADR`. Subject/toolchain/config fingerprints, hardware/runtime provenance, independent Evaluation and Policy/Runner isolation are already designed. No accepted G8 contract was found for evaluator environment identity, held-out evidence visibility, network/tool contamination policy or tainted-result semantics.
+
+**Decision:** `ADAPT`.
+
+**Relevant Runlith architecture:** ADR-0018; G8 Verification/Evaluation; Adaptive Model Router runtime/benchmark provenance; `INV-062`, `INV-080`; Policy/Runner isolation.
+
+**Runlith differentiation:** Keep the environment contract provider-neutral and completion-authoritative: evaluator profile + Policy/Runner/isolation evidence + subject/toolchain/config/fixture provenance, with contamination unable to produce a trusted VERIFIED verdict.
