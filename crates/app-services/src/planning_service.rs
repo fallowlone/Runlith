@@ -1139,9 +1139,17 @@ impl<C: Clock> PlanningService<C> {
         let risk_escalated = match validate_proposal(&base_graph, &proposal, &validation) {
             ValidationOutcome::Refused(refusal) => {
                 if let Some(limit) = refusal.limit_detail() {
-                    return Ok(PlanningProposalOutcome::GuardrailTripped(
-                        GuardrailTrip::new(limit.which, limit.observed),
-                    ));
+                    return self.record_rejection_with_human_intervention(
+                        branch,
+                        &trigger_key,
+                        PlanningProposalOutcome::GuardrailTripped(GuardrailTrip::new(
+                            limit.which,
+                            limit.observed,
+                        )),
+                        policy,
+                        &snapshot,
+                        &proposal.source_evidence_refs,
+                    );
                 }
                 if matches!(refusal, ValidationRefusal::RiskGateOpen { .. }) {
                     // A caller that already supplied a grant reached V9 with
