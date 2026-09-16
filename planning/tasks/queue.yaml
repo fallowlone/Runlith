@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0080
+completed_through: TASK-0081
 current_gate: G7
-gate_status: IN_PROGRESS  # G7 breakdown materialized (TASK-0075..0081); implementation starts at TASK-0075 contract
+gate_status: IN_PROGRESS  # TASK-0081: G7_REMEDIATION_REQUIRED; G7-BLOCKER-01..04 remain
 
 items:
   - id: TASK-0012
@@ -1580,8 +1580,31 @@ items:
     scope: Audit only; no repairs, no implementation, no G8 scope.
     exit_criteria_summary: A closure audit report exists with an explicit
       overall status.
+    outcome: >-
+      G7_REMEDIATION_REQUIRED. Static gates green (check, clippy -D warnings,
+      fmt, diff check); cargo test --workspace green 1 of 3 runs (118 suites /
+      1022 passed / 2 ignored opt-in real-Claude smokes), the other two red
+      only from the unmerged TEST-H orphan-daemon harness race (F-09). V1-V9
+      order, atomic revision+journal commits, head/input/run publication
+      fencing, durable spend/L3 accounting, accepted-Plan execution admission
+      and G5/G6 launch boundaries independently re-verified. Closure blockers
+      reproduced by external auditor probes and shipped binaries:
+      G7-BLOCKER-01 planner-chosen node ids bind to canonical Tasks outside the
+      parent scope (blocks or admits unrelated Tasks); G7-BLOCKER-02 no shipped
+      IPC/agentctl path plans or applies human continuations, so shipped
+      RunExecution always refuses (ADR-0016/ADR-0028 §5); G7-BLOCKER-03
+      stale/expired/failed-continuation HumanDecisionRequests permanently wedge
+      their scope; G7-BLOCKER-04 V9 RESUME cannot publish with the measured-
+      receipt production planner. Findings F-01..F-09 recorded (F-09 is a
+      verification-gate prerequisite).
+      No repair implemented; nothing merged. Record:
+      docs/development/G7_CLOSURE_AUDIT.md.
     depends_on:
       - TASK-0080
     blocked_by: []
     references:
       - AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md
+      - docs/development/G7_FAILURE_MATRIX.md
+      - docs/development/G7_CLOSURE_AUDIT.md
