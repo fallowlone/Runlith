@@ -38,20 +38,25 @@ pub const IPC_PROTOCOL_VERSION_V4: u32 = 4;
 /// G7 planning operations: trusted planning trigger and continuation apply.
 pub const IPC_PROTOCOL_VERSION_V5: u32 = 5;
 
+/// G7 Task authoring (TASK-0084): creates a Task together with its canonical
+/// planning metadata through the bounded `task_authoring_core` envelope.
+pub const IPC_PROTOCOL_VERSION_V6: u32 = 6;
+
 /// Current IPC protocol version: the highest version this build speaks.
-pub const IPC_PROTOCOL_VERSION: u32 = IPC_PROTOCOL_VERSION_V5;
+pub const IPC_PROTOCOL_VERSION: u32 = IPC_PROTOCOL_VERSION_V6;
 
 /// Alias making "current" explicit at call sites.
-pub const IPC_PROTOCOL_VERSION_CURRENT: u32 = IPC_PROTOCOL_VERSION_V5;
+pub const IPC_PROTOCOL_VERSION_CURRENT: u32 = IPC_PROTOCOL_VERSION_V6;
 
 /// Every protocol version this build negotiates, oldest first.
-pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 6] = [
+pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 7] = [
     IPC_PROTOCOL_VERSION_V0,
     IPC_PROTOCOL_VERSION_V1,
     IPC_PROTOCOL_VERSION_V2,
     IPC_PROTOCOL_VERSION_V3,
     IPC_PROTOCOL_VERSION_V4,
     IPC_PROTOCOL_VERSION_V5,
+    IPC_PROTOCOL_VERSION_V6,
 ];
 
 /// Maximum length of a client-supplied human/request `reason` (block
@@ -98,6 +103,7 @@ pub fn supports_business_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V3
             | IPC_PROTOCOL_VERSION_V4
             | IPC_PROTOCOL_VERSION_V5
+            | IPC_PROTOCOL_VERSION_V6
     )
 }
 
@@ -112,6 +118,7 @@ pub fn supports_execution_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V3
             | IPC_PROTOCOL_VERSION_V4
             | IPC_PROTOCOL_VERSION_V5
+            | IPC_PROTOCOL_VERSION_V6
     )
 }
 
@@ -121,25 +128,39 @@ pub fn supports_execution_ipc(negotiated_version: u32) -> bool {
 pub fn supports_policy_ipc(negotiated_version: u32) -> bool {
     matches!(
         negotiated_version,
-        IPC_PROTOCOL_VERSION_V3 | IPC_PROTOCOL_VERSION_V4 | IPC_PROTOCOL_VERSION_V5
+        IPC_PROTOCOL_VERSION_V3
+            | IPC_PROTOCOL_VERSION_V4
+            | IPC_PROTOCOL_VERSION_V5
+            | IPC_PROTOCOL_VERSION_V6
     )
 }
 
 /// Reports whether a negotiated session carries G7 Human Decision Queue
-/// observation/resolution authority. Version 4 introduced it and v5
-/// preserves it.
+/// observation/resolution authority. Version 4 introduced it and every later
+/// version preserves it.
 #[must_use]
 pub fn supports_human_decision_ipc(negotiated_version: u32) -> bool {
     matches!(
         negotiated_version,
-        IPC_PROTOCOL_VERSION_V4 | IPC_PROTOCOL_VERSION_V5
+        IPC_PROTOCOL_VERSION_V4 | IPC_PROTOCOL_VERSION_V5 | IPC_PROTOCOL_VERSION_V6
     )
 }
 
 /// Planning operations are new authority and are never enabled for v0-v4.
+/// Version 6 preserves them.
 #[must_use]
 pub fn supports_planning_ipc(negotiated_version: u32) -> bool {
-    negotiated_version == IPC_PROTOCOL_VERSION_V5
+    matches!(
+        negotiated_version,
+        IPC_PROTOCOL_VERSION_V5 | IPC_PROTOCOL_VERSION_V6
+    )
+}
+
+/// Task planning-metadata authoring is new authority and is never enabled for
+/// v0-v5, whose `CreateTaskRequest` keeps its original objective-only shape.
+#[must_use]
+pub fn supports_task_authoring_ipc(negotiated_version: u32) -> bool {
+    negotiated_version == IPC_PROTOCOL_VERSION_V6
 }
 
 #[cfg(test)]
@@ -163,28 +184,31 @@ mod tests {
     }
 
     #[test]
-    fn historical_versions_remain_supported_and_v5_is_current() {
+    fn historical_versions_remain_supported_and_v6_is_current() {
         assert_eq!(IPC_PROTOCOL_VERSION_V0, 0);
         assert_eq!(IPC_PROTOCOL_VERSION_V1, 1);
         assert_eq!(IPC_PROTOCOL_VERSION_V2, 2);
         assert_eq!(IPC_PROTOCOL_VERSION_V3, 3);
         assert_eq!(IPC_PROTOCOL_VERSION_V5, 5);
-        assert_eq!(IPC_PROTOCOL_VERSION, 5);
-        assert_eq!(IPC_PROTOCOL_VERSION_CURRENT, 5);
-        assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, [0, 1, 2, 3, 4, 5]);
+        assert_eq!(IPC_PROTOCOL_VERSION_V6, 6);
+        assert_eq!(IPC_PROTOCOL_VERSION, 6);
+        assert_eq!(IPC_PROTOCOL_VERSION_CURRENT, 6);
+        assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, [0, 1, 2, 3, 4, 5, 6]);
         assert!(is_supported_version(0));
         assert!(is_supported_version(1));
         assert!(is_supported_version(2));
         assert!(is_supported_version(3));
         assert!(is_supported_version(4));
         assert!(is_supported_version(5));
-        assert!(!is_supported_version(6));
+        assert!(is_supported_version(6));
+        assert!(!is_supported_version(7));
         assert!(is_compatible(0));
         assert!(is_compatible(1));
         assert!(is_compatible(2));
         assert!(is_compatible(3));
         assert!(is_compatible(4));
         assert!(is_compatible(5));
+        assert!(is_compatible(6));
     }
 
     #[test]
@@ -211,6 +235,23 @@ mod tests {
         assert!(!supports_planning_ipc(IPC_PROTOCOL_VERSION_V4));
         assert!(supports_planning_ipc(IPC_PROTOCOL_VERSION_V5));
         assert!(!supports_human_decision_ipc(99));
+    }
+
+    #[test]
+    fn v6_adds_task_authoring_without_granting_it_to_historical_sessions() {
+        for historical in IPC_PROTOCOL_VERSION_V0..=IPC_PROTOCOL_VERSION_V5 {
+            assert!(
+                !supports_task_authoring_ipc(historical),
+                "v{historical} never gains Task authoring authority"
+            );
+        }
+        assert!(supports_task_authoring_ipc(IPC_PROTOCOL_VERSION_V6));
+        assert!(!supports_task_authoring_ipc(99));
+        assert!(supports_business_ipc(IPC_PROTOCOL_VERSION_V6));
+        assert!(supports_execution_ipc(IPC_PROTOCOL_VERSION_V6));
+        assert!(supports_policy_ipc(IPC_PROTOCOL_VERSION_V6));
+        assert!(supports_human_decision_ipc(IPC_PROTOCOL_VERSION_V6));
+        assert!(supports_planning_ipc(IPC_PROTOCOL_VERSION_V6));
     }
 
     #[test]

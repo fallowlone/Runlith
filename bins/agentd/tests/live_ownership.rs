@@ -155,6 +155,7 @@ fn seed_accepted_plan(db: &Path, task: &str) {
         baseline_risk: plan_domain::RiskClass::Low,
         affected_parent_criteria: vec![],
         parent_task_ref: task.to_owned(),
+        canonical_task_authority: false,
         lineage_fingerprints: vec![],
         risk_grant: None,
         risk_decision_id: None,

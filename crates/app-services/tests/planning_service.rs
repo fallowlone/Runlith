@@ -540,6 +540,7 @@ fn policy(with_criterion: bool) -> PlanningPolicyContext {
             vec![]
         },
         parent_task_ref: "TASK-0078".to_owned(),
+        canonical_task_authority: false,
         lineage_fingerprints: vec![],
         risk_grant: None,
         risk_decision_id: None,

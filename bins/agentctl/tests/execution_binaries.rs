@@ -254,6 +254,7 @@ fn seed_accepted_plan(sandbox: &Sandbox, task: &str) {
         baseline_risk: plan_domain::RiskClass::Low,
         affected_parent_criteria: vec![],
         parent_task_ref: task.to_owned(),
+        canonical_task_authority: false,
         lineage_fingerprints: vec![],
         risk_grant: None,
         risk_decision_id: None,
@@ -268,28 +269,42 @@ fn seed_accepted_plan(sandbox: &Sandbox, task: &str) {
     ));
 }
 
-fn seed_planning_task_metadata(
+/// Authors a planning Task through the shipped protocol-v6 control plane
+/// (`agentctl task create-planned`) and declares it READY. No SQLite access:
+/// the daemon's TaskService validates and commits the canonical metadata.
+fn author_ready_planning_task(
     sandbox: &Sandbox,
+    project: &str,
     task: &str,
     scope: &str,
     criterion: &str,
     risk: &str,
 ) {
-    let db = sandbox.root.join("data/ai-engineering-os/state.sqlite3");
-    let mut store = storage_sqlite::SqliteStore::open(&db).expect("open canonical task store");
-    let task_id = task_domain::TaskId::new(task).expect("task id");
-    let task = store
-        .get_task(&task_id)
-        .expect("canonical task query")
-        .expect("canonical task");
-    let mut snapshot = task.snapshot();
-    snapshot.allowed_paths = vec![scope.to_owned()];
-    snapshot.acceptance = vec![criterion.to_owned()];
-    snapshot.risk = Some(risk.to_owned());
-    let task = task_domain::Task::restore(snapshot).expect("canonical planning task metadata");
-    store
-        .save_task(&task)
-        .expect("persist canonical task metadata");
+    let created = sandbox.agentctl(&["project", "create", project, &format!("project {project}")]);
+    assert!(created.status.success(), "project: {}", stderr(&created));
+    let authored = sandbox.agentctl(&[
+        "task",
+        "create-planned",
+        task,
+        project,
+        "planning",
+        "fixture",
+        "--scope",
+        scope,
+        "--acceptance",
+        criterion,
+        "--risk",
+        risk,
+    ]);
+    assert!(authored.status.success(), "author: {}", stderr(&authored));
+    assert_eq!(
+        stdout(&authored).trim(),
+        format!(
+            "task {task} {project} DRAFT \"planning fixture\" scope={scope} acceptance={criterion} risk={risk}"
+        )
+    );
+    let ready = sandbox.agentctl(&["task", "ready", task]);
+    assert!(ready.status.success(), "ready: {}", stderr(&ready));
 }
 
 fn seed_human_decision(sandbox: &Sandbox, task: &str) -> String {
@@ -796,13 +811,14 @@ fn v5_planning_cli_publishes_an_accepted_plan_then_admits_execution() {
     let _daemon = DaemonGuard::spawn(&sandbox);
     sandbox.wait_ready();
 
-    let project = sandbox.agentctl(&["project", "create", "P-PLAN", "planning fixture"]);
-    assert!(project.status.success(), "project: {}", stderr(&project));
-    let task = sandbox.agentctl(&["task", "create", "T-PLAN", "P-PLAN", "plan fixture"]);
-    assert!(task.status.success(), "task: {}", stderr(&task));
-    let ready = sandbox.agentctl(&["task", "ready", "T-PLAN"]);
-    assert!(ready.status.success(), "ready: {}", stderr(&ready));
-    seed_planning_task_metadata(&sandbox, "T-PLAN", "repo:src", "criterion-root", "low");
+    author_ready_planning_task(
+        &sandbox,
+        "P-PLAN",
+        "T-PLAN",
+        "repo:src",
+        "criterion-root",
+        "low",
+    );
 
     let planning = sandbox.agentctl(&[
         "planning",
@@ -847,18 +863,198 @@ fn v5_planning_cli_publishes_an_accepted_plan_then_admits_execution() {
 }
 
 #[test]
+fn v6_authored_task_plans_and_executes_without_sqlite_authority_seeding() {
+    let sandbox = Sandbox::new("v6-authored-flow", PLANNING_BODY);
+    let _daemon = DaemonGuard::spawn(&sandbox);
+    sandbox.wait_ready();
+
+    let project = sandbox.agentctl(&["project", "create", "P-V6", "authoring fixture"]);
+    assert!(project.status.success(), "project: {}", stderr(&project));
+
+    // Invalid authoring is refused by the daemon's TaskService and persists
+    // nothing: the id stays free for a valid request.
+    for invalid in [
+        &[
+            "--scope",
+            "repo:src",
+            "--acceptance",
+            "criterion-root",
+            "--risk",
+            "severe",
+        ][..],
+        &[
+            "--scope",
+            "repo:../escape",
+            "--acceptance",
+            "criterion-root",
+            "--risk",
+            "low",
+        ][..],
+        &["--acceptance", "criterion-root", "--risk", "low"][..],
+        &["--scope", "repo:src", "--risk", "low"][..],
+    ] {
+        let mut args = vec!["task", "create-planned", "T-PLAN", "P-V6", "flow"];
+        args.extend_from_slice(invalid);
+        let refused = sandbox.agentctl(&args);
+        assert!(!refused.status.success(), "{invalid:?} must be refused");
+        assert!(
+            stderr(&refused).contains("INVALID_ARGUMENT"),
+            "{invalid:?}: {}",
+            stderr(&refused)
+        );
+        let missing = sandbox.agentctl(&["task", "get", "T-PLAN"]);
+        assert!(
+            stderr(&missing).contains("NOT_FOUND"),
+            "{invalid:?} persisted"
+        );
+    }
+    let usage = sandbox.agentctl(&[
+        "task",
+        "create-planned",
+        "T-PLAN",
+        "P-V6",
+        "flow",
+        "--scope",
+    ]);
+    assert!(!usage.status.success());
+    assert!(stderr(&usage).contains("usage: agentctl task create-planned"));
+
+    // A historical objective-only Task has no planning authority to derive.
+    let legacy = sandbox.agentctl(&["task", "create", "T-LEGACY", "P-V6", "legacy"]);
+    assert!(legacy.status.success(), "legacy: {}", stderr(&legacy));
+    let unplannable = sandbox.agentctl(&["planning", "trigger", "T-LEGACY", "B-LEGACY", "e:1"]);
+    assert!(!unplannable.status.success());
+    assert!(
+        stderr(&unplannable).contains("has no authorized scope"),
+        "legacy planning: {}",
+        stderr(&unplannable)
+    );
+
+    author_ready_planning_task(
+        &sandbox,
+        "P-V6-FLOW",
+        "T-PLAN",
+        "repo:src",
+        "criterion-root",
+        "low",
+    );
+    let duplicate = sandbox.agentctl(&[
+        "task",
+        "create-planned",
+        "T-PLAN",
+        "P-V6",
+        "rewrite",
+        "--scope",
+        "repo:everything",
+        "--acceptance",
+        "criterion-root",
+        "--risk",
+        "critical",
+    ]);
+    assert!(
+        !duplicate.status.success(),
+        "authored intent cannot be rewritten"
+    );
+    assert!(
+        stderr(&duplicate).contains("ALREADY_EXISTS"),
+        "{}",
+        stderr(&duplicate)
+    );
+    let read = sandbox.agentctl(&["task", "get", "T-PLAN"]);
+    assert!(read.status.success(), "get: {}", stderr(&read));
+    assert!(
+        stdout(&read).contains("task T-PLAN P-V6-FLOW READY"),
+        "{}",
+        stdout(&read)
+    );
+
+    let planning = sandbox.agentctl(&["planning", "trigger", "T-PLAN", "B-V6", "fixture:v6"]);
+    assert!(planning.status.success(), "planning: {}", stderr(&planning));
+    assert!(
+        stdout(&planning).contains("planning ACCEPTED branch=B-V6 revision=1"),
+        "planning output: {}",
+        stdout(&planning)
+    );
+
+    let run = sandbox.agentctl(&[
+        "execution",
+        "run",
+        "T-PLAN",
+        &sandbox.repo.display().to_string(),
+        "--execution",
+        "E-V6",
+        "--attempt",
+        "A-V6",
+    ]);
+    assert!(run.status.success(), "execution: {}", stderr(&run));
+    let status = sandbox.agentctl(&["execution", "status", "E-V6"]);
+    assert!(status.status.success(), "status: {}", stderr(&status));
+    assert!(
+        stdout(&status).contains("execution E-V6"),
+        "{}",
+        stdout(&status)
+    );
+
+    // Read-only durable assertions. Every authority write above travelled
+    // through agentctl -> agentd -> TaskService/PlanningService.
+    let db = sandbox.root.join("data/ai-engineering-os/state.sqlite3");
+    let store = storage_sqlite::SqliteStore::open(&db).expect("assertion store");
+    let task_id = task_domain::TaskId::new("T-PLAN").unwrap();
+    let facts = store.get_task(&task_id).unwrap().expect("task").snapshot();
+    assert_eq!(facts.allowed_paths, ["repo:src"]);
+    assert_eq!(facts.acceptance, ["criterion-root"]);
+    assert_eq!(facts.risk.as_deref(), Some("low"));
+    let task_events: Vec<_> = store
+        .list_events_for_task(&task_id)
+        .unwrap()
+        .into_iter()
+        .map(|event| event.fact.event_type.as_str())
+        .collect();
+    assert_eq!(
+        &task_events[..2],
+        ["task.created", "task.marked_ready"],
+        "authoring is creation evidence; no out-of-band metadata write exists"
+    );
+    let planning = app_services::PlanningService::open(&db, app_services::SystemClock)
+        .expect("assertion planning service");
+    let branch = plan_domain::PlanBranchId::new("B-V6").unwrap();
+    let accepted = planning
+        .current_accepted_plan(&branch)
+        .unwrap()
+        .expect("accepted plan");
+    let fingerprint = accepted.revision().validated_by.policy_fingerprint.clone();
+    let canonical = planning
+        .canonical_policy_context(&task_id, fingerprint.clone())
+        .expect("canonical authority");
+    assert!(planning
+        .store()
+        .planning_input_policy_matches(
+            accepted.planning_input_snapshot_id(),
+            "T-PLAN",
+            &canonical.scope_bound,
+            canonical.baseline_risk,
+            &canonical.affected_parent_criteria,
+            &canonical.lineage_fingerprints,
+            None,
+            &fingerprint,
+        )
+        .unwrap());
+}
+
+#[test]
 fn v5_planning_cli_applies_risk_resume_without_replaying_the_planner() {
     let sandbox = Sandbox::new("v5-risk-resume-cli", RISK_PLANNING_BODY);
     let _daemon = DaemonGuard::spawn(&sandbox);
     sandbox.wait_ready();
 
-    let project = sandbox.agentctl(&["project", "create", "P-RISK", "risk fixture"]);
-    assert!(project.status.success(), "project: {}", stderr(&project));
-    let task = sandbox.agentctl(&["task", "create", "T-RISK", "P-RISK", "risk fixture"]);
-    assert!(task.status.success(), "task: {}", stderr(&task));
-    let ready = sandbox.agentctl(&["task", "ready", "T-RISK"]);
-    assert!(ready.status.success(), "ready: {}", stderr(&ready));
-    seed_planning_task_metadata(&sandbox, "T-RISK", "repo:src", "criterion-root", "low");
+    author_ready_planning_task(
+        &sandbox,
+        "P-RISK",
+        "T-RISK",
+        "repo:src",
+        "criterion-root",
+        "low",
+    );
 
     let planning = sandbox.agentctl(&["planning", "trigger", "T-RISK", "B-RISK", "fixture:risk"]);
     assert!(planning.status.success(), "planning: {}", stderr(&planning));
@@ -911,14 +1107,9 @@ fn v5_planning_ignores_client_authored_authority_and_persists_canonical_task_pol
     let _daemon = DaemonGuard::spawn(&sandbox);
     sandbox.wait_ready();
 
-    let project = sandbox.agentctl(&["project", "create", "P-AUTH", "authority fixture"]);
-    assert!(project.status.success(), "project: {}", stderr(&project));
-    let task = sandbox.agentctl(&["task", "create", "T-AUTH", "P-AUTH", "authority fixture"]);
-    assert!(task.status.success(), "task: {}", stderr(&task));
-    let ready = sandbox.agentctl(&["task", "ready", "T-AUTH"]);
-    assert!(ready.status.success(), "ready: {}", stderr(&ready));
-    seed_planning_task_metadata(
+    author_ready_planning_task(
         &sandbox,
+        "P-AUTH",
         "T-AUTH",
         "repo:canonical",
         "criterion-canonical",

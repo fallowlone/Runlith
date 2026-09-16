@@ -1713,3 +1713,51 @@ items:
       - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
       - docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md
       - docs/development/G7_CLOSURE_AUDIT.md
+
+  - id: TASK-0084
+    gate: G7
+    title: G7 Closure Remediation III
+    objective: Remediate the two remaining independent TASK-0083 re-audit
+      blockers by fencing Plan publication against canonical Task authority
+      changes made while PlannerPort runs (Case G), and by shipping a typed,
+      trusted Task-authoring control-plane path for the scope, acceptance
+      obligations and baseline risk that G7 planning derives authority from.
+    scope: >-
+      Bounded G7 remediation only: in-transaction canonical Task authority
+      publication fence, shared pure Task planning-authority derivation,
+      DRAFT-only Task planning-metadata domain operation, TaskService
+      creation-time authoring, protocol-v6 task_authoring_core IPC, agentd
+      dispatch, agentctl task create-planned, directly related tests, the
+      ADR-0028 amendment and governance bookkeeping. No G8/G9, UI, Council,
+      general Task editing, provider expansion, or unrelated G6 change.
+    exit_criteria_summary: Scope, acceptance, risk, forbidden-path and
+      candidate-Task drift during or before a planner call fails publication
+      closed with no Plan head, revision or Human Decision consumption; V9
+      RESUME and REPLAN re-derive canonical authority; shipped agentctl/agentd
+      author canonical planning metadata and reach an accepted Plan and
+      execution admission with no direct SQLite authority seeding; historical
+      protocols gain no authority; mandatory workspace verification is green;
+      branch is committed and ready for independent G7 re-audit.
+    outcome: >-
+      READY_FOR_INDEPENDENT_G7_REAUDIT. Plan publication for Task-derived
+      planning contexts now re-derives Task-owned scope/acceptance/risk and the
+      trusted candidate Task set through the Task repository inside the same
+      BEGIN IMMEDIATE transaction and refuses any mismatch, missing Task or
+      underivable metadata as PlanningInputStale before any Plan or Human
+      Decision write. One pure plan-domain derivation is shared by policy
+      derivation, the fence and authoring validation. Protocol v6 adds
+      task_authoring_core CreatePlanningTask: TaskService authors bounded
+      DRAFT metadata that must derive into planning authority and commits it
+      with server-minted task.created evidence; no edit path exists and v0-v5
+      authority is unchanged. Shipped-binary G7 tests no longer seed Task
+      metadata through SQLite. The audit-created uncommitted TASK-0083
+      candidate patch was reviewed and redesigned rather than committed.
+      TASK-0084 does not declare G7 closed.
+    depends_on:
+      - TASK-0083
+    blocked_by: []
+    references:
+      - AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
+      - docs/architecture/adr/ADR-0016-agentctl-before-complex-ui.md
+      - docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md
+      - docs/development/G7_CLOSURE_AUDIT.md

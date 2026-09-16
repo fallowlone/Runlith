@@ -11,8 +11,9 @@
 
 use std::path::Path;
 
+use plan_domain::{PlanDomainError, TaskPlanningAuthority};
 use storage_sqlite::{EventType, JournalEvent, NewJournalEvent, SqliteStore, StorageError};
-use task_domain::{Project, ProjectId, Task, TaskId, TransitionCommand};
+use task_domain::{DomainError, Project, ProjectId, Task, TaskId, TransitionCommand};
 
 use crate::clock::{format_rfc3339, Clock, SystemClock};
 use crate::error::{ServiceError, ServiceResult};
@@ -114,6 +115,37 @@ impl<C: Clock> TaskService<C> {
             "create_task",
         );
         Ok(self.store.create_task_with_event(task, &event)?)
+    }
+
+    /// Creates a DRAFT Task whose canonical planning metadata — allowed
+    /// scope, acceptance obligations and baseline risk — commits atomically
+    /// with its `task.created` evidence (TASK-0084). The metadata must derive
+    /// into G7 planning authority through the same derivation that planning
+    /// and Plan publication use, so nothing underivable is ever persisted.
+    /// The control plane exposes no later edit of this intent.
+    pub fn create_planning_task(
+        &mut self,
+        id: TaskId,
+        project_id: ProjectId,
+        objective: impl Into<String>,
+        allowed_paths: Vec<String>,
+        acceptance: Vec<String>,
+        baseline_risk: impl Into<String>,
+    ) -> ServiceResult<(Task, JournalEvent)> {
+        let mut task = Task::draft(id, project_id, objective)?;
+        task.define_planning_metadata(allowed_paths, acceptance, baseline_risk)?;
+        let facts = task.snapshot();
+        TaskPlanningAuthority::derive(
+            &facts.allowed_paths,
+            &facts.forbidden_paths,
+            &facts.acceptance,
+            facts.risk.as_deref(),
+        )
+        .map_err(|PlanDomainError::InvalidInput(detail)| {
+            DomainError::InvalidInput(format!("planning metadata {detail}"))
+        })?;
+        let event = self.create_task(&task)?;
+        Ok((task, event))
     }
 
     /// Adds `task_id depends on depends_on_id` together with its

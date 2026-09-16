@@ -18,6 +18,7 @@ pub mod ids;
 pub mod model;
 pub mod risk;
 pub mod scope;
+pub mod task_authority;
 pub mod validation;
 
 pub use control::PlanningInputSnapshot;
@@ -49,6 +50,7 @@ pub use model::{
 };
 pub use risk::{CriterionDecl, GateRef, RiskClass, RiskDelta, VerificationMethod};
 pub use scope::{PlanScope, ScopeBound};
+pub use task_authority::{trusted_candidate_task_refs, TaskPlanningAuthority};
 pub use validation::{
     validate_proposal, AffectedParentCriterion, LimitDetail, RiskEscalationGrant,
     ValidationContext, ValidationOutcome, ValidationRefusal,

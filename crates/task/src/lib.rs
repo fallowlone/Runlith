@@ -32,4 +32,7 @@ pub use error::DomainError;
 pub use id::{ProjectId, TaskId};
 pub use project::Project;
 pub use state::{can_transition, TaskState, ACCEPTED_TRANSITIONS};
-pub use task::{Task, TaskSnapshot, TransitionCommand};
+pub use task::{
+    Task, TaskSnapshot, TransitionCommand, MAX_TASK_ACCEPTANCE, MAX_TASK_ALLOWED_PATHS,
+    MAX_TASK_METADATA_ITEM_LEN,
+};

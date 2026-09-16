@@ -974,6 +974,97 @@ fn superseded_planning_run_generation_cannot_publish_a_revision() {
 }
 
 #[test]
+fn canonical_task_authority_fence_rechecks_task_facts_inside_publication_transaction() {
+    let db = TestDb::new("canonical-task-authority-fence");
+    let mut store = db.open();
+    let project = ProjectId::new("project-authority").unwrap();
+    store
+        .create_project(&Project::new(project.clone(), "authority".to_owned()).unwrap())
+        .unwrap();
+    let mut root = Task::draft(TaskId::new("task-root").unwrap(), project, "root").unwrap();
+    root.define_planning_metadata(
+        vec!["repo:src".to_owned()],
+        vec!["criterion-root".to_owned()],
+        "low",
+    )
+    .unwrap();
+    store.create_task(&root).unwrap();
+
+    let branch = PlanBranchId::new("branch-authority").unwrap();
+    let changeset = changeset(0, "first revision", &[evidence("attempt-1")]);
+    let revision = revision(&branch, 1, &changeset);
+    let trigger_evidence = changeset.source_evidence_refs.clone();
+    let trigger_key = planning_evidence_key(&trigger_evidence);
+    let attempt = |store: &mut SqliteStore, task_ref: &str, created_at: u64| {
+        let snapshot = PlanningInputSnapshot::new_with_candidates(
+            branch.clone(),
+            task_ref.to_owned(),
+            vec![task_ref.to_owned()],
+            0,
+            ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+            RiskClass::Low,
+            vec![plan_domain::AffectedParentCriterion {
+                id: cid("criterion-root"),
+                method: VerificationMethod::AutomatedTest,
+            }],
+            trigger_evidence.clone(),
+            vec![],
+            None,
+            revision.validated_by.policy_fingerprint.clone(),
+        )
+        .unwrap();
+        let run = store
+            .start_planning_run(&snapshot, &trigger_key, created_at)
+            .unwrap();
+        let lineage = PlanRevisionLineage {
+            parent_task_ref: task_ref.to_owned(),
+            trigger_evidence_key: trigger_key.clone(),
+            planning_input_snapshot_id: snapshot.id,
+            planning_input_fingerprint: snapshot.input_fingerprint,
+            planning_run_id: run.id,
+            planning_run_generation: run.generation,
+        };
+        store.commit_plan_revision_with_human_decision(
+            &changeset,
+            &revision,
+            &graph_v1(),
+            &lineage,
+            &journal_evidence(1),
+            None,
+            true,
+        )
+    };
+    let assert_unpublished = |store: &SqliteStore| {
+        assert_eq!(store.get_plan_head(&branch).unwrap(), None);
+        assert!(!store
+            .list_events_ordered()
+            .unwrap()
+            .iter()
+            .any(|event| event.fact.event_type == EventType::PlanRevisionCommitted));
+    };
+
+    let missing = attempt(&mut store, "task-missing", revision.created_at - 4)
+        .expect_err("a snapshot for a nonexistent canonical Task cannot publish");
+    assert!(matches!(missing, StorageError::PlanningInputStale { .. }));
+    assert_unpublished(&store);
+
+    let mut drifted = root.snapshot();
+    drifted.risk = Some("medium".to_owned());
+    store.save_task(&Task::restore(drifted).unwrap()).unwrap();
+    let stale = attempt(&mut store, "task-root", revision.created_at - 3)
+        .expect_err("changed canonical risk fences publication");
+    assert!(matches!(stale, StorageError::PlanningInputStale { .. }));
+    assert_unpublished(&store);
+
+    // Values, not write history, are the authority: restoring the exact
+    // facts the snapshot captured makes the same publication current again.
+    store.save_task(&root).unwrap();
+    attempt(&mut store, "task-root", revision.created_at - 2)
+        .expect("current canonical authority publishes");
+    assert_eq!(store.get_plan_head(&branch).unwrap(), Some(1));
+}
+
+#[test]
 fn risk_decision_consumption_rolls_back_when_plan_commit_fails_then_consumes_on_retry() {
     let db = TestDb::new("human-risk-atomic-rollback");
     let mut store = db.open();
@@ -1095,6 +1186,7 @@ fn risk_decision_consumption_rolls_back_when_plan_commit_fails_then_consumes_on_
             &lineage,
             &journal_evidence(1),
             Some(&decision.id),
+            false,
         )
         .expect_err("missing receipt fails after tentative decision consumption");
     assert!(matches!(error, StorageError::ConstraintViolation(_)));
@@ -1117,6 +1209,7 @@ fn risk_decision_consumption_rolls_back_when_plan_commit_fails_then_consumes_on_
             &lineage,
             &journal_evidence(1),
             Some(&decision.id),
+            false,
         )
         .expect("successful retry atomically publishes and consumes");
     assert_eq!(store.get_plan_head(&branch).unwrap(), Some(1));
