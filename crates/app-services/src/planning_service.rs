@@ -25,14 +25,14 @@ use std::path::Path;
 
 use plan_domain::{
     call_within_envelope, l3_no_progress_tripped, planning_evidence_key, validate_proposal,
-    AffectedParentCriterion, AtomicityAssessment, AtomicityBlocker, AtomicityRequest,
+    AffectedParentCriterion, AtomicityAssessment, AtomicityBlocker, AtomicityRequest, CriterionId,
     DecompositionRequest, EvidenceRef, GuardrailTrip, HumanContinuation, HumanDecisionReason,
     HumanDecisionRequest, HumanDecisionRequestId, HumanDecisionStatus, PlanBranchId, PlanChangeSet,
     PlanDomainError, PlanGraph, PlanRevision, PlannerCallSpend, PlannerFault, PlannerPort,
     PlanningBudget, PlanningCostReceipt, PlanningCostReceiptRef, PlanningInputSnapshot,
     PlanningInputSnapshotId, ReplanRequest, RevisionProposedBy, RiskClass, RiskEscalationGrant,
     ScopeBound, ValidatedBy, ValidationContext, ValidationOutcome, ValidationRefusal,
-    MAX_DECOMPOSITION_DEPTH, MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
+    VerificationMethod, MAX_DECOMPOSITION_DEPTH, MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
     MAX_PLANNER_CUMULATIVE_INPUT_TOKENS, MAX_PLANNER_INPUT_TOKENS, MAX_PLANNER_OUTPUT_TOKENS,
     MAX_PLANNER_WALL_CLOCK_SECS, MAX_REVISIONS_PER_CYCLE_PER_BRANCH,
 };
@@ -273,6 +273,86 @@ pub struct PlanningService<C: Clock = SystemClock> {
 }
 
 impl<C: Clock> PlanningService<C> {
+    /// Re-derives the trusted planning authority for `task_id` from canonical
+    /// product state. IPC/provider input is deliberately absent from this
+    /// API: Task owns scope/acceptance/risk while Policy owns the fingerprint.
+    pub fn canonical_policy_context(
+        &self,
+        task_id: &TaskId,
+        policy_fingerprint: impl Into<String>,
+    ) -> Result<PlanningPolicyContext, PlanningServiceError> {
+        let task = self.store.get_task(task_id)?.ok_or_else(|| {
+            PlanningServiceError::InvalidContext(format!(
+                "canonical planning Task {} does not exist",
+                task_id.as_str()
+            ))
+        })?;
+        let snapshot = task.snapshot();
+        if snapshot.allowed_paths.is_empty() {
+            return Err(PlanningServiceError::InvalidContext(format!(
+                "canonical planning Task {} has no authorized scope",
+                task_id.as_str()
+            )));
+        }
+        if !snapshot.forbidden_paths.is_empty() {
+            return Err(PlanningServiceError::InvalidContext(format!(
+                "canonical planning Task {} has forbidden-path constraints that the G7 ScopeBound cannot represent",
+                task_id.as_str()
+            )));
+        }
+        if snapshot.acceptance.is_empty() {
+            return Err(PlanningServiceError::InvalidContext(format!(
+                "canonical planning Task {} has no acceptance obligations",
+                task_id.as_str()
+            )));
+        }
+        let baseline_risk = snapshot
+            .risk
+            .as_deref()
+            .ok_or_else(|| {
+                PlanningServiceError::InvalidContext(format!(
+                    "canonical planning Task {} has no baseline risk",
+                    task_id.as_str()
+                ))
+            })
+            .and_then(|risk| {
+                RiskClass::parse(risk).map_err(|error| {
+                    PlanningServiceError::InvalidContext(format!(
+                        "canonical planning Task {} has invalid baseline risk: {error}",
+                        task_id.as_str()
+                    ))
+                })
+            })?;
+        let affected_parent_criteria = snapshot
+            .acceptance
+            .into_iter()
+            .map(|criterion| {
+                CriterionId::new(criterion)
+                    .map(|id| AffectedParentCriterion {
+                        id,
+                        // G7 v1 has no criterion-to-proof-method field in the
+                        // Task contract. Keep the existing product-owned v1
+                        // planning default at the trusted boundary; clients no
+                        // longer choose this value.
+                        method: VerificationMethod::AutomatedTest,
+                    })
+                    .map_err(PlanningServiceError::Domain)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let policy = PlanningPolicyContext {
+            scope_bound: ScopeBound::new(snapshot.allowed_paths)?,
+            baseline_risk,
+            affected_parent_criteria,
+            parent_task_ref: task_id.as_str().to_owned(),
+            lineage_fingerprints: Vec::new(),
+            risk_grant: None,
+            risk_decision_id: None,
+            policy_fingerprint: policy_fingerprint.into(),
+        };
+        validate_policy_context(&policy)?;
+        Ok(policy)
+    }
+
     pub fn open(path: impl AsRef<Path>, clock: C) -> Result<Self, PlanningServiceError> {
         Ok(Self {
             store: SqliteStore::open(path)?,
@@ -791,7 +871,7 @@ impl<C: Clock> PlanningService<C> {
         let lineage = self.store.get_plan_lineage(branch)?;
         let remaining_depth = remaining_depth(&graph);
         let state = self.guardrail_snapshot(branch, &trigger_key, &lineage)?;
-        let (snapshot, run) = self.start_control_run(
+        let (snapshot, run) = self.start_approved_control_run(
             branch,
             triggering_evidence,
             policy,
@@ -904,6 +984,48 @@ impl<C: Clock> PlanningService<C> {
         durable_lineage: &[PlanRevisionLineageRecord],
         trigger_key: &str,
     ) -> Result<(PlanningInputSnapshot, PlanningRunRecord), PlanningServiceError> {
+        self.start_control_run_with_mode(
+            branch,
+            triggering_evidence,
+            policy,
+            head,
+            durable_lineage,
+            trigger_key,
+            false,
+        )
+    }
+
+    fn start_approved_control_run(
+        &mut self,
+        branch: &PlanBranchId,
+        triggering_evidence: &[EvidenceRef],
+        policy: &PlanningPolicyContext,
+        head: u64,
+        durable_lineage: &[PlanRevisionLineageRecord],
+        trigger_key: &str,
+    ) -> Result<(PlanningInputSnapshot, PlanningRunRecord), PlanningServiceError> {
+        self.start_control_run_with_mode(
+            branch,
+            triggering_evidence,
+            policy,
+            head,
+            durable_lineage,
+            trigger_key,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_control_run_with_mode(
+        &mut self,
+        branch: &PlanBranchId,
+        triggering_evidence: &[EvidenceRef],
+        policy: &PlanningPolicyContext,
+        head: u64,
+        durable_lineage: &[PlanRevisionLineageRecord],
+        trigger_key: &str,
+        join_identical_active: bool,
+    ) -> Result<(PlanningInputSnapshot, PlanningRunRecord), PlanningServiceError> {
         let mut lineage_fingerprints = policy.lineage_fingerprints.clone();
         lineage_fingerprints.extend(
             durable_lineage
@@ -925,9 +1047,16 @@ impl<C: Clock> PlanningService<C> {
             policy.risk_grant.clone(),
             policy.policy_fingerprint.clone(),
         )?;
-        let run = self
-            .store
-            .start_planning_run(&snapshot, trigger_key, self.clock.now_millis())?;
+        let run = if join_identical_active {
+            self.store.start_or_join_identical_planning_run(
+                &snapshot,
+                trigger_key,
+                self.clock.now_millis(),
+            )?
+        } else {
+            self.store
+                .start_planning_run(&snapshot, trigger_key, self.clock.now_millis())?
+        };
         Ok((snapshot, run))
     }
 

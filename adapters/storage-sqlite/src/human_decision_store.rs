@@ -88,13 +88,52 @@ impl SqliteStore {
         }
 
         // A newer request for the same bounded owner scope fences every
-        // unresolved predecessor. Old decisions can no longer be replayed.
-        tx.execute(
-            "UPDATE human_decision_requests SET status = 'SUPERSEDED'
-             WHERE task_id = ?1 AND plan_branch_id = ?2
-               AND status IN ('PENDING', 'RESOLVED')",
-            params![request.task_id.as_str(), request.plan_branch_id.as_str()],
-        )?;
+        // unresolved predecessor. Capture exact rows first so each actual
+        // authoritative transition has matching Security Audit evidence in
+        // this same transaction. Conditional per-row updates also avoid
+        // emitting a supersession fact for a row that did not transition.
+        let predecessor_ids = {
+            let mut statement = tx.prepare(
+                "SELECT request_id FROM human_decision_requests
+                 WHERE task_id = ?1 AND plan_branch_id = ?2
+                   AND status IN ('PENDING', 'RESOLVED')
+                 ORDER BY seq",
+            )?;
+            let rows = statement
+                .query_map(
+                    params![request.task_id.as_str(), request.plan_branch_id.as_str()],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for predecessor_id in predecessor_ids {
+            let updated = tx.execute(
+                "UPDATE human_decision_requests SET status = 'SUPERSEDED'
+                 WHERE request_id = ?1 AND status IN ('PENDING', 'RESOLVED')",
+                params![predecessor_id],
+            )?;
+            if updated == 0 {
+                continue;
+            }
+            let predecessor = load_request(&tx, &predecessor_id)?.ok_or_else(|| {
+                StorageError::Corrupt(format!(
+                    "human decision {predecessor_id} vanished during replacement"
+                ))
+            })?;
+            append_human_decision_audit(
+                &tx,
+                HumanDecisionAuditFact {
+                    event: SecurityAuditEvent::HumanDecisionSuperseded,
+                    outcome: SecurityAuditOutcome::Superseded,
+                    id: &predecessor.id,
+                    task_id: &predecessor.task_id,
+                    policy_fingerprint: &predecessor.precondition.policy_fingerprint,
+                    reason_code: predecessor.reason.as_str(),
+                    occurred_at_ms: created_at_ms,
+                },
+            )?;
+        }
 
         let seq: i64 = tx.query_row(
             "SELECT COALESCE(MAX(seq), 0) + 1 FROM human_decision_requests",

@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Barrier, Mutex};
 
 use agent_runtime::{AttemptId, ExecutionId, ProviderRef};
 use app_services::{
@@ -638,30 +638,37 @@ fn create_human_decision(
     task_id: &str,
     options: Vec<HumanContinuation>,
 ) -> HumanDecisionRequest {
+    let request = human_decision_create(db, task_id, options);
+    let mut service = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS));
+    service.create(request).expect("create human decision")
+}
+
+fn human_decision_create(
+    db: &TestDb,
+    task_id: &str,
+    options: Vec<HumanContinuation>,
+) -> HumanDecisionCreate {
     let accepted = db
         .service()
         .current_accepted_plan(&branch())
         .expect("current accepted plan")
         .expect("accepted plan required");
-    let mut service = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS));
-    service
-        .create(HumanDecisionCreate {
-            task_id: TaskId::new(task_id).expect("task id"),
-            plan_branch_id: branch(),
-            reason: HumanDecisionReason::PlannerBlocked,
-            risk: RiskClass::Low,
-            affected_scope: ScopeBound::new(vec!["repo:src".to_owned()]).expect("scope"),
-            options,
-            recommendation: None,
-            evidence: vec![evidence("human-decision-fixture")],
-            proposal_hash: None,
-            plan_head: accepted.revision().revision_seq,
-            planning_input_snapshot_id: accepted.planning_input_snapshot_id().clone(),
-            planning_input_fingerprint: accepted.planning_input_fingerprint().to_owned(),
-            policy_fingerprint: "policy:test".to_owned(),
-            expires_at_ms: None,
-        })
-        .expect("create human decision")
+    HumanDecisionCreate {
+        task_id: TaskId::new(task_id).expect("task id"),
+        plan_branch_id: branch(),
+        reason: HumanDecisionReason::PlannerBlocked,
+        risk: RiskClass::Low,
+        affected_scope: ScopeBound::new(vec!["repo:src".to_owned()]).expect("scope"),
+        options,
+        recommendation: None,
+        evidence: vec![evidence("human-decision-fixture")],
+        proposal_hash: None,
+        plan_head: accepted.revision().revision_seq,
+        planning_input_snapshot_id: accepted.planning_input_snapshot_id().clone(),
+        planning_input_fingerprint: accepted.planning_input_fingerprint().to_owned(),
+        policy_fingerprint: "policy:test".to_owned(),
+        expires_at_ms: None,
+    }
 }
 
 fn replace_current_planning_input(
@@ -2431,6 +2438,212 @@ fn risk_decision_survives_restart_and_resume_is_consumed_with_plan_commit() {
 }
 
 #[test]
+fn corrupted_persisted_approved_proposal_fails_closed_before_publication_or_consumption() {
+    let db = TestDb::new("human-risk-corrupt-approved-proposal");
+    db.seed_tasks(&["TASK-0078", "node-1"], true);
+    let decision = match db
+        .service()
+        .propose_decomposition(
+            &TestPlanner::new(ProposalCase::RiskEscalation),
+            &branch(),
+            request("risk-corrupt-approved"),
+            &policy(false),
+        )
+        .unwrap()
+    {
+        PlanningProposalOutcome::WaitingForHuman(decision) => *decision,
+        other => panic!("expected risk decision, got {other:?}"),
+    };
+    HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS))
+        .decide(&decision.id, HumanContinuation::Resume, "operator:test")
+        .unwrap();
+
+    {
+        let raw = rusqlite::Connection::open(&db.path).unwrap();
+        let mut blob: Vec<u8> = raw
+            .query_row(
+                "SELECT approved_changeset FROM human_decision_requests WHERE request_id = ?1",
+                rusqlite::params![decision.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let needle = b"deterministic planning-service proposal";
+        let offset = blob
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .expect("encoded reason bytes");
+        blob[offset] = b'e';
+        raw.execute(
+            "UPDATE human_decision_requests SET approved_changeset = ?1 WHERE request_id = ?2",
+            rusqlite::params![blob, decision.id.as_str()],
+        )
+        .unwrap();
+    }
+
+    let error = db
+        .service()
+        .resume_approved_risk_proposal(&decision.id, &policy(false))
+        .expect_err("hash-mismatched approved proposal must fail closed");
+    assert!(matches!(
+        error,
+        PlanningServiceError::Storage(StorageError::Corrupt(ref detail))
+            if detail.contains("proposal_hash")
+    ));
+    assert_eq!(db.store().get_plan_head(&branch()).unwrap(), None);
+    assert_eq!(
+        HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS))
+            .get(&decision.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        HumanDecisionStatus::Resolved,
+        "corruption must be refused before once-only authority is consumed"
+    );
+}
+
+#[test]
+fn approved_proposal_trailing_bytes_fail_closed_before_publication_or_consumption() {
+    let db = TestDb::new("human-risk-approved-trailing-bytes");
+    db.seed_tasks(&["TASK-0078", "node-1"], true);
+    let decision = match db
+        .service()
+        .propose_decomposition(
+            &TestPlanner::new(ProposalCase::RiskEscalation),
+            &branch(),
+            request("risk-approved-trailing"),
+            &policy(false),
+        )
+        .unwrap()
+    {
+        PlanningProposalOutcome::WaitingForHuman(decision) => *decision,
+        other => panic!("expected risk decision, got {other:?}"),
+    };
+    HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS))
+        .decide(&decision.id, HumanContinuation::Resume, "operator:test")
+        .unwrap();
+    {
+        let raw = rusqlite::Connection::open(&db.path).unwrap();
+        let mut blob: Vec<u8> = raw
+            .query_row(
+                "SELECT approved_changeset FROM human_decision_requests WHERE request_id = ?1",
+                rusqlite::params![decision.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        blob.extend_from_slice(b"trailing-data");
+        raw.execute(
+            "UPDATE human_decision_requests SET approved_changeset = ?1 WHERE request_id = ?2",
+            rusqlite::params![blob, decision.id.as_str()],
+        )
+        .unwrap();
+    }
+
+    let error = db
+        .service()
+        .resume_approved_risk_proposal(&decision.id, &policy(false))
+        .expect_err("trailing approved proposal bytes must fail closed");
+    assert!(matches!(
+        error,
+        PlanningServiceError::Storage(StorageError::Corrupt(ref detail))
+            if detail.contains("trailing bytes")
+    ));
+    assert_eq!(db.store().get_plan_head(&branch()).unwrap(), None);
+    assert_eq!(
+        HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS))
+            .get(&decision.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        HumanDecisionStatus::Resolved
+    );
+}
+
+#[test]
+fn concurrent_v9_resume_publishes_and_consumes_exactly_once() {
+    let db = TestDb::new("human-risk-concurrent-resume");
+    db.seed_tasks(&["TASK-0078", "node-1"], true);
+    let decision = match db
+        .service()
+        .propose_decomposition(
+            &TestPlanner::new(ProposalCase::RiskEscalation),
+            &branch(),
+            request("risk-concurrent-resume"),
+            &policy(false),
+        )
+        .unwrap()
+    {
+        PlanningProposalOutcome::WaitingForHuman(decision) => *decision,
+        other => panic!("expected risk decision, got {other:?}"),
+    };
+    HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS))
+        .decide(&decision.id, HumanContinuation::Resume, "operator:test")
+        .unwrap();
+
+    let participants = 4;
+    let barrier = Arc::new(Barrier::new(participants));
+    let mut handles = Vec::new();
+    for _ in 0..participants {
+        let path = db.path.clone();
+        let id = decision.id.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            let mut service =
+                PlanningService::open(path, FixedClock(FIXED_MILLIS)).expect("concurrent service");
+            barrier.wait();
+            service.resume_approved_risk_proposal(&id, &policy(false))
+        }));
+    }
+    let outcomes = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("concurrent RESUME thread"))
+        .collect::<Vec<_>>();
+    let accepted = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome, Ok(PlanningProposalOutcome::Accepted(_))))
+        .count();
+    assert_eq!(
+        accepted, 1,
+        "V9 authority must publish exactly once: {outcomes:?}"
+    );
+    for outcome in outcomes
+        .iter()
+        .filter(|outcome| !matches!(outcome, Ok(PlanningProposalOutcome::Accepted(_))))
+    {
+        assert!(
+            matches!(
+                outcome,
+                Err(PlanningServiceError::Storage(
+                    StorageError::HumanDecisionState { .. }
+                )) | Err(PlanningServiceError::Storage(
+                    StorageError::HumanDecisionStale { .. }
+                )) | Err(PlanningServiceError::Storage(
+                    StorageError::PlanningRunStale { .. }
+                )) | Err(PlanningServiceError::Storage(
+                    StorageError::PlanningInputStale { .. }
+                ))
+            ),
+            "losing V9 consumer must receive a typed stale/consumed refusal: {outcome:?}"
+        );
+    }
+
+    let restarted = PlanningService::open(&db.path, FixedClock(FIXED_MILLIS))
+        .expect("restart after concurrent RESUME");
+    assert_eq!(restarted.store().get_plan_head(&branch()).unwrap(), Some(1));
+    assert_eq!(
+        restarted.store().get_plan_lineage(&branch()).unwrap().len(),
+        1
+    );
+    assert_eq!(
+        HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS))
+            .get(&decision.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        HumanDecisionStatus::Consumed
+    );
+}
+
+#[test]
 fn expired_risk_decision_is_superseded_once_and_replaced_after_restart() {
     let db = TestDb::new("human-risk-expiry-replacement");
     db.seed_tasks(&["TASK-0078", "node-1"], true);
@@ -2492,6 +2705,155 @@ fn expired_risk_decision_is_superseded_once_and_replaced_after_restart() {
         PlanningProposalOutcome::WaitingForHuman(ref current) if current.id == second.id
     ));
     assert_eq!(planner.call_count(), 2);
+}
+
+#[test]
+fn replacement_supersession_is_audited_for_pending_and_resolved_chain_and_survives_restart() {
+    let db = TestDb::new("human-replacement-audit-chain");
+    seed_head(&db, 1);
+    let options = vec![HumanContinuation::Resume, HumanContinuation::Replan];
+
+    let first = create_human_decision(&db, "TASK-0078", options.clone());
+    let second = create_human_decision(&db, "TASK-0078", options.clone());
+    assert_eq!(
+        HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS))
+            .get(&first.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        HumanDecisionStatus::Superseded
+    );
+    let first_events = db
+        .store()
+        .list_security_audit_by_correlation(&format!("human-decision:{}", first.id.as_str()))
+        .unwrap()
+        .into_iter()
+        .map(|record| record.fact.event)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        first_events,
+        vec![
+            SecurityAuditEvent::HumanDecisionRequested,
+            SecurityAuditEvent::HumanDecisionSuperseded,
+        ],
+        "PENDING predecessor replacement must have authoritative supersession evidence"
+    );
+
+    let mut human = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS));
+    human
+        .decide(&second.id, HumanContinuation::Replan, "operator:test")
+        .unwrap();
+    drop(human);
+    let third = create_human_decision(&db, "TASK-0078", options);
+    let second_events = db
+        .store()
+        .list_security_audit_by_correlation(&format!("human-decision:{}", second.id.as_str()))
+        .unwrap()
+        .into_iter()
+        .map(|record| record.fact.event)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        second_events,
+        vec![
+            SecurityAuditEvent::HumanDecisionRequested,
+            SecurityAuditEvent::HumanDecisionDecided,
+            SecurityAuditEvent::HumanDecisionSuperseded,
+        ],
+        "RESOLVED predecessor replacement must have authoritative supersession evidence"
+    );
+
+    let mut restarted = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS));
+    assert_eq!(
+        restarted.get(&first.id).unwrap().unwrap().status,
+        HumanDecisionStatus::Superseded
+    );
+    assert_eq!(
+        restarted.get(&second.id).unwrap().unwrap().status,
+        HumanDecisionStatus::Superseded
+    );
+    assert_eq!(
+        restarted.get(&third.id).unwrap().unwrap().status,
+        HumanDecisionStatus::Pending
+    );
+    let unusable = restarted
+        .decide(&first.id, HumanContinuation::Resume, "operator:stale")
+        .expect_err("superseded decision must remain unusable");
+    assert!(matches!(
+        unusable,
+        app_services::ServiceError::Storage(StorageError::HumanDecisionState { .. })
+    ));
+    drop(restarted);
+
+    // Later replacement scans must not manufacture a second supersession
+    // fact for rows that are already SUPERSEDED.
+    let _fourth = create_human_decision(
+        &db,
+        "TASK-0078",
+        vec![HumanContinuation::Resume, HumanContinuation::Replan],
+    );
+    let first_superseded_count = db
+        .store()
+        .list_security_audit_by_correlation(&format!("human-decision:{}", first.id.as_str()))
+        .unwrap()
+        .into_iter()
+        .filter(|record| record.fact.event == SecurityAuditEvent::HumanDecisionSuperseded)
+        .count();
+    assert_eq!(first_superseded_count, 1);
+}
+
+#[test]
+fn replacement_audit_failure_rolls_back_supersession_and_new_request() {
+    let db = TestDb::new("human-replacement-audit-rollback");
+    seed_head(&db, 1);
+    let first = create_human_decision(
+        &db,
+        "TASK-0078",
+        vec![HumanContinuation::Resume, HumanContinuation::Replan],
+    );
+
+    {
+        let raw = rusqlite::Connection::open(&db.path).unwrap();
+        raw.execute_batch(
+            "CREATE TRIGGER test_fail_human_supersession_audit
+             BEFORE INSERT ON security_audit
+             WHEN NEW.event_type = 'human_decision.superseded'
+             BEGIN
+               SELECT RAISE(ABORT, 'forced human decision audit failure');
+             END;",
+        )
+        .unwrap();
+    }
+    let mut service = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS));
+    let error = service
+        .create(human_decision_create(
+            &db,
+            "TASK-0078",
+            vec![HumanContinuation::Resume, HumanContinuation::Replan],
+        ))
+        .expect_err("audit failure must abort replacement transaction");
+    assert!(matches!(error, app_services::ServiceError::Storage(_)));
+    drop(service);
+    {
+        let raw = rusqlite::Connection::open(&db.path).unwrap();
+        raw.execute_batch("DROP TRIGGER test_fail_human_supersession_audit")
+            .unwrap();
+    }
+
+    let restarted = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS));
+    assert_eq!(
+        restarted.get(&first.id).unwrap().unwrap().status,
+        HumanDecisionStatus::Pending,
+        "predecessor mutation must roll back with audit failure"
+    );
+    assert_eq!(restarted.list_pending().unwrap(), vec![first.clone()]);
+    let events = db
+        .store()
+        .list_security_audit_by_correlation(&format!("human-decision:{}", first.id.as_str()))
+        .unwrap()
+        .into_iter()
+        .map(|record| record.fact.event)
+        .collect::<Vec<_>>();
+    assert_eq!(events, vec![SecurityAuditEvent::HumanDecisionRequested]);
 }
 
 #[test]

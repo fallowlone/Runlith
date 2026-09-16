@@ -59,8 +59,8 @@ async fn main() -> ExitCode {
             eprintln!("  agentctl human-decision list");
             eprintln!("  agentctl human-decision get <request-id>");
             eprintln!("  agentctl human-decision decide <request-id> <resume|replan|abort>");
-            eprintln!("  agentctl planning trigger <task-id> <branch-id> <scope-root> <criterion-id> <policy-fingerprint> <evidence-ref>");
-            eprintln!("  agentctl planning apply <human-decision-id> [<task-id> <branch-id> <scope-root> <criterion-id> <policy-fingerprint> <evidence-ref>]");
+            eprintln!("  agentctl planning trigger <task-id> <branch-id> <evidence-ref>");
+            eprintln!("  agentctl planning apply <human-decision-id>");
             ExitCode::FAILURE
         }
     }
@@ -672,18 +672,30 @@ fn print_human_decision(decision: HumanDecisionDto) {
 }
 
 fn planning_context(values: &[String]) -> Result<PlanningContext, ()> {
-    let [task_id, plan_branch_id, scope_root, criterion, policy_fingerprint, evidence_ref] = values
-    else {
-        return Err(());
-    };
-    Ok(PlanningContext {
-        task_id: task_id.clone(),
-        plan_branch_id: plan_branch_id.clone(),
-        scope_roots: vec![scope_root.clone()],
-        acceptance_criterion_ids: vec![criterion.clone()],
-        policy_fingerprint: policy_fingerprint.clone(),
-        evidence_ref: evidence_ref.clone(),
-    })
+    match values {
+        [task_id, plan_branch_id, evidence_ref] => Ok(PlanningContext {
+            task_id: task_id.clone(),
+            plan_branch_id: plan_branch_id.clone(),
+            scope_roots: Vec::new(),
+            acceptance_criterion_ids: Vec::new(),
+            policy_fingerprint: String::new(),
+            evidence_ref: evidence_ref.clone(),
+        }),
+        // Compatibility with the original protocol-v5 CLI shape. These
+        // authority-bearing values are serialized only so old invocations
+        // remain decodable; current agentd ignores them.
+        [task_id, plan_branch_id, scope_root, criterion, policy_fingerprint, evidence_ref] => {
+            Ok(PlanningContext {
+                task_id: task_id.clone(),
+                plan_branch_id: plan_branch_id.clone(),
+                scope_roots: vec![scope_root.clone()],
+                acceptance_criterion_ids: vec![criterion.clone()],
+                policy_fingerprint: policy_fingerprint.clone(),
+                evidence_ref: evidence_ref.clone(),
+            })
+        }
+        _ => Err(()),
+    }
 }
 
 fn planning_request(args: &[String]) -> Result<PlanningCoreRequest, ()> {
@@ -724,7 +736,7 @@ async fn cmd_planning(args: Vec<String>) -> ExitCode {
     let request = match planning_request(&args) {
         Ok(value) => value,
         Err(()) => {
-            eprintln!("usage: agentctl planning trigger <task-id> <branch-id> <scope-root> <criterion-id> <policy-fingerprint> <evidence-ref> | apply <human-decision-id> [context]");
+            eprintln!("usage: agentctl planning trigger <task-id> <branch-id> <evidence-ref> | apply <human-decision-id>");
             return ExitCode::FAILURE;
         }
     };

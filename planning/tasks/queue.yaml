@@ -1671,3 +1671,45 @@ items:
       - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
       - docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md
       - docs/development/G7_CLOSURE_AUDIT.md
+
+  - id: TASK-0083
+    gate: G7
+    title: G7 Closure Remediation II
+    objective: Remediate the remaining independent TASK-0082 audit blockers by
+      restoring product-owned PlanningPolicyContext authority, coupling
+      automatic Human Decision replacement to Security Audit, making TEST-H
+      production-launch cleanup unwind-safe, and adding approved-proposal
+      corruption/trailing/concurrent-RESUME regression coverage.
+    scope: >-
+      Bounded G7 remediation only: trusted planning-context derivation,
+      protocol-v5 compatibility at the agentctl/agentd boundary, Human
+      Decision replacement audit atomicity, TEST-H endpoint ownership, V9
+      persistence/concurrency tests, and directly related governance
+      bookkeeping. No G8/G9, UI, Council, provider redesign, or unrelated G6
+      refactor.
+    exit_criteria_summary: Client input cannot mint scope, acceptance, risk or
+      Policy identity; continuations re-derive current canonical authority;
+      automatic Human Decision supersession and audit evidence commit or roll
+      back together; TEST-H cleans its production-launched daemon on unwind;
+      malformed approved proposals fail closed; concurrent V9 RESUME publishes
+      at most once; mandatory workspace verification is green; branch is
+      committed and ready for independent G7 re-audit.
+    outcome: >-
+      READY_FOR_INDEPENDENT_G7_REAUDIT. Planning authority is now derived from
+      canonical Task scope/acceptance/risk plus the current product-owned G6
+      planner Policy fingerprint; legacy protocol-v5 authority fields remain
+      decodable but are ignored by agentd. Human Decision replacement appends
+      one supersession Security Audit fact per actual predecessor transition in
+      the same transaction. TEST-H owns its exact endpoint before production
+      agentctl start and cleans it during unwind. V9 corruption, trailing-byte
+      and concurrent RESUME regressions prove fail-closed persistence and
+      once-only publication. TASK-0083 is remediation only and does not declare
+      G7 closed.
+    depends_on:
+      - TASK-0082
+    blocked_by: []
+    references:
+      - AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md
+      - docs/development/G7_CLOSURE_AUDIT.md

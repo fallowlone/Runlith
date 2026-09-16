@@ -200,6 +200,9 @@ const PLANNING_BODY: &str = r#"printf '%s\n' '{"type":"result","subtype":"succes
 const RISK_PLANNING_BODY: &str = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":0,\"reason\":\"fixture risk escalation\",\"node_additions\":[{\"id\":\"T-RISK\",\"scope\":[\"repo:src\"],\"criteria\":[{\"id\":\"criterion-root\",\"method\":\"automated-test\"}],\"risk_class\":\"high\",\"required_gate\":\"human-review\"}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"fixture work requires human approval\",\"risk_delta\":[{\"node\":\"T-RISK\",\"from\":\"low\",\"to\":\"high\"}],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:src\"],\"coverage_map\":{\"criterion-root\":[\"criterion-root\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
 "#;
 
+const AUTHORITY_PLANNING_BODY: &str = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":0,\"reason\":\"canonical authority fixture\",\"node_additions\":[{\"id\":\"T-AUTH\",\"scope\":[\"repo:canonical\"],\"criteria\":[{\"id\":\"criterion-canonical\",\"method\":\"automated-test\"}],\"risk_class\":\"medium\",\"required_gate\":null}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"canonical authority is preserved\",\"risk_delta\":[],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:canonical\"],\"coverage_map\":{\"criterion-canonical\":[\"criterion-canonical\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
+"#;
+
 const SLOW_BODY: &str = "while :; do :; done\n";
 
 fn seed_ready(sandbox: &Sandbox, project: &str, task: &str) {
@@ -263,6 +266,30 @@ fn seed_accepted_plan(sandbox: &Sandbox, task: &str) {
         outcome,
         app_services::PlanningProposalOutcome::Accepted(_)
     ));
+}
+
+fn seed_planning_task_metadata(
+    sandbox: &Sandbox,
+    task: &str,
+    scope: &str,
+    criterion: &str,
+    risk: &str,
+) {
+    let db = sandbox.root.join("data/ai-engineering-os/state.sqlite3");
+    let mut store = storage_sqlite::SqliteStore::open(&db).expect("open canonical task store");
+    let task_id = task_domain::TaskId::new(task).expect("task id");
+    let task = store
+        .get_task(&task_id)
+        .expect("canonical task query")
+        .expect("canonical task");
+    let mut snapshot = task.snapshot();
+    snapshot.allowed_paths = vec![scope.to_owned()];
+    snapshot.acceptance = vec![criterion.to_owned()];
+    snapshot.risk = Some(risk.to_owned());
+    let task = task_domain::Task::restore(snapshot).expect("canonical planning task metadata");
+    store
+        .save_task(&task)
+        .expect("persist canonical task metadata");
 }
 
 fn seed_human_decision(sandbox: &Sandbox, task: &str) -> String {
@@ -775,15 +802,13 @@ fn v5_planning_cli_publishes_an_accepted_plan_then_admits_execution() {
     assert!(task.status.success(), "task: {}", stderr(&task));
     let ready = sandbox.agentctl(&["task", "ready", "T-PLAN"]);
     assert!(ready.status.success(), "ready: {}", stderr(&ready));
+    seed_planning_task_metadata(&sandbox, "T-PLAN", "repo:src", "criterion-root", "low");
 
     let planning = sandbox.agentctl(&[
         "planning",
         "trigger",
         "T-PLAN",
         "B-PLAN",
-        "repo:src",
-        "criterion-root",
-        "policy:binary-planning",
         "fixture:planning",
     ]);
     assert!(planning.status.success(), "planning: {}", stderr(&planning));
@@ -833,17 +858,9 @@ fn v5_planning_cli_applies_risk_resume_without_replaying_the_planner() {
     assert!(task.status.success(), "task: {}", stderr(&task));
     let ready = sandbox.agentctl(&["task", "ready", "T-RISK"]);
     assert!(ready.status.success(), "ready: {}", stderr(&ready));
+    seed_planning_task_metadata(&sandbox, "T-RISK", "repo:src", "criterion-root", "low");
 
-    let planning = sandbox.agentctl(&[
-        "planning",
-        "trigger",
-        "T-RISK",
-        "B-RISK",
-        "repo:src",
-        "criterion-root",
-        "policy:binary-risk",
-        "fixture:risk",
-    ]);
+    let planning = sandbox.agentctl(&["planning", "trigger", "T-RISK", "B-RISK", "fixture:risk"]);
     assert!(planning.status.success(), "planning: {}", stderr(&planning));
     assert!(
         stdout(&planning).contains("planning WAITING_FOR_HUMAN branch=B-RISK"),
@@ -869,10 +886,10 @@ fn v5_planning_cli_applies_risk_resume_without_replaying_the_planner() {
         &decision_id,
         "T-RISK",
         "B-RISK",
-        "repo:src",
-        "criterion-root",
-        "policy:binary-risk",
-        "fixture:risk",
+        "repo:forged-resume",
+        "criterion-forged-resume",
+        "policy:forged-resume",
+        "fixture:forged-resume",
     ]);
     assert!(applied.status.success(), "apply: {}", stderr(&applied));
     assert!(
@@ -881,19 +898,91 @@ fn v5_planning_cli_applies_risk_resume_without_replaying_the_planner() {
         stdout(&applied)
     );
 
-    let replay = sandbox.agentctl(&[
-        "planning",
-        "apply",
-        &decision_id,
-        "T-RISK",
-        "B-RISK",
-        "repo:src",
-        "criterion-root",
-        "policy:binary-risk",
-        "fixture:risk",
-    ]);
+    let replay = sandbox.agentctl(&["planning", "apply", &decision_id]);
     assert!(
         !replay.status.success(),
         "consumed decision must not replay"
+    );
+}
+
+#[test]
+fn v5_planning_ignores_client_authored_authority_and_persists_canonical_task_policy() {
+    let sandbox = Sandbox::new("v5-planning-authority", AUTHORITY_PLANNING_BODY);
+    let _daemon = DaemonGuard::spawn(&sandbox);
+    sandbox.wait_ready();
+
+    let project = sandbox.agentctl(&["project", "create", "P-AUTH", "authority fixture"]);
+    assert!(project.status.success(), "project: {}", stderr(&project));
+    let task = sandbox.agentctl(&["task", "create", "T-AUTH", "P-AUTH", "authority fixture"]);
+    assert!(task.status.success(), "task: {}", stderr(&task));
+    let ready = sandbox.agentctl(&["task", "ready", "T-AUTH"]);
+    assert!(ready.status.success(), "ready: {}", stderr(&ready));
+    seed_planning_task_metadata(
+        &sandbox,
+        "T-AUTH",
+        "repo:canonical",
+        "criterion-canonical",
+        "medium",
+    );
+
+    // Original protocol-v5 attack shape: all authority-bearing values are
+    // deliberately forged. The server must decode them for compatibility but
+    // never use them to construct PlanningPolicyContext.
+    let planning = sandbox.agentctl(&[
+        "planning",
+        "trigger",
+        "T-AUTH",
+        "B-AUTH",
+        "repo:client-wide",
+        "criterion-client",
+        "policy:client-forged",
+        "fixture:authority-probe",
+    ]);
+    assert!(planning.status.success(), "planning: {}", stderr(&planning));
+    assert!(
+        stdout(&planning).contains("planning ACCEPTED branch=B-AUTH revision=1"),
+        "planning output: {}",
+        stdout(&planning)
+    );
+
+    let db = sandbox.root.join("data/ai-engineering-os/state.sqlite3");
+    let planning = app_services::PlanningService::open(&db, app_services::SystemClock)
+        .expect("open assertion planning service");
+    let branch = plan_domain::PlanBranchId::new("B-AUTH").unwrap();
+    let accepted = planning
+        .current_accepted_plan(&branch)
+        .expect("accepted plan query")
+        .expect("accepted plan");
+    let persisted_policy_fingerprint = accepted.revision().validated_by.policy_fingerprint.clone();
+    assert_ne!(persisted_policy_fingerprint, "policy:client-forged");
+    let canonical = planning
+        .canonical_policy_context(
+            &task_domain::TaskId::new("T-AUTH").unwrap(),
+            persisted_policy_fingerprint.clone(),
+        )
+        .expect("canonical planning policy");
+    assert_eq!(canonical.scope_bound.roots(), vec!["repo:canonical"]);
+    assert_eq!(canonical.baseline_risk, plan_domain::RiskClass::Medium);
+    assert_eq!(canonical.affected_parent_criteria.len(), 1);
+    assert_eq!(
+        canonical.affected_parent_criteria[0].id.as_str(),
+        "criterion-canonical"
+    );
+    assert!(planning
+        .store()
+        .planning_input_policy_matches(
+            accepted.planning_input_snapshot_id(),
+            "T-AUTH",
+            &canonical.scope_bound,
+            canonical.baseline_risk,
+            &canonical.affected_parent_criteria,
+            &canonical.lineage_fingerprints,
+            None,
+            &persisted_policy_fingerprint,
+        )
+        .expect("durable canonical planning input"));
+    assert_eq!(
+        accepted.revision().validated_by.policy_fingerprint,
+        persisted_policy_fingerprint
     );
 }

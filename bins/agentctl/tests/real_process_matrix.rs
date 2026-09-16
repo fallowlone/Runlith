@@ -102,6 +102,30 @@ fn connect_ping() -> bool {
         })
 }
 
+/// Owns the production-launched daemon through this test's unique endpoint.
+/// `agentctl start` intentionally detaches, so the endpoint plus canonical
+/// shutdown operation is the only scoped authority available to the harness.
+/// Drop is idempotent and deliberately non-panicking during unwind.
+struct ProductionEndpointGuard;
+
+impl ProductionEndpointGuard {
+    fn new() -> Self {
+        Self
+    }
+}
+
+impl Drop for ProductionEndpointGuard {
+    fn drop(&mut self) {
+        if connect_ping() {
+            let _ = agentctl(&["shutdown"]);
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while endpoint_present() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
 /// Owns a directly-spawned daemon and always kills and reaps it on failure.
 struct DaemonGuard {
     child: Option<Child>,
@@ -173,6 +197,29 @@ fn g1_real_process_matrix() {
         assert!(out.status.success(), "pre-existing daemon must shut down");
     }
     // A stale node (if any) is recovered by the first start below.
+
+    // Failure injection: ownership exists before the production launcher is
+    // called. An unwind before the ordinary final shutdown must still retire
+    // exactly this test endpoint.
+    let injected = std::panic::catch_unwind(|| {
+        let _owned = ProductionEndpointGuard::new();
+        let out = agentctl(&["start"]);
+        assert!(out.status.success(), "injected start failed: {out:?}");
+        wait_ping_ok();
+        assert!(endpoint_present(), "injected daemon must own the endpoint");
+        panic!("TEST-H injected failure before normal shutdown");
+    });
+    assert!(injected.is_err(), "failure injection must unwind");
+    wait_for(
+        || !endpoint_present() && !connect_ping(),
+        Duration::from_secs(15),
+        "failure-injection endpoint cleanup",
+    );
+
+    // From here through every production `agentctl start`, unwind cleanup is
+    // armed. The explicit final shutdown remains the happy-path assertion;
+    // Drop becomes a no-op after it succeeds.
+    let _production_owner = ProductionEndpointGuard::new();
 
     // 1. Daemon missing: `agentctl start` launches, handshakes, reports ready.
     let out = agentctl(&["start"]);

@@ -210,6 +210,29 @@ impl SqliteStore {
         trigger_evidence_key: &str,
         created_at_ms: u64,
     ) -> StorageResult<PlanningRunRecord> {
+        self.start_planning_run_inner(snapshot, trigger_evidence_key, created_at_ms, false)
+    }
+
+    /// Claims the current planning generation for immutable approved-proposal
+    /// replay. Concurrent callers for the exact same snapshot/evidence join
+    /// the already-active run instead of superseding each other; any different
+    /// planning input retains the normal generation-fencing behavior.
+    pub fn start_or_join_identical_planning_run(
+        &mut self,
+        snapshot: &PlanningInputSnapshot,
+        trigger_evidence_key: &str,
+        created_at_ms: u64,
+    ) -> StorageResult<PlanningRunRecord> {
+        self.start_planning_run_inner(snapshot, trigger_evidence_key, created_at_ms, true)
+    }
+
+    fn start_planning_run_inner(
+        &mut self,
+        snapshot: &PlanningInputSnapshot,
+        trigger_evidence_key: &str,
+        created_at_ms: u64,
+        join_identical_active: bool,
+    ) -> StorageResult<PlanningRunRecord> {
         require_evidence_key(trigger_evidence_key)?;
         require_evidence_key(&snapshot.input_fingerprint)?;
         let tx = self
@@ -229,6 +252,20 @@ impl SqliteStore {
                 snapshot.input_fingerprint,
             ],
         )?;
+
+        if join_identical_active {
+            if let Some(current) = load_current_run(&tx, &snapshot.plan_branch_id)? {
+                if current.state == PlanningRunState::Active
+                    && current.snapshot_id == snapshot.id
+                    && current.input_fingerprint == snapshot.input_fingerprint
+                    && current.expected_plan_head == snapshot.expected_plan_head
+                    && current.trigger_evidence_key == trigger_evidence_key
+                {
+                    tx.commit()?;
+                    return Ok(current);
+                }
+            }
+        }
 
         let current: Option<(String, i64)> = tx
             .query_row(
