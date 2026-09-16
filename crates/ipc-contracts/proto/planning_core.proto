@@ -10,6 +10,9 @@ import "task_core.proto";
 message PlanningContext {
   string task_id = 1;
   string plan_branch_id = 2;
+  // Historical protocol-v5 fields. They remain on the wire for decode
+  // compatibility only; agentd ignores them and re-derives authority from
+  // canonical Task + Policy state.
   repeated string scope_roots = 3;
   repeated string acceptance_criterion_ids = 4;
   string policy_fingerprint = 5;
@@ -22,9 +25,9 @@ message TriggerPlanningRequest {
 
 message ApplyHumanContinuationRequest {
   string request_id = 1;
-  // Required for REPLAN and for risk-gated RESUME. The daemon validates the
-  // context against the durable request before any planning/publication work;
-  // a risk RESUME publishes the stored approved proposal without PlannerPort.
+  // Historical protocol-v5 context. Kept for decode compatibility only.
+  // Current agentd re-derives Task/branch/Policy authority from the durable
+  // HumanDecisionRequest and canonical product state.
   optional PlanningContext context = 2;
 }
 

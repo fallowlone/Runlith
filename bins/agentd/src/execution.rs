@@ -358,6 +358,12 @@ pub(crate) struct ProviderLaunchSecurity {
     executable: ScopeId,
 }
 
+impl ProviderLaunchSecurity {
+    pub(crate) fn policy_fingerprint(&self) -> &str {
+        self.policy.fingerprint()
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum ProviderWorkspaceAccess {
     ReadOnly,

@@ -12,17 +12,16 @@ use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use app_services::{HumanDecisionService, PlanningPolicyContext, PlanningProposalOutcome};
+use app_services::{HumanDecisionService, PlanningProposalOutcome};
 use ipc_contracts::proto::{
     planning_core_request, planning_core_response, ApplyHumanContinuationRequest, BusinessError,
     BusinessErrorCode, PlanningContext, PlanningCoreRequest, PlanningCoreResponse,
     PlanningOperationResponse,
 };
 use plan_domain::{
-    AffectedParentCriterion, AtomicityAssessment, AtomicityRequest, CriterionId,
-    DecompositionRequest, EvidenceRef, HumanContinuation, HumanDecisionRequestId, PlanBranchId,
-    PlanChangeSet, PlannerCallSpend, PlannerFault, PlannerPort, PlanningBudget, ReplanRequest,
-    RiskClass, ScopeBound, VerificationMethod, MAX_DECOMPOSITION_DEPTH,
+    AtomicityAssessment, AtomicityRequest, DecompositionRequest, EvidenceRef, HumanContinuation,
+    HumanDecisionRequestId, PlanBranchId, PlanChangeSet, PlannerCallSpend, PlannerFault,
+    PlannerPort, PlanningBudget, ReplanRequest, MAX_DECOMPOSITION_DEPTH,
     MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH, MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
 };
 use task_domain::TaskId;
@@ -190,6 +189,28 @@ impl ExecutionComposition {
             authority_task_ref,
         })
     }
+
+    /// Returns the fingerprint of the current product-owned G6 Policy that
+    /// guards the production planner launch. The operation identity is not
+    /// part of `CompiledPolicy` canonicalization, so this is the same policy
+    /// identity used when an actual planner call crosses the launch boundary.
+    pub fn planning_policy_fingerprint(&self, authority_task_ref: &str) -> Result<String, String> {
+        let task_id = TaskId::new(authority_task_ref.to_owned())
+            .map_err(|error| format!("planner authority task ref is invalid: {error}"))?;
+        let workdir = planner_workdir(self.db_path(), &task_id)?;
+        let executable = self.resolved_provider_executable()?;
+        let launch = build_provider_launch_security_for_context(ProviderLaunchContext {
+            task_id: task_id.as_str(),
+            execution_id: None,
+            attempt_id: None,
+            operation_id: "planner.policy-context".to_owned(),
+            requester: PLANNER_LAUNCH_REQUESTER,
+            workspace: &workdir,
+            executable: executable.as_os_str(),
+            workspace_access: ProviderWorkspaceAccess::ReadOnly,
+        })?;
+        Ok(launch.policy_fingerprint().to_owned())
+    }
 }
 
 fn planner_workdir(db_path: &std::path::Path, task_id: &TaskId) -> Result<PathBuf, String> {
@@ -233,13 +254,33 @@ pub fn dispatch_control(
                 Some(value) => value,
                 None => return invalid("planning context is required"),
             };
-            let (task, branch, policy, decomposition) = match planning_input(context) {
+            let (task, branch, evidence) = match planning_intent(context) {
                 Ok(value) => value,
                 Err(message) => return invalid(&message),
             };
             let mut planning = match composition.planning_service() {
                 Ok(value) => value,
                 Err(error) => return internal(error.to_string()),
+            };
+            let policy_fingerprint = match composition.planning_policy_fingerprint(task.as_str()) {
+                Ok(value) => value,
+                Err(error) => return internal(error),
+            };
+            let policy = match planning.canonical_policy_context(&task, policy_fingerprint) {
+                Ok(value) => value,
+                Err(error) => return invalid(&error.to_string()),
+            };
+            let decomposition = DecompositionRequest {
+                parent_task_ref: String::new(),
+                base_plan_revision: 0,
+                acceptance_criteria_refs: Vec::new(),
+                scope_bound: policy.scope_bound.clone(),
+                evidence_refs: vec![evidence],
+                depth_remaining: MAX_DECOMPOSITION_DEPTH,
+                budget_remaining: PlanningBudget {
+                    calls_remaining: MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
+                    input_tokens_remaining: MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
+                },
             };
             let planner = match composition.secured_claude_planner(task.as_str()) {
                 Ok(value) => value,
@@ -279,48 +320,44 @@ fn apply_continuation(
     if record.reason == plan_domain::HumanDecisionReason::RiskEscalation
         && record.selected == Some(HumanContinuation::Resume)
     {
-        let context = match request.context {
-            Some(value) => value,
-            None => return invalid("planning context is required for RESUME"),
-        };
-        let (task, branch, policy, _) = match planning_input(context) {
-            Ok(value) => value,
-            Err(message) => return invalid(&message),
-        };
-        if task != record.task_id || branch != record.plan_branch_id {
-            return invalid("planning context does not match human decision scope");
-        }
         let mut planning = match composition.planning_service() {
             Ok(value) => value,
             Err(error) => return internal(error.to_string()),
         };
+        let policy_fingerprint =
+            match composition.planning_policy_fingerprint(record.task_id.as_str()) {
+                Ok(value) => value,
+                Err(error) => return internal(error),
+            };
+        let policy = match planning.canonical_policy_context(&record.task_id, policy_fingerprint) {
+            Ok(value) => value,
+            Err(error) => return invalid(&error.to_string()),
+        };
         return match planning.resume_approved_risk_proposal(&id, &policy) {
-            Ok(outcome) => outcome_response(outcome, &branch),
+            Ok(outcome) => outcome_response(outcome, &record.plan_branch_id),
             Err(error) => internal(error.to_string()),
         };
     }
     if record.selected == Some(HumanContinuation::Replan) {
-        let context = match request.context {
-            Some(value) => value,
-            None => return invalid("planning context is required for REPLAN"),
-        };
-        let (task, branch, policy, _) = match planning_input(context) {
-            Ok(value) => value,
-            Err(message) => return invalid(&message),
-        };
-        if task != record.task_id || branch != record.plan_branch_id {
-            return invalid("planning context does not match human decision scope");
-        }
         let mut planning = match composition.planning_service() {
             Ok(value) => value,
             Err(error) => return internal(error.to_string()),
         };
-        let planner = match composition.secured_claude_planner(task.as_str()) {
+        let policy_fingerprint =
+            match composition.planning_policy_fingerprint(record.task_id.as_str()) {
+                Ok(value) => value,
+                Err(error) => return internal(error),
+            };
+        let policy = match planning.canonical_policy_context(&record.task_id, policy_fingerprint) {
+            Ok(value) => value,
+            Err(error) => return invalid(&error.to_string()),
+        };
+        let planner = match composition.secured_claude_planner(record.task_id.as_str()) {
             Ok(value) => value,
             Err(error) => return internal(error),
         };
         return match decisions.apply_replan(&mut planning, &planner, &id, &policy) {
-            Ok(outcome) => outcome_response(outcome, &branch),
+            Ok(outcome) => outcome_response(outcome, &record.plan_branch_id),
             Err(error) => internal(error.to_string()),
         };
     }
@@ -336,67 +373,23 @@ fn apply_continuation(
     }
 }
 
-fn planning_input(
+fn planning_intent(
     context: PlanningContext,
-) -> Result<
-    (
-        TaskId,
-        PlanBranchId,
-        PlanningPolicyContext,
-        DecompositionRequest,
-    ),
-    String,
-> {
+) -> Result<(TaskId, PlanBranchId, EvidenceRef), String> {
     let task = TaskId::new(context.task_id).map_err(|error| format!("invalid task id: {error}"))?;
     let branch = PlanBranchId::new(context.plan_branch_id)
         .map_err(|error| format!("invalid plan branch id: {error}"))?;
-    let scope_bound = ScopeBound::new(context.scope_roots)
-        .map_err(|error| format!("invalid planning scope: {error}"))?;
     let evidence = EvidenceRef::new(context.evidence_ref)
         .map_err(|error| format!("invalid planning evidence reference: {error}"))?;
-    if context.policy_fingerprint.trim().is_empty()
-        || context.policy_fingerprint.len() > ipc_contracts::MAX_WIRE_ID_LEN
-    {
-        return Err("policy fingerprint is invalid".to_owned());
-    }
-    let criteria = context
-        .acceptance_criterion_ids
-        .into_iter()
-        .map(|value| {
-            CriterionId::new(value)
-                .map(|id| AffectedParentCriterion {
-                    id,
-                    method: VerificationMethod::AutomatedTest,
-                })
-                .map_err(|error| format!("invalid acceptance criterion: {error}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if criteria.is_empty() {
-        return Err("at least one acceptance criterion is required".to_owned());
-    }
-    let policy = PlanningPolicyContext {
-        scope_bound: scope_bound.clone(),
-        baseline_risk: RiskClass::Low,
-        affected_parent_criteria: criteria,
-        parent_task_ref: task.as_str().to_owned(),
-        lineage_fingerprints: Vec::new(),
-        risk_grant: None,
-        risk_decision_id: None,
-        policy_fingerprint: context.policy_fingerprint,
-    };
-    let request = DecompositionRequest {
-        parent_task_ref: String::new(),
-        base_plan_revision: 0,
-        acceptance_criteria_refs: Vec::new(),
-        scope_bound,
-        evidence_refs: vec![evidence],
-        depth_remaining: MAX_DECOMPOSITION_DEPTH,
-        budget_remaining: PlanningBudget {
-            calls_remaining: MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
-            input_tokens_remaining: MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
-        },
-    };
-    Ok((task, branch, policy, request))
+    // Historical protocol-v5 authority-bearing fields remain decodable for
+    // compatibility but are intentionally ignored here. Canonical Task and
+    // Policy state are re-derived above before any planner/publication work.
+    let _ = (
+        context.scope_roots,
+        context.acceptance_criterion_ids,
+        context.policy_fingerprint,
+    );
+    Ok((task, branch, evidence))
 }
 
 fn outcome_response(
