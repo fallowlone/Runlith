@@ -496,9 +496,9 @@ satisfy runnable-leaf requirements.
 
 ## Amendment — TASK-0088 child readiness eligibility (2026-09-17)
 
-> Proposed. Owner decision of 2026-09-17 selected direct READY materialization
-> over a separate readiness-admission operation; this amendment writes that
-> decision down. Source of the clause text: the TASK-0087-R1 verification
+> Accepted 2026-09-17. Owner decision of 2026-09-17 selected direct READY
+> materialization over a separate readiness-admission operation; this amendment
+> writes that decision down. Source of the clause text: the TASK-0087-R1 verification
 > report (`docs/development/G7_TASK_0087_R1_VERIFICATION.md`), whose BLOCKED
 > verdict identified readiness eligibility as unsettled authority rather than
 > a demonstrated defect.
