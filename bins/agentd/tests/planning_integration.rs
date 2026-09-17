@@ -112,13 +112,14 @@ impl ExecutionPort for CountingExecutor {
     }
 }
 
-/// Creates one canonical planning parent plus READY descendant Tasks whose
-/// identities may legitimately appear in planner output for that parent.
-fn seed_ready_child_tasks(
+/// Creates one canonical planning parent and returns the ids of the children
+/// the planner proposes for it. Children are never pre-seeded: an accepted
+/// revision materializes them as new READY Tasks under the parent (TASK-0087).
+fn seed_planning_parent(
     orchestration: &mut OrchestrationService<FixedClock>,
     project: &str,
     parent: &str,
-    names: &[&str],
+    planned: &[&str],
 ) -> Vec<TaskId> {
     let project_id = ProjectId::new(project).expect("project id");
     orchestration
@@ -137,27 +138,9 @@ fn seed_ready_child_tasks(
         .create_task(&parent_task)
         .expect("create planning parent");
 
-    names
+    planned
         .iter()
-        .map(|name| {
-            let mut task = Task::draft(
-                TaskId::new(*name).expect("task id"),
-                project_id.clone(),
-                format!("planned step {name}"),
-            )
-            .expect("draft task");
-            task.set_parent(parent_id.clone())
-                .expect("set planning parent");
-            orchestration
-                .tasks_mut()
-                .create_task(&task)
-                .expect("create task");
-            orchestration
-                .tasks_mut()
-                .mark_ready(task.id())
-                .expect("mark ready");
-            task.id().clone()
-        })
+        .map(|name| TaskId::new(*name).expect("planned child id"))
         .collect()
 }
 
@@ -213,10 +196,10 @@ fn agentd_composes_planning_validation_persistence_execution_and_bounded_replan(
         OrchestrationService::open(database_path, FixedClock(FIXED_MILLIS)).expect("orchestration");
     let mut planning =
         PlanningService::open(database_path, FixedClock(FIXED_MILLIS)).expect("planning");
-    // `replanned-child` is the canonical Task the bounded replan proposes as
-    // replacement work; ADR-0027 L4 requires the accepted replan to leave
-    // runnable canonical work, not merely a structurally valid node.
-    let tasks = seed_ready_child_tasks(
+    // The bounded replan proposes `replanned-child` as replacement work; its
+    // acceptance materializes it READY, so ADR-0027 L4 still sees runnable
+    // canonical work, not merely a structurally valid node.
+    let tasks = seed_planning_parent(
         &mut orchestration,
         "P-PLANNING",
         "TASK-0078",
@@ -281,7 +264,7 @@ fn plan_dependency_direction_runs_predecessor_before_successor() {
     let mut orchestration =
         OrchestrationService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("orchestration");
     let mut planning = PlanningService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("planning");
-    let tasks = seed_ready_child_tasks(
+    let tasks = seed_planning_parent(
         &mut orchestration,
         "P-PLANNING-CHAIN",
         "TASK-0078-CHAIN",
@@ -343,7 +326,7 @@ fn accepted_plan_chain_runs_successor_after_predecessor_without_replanning() {
     let mut orchestration =
         OrchestrationService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("orchestration");
     let mut planning = PlanningService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("planning");
-    let tasks = seed_ready_child_tasks(
+    let tasks = seed_planning_parent(
         &mut orchestration,
         "P-PLAN-E2E",
         "TASK-0078-E2E",
@@ -505,10 +488,10 @@ fn production_claude_planner_composition_crosses_g6_runner_before_provider_call(
     );
     let composition = ExecutionComposition::new(db.path.clone(), Some(provider));
     {
-        // Canonical Task the secured proposal decomposes into (L4).
+        // Canonical parent; acceptance materializes `secured-child` (L4).
         let mut orchestration =
             OrchestrationService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("orchestration");
-        seed_ready_child_tasks(
+        seed_planning_parent(
             &mut orchestration,
             "P-SECURED",
             "TASK-0078",

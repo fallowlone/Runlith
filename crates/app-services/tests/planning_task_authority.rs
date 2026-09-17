@@ -25,6 +25,8 @@ use task_domain::{Project, ProjectId, Task, TaskId};
 const FIXED_MILLIS: u64 = 1_704_067_200_000;
 const ROOT: &str = "T-AUTHORITY";
 const CHILD: &str = "T-AUTHORITY-CHILD";
+/// The planner-proposed child: a new identity, never the parent or `CHILD`.
+const LEAF: &str = "T-AUTHORITY-LEAF";
 const POLICY: &str = "policy:task-authority";
 
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -191,7 +193,7 @@ impl DriftingPlanner {
         Self {
             db_path: db.path.clone(),
             drift,
-            inner: FakePlanner::for_single_leaf(PlanNodeId::new(ROOT).unwrap()),
+            inner: FakePlanner::for_single_leaf(PlanNodeId::new(LEAF).unwrap()),
         }
     }
 
@@ -424,7 +426,7 @@ impl PlannerPort for RiskPlanner {
 #[test]
 fn v9_resume_with_task_drift_after_policy_derivation_fails_closed_without_consumption() {
     let db = TestDb::new("v9-resume-drift");
-    let planner = RiskPlanner(FakePlanner::for_single_leaf(PlanNodeId::new(ROOT).unwrap()));
+    let planner = RiskPlanner(FakePlanner::for_single_leaf(PlanNodeId::new(LEAF).unwrap()));
     let decision = match db
         .service()
         .propose_decomposition(
