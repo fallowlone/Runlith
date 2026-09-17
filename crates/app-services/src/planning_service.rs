@@ -40,8 +40,9 @@ use storage_sqlite::{
     ApprovedPlanProposal, ChildTaskMaterialization, EventType, NewHumanDecisionRequest,
     NewJournalEvent, PlanCommitJournalEvidence, PlanRevisionLineage, PlanRevisionLineageRecord,
     PlannerCallSettlement, PlanningRunRecord, PlanningRunState, SqliteStore, StorageError,
+    CHILD_TASK_MATERIALIZATION_PROVENANCE,
 };
-use task_domain::{ProjectId, Task, TaskId};
+use task_domain::{Task, TaskId};
 
 use crate::clock::{format_rfc3339, Clock, SystemClock};
 use crate::plan_graph::{
@@ -1520,16 +1521,27 @@ impl<C: Clock> PlanningService<C> {
         // can only make an accepted plan wait, because plan-gated scheduling
         // re-derives predecessor and Task readiness before admission.
         let candidate = apply_validated_changeset(&base_graph, &proposal)?;
-        if let Some(refusal) = trusted_node_identity_refusal(&candidate, &snapshot) {
-            return self.record_rejection_with_human_intervention(
-                branch,
-                &trigger_key,
-                PlanningProposalOutcome::NotApplicable(refusal),
-                policy,
-                &snapshot,
-                &proposal.source_evidence_refs,
-            );
-        }
+        // Trusted child identity (TASK-0087, Option B): planner output is
+        // proposal data only. A `node_addition` id that names no existing
+        // Task is a new child the accept path materializes atomically below;
+        // a `node_addition` id that names any existing Task — trusted
+        // descendant, foreign task, or the parent itself — is refused here,
+        // and again fail-closed by storage on the commit path. Base-graph
+        // nodes keep the established trusted-candidate rule.
+        let pending_children =
+            match child_identity_outcome(&self.store, &candidate, &snapshot, &proposal)? {
+                ChildIdentityOutcome::Pending(ids) => ids,
+                ChildIdentityOutcome::Refused(refusal) => {
+                    return self.record_rejection_with_human_intervention(
+                        branch,
+                        &trigger_key,
+                        PlanningProposalOutcome::NotApplicable(refusal),
+                        policy,
+                        &snapshot,
+                        &proposal.source_evidence_refs,
+                    );
+                }
+            };
         if let Some(task_id) = target {
             if let Some(refusal) = target_applicability(&self.store, &candidate, task_id)? {
                 return self.record_rejection_with_human_intervention(
@@ -1543,7 +1555,7 @@ impl<C: Clock> PlanningService<C> {
             }
         }
 
-        if !has_runnable_node(&self.store, &candidate)? {
+        if !has_runnable_node(&self.store, &candidate, &pending_children)? {
             let decision = self.create_planning_human_decision(
                 branch,
                 policy,
@@ -1594,7 +1606,7 @@ impl<C: Clock> PlanningService<C> {
             planning_run_generation: run.generation,
         };
 
-        let child_tasks = self.materialize_child_tasks(&proposal, policy)?;
+        let child_tasks = self.materialize_child_tasks(&proposal, policy, &pending_children)?;
         match self
             .store
             .commit_plan_revision_with_human_decision_and_children(
@@ -1634,20 +1646,25 @@ impl<C: Clock> PlanningService<C> {
     /// Materializes planner-proposed nodes only after the proposal has passed
     /// trusted validation. Planner output remains proposal data; this method
     /// is the application-owned boundary that mints canonical Task identity.
+    ///
+    /// Every addition reaching here was proved brand-new by
+    /// [`child_identity_outcome`]: no existence skip exists on this path, so
+    /// reconciliation stays executable and storage remains the authority that
+    /// re-fences availability inside the commit transaction (concurrent claim
+    /// of the same id fails the whole commit closed).
     fn materialize_child_tasks(
         &mut self,
         proposal: &PlanChangeSet,
         policy: &PlanningPolicyContext,
+        pending_children: &BTreeSet<String>,
     ) -> Result<Vec<ChildTaskMaterialization>, PlanningServiceError> {
         let mut children = Vec::new();
         for addition in &proposal.node_additions {
+            if !pending_children.contains(addition.id.as_str()) {
+                continue;
+            }
             let task_id = TaskId::new(addition.id.as_str().to_owned())
                 .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
-            if self.store.get_task(&task_id)?.is_some() {
-                return Err(PlanningServiceError::Storage(StorageError::Duplicate(
-                    format!("materialized child task {} already exists", task_id),
-                )));
-            }
             let project_id = self
                 .store
                 .get_task(
@@ -1673,6 +1690,22 @@ impl<C: Clock> PlanningService<C> {
                         .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?,
                 )
                 .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
+            child
+                .define_planning_metadata(
+                    addition.scope.roots(),
+                    addition
+                        .criteria
+                        .iter()
+                        .map(|criterion| criterion.id.as_str().to_owned())
+                        .collect(),
+                    // Domain-safe serialization: the canonical lowercase
+                    // risk name (`low`/`medium`/...) that
+                    // `TaskPlanningAuthority::derive` parses back. `Debug`
+                    // (`Low`/`Medium`/...) would persist an unparseable
+                    // value and break derived planning authority.
+                    addition.risk_class.as_str(),
+                )
+                .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
             let event = NewJournalEvent {
                 event_type: EventType::TaskCreated,
                 task_id: Some(child.id().clone()),
@@ -1683,7 +1716,7 @@ impl<C: Clock> PlanningService<C> {
                 correlation_id: format!("plan-child:{}", addition.id.as_str()),
                 causation_id: proposal.proposal_hash.clone(),
                 occurred_at: format_rfc3339(self.clock.now_millis()),
-                provenance: "plan-application-service/materialize_child_task".to_owned(),
+                provenance: CHILD_TASK_MATERIALIZATION_PROVENANCE.to_owned(),
                 execution_id: None,
                 attempt_id: None,
                 attempt_outcome: None,
@@ -1954,22 +1987,73 @@ fn trusted_candidate_task_refs(
     ))
 }
 
-fn trusted_node_identity_refusal(
+/// Outcome of resolving candidate Plan node identities against canonical
+/// Task state (TASK-0087 trusted child materialization, Option B).
+enum ChildIdentityOutcome {
+    /// Every candidate node is trusted. Carries the `node_addition` ids that
+    /// name brand-new Tasks the accept path must materialize atomically.
+    Pending(BTreeSet<String>),
+    /// A candidate node names an identity the planner cannot own.
+    Refused(PlanApplicabilityRefusal),
+}
+
+/// Resolves the only canonical Task identities a planner may name for one
+/// branch: the trusted snapshot set (owning parent plus existing descendants)
+/// for already-materialized nodes, plus brand-new `node_addition` ids that
+/// the accept path materializes. Planner output never owns an existing Task:
+/// an addition colliding with any stored Task — trusted descendant, foreign
+/// task, or the parent itself — is refused, as is any non-addition node
+/// outside the trusted set. Every arm is reachable: existing trusted base
+/// nodes pass, new ids pend, collisions and unknown refs refuse.
+fn child_identity_outcome(
+    store: &SqliteStore,
     candidate: &PlanGraph,
     snapshot: &PlanningInputSnapshot,
-) -> Option<PlanApplicabilityRefusal> {
+    proposal: &PlanChangeSet,
+) -> Result<ChildIdentityOutcome, PlanningServiceError> {
     let trusted: BTreeSet<&str> = snapshot
         .trusted_candidate_task_refs
         .iter()
         .map(String::as_str)
         .collect();
-    candidate
-        .nodes
+    let additions: BTreeSet<&str> = proposal
+        .node_additions
         .iter()
-        .find(|node| !trusted.contains(node.id.as_str()))
-        .map(|node| PlanApplicabilityRefusal::UntrustedNodeIdentity {
-            node: node.id.as_str().to_owned(),
-        })
+        .map(|addition| addition.id.as_str())
+        .collect();
+    let mut pending = BTreeSet::new();
+    for node in &candidate.nodes {
+        let id = node.id.as_str();
+        if additions.contains(id) {
+            let task_id = TaskId::new(id.to_owned()).map_err(|error| {
+                PlanningServiceError::InvalidContext(format!(
+                    "plan addition {id} is not a valid Task id: {error}"
+                ))
+            })?;
+            // Existing trusted candidates are historical materialized nodes
+            // already owned by this plan context. Unknown existing tasks are
+            // foreign claims and must fail closed. A new child that has no
+            // canonical Task yet proceeds to atomic materialization.
+            if store.get_task(&task_id)?.is_some() {
+                if !trusted.contains(id) {
+                    return Ok(ChildIdentityOutcome::Refused(
+                        PlanApplicabilityRefusal::UntrustedNodeIdentity {
+                            node: id.to_owned(),
+                        },
+                    ));
+                }
+                continue;
+            }
+            pending.insert(id.to_owned());
+        } else if !trusted.contains(id) {
+            return Ok(ChildIdentityOutcome::Refused(
+                PlanApplicabilityRefusal::UntrustedNodeIdentity {
+                    node: id.to_owned(),
+                },
+            ));
+        }
+    }
+    Ok(ChildIdentityOutcome::Pending(pending))
 }
 
 fn human_reason_for_guardrail(trip: &GuardrailTrip) -> Option<HumanDecisionReason> {

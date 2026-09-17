@@ -1326,6 +1326,32 @@ items:
     references:
       - bins/agentctl/tests/execution_recovery.rs
 
+  - id: TASK-0087-R1
+    gate: G7
+    title: Durable child task materialization reconciliation
+    objective: Resolve duplicate child task materialization retries while
+      preserving deterministic Task ownership and transactional storage
+      boundaries.
+    scope: >-
+      Storage reconciliation for durable child task materialization and the
+      related planning application path. Same identity and provenance reuse
+      existing state; conflicting provenance fails closed.
+    exit_criteria_summary: Child task materialization is idempotent for the
+      same identity and provenance, rejects conflicting provenance without
+      partial state, and required planning verification passes.
+    outcome: >-
+      ACCEPTED. Storage reconciliation now handles retry materialization
+      inside the transaction boundary. Existing child tasks with matching
+      materialization provenance are reused, while conflicting provenance is
+      rejected. Planning authority and Task lifecycle boundaries remain
+      unchanged.
+    depends_on:
+      - TASK-0085
+    blocked_by: []
+    references:
+      - adapters/storage-sqlite/src/plan_store.rs
+      - crates/app-services/src/planning_service.rs
+
   - id: TASK-0074
     gate: G6
     title: Independent Full G6 Closure Re-Audit

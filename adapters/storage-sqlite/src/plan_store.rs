@@ -23,10 +23,11 @@ use crate::event::{EventType, JournalEvent, NewJournalEvent, PlanRevisionJournal
 use crate::human_decision_store::{
     consume_risk_decision_for_plan_commit, RiskDecisionPlanCommitBinding,
 };
-use crate::journal_store::{insert_journal_event, require_canonical_sha256};
+use crate::journal_store::{insert_journal_event, list_events_for_task, require_canonical_sha256};
 use crate::plan_cost_store::load_plan_cost_receipt;
 use crate::plan_guardrail_store::{require_evidence_key, reset_rejections};
 use crate::planning_control_store::{enforce_publication_fence, mark_publication_succeeded};
+use crate::task_store::load_task;
 use crate::task_store::{
     insert_task_edges, insert_task_row, insert_task_strings, require_task_created_envelope,
 };
@@ -76,6 +77,14 @@ pub struct ChildTaskMaterialization {
     pub task: Task,
     pub event: NewJournalEvent,
 }
+
+/// Provenance minted by the planning application service for every
+/// materialized child `task.created` fact. Storage reconciliation keys
+/// idempotent retry recognition on exactly this value plus the event's
+/// `causation_id` (the accepted proposal hash); any other provenance for
+/// the same Task id is a conflict and fails closed.
+pub const CHILD_TASK_MATERIALIZATION_PROVENANCE: &str =
+    "plan-application-service/materialize_child_task";
 
 impl crate::task_store::SqliteStore {
     /// Reads and validates one branch's durable head. A head/revision lineage
@@ -322,11 +331,23 @@ impl crate::task_store::SqliteStore {
 
         for child in child_tasks {
             require_task_created_envelope(&child.task, &child.event)?;
-            if load_task(&transaction, child.task.id())?.is_some() {
-                return Err(StorageError::Duplicate(format!(
-                    "materialized child task {} already exists",
-                    child.task.id()
-                )));
+            if let Some(existing) = load_task(&transaction, child.task.id())? {
+                // Fail closed: an existing Task id is reused only for an
+                // exact idempotent retry of the same materialization — same
+                // provenance, same causation (accepted proposal hash), and
+                // same full content snapshot (parent, project, objective,
+                // acceptance, scope, risk, state, ...). Anything else is a
+                // conflicting claim (different proposal, different owner, or
+                // a foreign pre-existing Task) and aborts the whole commit:
+                // returning here drops the transaction without committing,
+                // so no partial Task/Plan/journal state survives.
+                if !is_idempotent_child_retry(&transaction, &existing, child)? {
+                    return Err(StorageError::ConstraintViolation(format!(
+                        "materialized child task {} conflicts with an existing task",
+                        child.task.id()
+                    )));
+                }
+                continue;
             }
             let snapshot = child.task.snapshot();
             insert_task_row(&transaction, &snapshot)?;
@@ -1069,6 +1090,32 @@ fn positive_u64(value: i64, field: &str) -> StorageResult<u64> {
         return Err(StorageError::Corrupt(format!("{field} stores zero")));
     }
     Ok(value)
+}
+
+/// Recognizes an exact idempotent retry of an already-materialized child:
+/// the proposed Task snapshot is byte-identical to the stored one and the
+/// journal already holds the `task.created` fact minted by the same
+/// materialization (same provenance, same causation = same accepted
+/// proposal hash). A foreign pre-existing Task (no such fact), a task whose
+/// content drifted (different snapshot), or a competing proposal (different
+/// causation) all return false so the caller fails closed.
+fn is_idempotent_child_retry(
+    connection: &Connection,
+    existing: &Task,
+    child: &ChildTaskMaterialization,
+) -> StorageResult<bool> {
+    if child.event.provenance != CHILD_TASK_MATERIALIZATION_PROVENANCE {
+        return Ok(false);
+    }
+    if existing.snapshot() != child.task.snapshot() {
+        return Ok(false);
+    }
+    let events = list_events_for_task(connection, child.task.id())?;
+    Ok(events.iter().any(|event| {
+        event.fact.event_type == EventType::TaskCreated
+            && event.fact.provenance == CHILD_TASK_MATERIALIZATION_PROVENANCE
+            && event.fact.causation_id == child.event.causation_id
+    }))
 }
 
 fn missing_lineage(branch: &PlanBranchId, revision_seq: u64) -> StorageError {

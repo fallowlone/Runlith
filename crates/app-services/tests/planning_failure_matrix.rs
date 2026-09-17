@@ -290,7 +290,12 @@ impl PlannerPort for AdversarialTextPlanner {
 #[test]
 fn adversarial_freeform_planner_text_is_inert_and_grants_no_authority() {
     let db = TestDb::new("adversarial-text");
-    db.seed_ready_tasks(&["TASK-0080", "planned-child-0"]);
+    // `planned-child-0` is created by the trusted child materialization path.
+    // The planner may propose a new child identity, but an already existing
+    // task without materialization provenance is a foreign identity and must
+    // fail closed. Keep this fixture focused on validating that planner text
+    // remains inert while the typed proposal path is accepted.
+    db.seed_ready_tasks(&["TASK-0080"]);
     let marker = db.dir.join("planner-text-was-executed");
     let planner = AdversarialTextPlanner {
         inner: FakePlanner::for_scenario(FakePlannerScenario::Valid),
