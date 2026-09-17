@@ -1120,8 +1120,8 @@ fn positive_u64(value: i64, field: &str) -> StorageResult<u64> {
 /// the proposed Task snapshot is byte-identical to the stored one and the
 /// journal holds exactly the complete lifecycle pair minted by the same
 /// materialization. Both `task.created` and `task.marked_ready` are checked
-/// for their type, Task/project scope, states, provenance, causation, and
-/// envelope. A foreign pre-existing Task, incomplete or contradictory
+/// for their type, Task/project scope, states, provenance, causation, journal
+/// order (creation before readiness), and envelope. A foreign pre-existing Task, incomplete or contradictory
 /// evidence, a task whose content drifted (different snapshot), or a
 /// competing proposal all return false so the caller fails closed.
 fn is_idempotent_child_retry(
@@ -1166,6 +1166,13 @@ fn is_idempotent_child_retry(
     if !valid_fact(created, EventType::TaskCreated, TaskState::Draft)
         || !valid_fact(ready, EventType::MarkedReady, TaskState::Ready)
     {
+        return Ok(false);
+    }
+
+    // `seq` is the journal's order. A child is created before it is readied,
+    // so a pair journaled the other way round is a contradictory lifecycle
+    // rather than the materialization this retry claims to repeat.
+    if created.seq >= ready.seq {
         return Ok(false);
     }
 

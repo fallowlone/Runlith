@@ -1546,7 +1546,7 @@ fn child_materialization_commits_ready_children_and_reuses_them_on_exact_retry()
 fn malformed_persisted_child_retry_evidence_fails_closed_without_partial_state() {
     type Mutation = fn(&rusqlite::Connection);
 
-    let cases: [(&str, Mutation); 18] = [
+    let cases: [(&str, Mutation); 19] = [
         ("missing-created", |connection| {
             connection
                 .execute(
@@ -1740,6 +1740,25 @@ fn malformed_persisted_child_retry_evidence_fails_closed_without_partial_state()
                             provenance
                      FROM event_journal
                      WHERE task_id = 'worker' AND event_type = 'task.created'",
+                    [],
+                )
+                .unwrap();
+        }),
+        // The pair is complete and individually valid, but readiness is
+        // journaled before creation. `seq` is the journal's order, so this is
+        // a contradictory lifecycle, not an exact retry.
+        ("ready-before-created", |connection| {
+            connection
+                .execute(
+                    "UPDATE event_journal SET seq = 900001
+                     WHERE task_id = 'worker' AND event_type = 'task.created'",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE event_journal SET seq = 900000
+                     WHERE task_id = 'worker' AND event_type = 'task.marked_ready'",
                     [],
                 )
                 .unwrap();
