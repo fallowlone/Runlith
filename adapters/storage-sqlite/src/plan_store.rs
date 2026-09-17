@@ -16,6 +16,7 @@ use plan_domain::{
     RiskClass, ValidatedBy, VerificationMethod,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use task_domain::Task;
 
 use crate::error::{map_constraint, StorageError, StorageResult};
 use crate::event::{EventType, JournalEvent, NewJournalEvent, PlanRevisionJournalPayload};
@@ -26,6 +27,9 @@ use crate::journal_store::{insert_journal_event, require_canonical_sha256};
 use crate::plan_cost_store::load_plan_cost_receipt;
 use crate::plan_guardrail_store::{require_evidence_key, reset_rejections};
 use crate::planning_control_store::{enforce_publication_fence, mark_publication_succeeded};
+use crate::task_store::{
+    insert_task_edges, insert_task_row, insert_task_strings, require_task_created_envelope,
+};
 
 /// Trusted application-service envelope for the Event Journal metadata that
 /// surrounds one committed Plan revision. It contains no planner transcript,
@@ -63,6 +67,14 @@ pub struct PlanRevisionLineageRecord {
     pub planning_input_fingerprint: String,
     pub planning_run_id: plan_domain::PlanningRunId,
     pub planning_run_generation: u64,
+}
+
+/// Tasks created as part of accepting a plan revision. The storage boundary
+/// commits these rows together with the PlanRevision and its journal event.
+#[derive(Clone, Debug)]
+pub struct ChildTaskMaterialization {
+    pub task: Task,
+    pub event: NewJournalEvent,
 }
 
 impl crate::task_store::SqliteStore {
@@ -236,6 +248,29 @@ impl crate::task_store::SqliteStore {
         risk_decision: Option<&HumanDecisionRequestId>,
         canonical_task_authority: bool,
     ) -> StorageResult<JournalEvent> {
+        self.commit_plan_revision_with_human_decision_and_children(
+            changeset,
+            revision,
+            resulting_graph,
+            lineage,
+            evidence,
+            risk_decision,
+            canonical_task_authority,
+            &[],
+        )
+    }
+
+    pub fn commit_plan_revision_with_human_decision_and_children(
+        &mut self,
+        changeset: &PlanChangeSet,
+        revision: &PlanRevision,
+        resulting_graph: &PlanGraph,
+        lineage: &PlanRevisionLineage,
+        evidence: &PlanCommitJournalEvidence,
+        risk_decision: Option<&HumanDecisionRequestId>,
+        canonical_task_authority: bool,
+        child_tasks: &[ChildTaskMaterialization],
+    ) -> StorageResult<JournalEvent> {
         validate_commit_binding(changeset, revision, evidence)?;
         validate_graph_snapshot(resulting_graph)?;
         require_evidence_key(&lineage.trigger_evidence_key)?;
@@ -283,6 +318,21 @@ impl crate::task_store::SqliteStore {
                     consumed_at_ms: revision.created_at,
                 },
             )?;
+        }
+
+        for child in child_tasks {
+            require_task_created_envelope(&child.task, &child.event)?;
+            if load_task(&transaction, child.task.id())?.is_some() {
+                return Err(StorageError::Duplicate(format!(
+                    "materialized child task {} already exists",
+                    child.task.id()
+                )));
+            }
+            let snapshot = child.task.snapshot();
+            insert_task_row(&transaction, &snapshot)?;
+            insert_task_strings(&transaction, &snapshot)?;
+            insert_task_edges(&transaction, &snapshot)?;
+            insert_journal_event(&transaction, &child.event)?;
         }
 
         if revision.revision_seq == 1 {
