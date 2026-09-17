@@ -1546,7 +1546,99 @@ fn child_materialization_commits_ready_children_and_reuses_them_on_exact_retry()
 fn malformed_persisted_child_retry_evidence_fails_closed_without_partial_state() {
     type Mutation = fn(&rusqlite::Connection);
 
-    let cases: [(&str, Mutation); 9] = [
+    let cases: [(&str, Mutation); 18] = [
+        ("missing-created", |connection| {
+            connection
+                .execute(
+                    "DELETE FROM event_journal
+                     WHERE task_id = 'worker' AND event_type = 'task.created'",
+                    [],
+                )
+                .unwrap();
+        }),
+        ("malformed-created-type", |connection| {
+            connection
+                .execute(
+                    "UPDATE event_journal SET event_type = 'task.claimed'
+                     WHERE task_id = 'worker' AND event_type = 'task.created'",
+                    [],
+                )
+                .unwrap();
+        }),
+        ("wrong-created-provenance", |connection| {
+            connection
+                .execute(
+                    "UPDATE event_journal SET provenance = 'task-service/create_task'
+                     WHERE task_id = 'worker' AND event_type = 'task.created'",
+                    [],
+                )
+                .unwrap();
+        }),
+        ("wrong-created-causation", |connection| {
+            connection
+                .execute(
+                    "UPDATE event_journal SET causation_id = 'sha256:foreign'
+                     WHERE task_id = 'worker' AND event_type = 'task.created'",
+                    [],
+                )
+                .unwrap();
+        }),
+        ("wrong-created-task", |connection| {
+            connection
+                .execute(
+                    "UPDATE event_journal SET task_id = 'task-root'
+                     WHERE task_id = 'worker' AND event_type = 'task.created'",
+                    [],
+                )
+                .unwrap();
+        }),
+        ("wrong-created-project", |connection| {
+            connection
+                .execute(
+                    "UPDATE event_journal SET project_id = 'P-FOREIGN'
+                     WHERE task_id = 'worker' AND event_type = 'task.created'",
+                    [],
+                )
+                .unwrap();
+        }),
+        ("wrong-ready-project", |connection| {
+            connection
+                .execute(
+                    "UPDATE event_journal SET project_id = 'P-FOREIGN'
+                     WHERE task_id = 'worker' AND event_type = 'task.marked_ready'",
+                    [],
+                )
+                .unwrap();
+        }),
+        ("malformed-created-envelope", |connection| {
+            connection
+                .execute_batch("PRAGMA ignore_check_constraints = ON;")
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE event_journal SET correlation_id = ''
+                     WHERE task_id = 'worker' AND event_type = 'task.created'",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute_batch("PRAGMA ignore_check_constraints = OFF;")
+                .unwrap();
+        }),
+        ("contradictory-ready-count", |connection| {
+            connection
+                .execute(
+                    "INSERT INTO event_journal
+                     (event_type, event_version, task_id, project_id, from_state, to_state,
+                      reason, correlation_id, causation_id, occurred_at, provenance)
+                     SELECT event_type, event_version, task_id, project_id, from_state, to_state,
+                            reason, correlation_id, causation_id, occurred_at, provenance
+                     FROM event_journal
+                     WHERE task_id = 'worker' AND event_type = 'task.marked_ready'",
+                    [],
+                )
+                .unwrap();
+        }),
         ("missing-ready", |connection| {
             connection
                 .execute(
@@ -1658,6 +1750,15 @@ fn malformed_persisted_child_retry_evidence_fails_closed_without_partial_state()
         let db = TestDb::new(label);
         let mut store = db.open();
         seed_child_parent(&mut store);
+        store
+            .create_project(
+                &Project::new(
+                    ProjectId::new("P-FOREIGN").unwrap(),
+                    "foreign project".to_owned(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
         let changeset = two_child_changeset("materialize worker with retry sibling");
         let child = materialized_child("worker", &changeset);
         commit_with_children(
