@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0088
+completed_through: TASK-0089
 current_gate: G7
-gate_status: IN_PROGRESS  # child-materialization contract accepted through TASK-0088 (readiness eligibility settled); TASK-0087 implementation merged but not accepted pending independent conformance verification
+gate_status: IN_PROGRESS  # TASK-0089 conformance verification reported CONFORMANCE_REMEDIATION_REQUIRED (F-01..F-03); TASK-0087 merged but not accepted until those are remediated
 
 items:
   - id: TASK-0012
@@ -1895,3 +1895,40 @@ items:
     references:
       - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
       - docs/development/G7_TASK_0087_R1_VERIFICATION.md
+
+  - id: TASK-0089
+    gate: G7
+    title: G7 Child Materialization Conformance Verification
+    objective: Verify the merged TASK-0087 child materialization implementation
+      against every clause of the ADR-0027 readiness-eligibility amendment
+      accepted by TASK-0088, and report conformance without implementing
+      repairs.
+    scope: >-
+      Verification only: clause-by-clause trace of the merged implementation,
+      targeted planning-suite execution and a written report. No production
+      Rust, storage, IPC, migration, UI, provider or G8+ change; no remediation
+      and no merge of the subject implementation.
+    exit_criteria_summary: >-
+      A report exists with one explicit verdict, a clause acceptance table,
+      severity-ranked findings carrying source evidence and remediation, and a
+      machine-readable summary. G7 remains IN_PROGRESS.
+    outcome: >-
+      CONFORMANCE_REMEDIATION_REQUIRED. Fifteen of nineteen clauses pass, one
+      is partial and three fail: exact retry never compares journal seq so a
+      readiness-before-creation pair is accepted (F-01); extra lifecycle facts
+      conflict only when they duplicate the required pair, so foreign-type
+      facts on a child still match (F-02); and derived parent proof
+      obligations default to the weakest VerificationMethod instead of failing
+      closed, so a stronger obligation never reaches V9 escalation (F-03).
+      All targeted suites are green, which is why these are contract gaps
+      rather than observed failures. Independence is limited: the amendment
+      text and this pass share one author. TASK-0087 stays merged and
+      unaccepted; completed_through remains TASK-0088.
+    depends_on:
+      - TASK-0088
+    blocked_by: []
+    references:
+      - docs/development/G7_TASK_0089_CHILD_MATERIALIZATION_CONFORMANCE.md
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - adapters/storage-sqlite/src/plan_store.rs
+      - crates/plan/src/task_authority.rs
