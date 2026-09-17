@@ -1784,36 +1784,85 @@ fn plan_predecessor_without_owned_canonical_task_is_refused_before_commit() {
 }
 
 #[test]
-fn structurally_valid_plan_without_runnable_task_trips_l4_before_commit() {
-    for (label, seeded, ready) in [
-        ("no-canonical-task", &[][..], true),
-        ("task-not-ready", &["planned-child-0"][..], false),
-    ] {
-        let db = TestDb::new(label);
-        db.seed_tasks(&["TASK-0078"], true);
-        db.seed_tasks(seeded, ready);
-        let outcome = db
-            .service()
-            .propose_decomposition(
-                &FakePlanner::for_scenario(FakePlannerScenario::Valid),
-                &branch(),
-                request(label),
-                &policy(true),
-            )
-            .expect("L4 escalation is typed");
-        assert!(
-            matches!(
-                &outcome,
-                PlanningProposalOutcome::Accepted(_)
-                    | PlanningProposalOutcome::NotApplicable(_)
-                    | PlanningProposalOutcome::WaitingForHuman(_)
+fn structurally_valid_plan_with_new_child_has_runnable_work_before_commit() {
+    let db = TestDb::new("new-runnable-child");
+    db.seed_tasks(&["TASK-0078"], true);
+    let outcome = db
+        .service()
+        .propose_decomposition(
+            &FakePlanner::for_scenario(FakePlannerScenario::Valid),
+            &branch(),
+            request("new-runnable-child"),
+            &policy(true),
+        )
+        .expect("new child is accepted only with runnable work");
+    let accepted = match outcome {
+        PlanningProposalOutcome::Accepted(accepted) => accepted,
+        other => panic!("new child must produce an accepted runnable plan, got {other:?}"),
+    };
+    assert_eq!(accepted.revision().revision_seq, 1);
+    assert_eq!(db.store().get_plan_head(&branch()).unwrap(), Some(1));
+    let child = db
+        .store()
+        .get_task(&TaskId::new("planned-child-0").unwrap())
+        .unwrap()
+        .expect("accepted plan materializes its child");
+    assert_eq!(child.state(), TaskState::Ready);
+    assert_eq!(child.parent().map(TaskId::as_str), Some("TASK-0078"));
+    assert_eq!(
+        task_facts(&db, "planned-child-0")
+            .iter()
+            .map(|(event_type, from, to, _, _)| (*event_type, *from, *to))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                EventType::TaskCreated,
+                Some(TaskState::Draft),
+                Some(TaskState::Draft)
             ),
-            "{label}: unexpected typed planning outcome {outcome:?}"
-        );
-        if !matches!(&outcome, PlanningProposalOutcome::Accepted(_)) {
-            assert_no_plan_persisted(&db);
-        }
-    }
+            (
+                EventType::MarkedReady,
+                Some(TaskState::Draft),
+                Some(TaskState::Ready)
+            ),
+        ]
+    );
+}
+
+#[test]
+fn structurally_valid_plan_without_runnable_task_trips_l4_before_commit() {
+    let db = TestDb::new("draft-only-child");
+    db.seed_tasks(&["TASK-0078"], true);
+    db.seed_tasks(&["planned-child-0"], false);
+    let child = TaskId::new("planned-child-0").unwrap();
+    let snapshot_before = db.store().get_task(&child).unwrap().unwrap().snapshot();
+    let facts_before = task_facts(&db, "planned-child-0");
+
+    let outcome = db
+        .service()
+        .propose_decomposition(
+            &FakePlanner::for_scenario(FakePlannerScenario::Valid),
+            &branch(),
+            request("draft-only-child"),
+            &policy(true),
+        )
+        .expect("non-runnable existing identity is a typed refusal");
+    assert!(
+        matches!(
+            outcome,
+            PlanningProposalOutcome::NotApplicable(
+                PlanApplicabilityRefusal::UntrustedNodeIdentity { ref node }
+            ) if node == "planned-child-0"
+        ),
+        "a DRAFT-only canonical Task must never produce Accepted, got {outcome:?}"
+    );
+    assert_no_plan_persisted(&db);
+    let store = db.store();
+    assert_eq!(
+        store.get_task(&child).unwrap().unwrap().snapshot(),
+        snapshot_before
+    );
+    assert_eq!(task_facts(&db, "planned-child-0"), facts_before);
 }
 
 #[test]
@@ -2445,6 +2494,73 @@ fn children_behind_non_runnable_work_trip_l4_without_materializing() {
         .get_task(&TaskId::new("node-2").unwrap())
         .unwrap()
         .is_none());
+}
+
+#[test]
+fn child_behind_running_predecessor_trips_l4_without_materializing() {
+    let db = TestDb::new("child-l4-running");
+    seed_head(&db, 1);
+    let node = TaskId::new("node-1").unwrap();
+    let mut tasks = TaskService::open(&db.path, FixedClock(FIXED_MILLIS)).unwrap();
+    tasks.claim(&node).unwrap();
+    tasks.start(&node).unwrap();
+
+    let outcome = db
+        .service()
+        .propose_decomposition(
+            &TestPlanner::new(ProposalCase::BehindPrevious),
+            &branch(),
+            request("child-l4-running"),
+            &policy(false),
+        )
+        .expect("L4 escalation is typed");
+    assert!(matches!(
+        outcome,
+        PlanningProposalOutcome::WaitingForHuman(decision)
+            if decision.reason == HumanDecisionReason::PlannerBlocked
+    ));
+    assert_eq!(db.store().get_plan_head(&branch()).unwrap(), Some(1));
+    assert!(db
+        .store()
+        .get_task(&TaskId::new("node-2").unwrap())
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn child_behind_completed_predecessor_is_runnable_and_can_be_accepted() {
+    let db = TestDb::new("child-l4-completed");
+    seed_head(&db, 1);
+    let node = TaskId::new("node-1").unwrap();
+    let executor = CountingExecutor::new();
+    let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
+    db.orchestration()
+        .schedule(&node, ids("complete-predecessor"), &executor, &evaluator)
+        .expect("predecessor completes through independent evaluation");
+    assert_eq!(
+        db.store().get_task(&node).unwrap().unwrap().state(),
+        TaskState::Completed
+    );
+
+    let outcome = db
+        .service()
+        .propose_decomposition(
+            &TestPlanner::new(ProposalCase::BehindPrevious),
+            &branch(),
+            request("child-l4-completed"),
+            &policy(false),
+        )
+        .expect("completed predecessor permits runnable successor");
+    assert!(matches!(outcome, PlanningProposalOutcome::Accepted(_)));
+    assert_eq!(db.store().get_plan_head(&branch()).unwrap(), Some(2));
+    assert_eq!(
+        db.store()
+            .get_task(&TaskId::new("node-2").unwrap())
+            .unwrap()
+            .unwrap()
+            .state(),
+        TaskState::Ready
+    );
 }
 
 #[test]

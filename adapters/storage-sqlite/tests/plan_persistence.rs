@@ -1543,6 +1543,210 @@ fn child_materialization_commits_ready_children_and_reuses_them_on_exact_retry()
 }
 
 #[test]
+fn malformed_persisted_child_retry_evidence_fails_closed_without_partial_state() {
+    type Mutation = fn(&rusqlite::Connection);
+
+    let cases: [(&str, Mutation); 9] = [
+        ("missing-ready", |connection| {
+            connection
+                .execute(
+                    "DELETE FROM event_journal
+                     WHERE task_id = 'worker' AND event_type = 'task.marked_ready'",
+                    [],
+                )
+                .unwrap();
+        }),
+        ("malformed-ready-type", |connection| {
+            connection
+                .execute(
+                    "UPDATE event_journal SET event_type = 'task.claimed'
+                     WHERE task_id = 'worker' AND event_type = 'task.marked_ready'",
+                    [],
+                )
+                .unwrap();
+        }),
+        ("wrong-ready-states", |connection| {
+            connection
+                .execute_batch("PRAGMA ignore_check_constraints = ON;")
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE event_journal SET from_state = 'READY', to_state = 'CLAIMED'
+                     WHERE task_id = 'worker' AND event_type = 'task.marked_ready'",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute_batch("PRAGMA ignore_check_constraints = OFF;")
+                .unwrap();
+        }),
+        ("wrong-ready-provenance", |connection| {
+            connection
+                .execute(
+                    "UPDATE event_journal SET provenance = 'task-service/mark_ready'
+                     WHERE task_id = 'worker' AND event_type = 'task.marked_ready'",
+                    [],
+                )
+                .unwrap();
+        }),
+        ("wrong-ready-causation", |connection| {
+            connection
+                .execute(
+                    "UPDATE event_journal SET causation_id = 'sha256:foreign'
+                     WHERE task_id = 'worker' AND event_type = 'task.marked_ready'",
+                    [],
+                )
+                .unwrap();
+        }),
+        ("wrong-ready-task", |connection| {
+            connection
+                .execute(
+                    "UPDATE event_journal SET task_id = 'task-root'
+                     WHERE task_id = 'worker' AND event_type = 'task.marked_ready'",
+                    [],
+                )
+                .unwrap();
+        }),
+        ("malformed-ready-envelope", |connection| {
+            connection
+                .execute_batch("PRAGMA ignore_check_constraints = ON;")
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE event_journal SET correlation_id = ''
+                     WHERE task_id = 'worker' AND event_type = 'task.marked_ready'",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute_batch("PRAGMA ignore_check_constraints = OFF;")
+                .unwrap();
+        }),
+        ("malformed-created-states", |connection| {
+            connection
+                .execute_batch("PRAGMA ignore_check_constraints = ON;")
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE event_journal SET from_state = 'READY', to_state = 'READY'
+                     WHERE task_id = 'worker' AND event_type = 'task.created'",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute_batch("PRAGMA ignore_check_constraints = OFF;")
+                .unwrap();
+        }),
+        ("contradictory-created-count", |connection| {
+            connection
+                .execute(
+                    "INSERT INTO event_journal
+                     (event_type, event_version, task_id, project_id, from_state, to_state,
+                      reason, correlation_id, causation_id, occurred_at, provenance)
+                     SELECT event_type, event_version, task_id, project_id, 'DRAFT', 'DRAFT',
+                            reason, 'plan-child:contradictory', causation_id, occurred_at,
+                            provenance
+                     FROM event_journal
+                     WHERE task_id = 'worker' AND event_type = 'task.created'",
+                    [],
+                )
+                .unwrap();
+        }),
+    ];
+
+    for (label, mutate) in cases {
+        let db = TestDb::new(label);
+        let mut store = db.open();
+        seed_child_parent(&mut store);
+        let changeset = two_child_changeset("materialize worker with retry sibling");
+        let child = materialized_child("worker", &changeset);
+        commit_with_children(
+            &mut store,
+            &PlanBranchId::new("branch-child-seed").unwrap(),
+            &changeset,
+            "receipt-1",
+            std::slice::from_ref(&child),
+        )
+        .expect("seed a complete child materialization");
+
+        let worker = TaskId::new("worker").unwrap();
+        let worker_before = store.get_task(&worker).unwrap().unwrap().snapshot();
+        let tasks_before = store
+            .list_tasks_for_project(&child_project())
+            .unwrap()
+            .len();
+
+        mutate(&db.raw());
+        // The mutation deliberately corrupts the persisted evidence. Capture
+        // that prepared state now; the retry itself must not add anything on
+        // top of it or alter the existing Task/facts.
+        let facts_at_retry = store.list_events_for_task(&worker).unwrap();
+        let events_at_retry = store.list_events_ordered().unwrap();
+
+        // The retry must be rejected by storage before its branch, sibling,
+        // revision, lineage, or plan journal fact becomes durable.
+        let retry_branch = PlanBranchId::new("branch-child-retry").unwrap();
+        let error = commit_with_children(
+            &mut store,
+            &retry_branch,
+            &changeset,
+            "receipt-1",
+            &[materialized_child("reviewer", &changeset), child],
+        )
+        .expect_err("malformed or incomplete persisted evidence must not be an exact retry");
+        assert!(
+            matches!(
+                error,
+                StorageError::ConstraintViolation(_)
+                    | StorageError::Corrupt(_)
+                    | StorageError::DomainReconstruction(_)
+            ),
+            "{label}: unexpected error {error:?}"
+        );
+        assert_eq!(store.get_plan_head(&retry_branch).unwrap(), None, "{label}");
+        assert_eq!(
+            store.get_plan_revision(&retry_branch, 1).unwrap(),
+            None,
+            "{label}"
+        );
+        assert!(
+            store
+                .get_task(&TaskId::new("reviewer").unwrap())
+                .unwrap()
+                .is_none(),
+            "{label}: sibling inserted before the conflict must roll back"
+        );
+        assert!(
+            store.get_plan_lineage(&retry_branch).unwrap().is_empty(),
+            "{label}"
+        );
+        assert_eq!(
+            store.list_events_ordered().unwrap(),
+            events_at_retry,
+            "{label}"
+        );
+        assert_eq!(
+            store
+                .list_tasks_for_project(&child_project())
+                .unwrap()
+                .len(),
+            tasks_before,
+            "{label}: no sibling child remains"
+        );
+        assert_eq!(
+            store.get_task(&worker).unwrap().unwrap().snapshot(),
+            worker_before,
+            "{label}: existing Task changed"
+        );
+        assert_eq!(
+            store.list_events_for_task(&worker).unwrap(),
+            facts_at_retry,
+            "{label}: facts changed"
+        );
+    }
+}
+
+#[test]
 fn conflicting_child_materialization_fails_closed_without_partial_state() {
     // Every case stores a `worker` Task that is not an exact retry of the
     // `competing` materialization, then commits `competing` with a brand-new

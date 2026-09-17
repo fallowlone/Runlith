@@ -1118,11 +1118,12 @@ fn positive_u64(value: i64, field: &str) -> StorageResult<u64> {
 
 /// Recognizes an exact idempotent retry of an already-materialized child:
 /// the proposed Task snapshot is byte-identical to the stored one and the
-/// journal already holds the `task.created` fact minted by the same
-/// materialization (same provenance, same causation = same accepted
-/// proposal hash). A foreign pre-existing Task (no such fact), a task whose
-/// content drifted (different snapshot), or a competing proposal (different
-/// causation) all return false so the caller fails closed.
+/// journal holds exactly the complete lifecycle pair minted by the same
+/// materialization. Both `task.created` and `task.marked_ready` are checked
+/// for their type, Task/project scope, states, provenance, causation, and
+/// envelope. A foreign pre-existing Task, incomplete or contradictory
+/// evidence, a task whose content drifted (different snapshot), or a
+/// competing proposal all return false so the caller fails closed.
 fn is_idempotent_child_retry(
     connection: &Connection,
     existing: &Task,
@@ -1132,11 +1133,48 @@ fn is_idempotent_child_retry(
         return Ok(false);
     }
     let events = list_events_for_task(connection, child.task.id())?;
-    Ok(events.iter().any(|event| {
-        event.fact.event_type == EventType::TaskCreated
-            && event.fact.provenance == CHILD_TASK_MATERIALIZATION_PROVENANCE
-            && event.fact.causation_id == child.created_event.causation_id
-    }))
+    let created = events
+        .iter()
+        .filter(|event| event.fact.event_type == EventType::TaskCreated)
+        .collect::<Vec<_>>();
+    let ready = events
+        .iter()
+        .filter(|event| event.fact.event_type == EventType::MarkedReady)
+        .collect::<Vec<_>>();
+
+    // A materialized child has one authoritative creation and one readiness
+    // fact. Requiring exactly one of each prevents a valid-looking pair from
+    // hiding an extra contradictory lifecycle fact.
+    if created.len() != 1 || ready.len() != 1 {
+        return Ok(false);
+    }
+
+    let expected_causation = child.created_event.causation_id.as_str();
+    let valid_fact = |event: &JournalEvent, event_type: EventType, to_state: TaskState| {
+        let fact = &event.fact;
+        fact.event_type == event_type
+            && fact.task_id.as_ref() == Some(child.task.id())
+            && fact.project_id.as_ref() == Some(child.task.project_id())
+            && fact.from_state == Some(TaskState::Draft)
+            && fact.to_state == Some(to_state)
+            && fact.provenance == CHILD_TASK_MATERIALIZATION_PROVENANCE
+            && fact.causation_id == expected_causation
+    };
+
+    let created = created[0];
+    let ready = ready[0];
+    if !valid_fact(created, EventType::TaskCreated, TaskState::Draft)
+        || !valid_fact(ready, EventType::MarkedReady, TaskState::Ready)
+    {
+        return Ok(false);
+    }
+
+    // Journal decoding validates persisted schema/type/state syntax, but the
+    // retry boundary must also re-run the write-side envelope/scope contract
+    // before treating persisted data as authority.
+    require_envelope(&created.fact)?;
+    require_envelope(&ready.fact)?;
+    Ok(true)
 }
 
 /// Validates one planner child before any write: a READY Task owned by the
