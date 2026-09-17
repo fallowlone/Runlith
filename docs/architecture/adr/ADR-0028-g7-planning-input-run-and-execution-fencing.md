@@ -207,6 +207,55 @@ or Security Audit table becomes a second source of planning truth.
 Planner adapters remain replaceable behind `PlannerPort`; the durable
 snapshot/run contracts are product-owned and provider-neutral.
 
+## Amendment — TASK-0086 child materialization and publication fencing (2026-09-17)
+
+### Existing references and proposed identities
+
+The publication fence distinguishes two cases:
+
+- References to existing Tasks remain restricted to the trusted candidate set
+  captured from canonical Task authority. A planner cannot name unrelated
+  roots, siblings, another project's Tasks, or arbitrary existing IDs.
+- A proposed new child identity from `node_additions` is not required to exist
+  in the pre-planning candidate snapshot. It is validated as a new identity at
+  the trusted materialization boundary.
+
+The absence of an existing ID is evidence for a possible new child, not
+authority to reuse an existing Task. The trusted boundary must prove the ID is
+available before materialization.
+
+### Publication fencing additions
+
+The authoritative write boundary must fence concurrent changes to:
+
+1. owning parent Task authority;
+2. existing descendant membership;
+3. proposed child ID availability;
+4. project/task state used for derived authority;
+5. Plan branch head and planning-run generation.
+
+Any mismatch refuses publication. TASK-0086 does not weaken TASK-0084's
+Task-derived authority checks.
+
+### Planner input contract
+
+New child materialization does not require adding existing candidate Task IDs
+to `DecompositionRequest`. New additions are independent from existing Task
+references.
+
+If future replan/update/remove operations require existing references, they
+must use the already established trusted candidate-set semantics rather than
+exposing unrestricted identifiers. Any protocol expansion must preserve the
+rule that clients and providers cannot supply authority.
+
+### Recovery implications
+
+The implementation must define durable reconciliation for interrupted
+materialization. A daemon restart, duplicate proposal, stale base revision,
+partial Task creation, or concurrent ID claim must produce an observable
+recoverable state. The system must distinguish a replay of the same accepted
+materialization from a conflicting attempt by durable provenance.
+
 ## Amendment — TASK-0084 canonical Task authority (2026-09-16)
 
 ### Problem
