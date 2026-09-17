@@ -493,3 +493,76 @@ missing.
 An accepted decomposition satisfies L4 only when at least one runnable leaf has
 a canonical Task representation. A proposed but unmaterialized child cannot
 satisfy runnable-leaf requirements.
+
+## Amendment — TASK-0088 child readiness eligibility (2026-09-17)
+
+> Proposed. Owner decision of 2026-09-17 selected direct READY materialization
+> over a separate readiness-admission operation; this amendment writes that
+> decision down. Source of the clause text: the TASK-0087-R1 verification
+> report (`docs/development/G7_TASK_0087_R1_VERIFICATION.md`), whose BLOCKED
+> verdict identified readiness eligibility as unsettled authority rather than
+> a demonstrated defect.
+
+### Problem
+
+The TASK-0086 amendment defines trusted materialization of canonical child
+Tasks but does not say whether a materialized child may be authored directly
+into READY. `docs/architecture/task-engine.md` permits the `DRAFT -> READY`
+transition and deliberately leaves its readiness checklist open, naming User /
+authorized client and the Task Application Service as initiators. The shipped
+implementation marks validated children READY inside the materialization
+transaction and fences on it, so the behavior needs accepted authority.
+
+### Decision: trusted service may author children READY
+
+For G7 materialization, the trusted Planning Application Service may declare
+authoring complete and perform `DRAFT -> READY` only after V1–V9 validation,
+canonical parent/project and new-ID checks, and explicit preservation of parent
+scope, acceptance proof obligations, baseline risk and required gates.
+
+- Planner output never authorizes readiness. Readiness is a trusted-code
+  decision derived from validation, never from proposal content.
+- READY means orchestration eligibility, not RUNNABLE and not execution
+  permission. Execution authority stays with the accepted Runner/G5/G6
+  boundary.
+- Obligations that cannot be represented on the child block materialization.
+  Defaulting to a weaker obligation is forbidden (INV-046 non-weakening).
+- Creating or readying a child never completes or satisfies the parent.
+
+### Publication and fencing
+
+The publication transaction fences input snapshot, active run/generation, Plan
+head, parent/project authority, descendant membership and proposed child IDs.
+The ADR-0028 amendment names which Task/project lifecycle changes invalidate
+derived authority.
+
+Committed atomically: READY children, exactly one `CREATED` (`DRAFT -> DRAFT`)
+and one `MARKED_READY` (`DRAFT -> READY`) fact per child, the revision, lineage
+and the plan journal fact. A refusal also rolls back approval consumption.
+Previously recorded spend is not erased.
+
+### Exact retry equivalence
+
+Reuse of an existing child requires identical canonical Task snapshots, a valid
+unique `CREATED`/`READY` pair with creation ordered before readiness, matching
+Task, project and states, trusted provenance and proposal-hash causation. New
+request timestamps or event IDs do not require byte-identical events.
+Additional lifecycle facts beyond the required pair are a conflict, not a
+match. Reuse appends no duplicate facts and never bypasses Plan head,
+generation or V7 checks.
+
+### L4 interaction
+
+L4 executable leaves are canonical Task work, not necessarily graph sinks. They
+count only with derived RUNNABLE and completed canonical Plan predecessors.
+Pending children count only under this transaction's READY guarantee and only
+without incomplete Task dependencies. Pending predecessors never count as
+completed. No runnable work yields the specified blocker or human decision,
+without automatically completing the parent.
+
+### Acceptance envelope
+
+This amendment states the contract; it does not certify conformance. TASK-0087
+is accepted only after an independent pass verifies the merged implementation
+against every clause above and reports remaining gaps as separately scoped
+remediation.

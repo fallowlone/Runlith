@@ -1855,3 +1855,32 @@ items:
     references:
       - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
       - docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md
+
+  - id: TASK-0088
+    gate: G7
+    title: G7 Child Readiness Eligibility Amendment
+    objective: Record the owner decision that the trusted Planning Application
+      Service may author validated child Tasks directly into READY, closing the
+      unsettled authority that blocks TASK-0087-R1.
+    scope: >-
+      ADR-0027 amendment text and required G7 bookkeeping only. No production
+      Rust, storage, IPC, migration, UI, provider or G8+ work. Conformance of
+      the merged TASK-0087 implementation is verified separately.
+    exit_criteria_summary: >-
+      ADR-0027 carries an accepted readiness-eligibility clause covering
+      trusted authoring preconditions, publication fencing, exact-retry
+      equivalence and L4 interaction. G7 remains IN_PROGRESS and TASK-0087
+      remains unaccepted pending independent conformance verification.
+    outcome: >-
+      PROPOSED. Amendment drafted on branch
+      task-0088-child-readiness-eligibility from the owner decision of
+      2026-09-17, adopting the clause text proposed in
+      docs/development/G7_TASK_0087_R1_VERIFICATION.md. Not merged, not
+      accepted; no conformance claim about the merged TASK-0087
+      implementation.
+    depends_on:
+      - TASK-0086
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - docs/development/G7_TASK_0087_R1_VERIFICATION.md
