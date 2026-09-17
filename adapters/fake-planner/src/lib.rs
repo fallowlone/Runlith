@@ -44,9 +44,11 @@ impl FakePlanner {
         }
     }
 
-    /// Builds the smallest accepted-plan fixture for one canonical Task.
-    /// Useful for execution-boundary tests whose subject is G5 behavior but
-    /// which must now satisfy the G7 accepted-plan precondition first.
+    /// Builds the smallest accepted-plan fixture: one proposed child node
+    /// `node_id`, which acceptance materializes as a new READY Task under the
+    /// planning parent. `node_id` must not name the parent or any existing
+    /// Task (TASK-0087). Useful for execution-boundary tests whose subject is
+    /// G5 behavior but which must satisfy the G7 accepted-plan precondition.
     #[must_use]
     pub fn for_single_leaf(node_id: PlanNodeId) -> Self {
         Self {

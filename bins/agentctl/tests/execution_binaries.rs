@@ -194,13 +194,13 @@ const SUCCESS_BODY: &str = r#"printf '{"type":"result","subtype":"success","is_e
 // The same fixture is a valid planner result and a successful execution
 // result. The planner adapter reads the JSON string in `result`; the
 // execution adapter only needs the outer successful provider event.
-const PLANNING_BODY: &str = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":0,\"reason\":\"fixture decomposition\",\"node_additions\":[{\"id\":\"T-PLAN\",\"scope\":[\"repo:src\"],\"criteria\":[{\"id\":\"criterion-root\",\"method\":\"automated-test\"}],\"risk_class\":\"low\",\"required_gate\":null}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"fixture work is executable\",\"risk_delta\":[],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:src\"],\"coverage_map\":{\"criterion-root\":[\"criterion-root\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
+const PLANNING_BODY: &str = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":0,\"reason\":\"fixture decomposition\",\"node_additions\":[{\"id\":\"T-PLAN-CHILD\",\"scope\":[\"repo:src\"],\"criteria\":[{\"id\":\"criterion-root\",\"method\":\"automated-test\"}],\"risk_class\":\"low\",\"required_gate\":null}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"fixture work is executable\",\"risk_delta\":[],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:src\"],\"coverage_map\":{\"criterion-root\":[\"criterion-root\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
 "#;
 
-const RISK_PLANNING_BODY: &str = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":0,\"reason\":\"fixture risk escalation\",\"node_additions\":[{\"id\":\"T-RISK\",\"scope\":[\"repo:src\"],\"criteria\":[{\"id\":\"criterion-root\",\"method\":\"automated-test\"}],\"risk_class\":\"high\",\"required_gate\":\"human-review\"}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"fixture work requires human approval\",\"risk_delta\":[{\"node\":\"T-RISK\",\"from\":\"low\",\"to\":\"high\"}],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:src\"],\"coverage_map\":{\"criterion-root\":[\"criterion-root\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
+const RISK_PLANNING_BODY: &str = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":0,\"reason\":\"fixture risk escalation\",\"node_additions\":[{\"id\":\"T-RISK-CHILD\",\"scope\":[\"repo:src\"],\"criteria\":[{\"id\":\"criterion-root\",\"method\":\"automated-test\"}],\"risk_class\":\"high\",\"required_gate\":\"human-review\"}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"fixture work requires human approval\",\"risk_delta\":[{\"node\":\"T-RISK-CHILD\",\"from\":\"low\",\"to\":\"high\"}],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:src\"],\"coverage_map\":{\"criterion-root\":[\"criterion-root\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
 "#;
 
-const AUTHORITY_PLANNING_BODY: &str = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":0,\"reason\":\"canonical authority fixture\",\"node_additions\":[{\"id\":\"T-AUTH\",\"scope\":[\"repo:canonical\"],\"criteria\":[{\"id\":\"criterion-canonical\",\"method\":\"automated-test\"}],\"risk_class\":\"medium\",\"required_gate\":null}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"canonical authority is preserved\",\"risk_delta\":[],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:canonical\"],\"coverage_map\":{\"criterion-canonical\":[\"criterion-canonical\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
+const AUTHORITY_PLANNING_BODY: &str = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":0,\"reason\":\"canonical authority fixture\",\"node_additions\":[{\"id\":\"T-AUTH-CHILD\",\"scope\":[\"repo:canonical\"],\"criteria\":[{\"id\":\"criterion-canonical\",\"method\":\"automated-test\"}],\"risk_class\":\"medium\",\"required_gate\":null}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"canonical authority is preserved\",\"risk_delta\":[],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:canonical\"],\"coverage_map\":{\"criterion-canonical\":[\"criterion-canonical\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
 "#;
 
 const SLOW_BODY: &str = "while :; do :; done\n";
@@ -212,19 +212,28 @@ fn seed_ready(sandbox: &Sandbox, project: &str, task: &str) {
         "seed project: {}",
         stderr(&created)
     );
+    // `task` itself is materialized READY by the accepted plan below.
     let created = sandbox.agentctl(&[
         "task",
         "create",
-        task,
+        &fixture_parent(task),
         project,
         &format!("objective {task}"),
     ]);
-    assert!(created.status.success(), "seed task: {}", stderr(&created));
-    let ready = sandbox.agentctl(&["task", "ready", task]);
-    assert!(ready.status.success(), "seed ready: {}", stderr(&ready));
+    assert!(
+        created.status.success(),
+        "seed parent: {}",
+        stderr(&created)
+    );
     seed_accepted_plan(sandbox, task);
 }
 
+fn fixture_parent(task: &str) -> String {
+    format!("{task}-PARENT")
+}
+
+/// Publishes an accepted plan whose only child is `task`; acceptance
+/// materializes it as a new READY Task under `<task>-PARENT` (TASK-0087).
 fn seed_accepted_plan(sandbox: &Sandbox, task: &str) {
     let db = sandbox
         .root
@@ -238,7 +247,7 @@ fn seed_accepted_plan(sandbox: &Sandbox, task: &str) {
     let planner =
         fake_planner::FakePlanner::for_single_leaf(plan_domain::PlanNodeId::new(task).unwrap());
     let request = plan_domain::DecompositionRequest {
-        parent_task_ref: task.to_owned(),
+        parent_task_ref: fixture_parent(task),
         base_plan_revision: 0,
         acceptance_criteria_refs: vec![],
         scope_bound: scope.clone(),
@@ -253,7 +262,7 @@ fn seed_accepted_plan(sandbox: &Sandbox, task: &str) {
         scope_bound: scope,
         baseline_risk: plan_domain::RiskClass::Low,
         affected_parent_criteria: vec![],
-        parent_task_ref: task.to_owned(),
+        parent_task_ref: fixture_parent(task),
         canonical_task_authority: false,
         lineage_fingerprints: vec![],
         risk_grant: None,
@@ -834,10 +843,11 @@ fn v5_planning_cli_publishes_an_accepted_plan_then_admits_execution() {
         stdout(&planning)
     );
 
+    // The accepted plan's work is the materialized child, never the parent.
     let run = sandbox.agentctl(&[
         "execution",
         "run",
-        "T-PLAN",
+        "T-PLAN-CHILD",
         &sandbox.repo.display().to_string(),
         "--execution",
         "E-PLAN",
@@ -976,10 +986,11 @@ fn v6_authored_task_plans_and_executes_without_sqlite_authority_seeding() {
         stdout(&planning)
     );
 
+    // The accepted plan's work is the materialized child, never the parent.
     let run = sandbox.agentctl(&[
         "execution",
         "run",
-        "T-PLAN",
+        "T-PLAN-CHILD",
         &sandbox.repo.display().to_string(),
         "--execution",
         "E-V6",

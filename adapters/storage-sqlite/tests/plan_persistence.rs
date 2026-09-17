@@ -17,10 +17,11 @@ use plan_domain::{
     VerificationMethod,
 };
 use storage_sqlite::{
-    EventType, NewHumanDecisionRequest, PlanCommitJournalEvidence, PlanRevisionLineage,
-    SqliteStore, StorageError, SUPPORTED_SCHEMA_VERSION,
+    ChildTaskMaterialization, CommitPlanRevisionRequest, EventType, NewHumanDecisionRequest,
+    NewJournalEvent, PlanCommitJournalEvidence, PlanRevisionLineage, SqliteStore, StorageError,
+    CHILD_TASK_MATERIALIZATION_PROVENANCE, SUPPORTED_SCHEMA_VERSION,
 };
-use task_domain::{Project, ProjectId, Task, TaskId};
+use task_domain::{Project, ProjectId, Task, TaskId, TaskState};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1299,4 +1300,497 @@ fn corrupt_plan_rows_fail_closed_on_reconstruction() {
         store.get_plan_graph(&branch, 1),
         Err(StorageError::Corrupt(_)) | Err(StorageError::DomainReconstruction(_))
     ));
+}
+
+// ---------------------------------------------------------------------------
+// TASK-0087: atomic child Task materialization
+// ---------------------------------------------------------------------------
+
+const CHILD_PARENT: &str = "task-root";
+
+fn child_project() -> ProjectId {
+    ProjectId::new("P-CHILD-MATERIALIZATION").unwrap()
+}
+
+/// Project plus the DRAFT plan parent every fixture revision's lineage names.
+fn seed_child_parent(store: &mut SqliteStore) {
+    store
+        .create_project(&Project::new(child_project(), "child materialization".to_owned()).unwrap())
+        .unwrap();
+    store
+        .create_task(
+            &Task::draft(
+                TaskId::new(CHILD_PARENT).unwrap(),
+                child_project(),
+                "plan parent".to_owned(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+}
+
+fn child_event(
+    task: &Task,
+    event_type: EventType,
+    to_state: TaskState,
+    causation: &str,
+) -> NewJournalEvent {
+    NewJournalEvent {
+        event_type,
+        task_id: Some(task.id().clone()),
+        project_id: Some(task.project_id().clone()),
+        from_state: Some(TaskState::Draft),
+        to_state: Some(to_state),
+        reason: None,
+        correlation_id: format!("plan-child:{}", task.id().as_str()),
+        causation_id: causation.to_owned(),
+        occurred_at: "2026-09-17T10:00:00Z".to_owned(),
+        provenance: CHILD_TASK_MATERIALIZATION_PROVENANCE.to_owned(),
+        execution_id: None,
+        attempt_id: None,
+        attempt_outcome: None,
+        workspace_id: None,
+        from_workspace_state: None,
+        to_workspace_state: None,
+        plan_revision: None,
+    }
+}
+
+/// The READY child plus its `task.created`/`task.marked_ready` facts, exactly
+/// as the planning application service mints them for `changeset`.
+fn materialized_child(id: &str, changeset: &PlanChangeSet) -> ChildTaskMaterialization {
+    let mut task = Task::draft(
+        TaskId::new(id).unwrap(),
+        child_project(),
+        format!("planned child task {id}"),
+    )
+    .unwrap();
+    task.set_parent(TaskId::new(CHILD_PARENT).unwrap()).unwrap();
+    task.mark_ready().unwrap();
+    child_materialization(task, changeset)
+}
+
+fn child_materialization(task: Task, changeset: &PlanChangeSet) -> ChildTaskMaterialization {
+    ChildTaskMaterialization {
+        created_event: child_event(
+            &task,
+            EventType::TaskCreated,
+            TaskState::Draft,
+            &changeset.proposal_hash,
+        ),
+        ready_event: child_event(
+            &task,
+            EventType::MarkedReady,
+            TaskState::Ready,
+            &changeset.proposal_hash,
+        ),
+        task,
+    }
+}
+
+/// `changeset` with a second node addition `reviewer`, rehashed.
+fn two_child_changeset(reason: &str) -> PlanChangeSet {
+    let mut two = changeset(0, reason, &[evidence("child-attempt")]);
+    let mut reviewer = two.node_additions[0].clone();
+    reviewer.id = nid("reviewer");
+    two.node_additions.push(reviewer);
+    two.proposal_hash = compute_proposal_hash(&two);
+    two
+}
+
+/// Publishes genesis revision 1 of `branch` with `children`, bound to a fresh
+/// planning run for the child parent.
+fn commit_with_children(
+    store: &mut SqliteStore,
+    branch: &PlanBranchId,
+    changeset: &PlanChangeSet,
+    receipt_ref: &str,
+    children: &[ChildTaskMaterialization],
+) -> storage_sqlite::StorageResult<storage_sqlite::JournalEvent> {
+    let revision = PlanRevision::new(
+        1,
+        branch.clone(),
+        0,
+        changeset.proposal_hash.clone(),
+        changeset.reason.clone(),
+        changeset.source_evidence_refs.clone(),
+        RevisionProposedBy::new(
+            changeset.proposed_by.clone(),
+            PlanningCostReceiptRef::new(receipt_ref).unwrap(),
+        ),
+        ValidatedBy::new("plan-reconciler".to_owned(), "policy:abc123".to_owned()).unwrap(),
+        1_800_000_000_001,
+    )
+    .unwrap();
+    let trigger = changeset.source_evidence_refs.clone();
+    let trigger_key = planning_evidence_key(&trigger);
+    let snapshot = PlanningInputSnapshot::new(
+        branch.clone(),
+        CHILD_PARENT.to_owned(),
+        0,
+        ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+        RiskClass::Low,
+        vec![],
+        trigger,
+        vec![],
+        None,
+        revision.validated_by.policy_fingerprint.clone(),
+    )
+    .unwrap();
+    let run = store
+        .start_planning_run(&snapshot, &trigger_key, revision.created_at - 1)
+        .unwrap();
+    let lineage = PlanRevisionLineage {
+        parent_task_ref: CHILD_PARENT.to_owned(),
+        trigger_evidence_key: trigger_key,
+        planning_input_snapshot_id: snapshot.id,
+        planning_input_fingerprint: snapshot.input_fingerprint,
+        planning_run_id: run.id,
+        planning_run_generation: run.generation,
+    };
+    store.commit_plan_revision_with_human_decision_and_children(CommitPlanRevisionRequest {
+        changeset,
+        revision: &revision,
+        resulting_graph: &graph_v1(),
+        lineage: &lineage,
+        evidence: &journal_evidence(1),
+        risk_decision: None,
+        canonical_task_authority: false,
+        child_tasks: children,
+    })
+}
+
+fn task_event_types(store: &SqliteStore, id: &str) -> Vec<EventType> {
+    store
+        .list_events_for_task(&TaskId::new(id).unwrap())
+        .unwrap()
+        .into_iter()
+        .map(|event| event.fact.event_type)
+        .collect()
+}
+
+/// Everything a failed materializing commit must leave untouched.
+fn assert_rolled_back(
+    store: &SqliteStore,
+    branch: &PlanBranchId,
+    events_before: usize,
+    tasks_before: usize,
+) {
+    assert_eq!(store.get_plan_head(branch).unwrap(), None);
+    assert!(store.get_plan_lineage(branch).unwrap().is_empty());
+    assert_eq!(store.list_events_ordered().unwrap().len(), events_before);
+    assert_eq!(
+        store
+            .list_tasks_for_project(&child_project())
+            .unwrap()
+            .len(),
+        tasks_before
+    );
+}
+
+#[test]
+fn child_materialization_commits_ready_children_and_reuses_them_on_exact_retry() {
+    let db = TestDb::new("child-exact-retry");
+    let mut store = db.open();
+    seed_child_parent(&mut store);
+    let changeset = changeset(0, "materialize worker", &[evidence("child-attempt")]);
+    let child = materialized_child("worker", &changeset);
+
+    commit_with_children(
+        &mut store,
+        &PlanBranchId::new("branch-child-a").unwrap(),
+        &changeset,
+        "receipt-1",
+        std::slice::from_ref(&child),
+    )
+    .expect("genesis revision materializes its child");
+    let worker = TaskId::new("worker").unwrap();
+    let stored = store.get_task(&worker).unwrap().expect("child row");
+    assert_eq!(stored.snapshot(), child.task.snapshot());
+    assert_eq!(stored.state(), TaskState::Ready);
+    assert_eq!(
+        task_event_types(&store, "worker"),
+        [EventType::TaskCreated, EventType::MarkedReady]
+    );
+
+    // Same id, provenance, causation and snapshot: reused, never duplicated.
+    let retry_branch = PlanBranchId::new("branch-child-b").unwrap();
+    commit_with_children(
+        &mut store,
+        &retry_branch,
+        &changeset,
+        "receipt-1",
+        std::slice::from_ref(&child),
+    )
+    .expect("exact retry reconciles to the existing child");
+    assert_eq!(store.get_plan_head(&retry_branch).unwrap(), Some(1));
+    assert_eq!(
+        store.get_task(&worker).unwrap().unwrap().snapshot(),
+        child.task.snapshot()
+    );
+    assert_eq!(
+        task_event_types(&store, "worker"),
+        [EventType::TaskCreated, EventType::MarkedReady]
+    );
+    assert_eq!(
+        store
+            .list_tasks_for_project(&child_project())
+            .unwrap()
+            .len(),
+        2,
+        "parent plus exactly one child row"
+    );
+}
+
+#[test]
+fn conflicting_child_materialization_fails_closed_without_partial_state() {
+    // Every case stores a `worker` Task that is not an exact retry of the
+    // `competing` materialization, then commits `competing` with a brand-new
+    // `reviewer` child inserted before `worker` conflicts.
+    let competing = two_child_changeset("competing decomposition");
+    let other = changeset(0, "materialize worker", &[evidence("child-attempt")]);
+
+    let foreign_provenance = |store: &mut SqliteStore| {
+        let task = materialized_child("worker", &competing).task;
+        let mut created = child_event(
+            &task,
+            EventType::TaskCreated,
+            TaskState::Ready,
+            &competing.proposal_hash,
+        );
+        created.from_state = Some(TaskState::Ready);
+        created.provenance = "task-service/create_task".to_owned();
+        store.create_task_with_event(&task, &created).unwrap();
+    };
+    let other_causation = |store: &mut SqliteStore| {
+        commit_with_children(
+            store,
+            &PlanBranchId::new("branch-child-other").unwrap(),
+            &other,
+            "receipt-1",
+            &[materialized_child("worker", &other)],
+        )
+        .unwrap();
+    };
+    let snapshot_mismatch = |store: &mut SqliteStore| {
+        let mut drifted = materialized_child("worker", &competing);
+        drifted.task = Task::restore(task_domain::TaskSnapshot {
+            objective: "a drifted objective".to_owned(),
+            ..drifted.task.snapshot()
+        })
+        .unwrap();
+        commit_with_children(
+            store,
+            &PlanBranchId::new("branch-child-drift").unwrap(),
+            &competing,
+            "receipt-1",
+            &[drifted],
+        )
+        .unwrap();
+    };
+
+    type Setup<'a> = &'a dyn Fn(&mut SqliteStore);
+    let cases: [(&str, Setup); 3] = [
+        ("foreign-provenance", &foreign_provenance),
+        ("other-proposal-causation", &other_causation),
+        ("snapshot-mismatch", &snapshot_mismatch),
+    ];
+    for (label, setup) in cases {
+        let db = TestDb::new(label);
+        let mut store = db.open();
+        seed_child_parent(&mut store);
+        setup(&mut store);
+        let worker = TaskId::new("worker").unwrap();
+        let worker_before = store.get_task(&worker).unwrap().unwrap().snapshot();
+        let worker_events = task_event_types(&store, "worker");
+        let events_before = store.list_events_ordered().unwrap().len();
+        let tasks_before = store
+            .list_tasks_for_project(&child_project())
+            .unwrap()
+            .len();
+
+        let branch = PlanBranchId::new("branch-child-conflict").unwrap();
+        let error = commit_with_children(
+            &mut store,
+            &branch,
+            &competing,
+            "receipt-1",
+            &[
+                materialized_child("reviewer", &competing),
+                materialized_child("worker", &competing),
+            ],
+        )
+        .expect_err("a conflicting child identity fails the whole commit");
+        assert!(
+            matches!(&error, StorageError::ConstraintViolation(detail)
+                if detail.contains("worker conflicts with an existing task")),
+            "{label}: {error:?}"
+        );
+        assert_rolled_back(&store, &branch, events_before, tasks_before);
+        assert!(
+            store
+                .get_task(&TaskId::new("reviewer").unwrap())
+                .unwrap()
+                .is_none(),
+            "{label}: the sibling inserted before the conflict rolled back"
+        );
+        assert_eq!(
+            store.get_task(&worker).unwrap().unwrap().snapshot(),
+            worker_before,
+            "{label}"
+        );
+        assert_eq!(task_event_types(&store, "worker"), worker_events, "{label}");
+    }
+}
+
+#[test]
+fn late_commit_failure_rolls_back_materialized_children_then_retry_publishes() {
+    let db = TestDb::new("child-late-failure");
+    let mut store = db.open();
+    seed_child_parent(&mut store);
+    let changeset = two_child_changeset("late failure");
+    let children = [
+        materialized_child("worker", &changeset),
+        materialized_child("reviewer", &changeset),
+    ];
+    let branch = PlanBranchId::new("branch-child-late").unwrap();
+    let events_before = store.list_events_ordered().unwrap().len();
+
+    // Children are inserted before the receipt check inside the same
+    // transaction; the forced late failure must discard them.
+    let error = commit_with_children(
+        &mut store,
+        &branch,
+        &changeset,
+        "receipt-child-missing",
+        &children,
+    )
+    .expect_err("unresolvable receipt fails after child inserts");
+    assert!(matches!(error, StorageError::ConstraintViolation(_)));
+    assert_rolled_back(&store, &branch, events_before, 1);
+
+    store
+        .record_plan_cost_receipt(
+            &PlanningCostReceiptRef::new("receipt-child-missing").unwrap(),
+            &fixture_receipt(),
+        )
+        .unwrap();
+    commit_with_children(
+        &mut store,
+        &branch,
+        &changeset,
+        "receipt-child-missing",
+        &children,
+    )
+    .expect("retry publishes revision and children together");
+    assert_eq!(store.get_plan_head(&branch).unwrap(), Some(1));
+    for id in ["worker", "reviewer"] {
+        assert_eq!(
+            store
+                .get_task(&TaskId::new(id).unwrap())
+                .unwrap()
+                .unwrap()
+                .state(),
+            TaskState::Ready
+        );
+        assert_eq!(
+            task_event_types(&store, id),
+            [EventType::TaskCreated, EventType::MarkedReady]
+        );
+    }
+}
+
+#[test]
+fn malformed_child_materialization_is_refused_before_any_write() {
+    let base = changeset(0, "materialize worker", &[evidence("child-attempt")]);
+    type Mutation = fn(&mut ChildTaskMaterialization, &mut PlanChangeSet);
+    let cases: [(&str, &str, Mutation); 7] = [
+        (
+            "parent-as-child",
+            "not owned by the plan revision parent",
+            |child, changeset| {
+                // A proposed node named after the parent; the domain already
+                // refuses a self-parent, so the READY task is parentless.
+                changeset.node_additions[0].id = nid(CHILD_PARENT);
+                changeset.proposal_hash = compute_proposal_hash(changeset);
+                let mut parent = Task::draft(
+                    TaskId::new(CHILD_PARENT).unwrap(),
+                    child_project(),
+                    "plan parent".to_owned(),
+                )
+                .unwrap();
+                parent.mark_ready().unwrap();
+                *child = child_materialization(parent, changeset);
+            },
+        ),
+        (
+            "not-a-proposed-node",
+            "not a node addition",
+            |child, changeset| {
+                *child = materialized_child("unproposed", changeset);
+            },
+        ),
+        (
+            "foreign-parent",
+            "not owned by the plan revision parent",
+            |child, _| {
+                child.task = Task::restore(task_domain::TaskSnapshot {
+                    parent: Some(TaskId::new("someone-else").unwrap()),
+                    ..child.task.snapshot()
+                })
+                .unwrap();
+            },
+        ),
+        (
+            "draft-placeholder",
+            "must be materialized READY",
+            |child, _| {
+                child.task = Task::restore(task_domain::TaskSnapshot {
+                    state: TaskState::Draft,
+                    ..child.task.snapshot()
+                })
+                .unwrap();
+            },
+        ),
+        (
+            "foreign-provenance",
+            "not minted by this plan",
+            |child, _| {
+                child.created_event.provenance = "task-service/create_task".to_owned();
+            },
+        ),
+        ("other-causation", "not minted by this plan", |child, _| {
+            child.ready_event.causation_id = "another-proposal".to_owned();
+        }),
+        (
+            "ready-fact-type",
+            "malformed task.marked_ready fact",
+            |child, _| {
+                child.ready_event.event_type = EventType::Claimed;
+            },
+        ),
+    ];
+    for (label, reason, mutate) in cases {
+        let db = TestDb::new(label);
+        let mut store = db.open();
+        seed_child_parent(&mut store);
+        let events_before = store.list_events_ordered().unwrap().len();
+        let mut changeset = base.clone();
+        let mut child = materialized_child("worker", &changeset);
+        mutate(&mut child, &mut changeset);
+
+        let branch = PlanBranchId::new("branch-child-malformed").unwrap();
+        let error = commit_with_children(&mut store, &branch, &changeset, "receipt-1", &[child])
+            .expect_err("malformed child materialization is refused");
+        assert!(
+            matches!(&error, StorageError::ConstraintViolation(detail) if detail.contains(reason)),
+            "{label}: {error:?}"
+        );
+        assert_rolled_back(&store, &branch, events_before, 1);
+        let parent = store
+            .get_task(&TaskId::new(CHILD_PARENT).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!((parent.state(), parent.parent()), (TaskState::Draft, None));
+    }
 }

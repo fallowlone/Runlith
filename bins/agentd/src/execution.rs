@@ -2019,6 +2019,10 @@ mod tests {
         seed_ready_with_objective(db, project, task, format!("objective {task}"));
     }
 
+    /// Authors a planning parent `<task>-PARENT` (carrying `objective`) and
+    /// publishes an accepted plan whose only child is `task`. Acceptance
+    /// materializes `task` as a new READY Task under the parent (TASK-0087);
+    /// its objective is the materialization placeholder.
     fn seed_ready_with_objective(
         db: &Path,
         project: &str,
@@ -2034,12 +2038,15 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
-        let task_id = task_domain::TaskId::new(task).unwrap();
+        let parent_id = task_domain::TaskId::new(fixture_parent(task)).unwrap();
         tasks
-            .create_task(&task_domain::Task::draft(task_id.clone(), project_id, objective).unwrap())
+            .create_task(&task_domain::Task::draft(parent_id, project_id, objective).unwrap())
             .unwrap();
-        tasks.mark_ready(&task_id).unwrap();
         seed_accepted_plan(db, task);
+    }
+
+    fn fixture_parent(task: &str) -> String {
+        format!("{task}-PARENT")
     }
 
     fn seed_accepted_plan(db: &Path, task: &str) {
@@ -2051,7 +2058,7 @@ mod tests {
         let planner =
             fake_planner::FakePlanner::for_single_leaf(plan_domain::PlanNodeId::new(task).unwrap());
         let request = plan_domain::DecompositionRequest {
-            parent_task_ref: task.to_owned(),
+            parent_task_ref: fixture_parent(task),
             base_plan_revision: 0,
             acceptance_criteria_refs: vec![],
             scope_bound: scope.clone(),
@@ -2066,7 +2073,7 @@ mod tests {
             scope_bound: scope,
             baseline_risk: plan_domain::RiskClass::Low,
             affected_parent_criteria: vec![],
-            parent_task_ref: task.to_owned(),
+            parent_task_ref: fixture_parent(task),
             canonical_task_authority: false,
             lineage_fingerprints: vec![],
             risk_grant: None,

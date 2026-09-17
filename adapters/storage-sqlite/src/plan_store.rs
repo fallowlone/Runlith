@@ -16,21 +16,20 @@ use plan_domain::{
     RiskClass, ValidatedBy, VerificationMethod,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use task_domain::Task;
+use task_domain::{Task, TaskState};
 
 use crate::error::{map_constraint, StorageError, StorageResult};
 use crate::event::{EventType, JournalEvent, NewJournalEvent, PlanRevisionJournalPayload};
 use crate::human_decision_store::{
     consume_risk_decision_for_plan_commit, RiskDecisionPlanCommitBinding,
 };
-use crate::journal_store::{insert_journal_event, list_events_for_task, require_canonical_sha256};
+use crate::journal_store::{
+    insert_journal_event, list_events_for_task, require_canonical_sha256, require_envelope,
+};
 use crate::plan_cost_store::load_plan_cost_receipt;
 use crate::plan_guardrail_store::{require_evidence_key, reset_rejections};
 use crate::planning_control_store::{enforce_publication_fence, mark_publication_succeeded};
-use crate::task_store::load_task;
-use crate::task_store::{
-    insert_task_edges, insert_task_row, insert_task_strings, require_task_created_envelope,
-};
+use crate::task_store::{insert_task_edges, insert_task_row, insert_task_strings, load_task};
 
 /// Trusted application-service envelope for the Event Journal metadata that
 /// surrounds one committed Plan revision. It contains no planner transcript,
@@ -72,10 +71,30 @@ pub struct PlanRevisionLineageRecord {
 
 /// Tasks created as part of accepting a plan revision. The storage boundary
 /// commits these rows together with the PlanRevision and its journal event.
+///
+/// A planner child is executable work: `task` is the READY Task owned by the
+/// lineage parent, `created_event` is its `task.created` fact (DRAFT) and
+/// `ready_event` its `task.marked_ready` fact (DRAFT -> READY) — the same
+/// evidence an authored Task carries, committed in one transaction.
 #[derive(Clone, Debug)]
 pub struct ChildTaskMaterialization {
     pub task: Task,
-    pub event: NewJournalEvent,
+    pub created_event: NewJournalEvent,
+    pub ready_event: NewJournalEvent,
+}
+
+/// Atomic inputs for publishing one plan revision with optional human
+/// decision consumption and child task materialization.
+#[derive(Debug)]
+pub struct CommitPlanRevisionRequest<'a> {
+    pub changeset: &'a PlanChangeSet,
+    pub revision: &'a PlanRevision,
+    pub resulting_graph: &'a PlanGraph,
+    pub lineage: &'a PlanRevisionLineage,
+    pub evidence: &'a PlanCommitJournalEvidence,
+    pub risk_decision: Option<&'a HumanDecisionRequestId>,
+    pub canonical_task_authority: bool,
+    pub child_tasks: &'a [ChildTaskMaterialization],
 }
 
 /// Provenance minted by the planning application service for every
@@ -257,7 +276,7 @@ impl crate::task_store::SqliteStore {
         risk_decision: Option<&HumanDecisionRequestId>,
         canonical_task_authority: bool,
     ) -> StorageResult<JournalEvent> {
-        self.commit_plan_revision_with_human_decision_and_children(
+        self.commit_plan_revision_with_human_decision_and_children(CommitPlanRevisionRequest {
             changeset,
             revision,
             resulting_graph,
@@ -265,21 +284,25 @@ impl crate::task_store::SqliteStore {
             evidence,
             risk_decision,
             canonical_task_authority,
-            &[],
-        )
+            child_tasks: &[],
+        })
     }
 
     pub fn commit_plan_revision_with_human_decision_and_children(
         &mut self,
-        changeset: &PlanChangeSet,
-        revision: &PlanRevision,
-        resulting_graph: &PlanGraph,
-        lineage: &PlanRevisionLineage,
-        evidence: &PlanCommitJournalEvidence,
-        risk_decision: Option<&HumanDecisionRequestId>,
-        canonical_task_authority: bool,
-        child_tasks: &[ChildTaskMaterialization],
+        request: CommitPlanRevisionRequest<'_>,
     ) -> StorageResult<JournalEvent> {
+        let CommitPlanRevisionRequest {
+            changeset,
+            revision,
+            resulting_graph,
+            lineage,
+            evidence,
+            risk_decision,
+            canonical_task_authority,
+            child_tasks,
+        } = request;
+
         validate_commit_binding(changeset, revision, evidence)?;
         validate_graph_snapshot(resulting_graph)?;
         require_evidence_key(&lineage.trigger_evidence_key)?;
@@ -330,7 +353,7 @@ impl crate::task_store::SqliteStore {
         }
 
         for child in child_tasks {
-            require_task_created_envelope(&child.task, &child.event)?;
+            require_child_materialization(child, &lineage.parent_task_ref, changeset)?;
             if let Some(existing) = load_task(&transaction, child.task.id())? {
                 // Fail closed: an existing Task id is reused only for an
                 // exact idempotent retry of the same materialization — same
@@ -353,7 +376,8 @@ impl crate::task_store::SqliteStore {
             insert_task_row(&transaction, &snapshot)?;
             insert_task_strings(&transaction, &snapshot)?;
             insert_task_edges(&transaction, &snapshot)?;
-            insert_journal_event(&transaction, &child.event)?;
+            insert_journal_event(&transaction, &child.created_event)?;
+            insert_journal_event(&transaction, &child.ready_event)?;
         }
 
         if revision.revision_seq == 1 {
@@ -1104,9 +1128,6 @@ fn is_idempotent_child_retry(
     existing: &Task,
     child: &ChildTaskMaterialization,
 ) -> StorageResult<bool> {
-    if child.event.provenance != CHILD_TASK_MATERIALIZATION_PROVENANCE {
-        return Ok(false);
-    }
     if existing.snapshot() != child.task.snapshot() {
         return Ok(false);
     }
@@ -1114,8 +1135,64 @@ fn is_idempotent_child_retry(
     Ok(events.iter().any(|event| {
         event.fact.event_type == EventType::TaskCreated
             && event.fact.provenance == CHILD_TASK_MATERIALIZATION_PROVENANCE
-            && event.fact.causation_id == child.event.causation_id
+            && event.fact.causation_id == child.created_event.causation_id
     }))
+}
+
+/// Validates one planner child before any write: a READY Task owned by the
+/// lineage parent, carried by exactly its `task.created` (DRAFT) and
+/// `task.marked_ready` (DRAFT -> READY) facts, both minted by the planning
+/// application service and caused by the accepted proposal. Binding the
+/// causation here keeps retry recognition storage-authoritative.
+fn require_child_materialization(
+    child: &ChildTaskMaterialization,
+    parent_task_ref: &str,
+    changeset: &PlanChangeSet,
+) -> StorageResult<()> {
+    let task = &child.task;
+    let violation = |detail: &str| {
+        Err(StorageError::ConstraintViolation(format!(
+            "materialized child task {} {detail}",
+            task.id()
+        )))
+    };
+    if !changeset
+        .node_additions
+        .iter()
+        .any(|addition| addition.id.as_str() == task.id().as_str())
+    {
+        return violation("is not a node addition of the accepted proposal");
+    }
+    if task.parent().map(|parent| parent.as_str()) != Some(parent_task_ref) {
+        return violation("is not owned by the plan revision parent task");
+    }
+    if task.state() != TaskState::Ready {
+        return violation("must be materialized READY");
+    }
+    for (event, event_type, to_state) in [
+        (
+            &child.created_event,
+            EventType::TaskCreated,
+            TaskState::Draft,
+        ),
+        (&child.ready_event, EventType::MarkedReady, TaskState::Ready),
+    ] {
+        if event.event_type != event_type
+            || event.task_id.as_ref() != Some(task.id())
+            || event.project_id.as_ref() != Some(task.project_id())
+            || event.from_state != Some(TaskState::Draft)
+            || event.to_state != Some(to_state)
+        {
+            return violation(&format!("has a malformed {} fact", event_type.as_str()));
+        }
+        if event.provenance != CHILD_TASK_MATERIALIZATION_PROVENANCE
+            || event.causation_id != changeset.proposal_hash
+        {
+            return violation("was not minted by this plan materialization");
+        }
+        require_envelope(event)?;
+    }
+    Ok(())
 }
 
 fn missing_lineage(branch: &PlanBranchId, revision_seq: u64) -> StorageError {

@@ -79,14 +79,14 @@ impl Sandbox {
                     .unwrap(),
             )
             .unwrap();
-        let task_id = task_domain::TaskId::new(task).unwrap();
+        // `task` itself is materialized READY by the accepted plan below.
+        let parent_id = task_domain::TaskId::new(fixture_parent(task)).unwrap();
         tasks
             .create_task(
-                &task_domain::Task::draft(task_id.clone(), project_id, format!("objective {task}"))
+                &task_domain::Task::draft(parent_id, project_id, format!("objective {task}"))
                     .unwrap(),
             )
             .unwrap();
-        tasks.mark_ready(&task_id).unwrap();
         seed_accepted_plan(&self.db, task);
     }
 
@@ -131,6 +131,12 @@ fn fixture(dir: &Path, name: &str, body: &str) -> PathBuf {
     path
 }
 
+fn fixture_parent(task: &str) -> String {
+    format!("{task}-PARENT")
+}
+
+/// Publishes an accepted plan whose only child is `task`; acceptance
+/// materializes it as a new READY Task under `<task>-PARENT` (TASK-0087).
 fn seed_accepted_plan(db: &Path, task: &str) {
     let mut planning = app_services::PlanningService::open(db, app_services::SystemClock)
         .expect("open planning service");
@@ -139,7 +145,7 @@ fn seed_accepted_plan(db: &Path, task: &str) {
     let planner =
         fake_planner::FakePlanner::for_single_leaf(plan_domain::PlanNodeId::new(task).unwrap());
     let request = plan_domain::DecompositionRequest {
-        parent_task_ref: task.to_owned(),
+        parent_task_ref: fixture_parent(task),
         base_plan_revision: 0,
         acceptance_criteria_refs: vec![],
         scope_bound: scope.clone(),
@@ -154,7 +160,7 @@ fn seed_accepted_plan(db: &Path, task: &str) {
         scope_bound: scope,
         baseline_risk: plan_domain::RiskClass::Low,
         affected_parent_criteria: vec![],
-        parent_task_ref: task.to_owned(),
+        parent_task_ref: fixture_parent(task),
         canonical_task_authority: false,
         lineage_fingerprints: vec![],
         risk_grant: None,
