@@ -176,9 +176,10 @@ no adversarial/security audit were performed in this pass.
 
 ## Canonical state
 
-`completed_through` stays TASK-0088 and product identity stays
-`0.1.0-dev.task0088` while this report is unmerged; the queue entry records
-TASK-0089 as reported, not accepted. G7 remains IN_PROGRESS. TASK-0087 remains
+`completed_through` advances to TASK-0089 and product identity to
+`0.1.0-dev.task0089`: the verification task itself completed and legitimately
+changed audit/planning artifacts (VERSIONING.md task-completion rule). That
+records the report, not acceptance of its subject. G7 remains IN_PROGRESS. TASK-0087 remains
 merged and unaccepted pending F-01..F-03 remediation, which is separately
 scoped work.
 
@@ -237,8 +238,8 @@ scoped work.
     "security audit"
   ],
   "canonical_state": {
-    "completed_through": "TASK-0088",
-    "version": "0.1.0-dev.task0088",
+    "completed_through": "TASK-0089",
+    "version": "0.1.0-dev.task0089",
     "gate": "G7",
     "gate_status": "IN_PROGRESS",
     "task_0087": "merged, unaccepted"

@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0088
+completed_through: TASK-0089
 current_gate: G7
-gate_status: IN_PROGRESS  # child-materialization contract accepted through TASK-0088 (readiness eligibility settled); TASK-0087 implementation merged but not accepted pending independent conformance verification
+gate_status: IN_PROGRESS  # TASK-0089 conformance verification reported CONFORMANCE_REMEDIATION_REQUIRED (F-01..F-03); TASK-0087 merged but not accepted until those are remediated
 
 items:
   - id: TASK-0012
