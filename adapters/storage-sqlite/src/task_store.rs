@@ -725,7 +725,10 @@ fn require_project_created_envelope(
 
 /// Validates that `event` is the `task.created` evidence for exactly
 /// `task` in its current (initial) state before any write.
-fn require_task_created_envelope(task: &Task, event: &NewJournalEvent) -> StorageResult<()> {
+pub(crate) fn require_task_created_envelope(
+    task: &Task,
+    event: &NewJournalEvent,
+) -> StorageResult<()> {
     if event.event_type != EventType::TaskCreated {
         return Err(StorageError::ConstraintViolation(
             "task creation requires a task.created event".to_owned(),
@@ -773,7 +776,10 @@ fn require_dependency_envelope(task: &Task, event: &NewJournalEvent) -> StorageR
     require_envelope(event)
 }
 
-fn insert_task_row(connection: &Connection, snapshot: &TaskSnapshot) -> StorageResult<()> {
+pub(crate) fn insert_task_row(
+    connection: &Connection,
+    snapshot: &TaskSnapshot,
+) -> StorageResult<()> {
     connection
         .execute(
             "INSERT INTO tasks (id, project_id, objective, parent_id, state, kind, risk)
@@ -811,7 +817,10 @@ fn insert_task_row_replace(connection: &Connection, snapshot: &TaskSnapshot) -> 
     Ok(())
 }
 
-fn insert_task_strings(connection: &Connection, snapshot: &TaskSnapshot) -> StorageResult<()> {
+pub(crate) fn insert_task_strings(
+    connection: &Connection,
+    snapshot: &TaskSnapshot,
+) -> StorageResult<()> {
     let lists: [(&str, &[String]); 6] = [
         ("acceptance", &snapshot.acceptance),
         ("allowed_path", &snapshot.allowed_paths),
@@ -832,7 +841,10 @@ fn insert_task_strings(connection: &Connection, snapshot: &TaskSnapshot) -> Stor
     Ok(())
 }
 
-fn insert_task_edges(connection: &Connection, snapshot: &TaskSnapshot) -> StorageResult<()> {
+pub(crate) fn insert_task_edges(
+    connection: &Connection,
+    snapshot: &TaskSnapshot,
+) -> StorageResult<()> {
     for dep in &snapshot.depends_on {
         connection
             .execute(

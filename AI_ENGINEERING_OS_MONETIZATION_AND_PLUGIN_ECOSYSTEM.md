@@ -85,11 +85,13 @@ The project should distinguish three different rights:
    → normal user/product entitlement; should be broadly allowed.
 
 2. Run AI Engineering OS internally at a company
-   → controlled by the applicable Community/Team/Enterprise product terms.
+   → permitted subject to the source license; additional paid components and
+     services follow their separately identified commercial terms.
 
 3. Reuse, redistribute, white-label, host-resell, embed or commercialize
    AI Engineering OS source/core itself
-   → requires explicit source-code/commercial/OEM rights.
+   → subject to Shield; rights beyond its permitted purposes require a
+     separate Commercial/OEM agreement.
 ```
 
 A developer paying for Pro must be able to build and sell their own SaaS or
@@ -97,23 +99,24 @@ software with AI Engineering OS. That does **not** automatically grant the right
 to extract the orchestration core, repackage it as a competing product or offer
 AI Engineering OS itself as a managed service.
 
-### Main-license candidates
+### Selected repository license
 
-The final license is not frozen yet. The current research ranking for the core is:
+The Community repository default is **PolyForm Shield 1.0.0**, provided verbatim
+in [LICENSE](LICENSE). [LICENSING.md](LICENSING.md) defines the repository
+boundaries and outstanding commercial/legal work. This is source-available,
+not OSI Open Source; no delayed conversion to a permissive license is promised.
 
-1. **Established source-available anti-competition license such as PolyForm
-   Shield + separate Commercial License**, if its exact competitive-use boundary
-   matches the desired product rights after legal review.
-2. **Counsel-drafted AI Engineering OS Community Source License + separate
-   Commercial/OEM License** if standard terms cannot express the required
-   boundaries clearly enough.
-3. **BSL/Fair Source-style delayed-open licensing** only if deliberately opening
-   old versions later becomes part of product strategy.
-4. **AGPLv3** only if reciprocal source disclosure is sufficient; AGPL does not
-   prohibit commercial competition itself.
+Additional Pro/Team/Enterprise components and rights beyond Shield require
+separately identified commercial terms. Shield does not itself impose paid
+feature or seat entitlements, and product purchase terms must not contradict
+rights already granted to the same code under Shield. No commercial EULA or
+OEM agreement is established by this strategy document.
 
-MIT/Apache-2.0/GPL/AGPL are therefore not assumed to satisfy the owner's core
-anti-clone goal merely because they are common software licenses.
+The future independently scoped Plugin SDK is intended to use Apache-2.0.
+No existing core, IPC or planner-contract component is thereby relicensed.
+If the entire Pro implementation is later published while paid internal use
+must remain mandatory, that requires a separately reviewed licensing decision,
+not an assumed restriction in Shield.
 
 This section is product strategy, not legal advice. Before public release or
 accepting material third-party contributions, obtain qualified legal review of
@@ -123,9 +126,10 @@ the final license text, contributor terms and commercial agreements.
 
 Before broad external contribution starts, decide how dual licensing and future
 relicensing will work. The project should choose an explicit contributor-rights
-mechanism (for example an appropriate CLA and/or DCO strategy) so accepted
-contributions can legally remain compatible with both Community and Commercial
-licensing. Do not wait until hundreds of contributors exist before deciding.
+mechanism (for example an appropriate CLA) so accepted contributions can legally
+remain compatible with both Community and Commercial licensing. A DCO alone is
+not an additional grant of commercial relicensing rights. Do not wait until
+hundreds of contributors exist before deciding.
 
 Trademark is a separate protection layer. The product/company should reserve the
 right to control the **AI Engineering OS** name, logo and implication of official
@@ -135,9 +139,9 @@ Potential repository/license split once the extension contracts stabilize:
 
 | Surface | Likely licensing direction |
 | --- | --- |
-| Core desktop/runtime/orchestration product | protected source-available Community license |
-| Commercial/OEM/white-label rights | separate negotiated Commercial License |
-| Plugin SDK / protocol schemas / examples | potentially permissive where ecosystem adoption benefits from it |
+| Core desktop/runtime/orchestration product | PolyForm Shield 1.0.0 repository default |
+| Commercial/OEM/white-label rights beyond Shield | separate negotiated Commercial License |
+| Future explicitly scoped Plugin SDK / public schemas / examples | Apache-2.0; no current component designated |
 | Enterprise/cloud services | commercial/private as appropriate |
 | Brand/trademark | separate trademark policy |
 

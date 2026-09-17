@@ -90,6 +90,31 @@ impl Sandbox {
             .expect("spawn agentd")
     }
 
+    fn endpoint(&self) -> ipc_transport::platform::unix::UnixEndpoint {
+        let runtime_dir = self.root.join("run/ai-engineering-os");
+        ipc_transport::platform::unix::UnixEndpoint {
+            socket_path: runtime_dir.join("agentd.sock"),
+            runtime_dir,
+        }
+    }
+
+    /// Probes only this sandbox's already-bound endpoint. Unlike the
+    /// `agentctl ping` binary command, this path cannot launch a sibling
+    /// daemon when a just-spawned daemon has not bound its socket yet.
+    fn connect_ping(&self) -> bool {
+        let endpoint = self.endpoint();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("readiness runtime")
+            .block_on(async move {
+                match agentctl::connect_and_handshake(&endpoint).await {
+                    Ok(mut session) => session.ping().await.is_ok(),
+                    Err(_) => false,
+                }
+            })
+    }
+
     fn install_branch_only_git_shim(&self) -> PathBuf {
         let real = Command::new("sh")
             .args(["-c", "command -v git"])
@@ -155,14 +180,13 @@ exec "$REAL_GIT" "$@"
     fn wait_ready(&self) {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            let output = self.agentctl(&["ping"]);
-            if output.status.success() {
+            if self.connect_ping() {
                 return;
             }
             if Instant::now() >= deadline {
                 panic!(
-                    "daemon never became ready: {}",
-                    String::from_utf8_lossy(&output.stderr)
+                    "daemon never became ready at {}",
+                    self.endpoint().socket_path.display()
                 );
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -268,19 +292,28 @@ fn seed_ready(sandbox: &Sandbox, project: &str, task: &str) {
     if !created.status.success() && !stderr(&created).contains("ALREADY_EXISTS") {
         panic!("seed project: {}", stderr(&created));
     }
+    // `task` itself is materialized READY by the accepted plan below.
     let created = sandbox.agentctl(&[
         "task",
         "create",
-        task,
+        &fixture_parent(task),
         project,
         &format!("objective {task}"),
     ]);
-    assert!(created.status.success(), "seed task: {}", stderr(&created));
-    let ready = sandbox.agentctl(&["task", "ready", task]);
-    assert!(ready.status.success(), "seed ready: {}", stderr(&ready));
+    assert!(
+        created.status.success(),
+        "seed parent: {}",
+        stderr(&created)
+    );
     seed_accepted_plan(sandbox, task);
 }
 
+fn fixture_parent(task: &str) -> String {
+    format!("{task}-PARENT")
+}
+
+/// Publishes an accepted plan whose only child is `task`; acceptance
+/// materializes it as a new READY Task under `<task>-PARENT` (TASK-0087).
 fn seed_accepted_plan(sandbox: &Sandbox, task: &str) {
     let db = sandbox
         .root
@@ -294,7 +327,7 @@ fn seed_accepted_plan(sandbox: &Sandbox, task: &str) {
     let planner =
         fake_planner::FakePlanner::for_single_leaf(plan_domain::PlanNodeId::new(task).unwrap());
     let request = plan_domain::DecompositionRequest {
-        parent_task_ref: task.to_owned(),
+        parent_task_ref: fixture_parent(task),
         base_plan_revision: 0,
         acceptance_criteria_refs: vec![],
         scope_bound: scope.clone(),
@@ -309,7 +342,7 @@ fn seed_accepted_plan(sandbox: &Sandbox, task: &str) {
         scope_bound: scope,
         baseline_risk: plan_domain::RiskClass::Low,
         affected_parent_criteria: vec![],
-        parent_task_ref: task.to_owned(),
+        parent_task_ref: fixture_parent(task),
         canonical_task_authority: false,
         lineage_fingerprints: vec![],
         risk_grant: None,
