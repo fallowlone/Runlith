@@ -37,11 +37,11 @@ use plan_domain::{
     MAX_PLANNER_WALL_CLOCK_SECS, MAX_REVISIONS_PER_CYCLE_PER_BRANCH,
 };
 use storage_sqlite::{
-    ApprovedPlanProposal, NewHumanDecisionRequest, PlanCommitJournalEvidence, PlanRevisionLineage,
-    PlanRevisionLineageRecord, PlannerCallSettlement, PlanningRunRecord, PlanningRunState,
-    SqliteStore, StorageError,
+    ApprovedPlanProposal, ChildTaskMaterialization, EventType, NewHumanDecisionRequest,
+    NewJournalEvent, PlanCommitJournalEvidence, PlanRevisionLineage, PlanRevisionLineageRecord,
+    PlannerCallSettlement, PlanningRunRecord, PlanningRunState, SqliteStore, StorageError,
 };
-use task_domain::TaskId;
+use task_domain::{ProjectId, Task, TaskId};
 
 use crate::clock::{format_rfc3339, Clock, SystemClock};
 use crate::plan_graph::{
@@ -1542,6 +1542,7 @@ impl<C: Clock> PlanningService<C> {
                 );
             }
         }
+
         if !has_runnable_node(&self.store, &candidate)? {
             let decision = self.create_planning_human_decision(
                 branch,
@@ -1593,15 +1594,19 @@ impl<C: Clock> PlanningService<C> {
             planning_run_generation: run.generation,
         };
 
-        match self.store.commit_plan_revision_with_human_decision(
-            &proposal,
-            &revision,
-            &candidate,
-            &lineage,
-            &evidence,
-            risk_decision,
-            policy.canonical_task_authority,
-        ) {
+        let child_tasks = self.materialize_child_tasks(&proposal, policy)?;
+        match self
+            .store
+            .commit_plan_revision_with_human_decision_and_children(
+                &proposal,
+                &revision,
+                &candidate,
+                &lineage,
+                &evidence,
+                risk_decision,
+                policy.canonical_task_authority,
+                &child_tasks,
+            ) {
             Ok(_) => {}
             Err(StorageError::PlanStale { found, .. }) => {
                 return self.record_rejection(
@@ -1624,6 +1629,72 @@ impl<C: Clock> PlanningService<C> {
                 planning_input_fingerprint: snapshot.input_fingerprint,
             },
         )))
+    }
+
+    /// Materializes planner-proposed nodes only after the proposal has passed
+    /// trusted validation. Planner output remains proposal data; this method
+    /// is the application-owned boundary that mints canonical Task identity.
+    fn materialize_child_tasks(
+        &mut self,
+        proposal: &PlanChangeSet,
+        policy: &PlanningPolicyContext,
+    ) -> Result<Vec<ChildTaskMaterialization>, PlanningServiceError> {
+        let mut children = Vec::new();
+        for addition in &proposal.node_additions {
+            let task_id = TaskId::new(addition.id.as_str().to_owned())
+                .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
+            if self.store.get_task(&task_id)?.is_some() {
+                return Err(PlanningServiceError::Storage(StorageError::Duplicate(
+                    format!("materialized child task {} already exists", task_id),
+                )));
+            }
+            let project_id = self
+                .store
+                .get_task(
+                    &TaskId::new(policy.parent_task_ref.clone())
+                        .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?,
+                )?
+                .ok_or_else(|| {
+                    PlanningServiceError::InvalidContext(
+                        "parent task disappeared during child materialization".to_owned(),
+                    )
+                })?
+                .project_id()
+                .clone();
+            let mut child = Task::draft(
+                task_id,
+                project_id,
+                format!("planned child task {}", addition.id.as_str()),
+            )
+            .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
+            child
+                .set_parent(
+                    TaskId::new(policy.parent_task_ref.clone())
+                        .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?,
+                )
+                .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
+            let event = NewJournalEvent {
+                event_type: EventType::TaskCreated,
+                task_id: Some(child.id().clone()),
+                project_id: Some(child.project_id().clone()),
+                from_state: Some(child.state()),
+                to_state: Some(child.state()),
+                reason: Some("plan child materialization".to_owned()),
+                correlation_id: format!("plan-child:{}", addition.id.as_str()),
+                causation_id: proposal.proposal_hash.clone(),
+                occurred_at: format_rfc3339(self.clock.now_millis()),
+                provenance: "plan-application-service/materialize_child_task".to_owned(),
+                execution_id: None,
+                attempt_id: None,
+                attempt_outcome: None,
+                workspace_id: None,
+                from_workspace_state: None,
+                to_workspace_state: None,
+                plan_revision: None,
+            };
+            children.push(ChildTaskMaterialization { task: child, event });
+        }
+        Ok(children)
     }
 
     fn stale_head_refusal(
