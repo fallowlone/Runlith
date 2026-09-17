@@ -1334,17 +1334,21 @@ items:
       boundaries.
     scope: >-
       Storage reconciliation for durable child task materialization and the
-      related planning application path. Same identity and provenance reuse
-      existing state; conflicting provenance fails closed.
+      related planning application path. Same identity, provenance, causation,
+      snapshot, and complete CREATED + MARKED_READY lifecycle evidence reuse
+      existing state; conflicting or malformed evidence fails closed.
     exit_criteria_summary: Child task materialization is idempotent for the
-      same identity and provenance, rejects conflicting provenance without
-      partial state, and required planning verification passes.
+      same full identity and lifecycle evidence, rejects conflicting or
+      malformed evidence without partial state, and required planning
+      verification passes.
     outcome: >-
-      ACCEPTED. Storage reconciliation now handles retry materialization
-      inside the transaction boundary. Existing child tasks with matching
-      materialization provenance are reused, while conflicting provenance is
-      rejected. Planning authority and Task lifecycle boundaries remain
-      unchanged.
+      VERIFICATION_REQUIRED. The implementation branch contains the initial
+      storage reconciliation and trusted child materialization changes, but
+      TASK-0087-R1 is not accepted until the complete malformed-evidence
+      regression matrix, L4 invariant tests, clippy, and workspace tests
+      pass under independent verification. `completed_through` remains at
+      TASK-0085; the product version keeps canonical implementation identity
+      TASK-0087 while this queue item uses the R1 review suffix.
     depends_on:
       - TASK-0085
     blocked_by: []
