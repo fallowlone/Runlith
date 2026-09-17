@@ -1342,17 +1342,26 @@ items:
       malformed evidence without partial state, and required planning
       verification passes.
     outcome: >-
-      VERIFICATION_REQUIRED. The implementation branch contains the initial
-      storage reconciliation and trusted child materialization changes, but
-      TASK-0087-R1 is not accepted until the complete malformed-evidence
-      regression matrix, L4 invariant tests, clippy, and workspace tests
-      pass under independent verification. `completed_through` remains at
-      TASK-0085; the product version keeps canonical implementation identity
-      TASK-0087 while this queue item uses the R1 review suffix.
+      BLOCKED: automatic-READY materialization needs an accepted contract.
+      Implementation is merged in 6a02eaa (PR #2), not merely branch-local.
+      R1 extends the persisted-evidence matrix from nine to eighteen cases
+      without production changes or weakened rollback assertions. Final
+      workspace verification: 1074 passed, 0 failed, 2 authenticated-provider
+      smoke tests ignored; check, clippy -D warnings and fmt pass.
+      Independent read-only diff review findings are reconciled in
+      docs/development/G7_TASK_0087_R1_VERIFICATION.md, including verification
+      limitations. Task-engine leaves DRAFT-to-READY preconditions open;
+      READY eligibility, retry equivalence, child-obligation preservation
+      and publication-fence fields require an explicit architecture decision.
+      Green tests characterize implementation, not contract acceptance.
+      The report includes a proposed, not Accepted, amendment. R1 is submitted,
+      not accepted; completed_through remains TASK-0085, product identity
+      remains TASK-0087, and G7 remains IN_PROGRESS.
     depends_on:
       - TASK-0085
     blocked_by: []
     references:
+      - docs/development/G7_TASK_0087_R1_VERIFICATION.md
       - adapters/storage-sqlite/src/plan_store.rs
       - crates/app-services/src/planning_service.rs
 
