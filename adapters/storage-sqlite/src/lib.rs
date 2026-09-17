@@ -48,7 +48,10 @@ pub use event::{
 pub use human_decision_store::{ApprovedPlanProposal, NewHumanDecisionRequest};
 pub use migration::SUPPORTED_SCHEMA_VERSION;
 pub use plan_guardrail_store::{PlanGuardrailEvent, PlannerCallSettlement};
-pub use plan_store::{PlanCommitJournalEvidence, PlanRevisionLineage, PlanRevisionLineageRecord};
+pub use plan_store::{
+    ChildTaskMaterialization, PlanCommitJournalEvidence, PlanRevisionLineage,
+    PlanRevisionLineageRecord, CHILD_TASK_MATERIALIZATION_PROVENANCE,
+};
 pub use planning_control_store::{PlanningRunRecord, PlanningRunState};
 pub use security_audit::{
     AuditCapability, NewSecurityAuditRecord, SecurityAuditAuthor, SecurityAuditEvent,

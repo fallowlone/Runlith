@@ -238,19 +238,33 @@ pub(crate) fn target_applicability(
 }
 
 /// ADR-0027 L4 at the product boundary: the candidate branch leaves at least
-/// one RUNNABLE node — a canonical Task whose derived readiness is RUNNABLE
-/// and whose Plan predecessors are all canonical COMPLETED Tasks. A
-/// structurally valid DAG alone never satisfies this.
+/// one node that will be executable-backed once the accept-path commit lands:
+/// either a canonical Task whose derived readiness is RUNNABLE today, or a
+/// validated new child in `pending_materializations` whose canonical Task the
+/// same atomic revision commit creates (plan revision, child rows and journal
+/// evidence share one transaction, so the representation is guaranteed before
+/// the revision becomes executable). A structurally valid DAG alone never
+/// satisfies this.
+///
+/// `pending_materializations` holds candidate node ids that trusted identity
+/// resolution already proved to be brand-new Tasks. Plan predecessors of any
+/// counted node must still be canonical COMPLETED Tasks — a pending child
+/// behind an incomplete predecessor does not count. Scheduling itself still
+/// derives readiness from durable Task state (DRAFT is never runnable), so
+/// this admits representation, not premature execution.
 pub(crate) fn has_runnable_node(
     store: &SqliteStore,
     candidate: &PlanGraph,
+    pending_materializations: &BTreeSet<String>,
 ) -> Result<bool, StorageError> {
     'nodes: for node in &candidate.nodes {
-        let Ok(task_id) = TaskId::new(node.id.as_str().to_owned()) else {
-            continue;
-        };
-        if derive_task_readiness(store, &task_id)? != Some(ScheduleReadiness::Runnable) {
-            continue;
+        if !pending_materializations.contains(node.id.as_str()) {
+            let Ok(task_id) = TaskId::new(node.id.as_str().to_owned()) else {
+                continue;
+            };
+            if derive_task_readiness(store, &task_id)? != Some(ScheduleReadiness::Runnable) {
+                continue;
+            }
         }
         for predecessor in plan_predecessors(candidate, node.id.as_str()) {
             let completed = canonical_task(store, predecessor)?

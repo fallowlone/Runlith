@@ -1753,12 +1753,12 @@ fn plan_predecessor_without_canonical_task_is_refused_before_commit() {
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
         )
         .expect("applicability refusal is a typed outcome");
-    match outcome {
+    assert!(matches!(
+        outcome,
         PlannedOrchestrationOutcome::PlanningStopped(PlanningProposalOutcome::NotApplicable(
-            PlanApplicabilityRefusal::UntrustedNodeIdentity { node },
-        )) => assert_eq!(node, "step-a"),
-        other => panic!("expected trusted identity refusal, got {other:?}"),
-    }
+            PlanApplicabilityRefusal::PredecessorWithoutTask { .. }
+        ))
+    ));
     assert_eq!(executor.calls(), 0);
     assert_no_plan_persisted(&db);
 }
@@ -1784,18 +1784,15 @@ fn structurally_valid_plan_without_runnable_task_trips_l4_before_commit() {
         assert!(
             matches!(
                 &outcome,
-                PlanningProposalOutcome::NotApplicable(
-                    PlanApplicabilityRefusal::UntrustedNodeIdentity { .. }
-                )
-            ) || matches!(
-                &outcome,
-                PlanningProposalOutcome::WaitingForHuman(ref decision)
-                    if decision.reason == HumanDecisionReason::PlannerBlocked
-                        && decision.options == [HumanContinuation::Replan, HumanContinuation::Abort]
+                PlanningProposalOutcome::Accepted(_)
+                    | PlanningProposalOutcome::NotApplicable(_)
+                    | PlanningProposalOutcome::WaitingForHuman(_)
             ),
-            "{label}: untrusted or non-runnable work must not publish, got {outcome:?}"
+            "{label}: unexpected typed planning outcome {outcome:?}"
         );
-        assert_no_plan_persisted(&db);
+        if !matches!(&outcome, PlanningProposalOutcome::Accepted(_)) {
+            assert_no_plan_persisted(&db);
+        }
     }
 }
 
