@@ -90,6 +90,31 @@ impl Sandbox {
             .expect("spawn agentd")
     }
 
+    fn endpoint(&self) -> ipc_transport::platform::unix::UnixEndpoint {
+        let runtime_dir = self.root.join("run/ai-engineering-os");
+        ipc_transport::platform::unix::UnixEndpoint {
+            socket_path: runtime_dir.join("agentd.sock"),
+            runtime_dir,
+        }
+    }
+
+    /// Probes only this sandbox's already-bound endpoint. Unlike the
+    /// `agentctl ping` binary command, this path cannot launch a sibling
+    /// daemon when a just-spawned daemon has not bound its socket yet.
+    fn connect_ping(&self) -> bool {
+        let endpoint = self.endpoint();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("readiness runtime")
+            .block_on(async move {
+                match agentctl::connect_and_handshake(&endpoint).await {
+                    Ok(mut session) => session.ping().await.is_ok(),
+                    Err(_) => false,
+                }
+            })
+    }
+
     fn install_branch_only_git_shim(&self) -> PathBuf {
         let real = Command::new("sh")
             .args(["-c", "command -v git"])
@@ -155,14 +180,13 @@ exec "$REAL_GIT" "$@"
     fn wait_ready(&self) {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            let output = self.agentctl(&["ping"]);
-            if output.status.success() {
+            if self.connect_ping() {
                 return;
             }
             if Instant::now() >= deadline {
                 panic!(
-                    "daemon never became ready: {}",
-                    String::from_utf8_lossy(&output.stderr)
+                    "daemon never became ready at {}",
+                    self.endpoint().socket_path.display()
                 );
             }
             std::thread::sleep(Duration::from_millis(100));
