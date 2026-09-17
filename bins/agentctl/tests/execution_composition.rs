@@ -6,7 +6,8 @@
 //! services, workspace leases, and a fixture provider executable standing
 //! in for the real Claude CLI (same `ExecutionPort` seam, same argv/cwd
 //! mechanics, no quota). The fixture multiplexes on the prompt text (the
-//! final argv): objectives containing SLOW sleep, BADJSON print garbage,
+//! final argv; a planned child's acceptance criteria carry the seeded
+//! marker): prompts containing SLOW sleep, BADJSON print garbage,
 //! EXIT3 fail, and anything else reports structured success whose result
 //! text claims completion — so the completion-authority test proves the
 //! claim alone never completes a Task.
@@ -25,8 +26,8 @@ use std::time::{Duration, Instant};
 use ipc_contracts::proto::{
     execution_core_request, execution_core_response, task_core_request, task_core_response,
     CancelExecutionRequest, CreateProjectRequest, CreateTaskRequest, ExecutionCoreRequest,
-    ExecutionCoreResponse, GetExecutionRequest, GetTaskRequest, LifecycleRequest,
-    RunExecutionRequest, TaskCoreRequest, TaskCoreResponse, TaskLifecycleOp,
+    ExecutionCoreResponse, GetExecutionRequest, GetTaskRequest, RunExecutionRequest,
+    TaskCoreRequest, TaskCoreResponse,
 };
 use ipc_transport::platform::unix::{UnixEndpoint, SOCKET_FILE_NAME};
 
@@ -188,16 +189,6 @@ fn create_task(id: &str, project: &str, objective: &str) -> TaskCoreRequest {
     }
 }
 
-fn lifecycle(task: &str, op: TaskLifecycleOp) -> TaskCoreRequest {
-    TaskCoreRequest {
-        payload: Some(task_core_request::Payload::Lifecycle(LifecycleRequest {
-            task_id: task.to_owned(),
-            op: op as i32,
-            reason: String::new(),
-        })),
-    }
-}
-
 async fn seed_ready(
     endpoint: &UnixEndpoint,
     db: &Path,
@@ -213,26 +204,32 @@ async fn seed_ready(
             if error.code == ipc_contracts::proto::BusinessErrorCode::AlreadyExists as i32 => {}
         other => panic!("seed project, got {created:?} ({other:?})"),
     }
-    let created = business(endpoint, create_task(task, project, objective)).await;
+    // `task` itself is materialized READY by the accepted plan below.
+    let created = business(
+        endpoint,
+        create_task(&fixture_parent(task), project, objective),
+    )
+    .await;
     assert!(
         matches!(
             created.payload,
             Some(task_core_response::Payload::CreateTask(_))
         ),
-        "seed task, got {created:?}"
+        "seed parent, got {created:?}"
     );
-    let ready = business(endpoint, lifecycle(task, TaskLifecycleOp::MarkReady)).await;
-    assert!(
-        matches!(
-            ready.payload,
-            Some(task_core_response::Payload::Lifecycle(_))
-        ),
-        "seed ready, got {ready:?}"
-    );
-    seed_accepted_plan(db, task);
+    seed_accepted_plan(db, task, objective);
 }
 
-fn seed_accepted_plan(db: &Path, task: &str) {
+fn fixture_parent(task: &str) -> String {
+    format!("{task}-PARENT")
+}
+
+/// Publishes an accepted plan whose only child is `task`; acceptance
+/// materializes it as a new READY Task under `<task>-PARENT` (TASK-0087).
+/// A planner child's objective is a materialization placeholder, so the
+/// fixture's prompt marker travels as the parent criterion the child's
+/// acceptance covers (the prompt lists acceptance criteria).
+fn seed_accepted_plan(db: &Path, task: &str, marker: &str) {
     let mut planning = app_services::PlanningService::open(db, app_services::SystemClock)
         .expect("open planning service");
     let scope = plan_domain::ScopeBound::new(vec!["repo:src".to_owned()]).unwrap();
@@ -240,7 +237,7 @@ fn seed_accepted_plan(db: &Path, task: &str) {
     let planner =
         fake_planner::FakePlanner::for_single_leaf(plan_domain::PlanNodeId::new(task).unwrap());
     let request = plan_domain::DecompositionRequest {
-        parent_task_ref: task.to_owned(),
+        parent_task_ref: fixture_parent(task),
         base_plan_revision: 0,
         acceptance_criteria_refs: vec![],
         scope_bound: scope.clone(),
@@ -254,8 +251,11 @@ fn seed_accepted_plan(db: &Path, task: &str) {
     let policy = app_services::PlanningPolicyContext {
         scope_bound: scope,
         baseline_risk: plan_domain::RiskClass::Low,
-        affected_parent_criteria: vec![],
-        parent_task_ref: task.to_owned(),
+        affected_parent_criteria: vec![plan_domain::AffectedParentCriterion {
+            id: plan_domain::CriterionId::new(marker).unwrap(),
+            method: plan_domain::VerificationMethod::AutomatedTest,
+        }],
+        parent_task_ref: fixture_parent(task),
         canonical_task_authority: false,
         lineage_fingerprints: vec![],
         risk_grant: None,

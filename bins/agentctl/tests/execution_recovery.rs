@@ -292,19 +292,28 @@ fn seed_ready(sandbox: &Sandbox, project: &str, task: &str) {
     if !created.status.success() && !stderr(&created).contains("ALREADY_EXISTS") {
         panic!("seed project: {}", stderr(&created));
     }
+    // `task` itself is materialized READY by the accepted plan below.
     let created = sandbox.agentctl(&[
         "task",
         "create",
-        task,
+        &fixture_parent(task),
         project,
         &format!("objective {task}"),
     ]);
-    assert!(created.status.success(), "seed task: {}", stderr(&created));
-    let ready = sandbox.agentctl(&["task", "ready", task]);
-    assert!(ready.status.success(), "seed ready: {}", stderr(&ready));
+    assert!(
+        created.status.success(),
+        "seed parent: {}",
+        stderr(&created)
+    );
     seed_accepted_plan(sandbox, task);
 }
 
+fn fixture_parent(task: &str) -> String {
+    format!("{task}-PARENT")
+}
+
+/// Publishes an accepted plan whose only child is `task`; acceptance
+/// materializes it as a new READY Task under `<task>-PARENT` (TASK-0087).
 fn seed_accepted_plan(sandbox: &Sandbox, task: &str) {
     let db = sandbox
         .root
@@ -318,7 +327,7 @@ fn seed_accepted_plan(sandbox: &Sandbox, task: &str) {
     let planner =
         fake_planner::FakePlanner::for_single_leaf(plan_domain::PlanNodeId::new(task).unwrap());
     let request = plan_domain::DecompositionRequest {
-        parent_task_ref: task.to_owned(),
+        parent_task_ref: fixture_parent(task),
         base_plan_revision: 0,
         acceptance_criteria_refs: vec![],
         scope_bound: scope.clone(),
@@ -333,7 +342,7 @@ fn seed_accepted_plan(sandbox: &Sandbox, task: &str) {
         scope_bound: scope,
         baseline_risk: plan_domain::RiskClass::Low,
         affected_parent_criteria: vec![],
-        parent_task_ref: task.to_owned(),
+        parent_task_ref: fixture_parent(task),
         canonical_task_authority: false,
         lineage_fingerprints: vec![],
         risk_grant: None,
