@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0081
+completed_through: TASK-0085
 current_gate: G7
-gate_status: IN_PROGRESS  # TASK-0081: G7_REMEDIATION_REQUIRED; G7-BLOCKER-01..04 remain
+gate_status: IN_PROGRESS  # TEST-H/F-09 remediated; child-Task decomposition reachability blocker needs architecture-sensitive follow-up
 
 items:
   - id: TASK-0012
@@ -1761,3 +1761,41 @@ items:
       - docs/architecture/adr/ADR-0016-agentctl-before-complex-ui.md
       - docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md
       - docs/development/G7_CLOSURE_AUDIT.md
+
+  - id: TASK-0085
+    gate: G7
+    title: G7 Final TEST-H Closure Remediation IV
+    objective: Remove the remaining F-09 TEST-H daemon-ownership race from
+      execution recovery readiness by probing only the manually spawned
+      daemon's exact sandbox endpoint without any launcher capability.
+    scope: >-
+      execution_recovery.rs readiness behavior, directly related agentctl test
+      helper code only if required, and G7 task/version bookkeeping. No
+      production daemon lifecycle change, G8/G9, UI, Council, or provider work.
+    exit_criteria_summary: Recovery readiness connects, handshakes and pings
+      only its exact already-bound sandbox endpoint; it cannot spawn an
+      unowned sibling; the manually spawned Child remains reaped by test
+      cleanup; targeted binary verification and one workspace run are complete.
+    outcome: >-
+      TEST_H_F09_REMEDIATED. execution_recovery.rs now uses a
+      direct endpoint-specific connect-and-handshake plus ping probe, matching
+      the TASK-0084 TEST-H pattern. It cannot enter agentctl's production
+      connect-or-start launcher path, so readiness cannot create an unowned
+      daemon sibling. The recovery binary passed 10 repeated runs; the binary
+      production-path suite and agentctl clippy passed. One workspace run had
+      the pre-existing unrelated execution_composition
+      success_leaves_task_verifying_never_completed flake, which then passed
+      10/10 in isolation; entry_atomicity's named baseline flake did not recur.
+      This remediation does not make G7 ready for closure re-audit: shipped
+      protocol-v6 CreatePlanningTask cannot author a parent/child relationship,
+      while trusted_candidate_task_refs permits only the root and its Task.parent
+      descendants. That separately discovered child-Task/decomposition
+      reachability blocker requires an architecture-sensitive follow-up. G7
+      remains IN_PROGRESS.
+    depends_on:
+      - TASK-0084
+    blocked_by: []
+    references:
+      - docs/development/G7_CLOSURE_AUDIT.md
+      - bins/agentctl/tests/execution_binaries.rs
+      - bins/agentctl/tests/execution_recovery.rs
