@@ -399,3 +399,97 @@ no `planning/` doc files were required, so none were added.
   non-weakening extended, never duplicated)
 - planning/roadmap.yaml G6 note + G7 objective/planned_capabilities;
   planning/tasks/queue.yaml TASK-0075..0081
+
+## Amendment — TASK-0086 trusted child-Task materialization (2026-09-17)
+
+### Problem
+
+TASK-0085 verification confirmed a decomposition reachability gap. A
+`PlanChangeSet.node_addition` can describe a desired node, but executable Plan
+nodes ultimately require canonical Task identity. The shipped planning path
+cannot pre-author every adaptive child because child authority is derived from
+canonical Task relationships. Requiring pre-created children would make the
+planner select from manually predicted work instead of allowing proposal-driven
+decomposition.
+
+Manual authoring of an already-known child Task may exist as a future control
+operation. It is not required for planner-driven G7 decomposition.
+
+### Decision: trusted materialization boundary
+
+Planner output remains proposal-only. A trusted planning/reconciliation
+boundary validates the complete `PlanChangeSet`, then materializes canonical
+child Tasks for accepted `node_additions`.
+
+The contract is:
+
+- `node_addition.id` becomes the canonical Task identity after trusted
+  materialization. No temporary child identity or hidden mapping exists.
+- the planner/provider never creates or mutates Tasks.
+- the parent Task is the immediate canonical Task being decomposed; nested
+  decomposition follows the Task.parent chain.
+- project identity is inherited from the owning parent and cannot be selected
+  by planner output.
+- creating a child never completes or satisfies the parent Task.
+
+Canonical ownership remains:
+
+| Fact | Canonical owner |
+| --- | --- |
+| Task identity | Task aggregate |
+| project membership | Task/project relationship |
+| parent relationship | Task.parent |
+| lifecycle | Task state machine |
+| accepted structure | PlanRevision |
+| decomposition provenance | PlanRevision and journal evidence |
+| scope, acceptance, baseline risk | Task-derived planning authority |
+
+Plan edges are projections of accepted planning structure and do not create a
+second mutable Task hierarchy.
+
+### Materialization validation
+
+Trusted validation derives child authority from the parent. Effective child
+authority is a subset of parent authority.
+
+The implementation must enforce:
+
+- child scope is contained by parent scope;
+- V3 acceptance coverage is preserved;
+- verification obligations cannot be weakened;
+- risk and required gates cannot be weakened;
+- project, policy, and approval semantics are derived by trusted code.
+
+Required failure behavior:
+
+- missing parent: refuse;
+- parent/project mismatch: refuse;
+- child id equal to parent id: refuse;
+- existing unrelated child id: refuse;
+- duplicate proposed ids: refuse;
+- unrelated existing Task capture: refuse.
+
+Existing Tasks are never silently attached to satisfy a proposal. Retry of the
+same accepted materialization is recognized through durable provenance;
+different proposal hashes or ownership are conflicts.
+
+### Durable state and recovery contract
+
+The implementation must preserve the existing bounded-context storage model.
+It must not claim cross-context ACID without evidence from storage design.
+
+The required durable outcome is:
+
+`task.created` evidence + canonical child Task → accepted PlanRevision →
+`plan.revision_committed` evidence.
+
+If Task and Plan facts cannot share one transaction boundary, the
+implementation must introduce an explicit recoverable staged protocol. A Plan
+revision is never executable while its canonical Task representation is
+missing.
+
+### L4
+
+An accepted decomposition satisfies L4 only when at least one runnable leaf has
+a canonical Task representation. A proposed but unmaterialized child cannot
+satisfy runnable-leaf requirements.

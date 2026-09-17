@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0085
+completed_through: TASK-0086
 current_gate: G7
-gate_status: IN_PROGRESS  # TEST-H/F-09 remediated; child-Task decomposition reachability blocker needs architecture-sensitive follow-up
+gate_status: IN_PROGRESS  # TASK-0086 child-materialization contract accepted; TASK-0087 implementation merged but not accepted (TASK-0087-R1 BLOCKED on READY-eligibility amendment)
 
 items:
   - id: TASK-0012
@@ -1829,3 +1829,29 @@ items:
       - docs/development/G7_CLOSURE_AUDIT.md
       - bins/agentctl/tests/execution_binaries.rs
       - bins/agentctl/tests/execution_recovery.rs
+
+  - id: TASK-0086
+    gate: G7
+    title: G7 Trusted Child-Task Materialization Architecture Contract
+    objective: Define the trusted semantics by which validated planner
+      node_additions become canonical child Tasks without granting planner
+      output durable authority or allowing unrelated Task capture.
+    scope: >-
+      ADR-0027 and ADR-0028 architecture-contract amendments, plus required G7
+      task bookkeeping. No production Rust implementation, IPC changes,
+      migrations, UI, providers, or G8+ work.
+    exit_criteria_summary: >-
+      Accepted architecture contract defines child Task materialization,
+      canonical ownership, durability/recovery semantics, fencing behavior,
+      and future implementation acceptance envelope. G7 remains IN_PROGRESS.
+    outcome: >-
+      Architecture contract materialized. ADR-0027 defines trusted
+      node_addition materialization into canonical child Tasks and ADR-0028
+      defines publication fencing between existing Task references and new
+      child identities. No production behavior implemented.
+    depends_on:
+      - TASK-0085
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md
