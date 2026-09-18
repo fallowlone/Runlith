@@ -62,7 +62,10 @@ impl TaskPlanningAuthority {
                     // materialization refuses such a child outright rather
                     // than downgrading it here. It is not correct because
                     // other methods are unreachable — the plan model, the
-                    // planner prompt and V9 all handle them. Anchored by
+                    // provider parser, durable plan storage, V3 and V9 all
+                    // handle them. The planner prompt asks for automated-test
+                    // only, but that is guidance, not the control: the refusal
+                    // does not depend on a provider obeying it. Anchored by
                     // `v1_derives_every_criterion_as_automated_test` and by
                     // `materialization_refuses_a_child_whose_proof_method_the_task_cannot_carry`.
                     method: VerificationMethod::AutomatedTest,

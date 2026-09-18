@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0098
+completed_through: TASK-0099
 current_gate: G7
-gate_status: IN_PROGRESS  # every audit finding through F-A2-01 is remediated (TASK-0090..0098); TASK-0087 acceptance now needs an independent conformance pass re-run against the remediated tree
+gate_status: IN_PROGRESS  # TASK-0087 ACCEPTED by TASK-0099 after three independent audits by three different systems; G7 closure is a separate owner decision and still needs its OS-level verification envelope settled
 
 items:
   - id: TASK-0012
@@ -2302,3 +2302,54 @@ items:
     references:
       - bins/agentd/src/lib.rs
       - docs/development/G7_INDEPENDENT_REVIEW_TASK_0087_CHAIN.md
+
+  - id: TASK-0099
+    gate: G7
+    title: G7 TASK-0087 Acceptance
+    objective: Accept TASK-0087 trusted child task materialization on the
+      strength of three independent audits, and correct the one remaining
+      finding they left open.
+    scope: >-
+      The F-A3-01 comment correction, the acceptance record for TASK-0087, and
+      the repeated full-workspace verification the third audit could not run.
+      No production behaviour change, no contract change, no G7 closure claim.
+    exit_criteria_summary: >-
+      F-A3-01 is corrected, TASK-0087 is recorded as accepted with its
+      evidence, and three consecutive full workspace runs are green on a host
+      without sandbox restrictions.
+    outcome: >-
+      TASK-0087 ACCEPTED. Three independent audits were run by three different
+      systems, not three sessions of one: Codex, Claude Opus 5 and ChatGPT 5.6
+      Sol High. That matters for the evidence, because each found what the
+      others missed. Codex found F-NEW-01 by inspecting the provider side of
+      the seam, which this orchestrator never examined; Opus 5 confirmed it and
+      added two independent proofs (node_removals feeding real stored methods
+      into the parent side, and a test already in the repository round-tripping
+      IndependentReview), found the F-A2-01 flake, and caught a pipeline that
+      reported a red run as exit 0; Sol High found F-A3-01, a comment this
+      orchestrator had made stale in TASK-0096 itself, and correctly separated
+      task acceptance from gate closure. Every blocking finding from TASK-0089,
+      the first review and all three audits is remediated across TASK-0090
+      through TASK-0099. F-A3-01 is corrected here: the comment claimed the
+      planner prompt still handles every method, which TASK-0096 had narrowed;
+      it now names the provider parser, durable plan storage, V3 and V9 as the
+      handlers and records that the prompt is guidance, not the control.
+      Sol High's full workspace run was red only because its sandbox refused
+      Unix socket bind and nested sandbox-exec — one environmental cause, not
+      seventy-five regressions, and the pure planning, storage and domain
+      suites passed in that same environment. That gap is closed here by three
+      consecutive unsandboxed full runs, each 1080 passed / 0 failed at cargo
+      exit 0, plus a fourth on the exact committed tree. Three rather than one
+      because both flakes this chain fixed appeared only under full-run load,
+      and this branch itself once produced a red run and a green run from
+      identical code. G7 closure is deliberately NOT claimed:
+      it is an owner decision, and the obligatory OS-level verification envelope
+      (including whether the production Claude and G6 Seatbelt keeper belong to
+      it) has not been settled.
+    depends_on:
+      - TASK-0098
+    blocked_by: []
+    references:
+      - docs/development/G7_INDEPENDENT_REVIEW_TASK_0087_CHAIN.md
+      - docs/development/G7_TASK_0089_CHILD_MATERIALIZATION_CONFORMANCE.md
+      - crates/plan/src/task_authority.rs
