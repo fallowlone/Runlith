@@ -316,6 +316,7 @@ pub fn validate_proposal(
     // V9 RISK-ESCALATION APPROVAL GATE.
     let risk_escalated = method_changed
         || has_derived_update_risk_escalation(graph, changeset)
+        || has_derived_addition_risk_escalation(changeset, ctx)
         || changeset
             .risk_delta
             .iter()
@@ -628,6 +629,24 @@ fn check_limits(
         });
     }
     None
+}
+
+/// Derives risk escalation for proposed new nodes from the trusted branch
+/// baseline. V5 already refuses an above-baseline addition that carries no
+/// `required_gate`, but `GateRef` is an opaque annotation that no policy,
+/// scheduler or runner consumes, and it is never carried onto the canonical
+/// child Task — only the elevated risk class is. Without this check the gate
+/// annotation would be the only thing between a proposal and a higher-risk
+/// canonical Task, and V9 would fire only when the planner chose to declare a
+/// `risk_delta`, which is planner-supplied input rather than trusted state.
+fn has_derived_addition_risk_escalation(
+    changeset: &PlanChangeSet,
+    ctx: &ValidationContext,
+) -> bool {
+    changeset
+        .node_additions
+        .iter()
+        .any(|addition| addition.risk_class > ctx.baseline_risk)
 }
 
 /// Derives risk escalation from trusted base state plus planner-proposed
