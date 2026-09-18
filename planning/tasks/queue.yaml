@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0092
+completed_through: TASK-0093
 current_gate: G7
-gate_status: IN_PROGRESS  # F-01/F-02 (TASK-0090/0092) and R-01/R-02 (TASK-0091) remediated; F-03/R-03 needs an owner decision and R-04..R-07 remain open, so TASK-0087 is still unaccepted
+gate_status: IN_PROGRESS  # F-01/F-02/F-03 and R-01..R-03 closed (TASK-0090..0093); R-04..R-07 remain open and TASK-0087 needs a final conformance pass
 
 items:
   - id: TASK-0012
@@ -2049,3 +2049,52 @@ items:
       - docs/development/G7_INDEPENDENT_REVIEW_TASK_0087_CHAIN.md
       - adapters/storage-sqlite/src/plan_store.rs
       - adapters/storage-sqlite/tests/plan_persistence.rs
+
+  - id: TASK-0093
+    gate: G7
+    title: G7 v1 Obligation Boundary
+    objective: Resolve TASK-0089 finding F-03 and independent-review R-03 by
+      recording what the v1 Task contract actually models for acceptance
+      obligations, and deferring the typed requirement-to-evidence model to G8.
+    scope: >-
+      ADR-0027 amendment, the rewrite of the unfalsifiable non-weakening
+      clause, documentation of the reserved Task fields, and one anchor test.
+      No IPC version, no schema migration, no change to derivation behaviour,
+      no G8 design.
+    exit_criteria_summary: >-
+      The contract states that v1 models acceptance obligations as criterion
+      identities proved by automated test, names the reserved fields as
+      unauthorable, and the boundary is pinned by an executable anchor. Full
+      workspace verification, clippy and fmt pass.
+    outcome: >-
+      V1 BOUNDARY RECORDED. Investigation corrected both prior accounts:
+      TASK-0089 F-03 claimed no stronger obligation is representable anywhere,
+      and the independent review's R-03 replied that Task.verification and
+      Task.required_review carry two obligation lists planning ignores. Neither
+      holds. The fields exist and persist, but the domain exposes no setter,
+      protocol v6 authoring carries only allowed_paths, acceptance_criteria and
+      baseline_risk with no later edit operation, and nothing reads them, so on
+      the supported control plane they are always empty. The real shape is that
+      v1 models acceptance obligations as criterion identities with no proof
+      method, which is why derive assigns AutomatedTest and why V9 method
+      escalation has no differing input. ADR-0027 now states this, names
+      IndependentReview, SecurityCheck and HumanApproval as unreachable in v1,
+      records that VerificationMethod deliberately has no Ord so declaration
+      order is never a strength ranking, and admits that INV-046 human-approval
+      requirements are not enforced as proof obligations because v1 cannot
+      express one. The typed model is deferred to G8, whose roadmap already
+      names EvidenceRequirement; building a narrower version in G7 would mean a
+      new IPC version and a schema migration for a model already scheduled for
+      replacement. The unfalsifiable non-weakening clause from TASK-0088 is
+      rewritten to apply to modelled obligations whose value the child cannot
+      carry, with scope as the worked example. Pinned by
+      v1_derives_every_criterion_as_automated_test. R-04..R-07 remain open and
+      TASK-0087 still needs a final conformance pass.
+    depends_on:
+      - TASK-0092
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - docs/development/G7_INDEPENDENT_REVIEW_TASK_0087_CHAIN.md
+      - crates/plan/src/task_authority.rs
+      - crates/ipc-contracts/proto/task_authoring_core.proto

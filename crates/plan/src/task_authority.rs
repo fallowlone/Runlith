@@ -56,6 +56,10 @@ impl TaskPlanningAuthority {
                     id: CriterionId::new(criterion.clone())?,
                     // G7 v1 has no criterion-to-proof-method field in the Task
                     // contract; the product-owned v1 default lives here only.
+                    // Accepted and bounded by the ADR-0027 TASK-0093
+                    // amendment: stronger methods are unreachable in v1 and
+                    // the typed model belongs to G8. Anchored by
+                    // `v1_derives_every_criterion_as_automated_test`.
                     method: VerificationMethod::AutomatedTest,
                 })
             })
@@ -155,6 +159,29 @@ mod tests {
                 "{allowed:?} {forbidden:?} {acceptance:?} {risk:?}"
             );
         }
+    }
+
+    /// Anchors the ADR-0027 TASK-0093 v1 obligation boundary. This is not a
+    /// property of the algorithm but a recorded product decision: until G8
+    /// models requirement-to-evidence, every acceptance obligation is proved
+    /// by automated test. If this test starts failing, the contract moved and
+    /// the amendment must move with it.
+    #[test]
+    fn v1_derives_every_criterion_as_automated_test() {
+        let authority = TaskPlanningAuthority::derive(
+            &strings(&["repo:src"]),
+            &[],
+            &strings(&["needs-human-sign-off", "needs-security-check", "plain"]),
+            Some("critical"),
+        )
+        .unwrap();
+        assert!(
+            authority
+                .affected_parent_criteria
+                .iter()
+                .all(|criterion| criterion.method == VerificationMethod::AutomatedTest),
+            "v1 has no per-criterion proof method; criterion text must not imply one"
+        );
     }
 
     #[test]
