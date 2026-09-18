@@ -702,6 +702,22 @@ fn v9_risk_escalation_approval_gate_blocks_without_grant() {
     assert_eq!(refusal_code(&graph, &cs, &ctx()), "RISK_GATE_OPEN");
 }
 
+/// A new node above the branch baseline is a risk escalation whether or not
+/// the planner says so. `risk_delta` is planner-declared input, so V9 must not
+/// depend on it, and `required_gate` is an annotation nothing enforces — it
+/// cannot be the only thing standing between a proposal and a higher-risk
+/// canonical Task.
+#[test]
+fn v9_risk_escalation_approval_gate_blocks_an_addition_that_declares_no_delta() {
+    let graph = base_graph();
+    let mut cs = valid_changeset();
+    cs.node_additions[0].risk_class = RiskClass::High;
+    cs.node_additions[0].required_gate = Some(GateRef::new("human-review").unwrap());
+    // Deliberately no risk_delta: the planner stays silent about the rise.
+    cs.proposal_hash = compute_proposal_hash(&cs);
+    assert_eq!(refusal_code(&graph, &cs, &ctx()), "RISK_GATE_OPEN");
+}
+
 #[test]
 fn v9_risk_escalation_approval_gate_rejects_expired_grant() {
     let graph = base_graph();

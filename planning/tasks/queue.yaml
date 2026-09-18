@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0093
+completed_through: TASK-0094
 current_gate: G7
-gate_status: IN_PROGRESS  # F-01/F-02/F-03 and R-01..R-03 closed (TASK-0090..0093); R-04..R-07 remain open and TASK-0087 needs a final conformance pass
+gate_status: IN_PROGRESS  # F-01..F-03 and R-01..R-04 closed (TASK-0090..0094); R-05..R-07 are documentation/shape items and TASK-0087 needs a final conformance pass
 
 items:
   - id: TASK-0012
@@ -2098,3 +2098,43 @@ items:
       - docs/development/G7_INDEPENDENT_REVIEW_TASK_0087_CHAIN.md
       - crates/plan/src/task_authority.rs
       - crates/ipc-contracts/proto/task_authoring_core.proto
+
+  - id: TASK-0094
+    gate: G7
+    title: G7 Addition Risk Escalation Gate
+    objective: Remediate independent-review finding R-04 so a proposed child
+      above the branch baseline requires a real V9 grant instead of resting on
+      a gate annotation nothing enforces.
+    scope: >-
+      V9 escalation derivation only: treat above-baseline node_additions as
+      escalation from trusted state, plus one regression test. No GateRef
+      enforcement mechanism, no Task contract field, no migration, no IPC
+      change.
+    exit_criteria_summary: >-
+      An above-baseline addition is refused with RISK_GATE_OPEN even when the
+      planner declares no risk_delta, and full workspace verification, clippy
+      and fmt pass.
+    outcome: >-
+      R-04 REMEDIATED, and narrower than reported. The review described a
+      latent risk ratchet across decomposition levels; the reachable defect was
+      one step wide. V9 derived escalation covered node_updates only, so for a
+      new node it fired only when the planner declared a risk_delta, which is
+      planner-supplied input rather than trusted state. A proposal could
+      therefore raise a child to High under a Low baseline by attaching any
+      non-blank required_gate and staying silent about the rise; the elevated
+      risk then reached the canonical Task while the GateRef stayed a plan-node
+      annotation that no policy, scheduler or runner reads and that is never
+      carried onto the Task. Escalation is now derived for node_additions
+      against the trusted baseline, so the existing durable single-use V9 grant
+      applies. Severity in context: no code outside the plan crate branches on
+      RiskClass today, so this was a fiction of control rather than an
+      exploitable authority hole — it would have become one as soon as policy
+      began to depend on risk. GateRef enforcement is not built here; like
+      per-criterion proof methods it belongs to policy and G8.
+    depends_on:
+      - TASK-0093
+    blocked_by: []
+    references:
+      - docs/development/G7_INDEPENDENT_REVIEW_TASK_0087_CHAIN.md
+      - crates/plan/src/validation.rs
+      - crates/plan/tests/validation_rules.rs
