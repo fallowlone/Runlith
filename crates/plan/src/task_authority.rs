@@ -56,10 +56,15 @@ impl TaskPlanningAuthority {
                     id: CriterionId::new(criterion.clone())?,
                     // G7 v1 has no criterion-to-proof-method field in the Task
                     // contract; the product-owned v1 default lives here only.
-                    // Accepted and bounded by the ADR-0027 TASK-0093
-                    // amendment: stronger methods are unreachable in v1 and
-                    // the typed model belongs to G8. Anchored by
-                    // `v1_derives_every_criterion_as_automated_test`.
+                    // Accepted and bounded by the ADR-0027 TASK-0093/TASK-0096
+                    // amendments. This default is correct *because* nothing
+                    // with another method can reach a canonical Task:
+                    // materialization refuses such a child outright rather
+                    // than downgrading it here. It is not correct because
+                    // other methods are unreachable — the plan model, the
+                    // planner prompt and V9 all handle them. Anchored by
+                    // `v1_derives_every_criterion_as_automated_test` and by
+                    // `materialization_refuses_a_child_whose_proof_method_the_task_cannot_carry`.
                     method: VerificationMethod::AutomatedTest,
                 })
             })

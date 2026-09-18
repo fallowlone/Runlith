@@ -687,16 +687,27 @@ reserved for the typed model, not a live obligation channel.
 
 ### Consequences, stated plainly rather than implied
 
-1. **`VerificationMethod` beyond `AutomatedTest` is unreachable in v1.** The
-   enum lists `IndependentReview`, `SecurityCheck` and `HumanApproval`, and no
-   supported path can produce them. `VerificationMethod` deliberately derives
-   no `Ord`: the variants are a closed vocabulary, not a strength ranking, and
-   no code may treat their declaration order as one.
-2. **V9 method escalation cannot fire on a proof-method difference in v1.**
+1. **The plan model carries all four methods; the Task contract carries none.**
+   The `PlanChangeSet` expresses `CriterionDecl { id, method }`, the shipped
+   planner prompt offers all four, the parser accepts all four, and
+   `plan_node_criteria` and `planning_input_criteria` store them durably. What
+   cannot carry a method is the canonical Task, whose acceptance is a list of
+   criterion identities. `VerificationMethod` deliberately derives no `Ord`:
+   the variants are a closed vocabulary, not a strength ranking, and no code
+   may treat their declaration order as one.
+2. **V9 method escalation does fire on a proof-method difference.**
    `check_criteria_preservation` raises `method_changed` whenever a child's
-   declared method differs from the parent's derived method, and routes that to
-   V9. The mechanism is correct and reachable; it has no differing input in v1
-   because the parent side is always the default.
+   declared method differs from the parent's, in either direction, and routes
+   that to V9's hash-bound single-use grant. The parent side is not always the
+   default either: for `node_removals` the base graph node's stored methods
+   become the affected parent criteria.
+
+   > **Corrected 2026-09-18 by the TASK-0096 amendment.** Both clauses above
+   > previously asserted that non-`AutomatedTest` methods were unreachable in
+   > v1 and that V9 could not fire on a method difference. Both were false, by
+   > two independent routes, and two independent audits found it. The original
+   > reasoning inspected only the Task side of the seam and never the plan and
+   > provider side.
 3. **INV-046 is not weakened by this, and is not fully enforced by it either.**
    INV-046 forbids weakening parent acceptance criteria, security policy, scope
    and human-approval requirements. Criteria coverage, scope containment and
@@ -726,3 +737,70 @@ This amendment describes v1; it does not authorize new code to depend on the
 default. Specifically: no path may write `Task::verification` or
 `Task::required_review` without a contract that also says who reads them, and
 no path may infer obligation strength from `VerificationMethod` ordering.
+
+## Amendment — TASK-0096 materialization refuses unrepresentable obligations (2026-09-18)
+
+> Accepted 2026-09-18. Two independent audits found that the TASK-0093
+> amendment rested on a false premise. This amendment corrects the record and
+> makes the code enforce what the contract claims.
+
+### What was wrong
+
+TASK-0093 asserted that `VerificationMethod` beyond `AutomatedTest` was
+unreachable in v1, and that V9 method escalation therefore had no differing
+input. Both statements were false:
+
+- the shipped Claude planner prompt offered all four methods and the parser
+  accepted all four;
+- `CriterionDecl` carries the method, and `plan_node_criteria` /
+  `planning_input_criteria` store it durably — the repository already contained
+  a passing test round-tripping `IndependentReview` through SQLite;
+- V3 flags any method difference in either direction and routes it to V9's
+  hash-bound, single-use grant;
+- the parent side is not always the default: `node_removals` feed the base
+  graph node's stored methods into the affected parent criteria.
+
+The reasoning that produced the false premise examined only the Task side of
+the seam. The consequence was worse than an inaccurate document: a human could
+be asked for, and give, a V9 grant for a strengthened proof obligation, after
+which materialization dropped the method and the child Task carried criterion
+identities alone. Decomposing that child re-derived `AutomatedTest`, so a
+grandchild declaring `automated-test` raised no difference and needed no
+further grant. The approved obligation disappeared one level down and the
+consumed grant bought nothing.
+
+### Decision: refuse, do not downgrade
+
+The canonical Task contract still models acceptance obligations as criterion
+identities without a proof method — that part of TASK-0093 stands. What changes
+is what happens when a proposal carries an obligation the Task cannot hold:
+
+**Materialization refuses the child.** `materialize_child_tasks` rejects any
+`node_addition` declaring a criterion whose method is not `AutomatedTest`,
+before any Task is minted. The refusal is a bounded, visible availability
+regression and a correct one: it surfaces exactly the case an owner must see,
+instead of consuming a human approval and discarding what it approved.
+
+This is the accepted non-weakening clause applied literally: an obligation the
+child cannot carry blocks materialization, and substituting a weaker one is
+forbidden.
+
+### What deliberately does not change
+
+The plan model, `VerificationMethod`, V3's comparison, V9's grant machinery and
+the durable plan-side storage all keep the full four-method vocabulary. They are
+the foundation G8's `EvidenceRequirement` will build on, and the executable
+proof that V9's method path works stays in the suite. Only the lossy boundary
+refuses.
+
+The planner prompt is narrowed to `automated-test` so the provider is not
+invited to produce what the system will reject. The prompt is guidance, not a
+control: the guard stands on its own and a provider ignoring the prompt is
+refused.
+
+### Open
+
+Enforcement of proof obligations remains absent in v1: no runner, policy or
+scheduler consumes `verification_method`. Until G8 models
+requirement-to-evidence, Runlith Task acceptance obligations are criterion
+identities proved by automated test — now by refusal rather than by assumption.
