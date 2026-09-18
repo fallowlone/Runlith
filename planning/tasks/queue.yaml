@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0096
+completed_through: TASK-0097
 current_gate: G7
-gate_status: IN_PROGRESS  # two independent audits blocked TASK-0087 on F-NEW-01, remediated by TASK-0096; handoff contract drift and a flaky daemon test remain before G7 closure is attempted
+gate_status: IN_PROGRESS  # F-NEW-01 remediated (TASK-0096) and handoff scope reconciled with G9 (TASK-0097); a flaky daemon test remains, and TASK-0087 needs its conformance pass re-run against the remediated tree
 
 items:
   - id: TASK-0012
@@ -2217,3 +2217,44 @@ items:
       - crates/app-services/src/planning_service.rs
       - crates/app-services/tests/planning_service.rs
       - adapters/provider-claude/src/planner.rs
+
+  - id: TASK-0097
+    gate: G7
+    title: G7 Handoff Scope Reconciliation
+    objective: Close the handoff contract drift confirmed by two independent
+      audits by narrowing the accepted G7 contract to what G7 owns and
+      deferring the rest to G9, instead of leaving a gate criterion the system
+      does not meet.
+    scope: >-
+      ADR-0027 vocabulary-table corrections, the TASK-0097 amendment, and the
+      roadmap G7/G9 entries. No code, no IPC change, no new continuation
+      variant.
+    exit_criteria_summary: >-
+      The G7 gate criterion and the shipped continuation contract agree;
+      TAKEOVER, the resulting-revision reference and full HandoffPacket
+      rendering are recorded as G9; workspace verification stays green.
+    outcome: >-
+      HANDOFF SCOPE RECONCILED. The roadmap demanded RESUME/REPLAN/TAKEOVER/
+      ABORT and the ADR asserted that every HandoffPacket field maps onto
+      HumanDecisionRequest; neither held. TAKEOVER exists nowhere in shipped
+      code, and actions, uncertainty and question have no HDR field, so the
+      total-mapping claim failed independently. The narrowing had already been
+      made in practice by TASK-0079's own objective in this queue, which is the
+      defect worth naming: under the project authority order a queue entry
+      cannot shrink a gate criterion, so the contract stayed wide while the
+      implementation went narrow and nothing recorded the gap for four tasks.
+      G7 now owns a bounded handoff resolved by RESUME, REPLAN or ABORT;
+      TAKEOVER, the resulting-revision reference and the remaining packet
+      fields move to G9, which already owns continuity. Deferred rather than
+      implemented because TAKEOVER needs unsettled semantics for the active
+      run, claimed Task, workspace lease and in-flight execution: shipping the
+      verb without them would produce another control the system accepts and
+      cannot honour, which is exactly the defect class both audits already
+      found in this gate.
+    depends_on:
+      - TASK-0096
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - planning/roadmap.yaml
+      - crates/plan/src/human_decision.rs
