@@ -566,3 +566,87 @@ This amendment states the contract; it does not certify conformance. TASK-0087
 is accepted only after an independent pass verifies the merged implementation
 against every clause above and reports remaining gaps as separately scoped
 remediation.
+
+## Amendment — TASK-0091 parent admission for decomposition (2026-09-18)
+
+> Accepted 2026-09-18. Owner decision of 2026-09-18 selected the admission set
+> below. Origin: an independent review of the TASK-0087..TASK-0090 chain found
+> that publication never consults the owning parent's lifecycle state or
+> project, and that the TASK-0089 conformance pass graded the fencing clause
+> PASS while two of the fences ADR-0028 names were absent.
+
+### Problem
+
+ADR-0028 "Publication fencing additions" item 4 requires fencing the
+"project/task state used for derived authority". The shipped publication
+transaction did not read parent state at all, did not compare a materialized
+child's project to its parent's, and did not require the parent Task to exist.
+A decomposition therefore published under a COMPLETED parent, under a parent
+that had never been created, or with children claiming a foreign project.
+
+### Decision: admission is an invariant, not a staleness comparison
+
+Equality against the planning-input snapshot is the wrong instrument for
+lifecycle state. `Task::define_planning_metadata` is DRAFT-only, so the scope,
+acceptance obligations and baseline risk that authority is derived from are
+frozen once the Task leaves DRAFT; current state does not change them.
+`READY -> CLAIMED -> RUNNING` are legitimate moves that must not invalidate a
+planner call already in flight. What lifecycle state governs is whether
+decomposition may be published at all.
+
+Publication therefore proves three things about the owning parent, before any
+other check and unconditionally:
+
+1. **The parent exists.** A lineage reference is not evidence of a Task.
+2. **The parent's state authorizes decomposition** — it is one of
+   `READY`, `CLAIMED`, `RUNNING`, `BLOCKED`, `RETRY_READY`.
+3. **Every materialized child carries the parent's project.**
+
+These are invariants of publication, so they do not sit behind the
+`canonical_task_authority` flag, which a caller may legitimately clear when its
+snapshot was not derived from canonical Task state. The existing snapshot fence
+keeps its current meaning and remains conditional.
+
+### The admission set, and why the rest are excluded
+
+`READY` through `RETRY_READY` is the parent's working life. `BLOCKED` is
+included deliberately: task-engine lists "planning unable to produce valid
+executable work" as a supported blocker cause, so decomposition is a normal
+exit from BLOCKED rather than an anomaly. `RETRY_READY` is included because
+another attempt is permitted there.
+
+- **DRAFT** is excluded because planning metadata is still authorable, so the
+  parent's own contract is not yet frozen while its children would already be
+  orchestration-eligible.
+- **SUBMITTED, AWAITING_REVIEW, VERIFYING** are excluded because the parent has
+  claimed its work is finished and is under independent evaluation; adding
+  READY children there silently changes what is being evaluated.
+- **COMPLETED, FAILED, CANCELLED** are excluded because the work is over.
+  task-engine §10 requires parent completion to rest on independent
+  verification of the parent's own acceptance contract, never on children.
+
+### Refusal semantics
+
+A missing parent, a parent outside the admission set and a child claiming a
+foreign project are all constraint violations, not stale input. The
+distinction is behavioural, not cosmetic: `PlanningInputStale` is mapped by
+`planned_orchestration` to the `PlanningInputMoved` **success** outcome and
+reported to clients as `StaleState`, both of which promise that a fresh
+planning cycle can proceed. None of these three conditions is repaired by
+replanning, so reporting them as concurrent movement would hide them and
+invite an unbounded replan loop.
+
+### Consequence for the production flow
+
+Decomposition now requires the parent to have been declared READY. Authoring a
+Task and planning against it while still DRAFT is no longer a valid sequence;
+the author declares eligibility first (`TaskLifecycleOp::MarkReady`), then
+planning may decompose. Every fixture that planned against a DRAFT parent was
+corrected to this order rather than the rule being relaxed.
+
+### Open
+
+The three refusals share one error type. If a caller ever needs to distinguish
+them — for example to surface "parent not eligible" differently from "parent
+missing" — that requires a typed refusal and an IPC mapping, and is not
+established here.

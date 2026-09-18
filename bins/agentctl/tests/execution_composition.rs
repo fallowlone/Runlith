@@ -189,6 +189,18 @@ fn create_task(id: &str, project: &str, objective: &str) -> TaskCoreRequest {
     }
 }
 
+fn mark_ready(id: &str) -> TaskCoreRequest {
+    TaskCoreRequest {
+        payload: Some(task_core_request::Payload::Lifecycle(
+            ipc_contracts::proto::LifecycleRequest {
+                task_id: id.to_owned(),
+                op: ipc_contracts::proto::TaskLifecycleOp::MarkReady as i32,
+                reason: "fixture parent authored".to_owned(),
+            },
+        )),
+    }
+}
+
 async fn seed_ready(
     endpoint: &UnixEndpoint,
     db: &Path,
@@ -216,6 +228,17 @@ async fn seed_ready(
             Some(task_core_response::Payload::CreateTask(_))
         ),
         "seed parent, got {created:?}"
+    );
+    // Publication admits a decomposition only while the parent is doing work
+    // (ADR-0027 TASK-0091 amendment), so the parent is declared eligible over
+    // the same IPC surface an operator would use, before planning runs.
+    let ready = business(endpoint, mark_ready(&fixture_parent(task))).await;
+    assert!(
+        matches!(
+            ready.payload,
+            Some(task_core_response::Payload::Lifecycle(_))
+        ),
+        "seed parent ready, got {ready:?}"
     );
     seed_accepted_plan(db, task, objective);
 }
