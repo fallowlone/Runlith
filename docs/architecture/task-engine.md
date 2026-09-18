@@ -168,6 +168,11 @@ must not be read as more complete than the architecture is.
 
 - **DRAFT** — work not yet eligible for execution. Establishes only
   `DRAFT -> READY`; the readiness validation checklist is open (§16).
+  Planning metadata (scope, acceptance obligations, baseline risk) is
+  authorable only here, so a DRAFT Task's own contract is not yet frozen.
+  Consequently a DRAFT Task cannot publish a decomposition: the parent
+  admission set for planning is READY, CLAIMED, RUNNING, BLOCKED and
+  RETRY_READY (ADR-0027 TASK-0091 amendment).
 - **READY** — persistent lifecycle state: the Task is eligible for
   orchestration. READY must never be equated with "scheduler says RUNNABLE
   right now" (§8).
@@ -224,7 +229,7 @@ transition; everything else is "Unresolved" and must not be guessed.
 
 | From | To | Trigger / semantic reason | Authority allowed to request | Required preconditions | Evidence / reason required | Accepted or unresolved |
 |------|----|---------------------------|------------------------------|------------------------|----------------------------|------------------------|
-| DRAFT | READY | authoring finished; work declared eligible | User / authorized client, Task Application Service | readiness validation (checklist open, §16) | reason for eligibility | Accepted (path; preconditions open) |
+| DRAFT | READY | authoring finished; work declared eligible | User / authorized client, Task Application Service, Planning Application Service (materialized children only, ADR-0027 TASK-0088 amendment) | readiness validation (checklist open, §16); for materialized children, full V1-V9 validation inside the publication transaction | reason for eligibility | Accepted (path; general preconditions open) |
 | READY | CLAIMED | orchestration reserves work for execution | Scheduler / Reconciler via Task Application Service | Task READY; dependencies satisfiable per readiness | assignment reference | Accepted |
 | CLAIMED | RUNNING | execution begins under a plan/scope/environment | Scheduler / Reconciler, Agent Runtime via Task Application Service | valid execution assignment | execution reference | Accepted |
 | RUNNING | BLOCKED | explicit impediment encountered | Agent Runtime, Scheduler / Reconciler, Policy Engine, Planner | blocker is explicit and observable | blocker reason | Accepted |
