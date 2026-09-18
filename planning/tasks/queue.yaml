@@ -8,7 +8,7 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0099
+completed_through: TASK-0100
 current_gate: G7
 gate_status: IN_PROGRESS  # TASK-0087 ACCEPTED by TASK-0099 after three independent audits by three different systems; G7 closure is a separate owner decision and still needs its OS-level verification envelope settled
 
@@ -2353,3 +2353,43 @@ items:
       - docs/development/G7_INDEPENDENT_REVIEW_TASK_0087_CHAIN.md
       - docs/development/G7_TASK_0089_CHILD_MATERIALIZATION_CONFORMANCE.md
       - crates/plan/src/task_authority.rs
+
+  - id: TASK-0100
+    gate: G7
+    title: G7 Branch Reconciliation and Spend Amendment Acceptance
+    objective: Reconcile every outstanding branch against main, accept the
+      owner-approved ADR-0027 planner spend accounting amendment, and land the
+      external architecture research that the TASK-0087 chain relied on.
+    scope: >-
+      Branch inventory, two documentation/contract merges, and worktree
+      cleanup. No code change: the inventory established that no branch holds
+      code absent from main.
+    exit_criteria_summary: >-
+      Every unmerged branch is accounted for, the spend amendment is accepted
+      with its shipped-behaviour evidence, and workspace verification stays
+      green.
+    outcome: >-
+      RECONCILED. Inventory of the four unmerged branches found no code missing
+      from main. hardening/test-h-agentd-hermeticity was already fully
+      superseded; task-0057-branch-only-recovery diverges at the G5 closure
+      commit and every symbol it carries (observe::repository_root,
+      branch_exists, worktree_status) exists in main in its final form, so
+      merging either would have reverted working code to an older draft. The
+      other two carried no code at all. research/external-architecture-
+      intelligence is merged as 27 markdown files: it earned a place in the
+      repository during this chain, where CURRENT_ARCHITECTURE_ASSESSMENT
+      independently corroborated the automated-test obligation derivation and
+      the pattern library's fail-closed admission entry matched the shape of
+      the TASK-0091 fix. The ADR-0027 spend amendment is accepted after
+      verifying it describes shipped behaviour rather than intent:
+      PlannerCallSpend exists with all three variants reachable in production
+      code. Uncommitted work found in two worktrees during cleanup was
+      preserved before removal: an early canonical_task_authority draft that
+      later reached main through TASK-0084 in a different form, and two
+      never-committed security review documents.
+    depends_on:
+      - TASK-0099
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - external-research/PATTERN_LIBRARY.md
