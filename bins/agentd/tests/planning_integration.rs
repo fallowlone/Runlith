@@ -137,6 +137,13 @@ fn seed_planning_parent(
         .tasks_mut()
         .create_task(&parent_task)
         .expect("create planning parent");
+    // Publication admits a decomposition only while the parent is doing work
+    // (ADR-0027 TASK-0091 amendment), so the fixture declares the parent
+    // eligible through the lifecycle service, exactly as the real flow must.
+    orchestration
+        .tasks_mut()
+        .mark_ready(&parent_id)
+        .expect("mark planning parent ready");
 
     planned
         .iter()

@@ -16,7 +16,7 @@ use plan_domain::{
     RiskClass, ValidatedBy, VerificationMethod,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use task_domain::{Task, TaskState};
+use task_domain::{Task, TaskId, TaskState};
 
 use crate::error::{map_constraint, StorageError, StorageResult};
 use crate::event::{EventType, JournalEvent, NewJournalEvent, PlanRevisionJournalPayload};
@@ -322,6 +322,14 @@ impl crate::task_store::SqliteStore {
         let transaction = self
             .connection_mut()
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // Admission precedes every other check: an absent parent, a parent
+        // past or before its working life, or a child claiming another
+        // project are invariants of publication itself, not staleness. They
+        // are therefore unconditional — unlike the snapshot fence below,
+        // which a caller can legitimately skip when its snapshot was not
+        // derived from canonical Task state.
+        require_parent_admission(&transaction, &lineage.parent_task_ref, child_tasks)?;
 
         // ADR-0028 stale-writer fence. The provider call happened outside
         // this transaction; publication is authoritative only while the
@@ -1114,6 +1122,73 @@ fn positive_u64(value: i64, field: &str) -> StorageResult<u64> {
         return Err(StorageError::Corrupt(format!("{field} stores zero")));
     }
     Ok(value)
+}
+
+/// Parent states in which publishing a decomposition is authorized
+/// (ADR-0027 TASK-0091 amendment). The set is the parent's working life:
+/// READY through RETRY_READY. DRAFT is excluded because planning metadata is
+/// still authorable there, so the parent's own contract is not yet frozen
+/// while its children would already be orchestration-eligible. SUBMITTED,
+/// AWAITING_REVIEW and VERIFYING are excluded because the parent has claimed
+/// its work is finished and is under independent evaluation. COMPLETED,
+/// FAILED and CANCELLED are excluded because the work is over.
+const PARENT_ADMISSION_STATES: [TaskState; 5] = [
+    TaskState::Ready,
+    TaskState::Claimed,
+    TaskState::Running,
+    TaskState::Blocked,
+    TaskState::RetryReady,
+];
+
+/// Proves the owning parent exists, is in a state that authorizes
+/// decomposition, and owns every materialized child's project.
+///
+/// ADR-0028 publication fencing item 4 requires fencing the project/task
+/// state behind derived authority. Equality against the planning-input
+/// snapshot would be the wrong instrument: `Task::define_planning_metadata`
+/// is DRAFT-only, so the scope, acceptance and risk the authority derives
+/// from are frozen once the Task leaves DRAFT, and READY -> CLAIMED ->
+/// RUNNING are legitimate moves that must not invalidate a planning call in
+/// flight. What state governs is admission, so that is what is checked here.
+///
+/// The project check lives here for the same reason: ADR-0027 makes project
+/// identity inherited from the parent and unselectable by planner output, and
+/// this transaction is the trusted boundary that must prove it, independent
+/// of whichever caller assembled the request.
+fn require_parent_admission(
+    connection: &Connection,
+    parent_task_ref: &str,
+    child_tasks: &[ChildTaskMaterialization],
+) -> StorageResult<()> {
+    let parent_id = TaskId::new(parent_task_ref.to_owned()).map_err(|error| {
+        StorageError::ConstraintViolation(format!(
+            "plan revision parent task ref {parent_task_ref} is not a valid task id: {error}"
+        ))
+    })?;
+    let Some(parent) = load_task(connection, &parent_id)? else {
+        return Err(StorageError::ConstraintViolation(format!(
+            "plan revision parent task {parent_task_ref} does not exist"
+        )));
+    };
+    if !PARENT_ADMISSION_STATES.contains(&parent.state()) {
+        return Err(StorageError::ConstraintViolation(format!(
+            "plan revision parent task {parent_task_ref} is {} and does not authorize \
+             publishing a decomposition",
+            parent.state()
+        )));
+    }
+    for child in child_tasks {
+        if child.task.project_id() != parent.project_id() {
+            return Err(StorageError::ConstraintViolation(format!(
+                "materialized child task {} claims project {} but its parent {parent_task_ref} \
+                 owns project {}",
+                child.task.id(),
+                child.task.project_id(),
+                parent.project_id()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Recognizes an exact idempotent retry of an already-materialized child:

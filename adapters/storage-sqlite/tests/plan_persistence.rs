@@ -21,7 +21,7 @@ use storage_sqlite::{
     NewJournalEvent, PlanCommitJournalEvidence, PlanRevisionLineage, SqliteStore, StorageError,
     CHILD_TASK_MATERIALIZATION_PROVENANCE, SUPPORTED_SCHEMA_VERSION,
 };
-use task_domain::{Project, ProjectId, Task, TaskId, TaskState};
+use task_domain::{Project, ProjectId, Task, TaskId, TaskState, TransitionCommand};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -415,6 +415,7 @@ fn v11_database_migrates_preserving_g2_g3_g5_g6_data_and_starts_with_empty_plan(
 fn revision_commit_persists_graph_provenance_and_exactly_one_bounded_event() {
     let db = TestDb::new("commit");
     let mut store = db.open();
+    seed_child_parent(&mut store);
     let branch = PlanBranchId::new("branch-main").unwrap();
     let causes = vec![evidence("attempt-17"), evidence("test-suite-4")];
     let changeset = changeset(0, "decompose root into executable worker", &causes);
@@ -546,6 +547,7 @@ fn successful_commit_survives_reopen_with_semantic_equivalence() {
     let graph = graph_v1();
     {
         let mut store = db.open();
+        seed_child_parent(&mut store);
         commit_revision(
             &mut store,
             &changeset,
@@ -573,6 +575,7 @@ fn journal_revision_hash_mismatch_fails_closed_on_reconstruction() {
     let revision = revision(&branch, 1, &changeset);
     {
         let mut store = db.open();
+        seed_child_parent(&mut store);
         commit_revision(
             &mut store,
             &changeset,
@@ -633,6 +636,7 @@ fn journal_revision_provenance_mismatches_fail_closed_on_reconstruction() {
         let revision = revision(&branch, 1, &changeset);
         {
             let mut store = db.open();
+            seed_child_parent(&mut store);
             commit_revision(
                 &mut store,
                 &changeset,
@@ -670,6 +674,7 @@ fn journal_revision_causes_mismatch_fails_closed_on_reconstruction() {
     let revision = revision(&branch, 1, &changeset);
     {
         let mut store = db.open();
+        seed_child_parent(&mut store);
         commit_revision(
             &mut store,
             &changeset,
@@ -703,6 +708,7 @@ fn journal_revision_noncanonical_hash_fails_closed_on_reconstruction() {
     let revision = revision(&branch, 1, &changeset);
     {
         let mut store = db.open();
+        seed_child_parent(&mut store);
         commit_revision(
             &mut store,
             &changeset,
@@ -733,6 +739,7 @@ fn journal_revision_noncanonical_hash_fails_closed_on_reconstruction() {
 fn stale_base_and_duplicate_revision_fail_closed_without_new_event() {
     let db = TestDb::new("stale");
     let mut store = db.open();
+    seed_child_parent(&mut store);
     let branch = PlanBranchId::new("branch-main").unwrap();
     let first_changeset = changeset(0, "first revision", &[evidence("attempt-1")]);
     let first = revision(&branch, 1, &first_changeset);
@@ -767,6 +774,7 @@ fn two_same_head_writers_have_exactly_one_winner() {
     let first = revision(&branch, 1, &first_changeset);
     {
         let mut store = db.open();
+        seed_child_parent(&mut store);
         commit_revision(
             &mut store,
             &first_changeset,
@@ -858,6 +866,7 @@ fn commit_requires_resolvable_receipt_matching_the_accepted_proposal() {
 fn commit_records_storage_derived_lineage_and_resets_l3_counter_atomically() {
     let db = TestDb::new("lineage");
     let mut store = db.open();
+    seed_child_parent(&mut store);
     let branch = PlanBranchId::new("branch-main").unwrap();
     let changeset = changeset(0, "first revision", &[evidence("attempt-1")]);
     let key = lineage().trigger_evidence_key;
@@ -919,6 +928,7 @@ fn commit_records_storage_derived_lineage_and_resets_l3_counter_atomically() {
 fn superseded_planning_run_generation_cannot_publish_a_revision() {
     let db = TestDb::new("stale-planning-run-publication");
     let mut store = db.open();
+    seed_child_parent(&mut store);
     let branch = PlanBranchId::new("branch-main").unwrap();
     let changeset = changeset(0, "first revision", &[evidence("attempt-1")]);
     let revision = revision(&branch, 1, &changeset);
@@ -989,6 +999,7 @@ fn canonical_task_authority_fence_rechecks_task_facts_inside_publication_transac
         "low",
     )
     .unwrap();
+    root.mark_ready().unwrap();
     store.create_task(&root).unwrap();
 
     let branch = PlanBranchId::new("branch-authority").unwrap();
@@ -1044,9 +1055,18 @@ fn canonical_task_authority_fence_rechecks_task_facts_inside_publication_transac
             .any(|event| event.fact.event_type == EventType::PlanRevisionCommitted));
     };
 
+    // A nonexistent parent is refused by admission, ahead of the staleness
+    // fence and independently of it. The distinction is deliberate:
+    // `PlanningInputStale` promises the caller that the input moved and a
+    // fresh planning cycle can proceed — `planned_orchestration` turns it into
+    // `PlanningInputMoved`, an `Ok` outcome. A parent that does not exist will
+    // not appear on replan, so it must not be reported as a concurrent move.
     let missing = attempt(&mut store, "task-missing", revision.created_at - 4)
         .expect_err("a snapshot for a nonexistent canonical Task cannot publish");
-    assert!(matches!(missing, StorageError::PlanningInputStale { .. }));
+    assert!(
+        matches!(missing, StorageError::ConstraintViolation(ref detail) if detail.contains("does not exist")),
+        "unexpected error {missing:?}"
+    );
     assert_unpublished(&store);
 
     let mut drifted = root.snapshot();
@@ -1074,9 +1094,9 @@ fn risk_decision_consumption_rolls_back_when_plan_commit_fails_then_consumes_on_
         .create_project(&Project::new(project_id.clone(), "hd atomic".to_owned()).unwrap())
         .unwrap();
     let task_id = TaskId::new("task-root").unwrap();
-    store
-        .create_task(&Task::draft(task_id.clone(), project_id, "risk owner".to_owned()).unwrap())
-        .unwrap();
+    let mut risk_owner = Task::draft(task_id.clone(), project_id, "risk owner".to_owned()).unwrap();
+    risk_owner.mark_ready().unwrap();
+    store.create_task(&risk_owner).unwrap();
 
     let branch = PlanBranchId::new("branch-human-risk").unwrap();
     let changeset = changeset(0, "risk guarded revision", &[evidence("risk-attempt")]);
@@ -1226,6 +1246,7 @@ fn schema_13_revision_history_without_lineage_fails_closed_after_upgrade() {
     let changeset = changeset(0, "first revision", &[evidence("attempt-1")]);
     {
         let mut store = db.open();
+        seed_child_parent(&mut store);
         commit_revision(
             &mut store,
             &changeset,
@@ -1277,6 +1298,7 @@ fn corrupt_plan_rows_fail_closed_on_reconstruction() {
     let revision = revision(&branch, 1, &changeset);
     {
         let mut store = db.open();
+        seed_child_parent(&mut store);
         commit_revision(
             &mut store,
             &changeset,
@@ -1313,20 +1335,10 @@ fn child_project() -> ProjectId {
 }
 
 /// Project plus the DRAFT plan parent every fixture revision's lineage names.
+/// The plan parent every publication needs: publication now proves the owning
+/// Task exists and authorizes decomposition, so READY is the fixture baseline.
 fn seed_child_parent(store: &mut SqliteStore) {
-    store
-        .create_project(&Project::new(child_project(), "child materialization".to_owned()).unwrap())
-        .unwrap();
-    store
-        .create_task(
-            &Task::draft(
-                TaskId::new(CHILD_PARENT).unwrap(),
-                child_project(),
-                "plan parent".to_owned(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
+    seed_child_parent_in_state(store, TaskState::Ready);
 }
 
 fn child_event(
@@ -1469,6 +1481,91 @@ fn task_event_types(store: &SqliteStore, id: &str) -> Vec<EventType> {
         .collect()
 }
 
+/// Seeds the child-materialization parent in `state`. States with accepted
+/// incoming transitions are reached through the domain; FAILED and CANCELLED
+/// have none (task-engine.md transition registry), so they are reconstructed
+/// the only way persistence can hold them.
+fn seed_child_parent_in_state(store: &mut SqliteStore, state: TaskState) {
+    store
+        .create_project(&Project::new(child_project(), "child materialization".to_owned()).unwrap())
+        .unwrap();
+    let mut task = Task::draft(
+        TaskId::new(CHILD_PARENT).unwrap(),
+        child_project(),
+        "plan parent".to_owned(),
+    )
+    .unwrap();
+    let reached = match state {
+        TaskState::Draft => true,
+        TaskState::Ready => task.mark_ready().is_ok(),
+        TaskState::Claimed => task.mark_ready().and_then(|_| task.claim()).is_ok(),
+        TaskState::Running => task
+            .mark_ready()
+            .and_then(|_| task.claim())
+            .and_then(|_| task.start())
+            .is_ok(),
+        TaskState::Blocked => task
+            .mark_ready()
+            .and_then(|_| task.claim())
+            .and_then(|_| task.start())
+            .and_then(|_| task.block("waiting on decomposition"))
+            .is_ok(),
+        TaskState::Submitted => running_then(&mut task, RunningTail::Submitted),
+        TaskState::AwaitingReview => running_then(&mut task, RunningTail::AwaitingReview),
+        TaskState::Verifying => running_then(&mut task, RunningTail::Verifying),
+        TaskState::RetryReady => running_then(&mut task, RunningTail::RetryReady),
+        TaskState::Completed => running_then(&mut task, RunningTail::Completed),
+        TaskState::Failed | TaskState::Cancelled => {
+            let mut snapshot = task.snapshot();
+            snapshot.state = state;
+            task = Task::restore(snapshot).unwrap();
+            true
+        }
+    };
+    assert!(reached, "could not reach {state} through the domain");
+    assert_eq!(task.state(), state, "parent fixture state");
+    store.create_task(&task).unwrap();
+}
+
+enum RunningTail {
+    Submitted,
+    AwaitingReview,
+    Verifying,
+    RetryReady,
+    Completed,
+}
+
+fn running_then(task: &mut Task, tail: RunningTail) -> bool {
+    let started = task
+        .mark_ready()
+        .and_then(|_| task.claim())
+        .and_then(|_| task.start())
+        .and_then(|_| task.submit_result("attempt output"));
+    if started.is_err() {
+        return false;
+    }
+    let outcome = match tail {
+        RunningTail::Submitted => Ok(task.state()),
+        RunningTail::AwaitingReview => task.route_to_review(),
+        RunningTail::Verifying => task
+            .route_to_review()
+            .and_then(|_| task.begin_verification()),
+        RunningTail::RetryReady => task
+            .route_to_review()
+            .and_then(|_| task.begin_verification())
+            .and_then(|_| task.verification_failed("rejected")),
+        RunningTail::Completed => task
+            .route_to_review()
+            .and_then(|_| task.begin_verification())
+            .and_then(|_| {
+                task.apply(TransitionCommand::VerificationSucceeded {
+                    verdict: "verified".to_owned(),
+                })
+            }),
+    };
+    outcome.is_ok()
+}
+
 /// Everything a failed materializing commit must leave untouched.
 fn assert_rolled_back(
     store: &SqliteStore,
@@ -1486,6 +1583,136 @@ fn assert_rolled_back(
             .len(),
         tasks_before
     );
+}
+
+/// ADR-0028 publication fencing item 4 and the ADR-0027 TASK-0091 amendment:
+/// decomposition publishes only while the owning parent is doing work. DRAFT
+/// is excluded because planning metadata is still authorable there, the
+/// review/verification states because the parent already claimed its work is
+/// finished, and the terminal states because the work is over.
+#[test]
+fn publication_requires_the_parent_task_in_the_admission_set() {
+    for state in TaskState::all() {
+        let admitted = matches!(
+            state,
+            TaskState::Ready
+                | TaskState::Claimed
+                | TaskState::Running
+                | TaskState::Blocked
+                | TaskState::RetryReady
+        );
+        let label = format!("parent {state}");
+        let db = TestDb::new(&format!("admission-{state}"));
+        let mut store = db.open();
+        seed_child_parent_in_state(&mut store, state);
+
+        let changeset = two_child_changeset("materialize under a parent in a given state");
+        let child = materialized_child("worker", &changeset);
+        let branch = PlanBranchId::new("branch-admission").unwrap();
+        let events_before = store.list_events_ordered().unwrap().len();
+        let tasks_before = store
+            .list_tasks_for_project(&child_project())
+            .unwrap()
+            .len();
+
+        let result = commit_with_children(&mut store, &branch, &changeset, "receipt-1", &[child]);
+
+        if admitted {
+            result.unwrap_or_else(|error| panic!("{label}: admitted state refused: {error:?}"));
+            assert_eq!(store.get_plan_head(&branch).unwrap(), Some(1), "{label}");
+            assert_eq!(
+                store
+                    .get_task(&TaskId::new("worker").unwrap())
+                    .unwrap()
+                    .map(|task| task.state()),
+                Some(TaskState::Ready),
+                "{label}"
+            );
+        } else {
+            let error = result.expect_err(&format!("{label}: must refuse publication"));
+            assert!(
+                matches!(error, StorageError::ConstraintViolation(_)),
+                "{label}: unexpected error {error:?}"
+            );
+            assert_rolled_back(&store, &branch, events_before, tasks_before);
+            assert!(
+                store
+                    .get_task(&TaskId::new("worker").unwrap())
+                    .unwrap()
+                    .is_none(),
+                "{label}: child must not survive a refused publication"
+            );
+        }
+    }
+}
+
+/// ADR-0027 TASK-0086: "project identity is inherited from the owning parent
+/// and cannot be selected by planner output", with "parent/project mismatch:
+/// refuse" required at this trusted boundary — not only in the caller that
+/// happens to derive the project correctly today.
+#[test]
+fn child_materialization_requires_the_parent_project() {
+    let db = TestDb::new("child-foreign-project");
+    let mut store = db.open();
+    seed_child_parent_in_state(&mut store, TaskState::Ready);
+    let foreign = ProjectId::new("P-FOREIGN").unwrap();
+    store
+        .create_project(&Project::new(foreign.clone(), "foreign project".to_owned()).unwrap())
+        .unwrap();
+
+    let changeset = two_child_changeset("materialize a child into a foreign project");
+    let mut task = Task::draft(
+        TaskId::new("worker").unwrap(),
+        foreign,
+        "planned child task worker".to_owned(),
+    )
+    .unwrap();
+    task.set_parent(TaskId::new(CHILD_PARENT).unwrap()).unwrap();
+    task.mark_ready().unwrap();
+    let child = child_materialization(task, &changeset);
+
+    let branch = PlanBranchId::new("branch-foreign-child").unwrap();
+    let events_before = store.list_events_ordered().unwrap().len();
+    let tasks_before = store
+        .list_tasks_for_project(&child_project())
+        .unwrap()
+        .len();
+
+    let error = commit_with_children(&mut store, &branch, &changeset, "receipt-1", &[child])
+        .expect_err("a child outside the parent project must be refused");
+    assert!(
+        matches!(error, StorageError::ConstraintViolation(_)),
+        "unexpected error {error:?}"
+    );
+    assert_rolled_back(&store, &branch, events_before, tasks_before);
+    assert!(store
+        .get_task(&TaskId::new("worker").unwrap())
+        .unwrap()
+        .is_none());
+}
+
+/// The publication boundary must prove the owning parent exists rather than
+/// trusting the lineage reference.
+#[test]
+fn publication_requires_an_existing_parent_task() {
+    let db = TestDb::new("missing-parent");
+    let mut store = db.open();
+    store
+        .create_project(&Project::new(child_project(), "child materialization".to_owned()).unwrap())
+        .unwrap();
+
+    let changeset = changeset(0, "publish without a parent task", &[evidence("no-parent")]);
+    let branch = PlanBranchId::new("branch-missing-parent").unwrap();
+    let events_before = store.list_events_ordered().unwrap().len();
+
+    let error = commit_with_children(&mut store, &branch, &changeset, "receipt-1", &[])
+        .expect_err("a missing parent task must refuse publication");
+    assert!(
+        matches!(error, StorageError::ConstraintViolation(_)),
+        "unexpected error {error:?}"
+    );
+    assert_eq!(store.get_plan_head(&branch).unwrap(), None);
+    assert_eq!(store.list_events_ordered().unwrap().len(), events_before);
 }
 
 #[test]
@@ -2096,6 +2323,6 @@ fn malformed_child_materialization_is_refused_before_any_write() {
             .get_task(&TaskId::new(CHILD_PARENT).unwrap())
             .unwrap()
             .unwrap();
-        assert_eq!((parent.state(), parent.parent()), (TaskState::Draft, None));
+        assert_eq!((parent.state(), parent.parent()), (TaskState::Ready, None));
     }
 }

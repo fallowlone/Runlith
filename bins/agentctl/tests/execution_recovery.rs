@@ -305,6 +305,15 @@ fn seed_ready(sandbox: &Sandbox, project: &str, task: &str) {
         "seed parent: {}",
         stderr(&created)
     );
+    // Publication admits a decomposition only while the parent is doing work
+    // (ADR-0027 TASK-0091 amendment), so the parent is declared eligible
+    // through the shipped CLI before planning — the real operator sequence.
+    let ready = sandbox.agentctl(&["task", "ready", &fixture_parent(task)]);
+    assert!(
+        ready.status.success(),
+        "seed parent ready: {}",
+        stderr(&ready)
+    );
     seed_accepted_plan(sandbox, task);
 }
 

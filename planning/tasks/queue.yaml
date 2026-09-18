@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0089
+completed_through: TASK-0091
 current_gate: G7
-gate_status: IN_PROGRESS  # TASK-0089 conformance verification reported CONFORMANCE_REMEDIATION_REQUIRED (F-01..F-03); TASK-0087 merged but not accepted until those are remediated
+gate_status: IN_PROGRESS  # independent review added R-01..R-07; R-01/R-02 remediated by TASK-0091, F-01 by TASK-0090; F-02, F-03/R-03 and R-04 still open, so TASK-0087 remains unaccepted
 
 items:
   - id: TASK-0012
@@ -1932,3 +1932,47 @@ items:
       - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
       - adapters/storage-sqlite/src/plan_store.rs
       - crates/plan/src/task_authority.rs
+
+  - id: TASK-0091
+    gate: G7
+    title: G7 Parent Admission Fence for Decomposition
+    objective: Remediate the independent review findings R-01 and R-02 by
+      proving, inside the publication transaction, that the owning parent Task
+      exists, is in a state that authorizes decomposition, and owns every
+      materialized child's project.
+    scope: >-
+      R-01 and R-02 only, plus the architecture amendment that defines their
+      semantics and the fixtures that planned against a DRAFT parent. No F-02,
+      F-03/R-03 or R-04 remediation, no IPC or schema change, no G8+ work.
+    exit_criteria_summary: >-
+      Publication refuses a missing parent, a parent outside the admission set
+      and a child claiming a foreign project, without partial state; the
+      admission set is accepted architecture; full workspace verification,
+      clippy and fmt pass.
+    outcome: >-
+      R-01 AND R-02 REMEDIATED. Publication now proves parent existence,
+      admission state (READY, CLAIMED, RUNNING, BLOCKED, RETRY_READY) and
+      child/parent project identity before any other check, unconditionally
+      rather than behind canonical_task_authority. ADR-0027 carries the
+      TASK-0091 amendment and ADR-0028 item 4 is clarified as an admission
+      invariant rather than snapshot equality, because DRAFT-only planning
+      metadata freezes derived authority while READY -> CLAIMED -> RUNNING
+      remain legitimate in-flight moves. A missing parent is a constraint
+      violation, not PlanningInputStale, which planned_orchestration maps to
+      the PlanningInputMoved success outcome and would have hidden it.
+      Written test-first: a twelve-state admission matrix, a foreign-project
+      child and a missing parent all failed at the expect_err boundary before
+      the fix. Consequence accepted deliberately: decomposition now requires
+      the parent to be declared READY first, so every fixture that planned
+      against a DRAFT parent was corrected to that order, including the
+      shipped-CLI and IPC paths. The independent review that found R-01/R-02
+      is recorded at docs/development/G7_INDEPENDENT_REVIEW_TASK_0087_CHAIN.md.
+      F-02, F-03/R-03 and R-04..R-07 remain open; TASK-0087 stays unaccepted.
+    depends_on:
+      - TASK-0089
+    blocked_by: []
+    references:
+      - docs/development/G7_INDEPENDENT_REVIEW_TASK_0087_CHAIN.md
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md
+      - adapters/storage-sqlite/src/plan_store.rs
