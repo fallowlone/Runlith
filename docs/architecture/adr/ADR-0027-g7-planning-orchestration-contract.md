@@ -269,8 +269,8 @@ is bounded and visible before it accrues further).
 | Term | Verdict | Rationale |
 |---|---|---|
 | `ActionProposal` | MERGE into `PlanChangeSet` | One proposal object survives. EXPLAIN/PROPOSE/EXECUTE adopted as orchestration modes (§8); the immutable proposal IS the `PlanChangeSet` + `proposal_hash`; no second durable proposal entity. |
-| `HandoffPacket` | MERGE into `HumanDecisionRequest` | HDR is the durable record; every packet field (goal/state/actions/evidence/blockers/uncertainty/question/options/recommendation) maps onto HDR fields; "HandoffPacket" survives only as the human-facing rendering name, never a second stored type. |
-| `ResumeToken` | MERGE into `HumanDecisionRequest` continuation | Opaque handle bound to the HDR identity, carrying RESUME/REPLAN/TAKEOVER/ABORT + resulting revision ref; non-bearer, single-use, expiry-bound — same semantics as TASK-0062 approvals. |
+| `HandoffPacket` | MERGE into `HumanDecisionRequest` | HDR is the durable record; "HandoffPacket" survives only as the human-facing rendering name, never a second stored type. **Narrowed by the TASK-0097 amendment:** the claim that *every* packet field maps onto HDR was never true — `actions`, `uncertainty` and `question` have no HDR field. G7 carries scope/risk/evidence/options/recommendation/precondition; full packet rendering moves to G9. |
+| `ResumeToken` | MERGE into `HumanDecisionRequest` continuation | Opaque handle bound to the HDR identity, non-bearer, single-use, expiry-bound — same semantics as TASK-0062 approvals. **Narrowed by the TASK-0097 amendment:** G7 carries RESUME/REPLAN/ABORT; TAKEOVER and the resulting-revision reference move to G9. |
 | `CapabilityLease` | DEFER (post-G7) | No G7 task needs temporary delegation: Policy effective authority + Secrets Broker scoped delivery already enforce least privilege. Revisit for G12 remote workers. |
 | `ContextItem` envelope | DEFER to G9 | Owner already assigned (roadmap G9). G7 planners exchange evidence refs, never envelope internals. |
 | `HumanDecisionRequest` | ADOPT (G7 durable record) | TASK-0079 implements the bounded lifecycle; blocks minimal scope only; risk-escalation gate (V9) consumes it. |
@@ -804,3 +804,62 @@ Enforcement of proof obligations remains absent in v1: no runner, policy or
 scheduler consumes `verification_method`. Until G8 models
 requirement-to-evidence, Runlith Task acceptance obligations are criterion
 identities proved by automated test — now by refusal rather than by assumption.
+
+## Amendment — TASK-0097 handoff scope reconciled with G9 (2026-09-18)
+
+> Accepted 2026-09-18. Owner decision of 2026-09-18. Origin: two independent
+> audits found that G7's accepted handoff contract is wider than anything the
+> system implements, and that a queue entry — not an amendment — is what
+> narrowed it.
+
+### The drift, and how it happened
+
+The roadmap's G7 exit criterion demanded `RESUME / REPLAN / TAKEOVER / ABORT`,
+and this ADR's vocabulary table asserted that *every* HandoffPacket field maps
+onto `HumanDecisionRequest`. Neither is implemented:
+
+- `HumanContinuation` and the IPC contract carry three variants;
+  `TAKEOVER` appears nowhere in shipped code.
+- `HumanDecisionRequest` carries scope, risk, options, recommendation, evidence
+  and precondition. `actions`, `uncertainty` and `question` have no field at
+  all, so the total-mapping claim fails independently of TAKEOVER.
+
+The narrowing was already made in practice: TASK-0079's objective in
+`planning/tasks/queue.yaml` scopes the work to RESUME/REPLAN/ABORT. That is the
+defect worth naming. Under the project's authority order a queue entry ranks
+below an accepted ADR, so a task cannot quietly shrink a gate criterion. The
+contract stayed wide, the implementation went narrow, and nothing recorded the
+gap for four tasks.
+
+### Decision
+
+G7 owns a **bounded** human handoff: a durable `HumanDecisionRequest` carrying
+scope, risk, evidence, options, recommendation and precondition, resolved by
+`RESUME`, `REPLAN` or `ABORT`.
+
+Deferred to G9, which already owns continuity: `TAKEOVER`, the
+resulting-revision reference, and rendering of the remaining packet fields
+(`goal`, `state`, `actions`, `blockers`, `uncertainty`, `question`).
+
+This is a narrowing of scope, not of authority. Nothing about proposal-only
+planning, fencing, approval binding or non-weakening changes. The deferred
+items are user-facing richness and one additional continuation verb, none of
+which is load-bearing for G7's guarantees.
+
+### Why defer rather than implement
+
+`TAKEOVER` means a human assumes execution authority mid-flight. That needs
+semantics G7 has not settled: what happens to the active planning run, the
+claimed Task, the workspace lease and the in-flight execution, and how the
+Task returns to machine execution afterwards. Implementing a fourth enum
+variant without those answers would produce a verb the system accepts and
+cannot honour — the same shape of defect as a `required_gate` nothing enforces
+or a proof method that disappears at materialization. Two audits found both of
+those in this gate already.
+
+### Consequence
+
+`roadmap.yaml` G7 and G9 are updated to match, so the gate criterion and the
+implementation now agree. G7 closure no longer requires TAKEOVER. Any future
+work that reintroduces the wider contract must amend this ADR rather than
+restate the wide form in a queue entry.
