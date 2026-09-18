@@ -1194,7 +1194,7 @@ fn require_parent_admission(
 /// Recognizes an exact idempotent retry of an already-materialized child:
 /// the proposed Task snapshot is byte-identical to the stored one and the
 /// journal holds exactly the complete lifecycle pair minted by the same
-/// materialization. Both `task.created` and `task.marked_ready` are checked
+/// materialization and nothing besides it. Both `task.created` and `task.marked_ready` are checked
 /// for their type, Task/project scope, states, provenance, causation, journal
 /// order (creation before readiness), and envelope. A foreign pre-existing Task, incomplete or contradictory
 /// evidence, a task whose content drifted (different snapshot), or a
@@ -1208,6 +1208,19 @@ fn is_idempotent_child_retry(
         return Ok(false);
     }
     let events = list_events_for_task(connection, child.task.id())?;
+
+    // A materialized child's journal is exactly its creation and its
+    // readiness — nothing else. Counting the whole journal rather than a
+    // type-filtered view is deliberate: no shipped path can append a third
+    // fact without also moving the Task row (claim, start, execution, attempt
+    // and workspace admission share one transaction, and `dependency_added`
+    // changes `depends_on`), so the snapshot comparison above would already
+    // have rejected it. A child that nonetheless carries an extra fact is
+    // therefore evidence of a journal this code did not write, and it is not
+    // the clean materialization the retry claims to repeat.
+    if events.len() != 2 {
+        return Ok(false);
+    }
     let created = events
         .iter()
         .filter(|event| event.fact.event_type == EventType::TaskCreated)
@@ -1216,10 +1229,6 @@ fn is_idempotent_child_retry(
         .iter()
         .filter(|event| event.fact.event_type == EventType::MarkedReady)
         .collect::<Vec<_>>();
-
-    // A materialized child has one authoritative creation and one readiness
-    // fact. Requiring exactly one of each prevents a valid-looking pair from
-    // hiding an extra contradictory lifecycle fact.
     if created.len() != 1 || ready.len() != 1 {
         return Ok(false);
     }

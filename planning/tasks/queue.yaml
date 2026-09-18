@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0091
+completed_through: TASK-0092
 current_gate: G7
-gate_status: IN_PROGRESS  # independent review added R-01..R-07; R-01/R-02 remediated by TASK-0091, F-01 by TASK-0090; F-02, F-03/R-03 and R-04 still open, so TASK-0087 remains unaccepted
+gate_status: IN_PROGRESS  # F-01/F-02 (TASK-0090/0092) and R-01/R-02 (TASK-0091) remediated; F-03/R-03 needs an owner decision and R-04..R-07 remain open, so TASK-0087 is still unaccepted
 
 items:
   - id: TASK-0012
@@ -2008,3 +2008,44 @@ items:
       - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
       - docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md
       - adapters/storage-sqlite/src/plan_store.rs
+
+  - id: TASK-0092
+    gate: G7
+    title: G7 Retry Foreign-Fact Conflict Remediation
+    objective: Remediate TASK-0089 finding F-02 so an exact child
+      materialization retry refuses a child whose journal carries anything
+      beyond its own creation and readiness facts.
+    scope: >-
+      F-02 only: the retry journal check in the SQLite plan store and one
+      regression row in the persisted-evidence matrix. No F-03/R-03 or R-04
+      work, no contract change, no IPC, migration, UI or provider change.
+    exit_criteria_summary: >-
+      A materialized child carrying a third journal fact is refused as a retry
+      without partial state, the malformed-evidence matrix covers it, and full
+      workspace verification, clippy and fmt pass.
+    outcome: >-
+      F-02 REMEDIATED. `is_idempotent_child_retry` now requires the child's
+      whole journal to be exactly two facts before matching the required
+      CREATED/READY pair, instead of counting within a type-filtered view that
+      discarded every other fact. Investigation first established that no
+      shipped path can append a third fact without also moving the Task row:
+      claim, start, execution, attempt and workspace admission share one
+      transaction (orchestration_service.rs), workspace readiness happens after
+      entry, and dependency_added changes `depends_on`, which the snapshot
+      comparison already catches. A whitelist of tolerated companion fact types
+      would therefore have been empty, so the strict check is the whole of the
+      decision rather than a simplification of it. Like F-01, the realistic
+      exposure is a journal this code did not write, not a reachable production
+      defect; severity is defense-in-depth. Written test-first: the new
+      foreign-lifecycle-fact matrix row, which journals BLOCKED while the Task
+      row still reads READY, failed at the expect_err boundary before the fix.
+      Matrix stands at twenty rows. F-03/R-03 and R-04..R-07 remain open, so
+      TASK-0087 stays merged and unaccepted.
+    depends_on:
+      - TASK-0091
+    blocked_by: []
+    references:
+      - docs/development/G7_TASK_0089_CHILD_MATERIALIZATION_CONFORMANCE.md
+      - docs/development/G7_INDEPENDENT_REVIEW_TASK_0087_CHAIN.md
+      - adapters/storage-sqlite/src/plan_store.rs
+      - adapters/storage-sqlite/tests/plan_persistence.rs
