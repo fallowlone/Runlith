@@ -392,6 +392,11 @@ async fn success_leaves_task_verifying_never_completed() {
         }
         other => panic!("expected run accepted, got {other:?}"),
     }
+    // Wait for what this test asserts. A concluded attempt is not the same
+    // event as the Task reaching VERIFYING: the lifecycle runs
+    // SUBMITTED -> AWAITING_REVIEW -> VERIFYING, so waiting on
+    // `outcome != OPEN` can observe AWAITING_REVIEW under load and fail on
+    // timing rather than on behaviour.
     let status = poll_status(
         &sandbox.endpoint,
         "E-1",
@@ -399,6 +404,7 @@ async fn success_leaves_task_verifying_never_completed() {
         |response| {
             let get = get_payload(response);
             get.attempts.iter().any(|attempt| attempt.outcome != "OPEN")
+                && get.task_state == "VERIFYING"
         },
     )
     .await;
