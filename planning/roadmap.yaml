@@ -81,8 +81,10 @@ gates:
     objective: Planner/Worker/Reviewer with typed messages, versioned plan
       revisions, PlannerPort, atomicity proposals, recursion guardrails.
     planned_capabilities:
-      - Bidirectional Human Handoff with HandoffPacket, ResumeToken and explicit
-        RESUME / REPLAN / TAKEOVER / ABORT continuation decisions.
+      - Bounded Human Handoff with a durable HumanDecisionRequest and explicit
+        RESUME / REPLAN / ABORT continuation decisions. TAKEOVER, the
+        resulting-revision reference and full HandoffPacket rendering are G9
+        (ADR-0027 TASK-0097 amendment).
       - >-
         Adaptive Collaboration Topology: multi-perspective work for ambiguity
         and independent review; one bounded worker for converged execution.
@@ -111,6 +113,9 @@ gates:
         permission scope, confidence and supersession metadata.
       - Conditional Entity Graph only when entity ambiguity or relationship-heavy
         retrieval measurably justifies graph-assisted resolution.
+      - TAKEOVER continuation, the resulting-revision reference and full
+        HandoffPacket rendering (goal/state/actions/blockers/uncertainty/
+        question), deferred from G7 by the ADR-0027 TASK-0097 amendment.
     scope_ref:
       - docs/architecture/adr/ADR-0010-context-derived-state.md
       - docs/architecture/adr/ADR-0011-provider-independent-context-continuity.md
