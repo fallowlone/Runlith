@@ -404,7 +404,12 @@ design is open (§16).
 Unresolved by accepted architecture; listed, not decided. Each item below
 is included only because no accepted source resolves it:
 
-- exact DRAFT → READY validation/preconditions;
+- exact DRAFT → READY validation/preconditions for the general
+  User / authorized client path. Partially resolved for one case only: a
+  planner-materialized child has defined preconditions (full V1-V9 validation,
+  canonical parent/project and new-ID checks, and parent admission) per the
+  ADR-0027 TASK-0088 and TASK-0091 amendments. The general checklist remains
+  undecided;
 - whether tasks with no required review bypass AWAITING_REVIEW
   (`SUBMITTED -> VERIFYING`);
 - review-rejection transition (`AWAITING_REVIEW -> RETRY_READY / RUNNING /
