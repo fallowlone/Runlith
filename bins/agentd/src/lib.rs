@@ -900,6 +900,35 @@ mod tests {
         session
     }
 
+    /// Readiness that keeps the session it proved readiness with.
+    ///
+    /// A control slot is released when the *daemon* observes the close, which
+    /// is asynchronous with the client-side drop. A test that probes readiness
+    /// and then saturates `MAX_CONTROL_CLIENTS` can therefore race its own
+    /// probe: under load the probe's slot is still held when the last holder
+    /// connects, and that holder is refused instead of the test's intended
+    /// extra client. Keeping the probe as the first holder makes occupancy
+    /// deterministic — the slot is never released, so it cannot be released
+    /// late.
+    async fn wait_ready_session(endpoint: &UnixEndpoint) -> ClientSession<UnixStream> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(stream) = transport_connect(endpoint).await {
+                let mut session = ClientSession::new(
+                    FramedTransport::new(stream),
+                    ClientConfig::new(ipc_control::CLIENT_KIND_AGENTCTL),
+                );
+                if session.perform_handshake().await.is_ok() {
+                    return session;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("daemon never became ready");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     async fn wait_ready(endpoint: &UnixEndpoint) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
@@ -1070,10 +1099,11 @@ mod tests {
     async fn ninth_concurrent_client_is_closed_not_fatal() {
         let sandbox = Sandbox::new("ninth");
         let handle = spawn_daemon(&sandbox.endpoint);
-        wait_ready(&sandbox.endpoint).await;
-        // wait_ready holds no session; open exactly MAX_CONTROL_CLIENTS idle ones.
-        let mut holders = Vec::new();
-        for _ in 0..MAX_CONTROL_CLIENTS {
+        // The readiness probe becomes the first holder, so exactly
+        // MAX_CONTROL_CLIENTS slots are occupied with no dependence on when the
+        // daemon releases a dropped probe's slot.
+        let mut holders = vec![wait_ready_session(&sandbox.endpoint).await];
+        for _ in 1..MAX_CONTROL_CLIENTS {
             holders.push(admin_session(&sandbox.endpoint).await);
         }
         // One more must be refused without harming the daemon.
