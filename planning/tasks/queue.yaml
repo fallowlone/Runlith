@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0089
+completed_through: TASK-0090
 current_gate: G7
-gate_status: IN_PROGRESS  # TASK-0089 conformance verification reported CONFORMANCE_REMEDIATION_REQUIRED (F-01..F-03); TASK-0087 merged but not accepted until those are remediated
+gate_status: IN_PROGRESS  # TASK-0089 F-01 remediated by TASK-0090; F-02 and F-03 still open, so TASK-0087 stays merged and unaccepted
 
 items:
   - id: TASK-0012
@@ -1932,3 +1932,36 @@ items:
       - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
       - adapters/storage-sqlite/src/plan_store.rs
       - crates/plan/src/task_authority.rs
+
+  - id: TASK-0090
+    gate: G7
+    title: G7 Child Retry Pair Ordering Remediation
+    objective: Remediate TASK-0089 finding F-01 so an exact child
+      materialization retry refuses a lifecycle pair whose readiness is
+      journaled before its creation.
+    scope: >-
+      F-01 only: the retry pair ordering check in the SQLite plan store and one
+      regression row in the persisted-evidence matrix. No F-02 or F-03
+      remediation, no contract change, no IPC, migration, UI, provider or G8+
+      work.
+    exit_criteria_summary: >-
+      A ready-before-created journal pair is refused without partial state, the
+      malformed-evidence matrix covers it, and planning-area tests, clippy and
+      fmt pass.
+    outcome: >-
+      F-01 REMEDIATED. `is_idempotent_child_retry` now requires
+      `created.seq < ready.seq`, so a complete and individually valid pair
+      journaled in the wrong order is a contradictory lifecycle rather than an
+      exact retry. Written test-first: the new `ready-before-created` matrix row
+      failed at the `expect_err` boundary before the fix (the retry was
+      accepted) and passes after it, with the matrix at nineteen rows. Green:
+      storage-sqlite, app-services and plan-domain suites, clippy -D warnings,
+      fmt. TASK-0089 F-02 and F-03 remain open, so TASK-0087 is still not
+      accepted.
+    depends_on:
+      - TASK-0089
+    blocked_by: []
+    references:
+      - docs/development/G7_TASK_0089_CHILD_MATERIALIZATION_CONFORMANCE.md
+      - adapters/storage-sqlite/src/plan_store.rs
+      - adapters/storage-sqlite/tests/plan_persistence.rs
