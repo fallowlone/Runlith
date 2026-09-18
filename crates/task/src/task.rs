@@ -91,7 +91,14 @@ pub struct Task {
     acceptance: Vec<String>,
     allowed_paths: Vec<String>,
     forbidden_paths: Vec<String>,
+    /// Reserved for the G8 typed requirement-to-evidence model
+    /// (ADR-0027 TASK-0093 amendment). Persisted and round-tripped, but the
+    /// domain exposes no setter and protocol v6 authoring does not carry it,
+    /// so on the supported control plane it is always empty. Do not start
+    /// writing it without a contract that also names its reader.
     verification: Vec<String>,
+    /// Reserved for the G8 typed requirement-to-evidence model
+    /// (ADR-0027 TASK-0093 amendment). Same standing as `verification`.
     required_review: Vec<String>,
     risk: Option<String>,
     artifacts: Vec<String>,

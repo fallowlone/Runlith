@@ -525,8 +525,13 @@ scope, acceptance proof obligations, baseline risk and required gates.
 - READY means orchestration eligibility, not RUNNABLE and not execution
   permission. Execution authority stays with the accepted Runner/G5/G6
   boundary.
-- Obligations that cannot be represented on the child block materialization.
-  Defaulting to a weaker obligation is forbidden (INV-046 non-weakening).
+- An obligation the v1 Task contract models, whose value the child cannot
+  carry, blocks materialization; silently substituting a weaker value is
+  forbidden (INV-046 non-weakening). Scope is the worked example: a parent
+  carrying forbidden-path constraints the G7 `ScopeBound` cannot express is
+  refused outright rather than materialized without them. Obligation *kinds*
+  the v1 contract does not model at all are governed by the TASK-0093
+  amendment, not by this rule.
 - Creating or readying a child never completes or satisfies the parent.
 
 ### Publication and fencing
@@ -650,3 +655,74 @@ The three refusals share one error type. If a caller ever needs to distinguish
 them — for example to surface "parent not eligible" differently from "parent
 missing" — that requires a typed refusal and an IPC mapping, and is not
 established here.
+
+## Amendment — TASK-0093 v1 obligation boundary (2026-09-18)
+
+> Accepted 2026-09-18. Owner decision of 2026-09-18: state the boundary
+> honestly in G7 and let G8 model obligations properly, rather than inventing a
+> typed obligation contract here. Origin: TASK-0089 finding F-03 and the
+> independent review's R-03, which disagreed with each other about what the
+> durable model actually carries. Neither was right, and this amendment records
+> what is.
+
+### What the v1 contract actually models
+
+A canonical Task carries acceptance obligations as **criterion identities**
+and nothing else. There is no per-criterion proof method in the Task contract,
+and `TaskPlanningAuthority::derive` therefore assigns every derived criterion
+`VerificationMethod::AutomatedTest`. That default is product-owned and lives in
+exactly one place.
+
+`Task::verification` and `Task::required_review` exist as fields and are
+persisted and round-tripped, but they are **not authorable and not read**:
+
+- the domain exposes no setter for either (unlike `add_acceptance`);
+- protocol v6 `CreatePlanningTaskRequest` carries `allowed_paths`,
+  `acceptance_criteria` and `baseline_risk`, and nothing else, and the contract
+  states there is no later edit operation;
+- no planning, scheduling, policy or runner code reads them.
+
+Through the supported control plane they are therefore always empty. They are
+reserved for the typed model, not a live obligation channel.
+
+### Consequences, stated plainly rather than implied
+
+1. **`VerificationMethod` beyond `AutomatedTest` is unreachable in v1.** The
+   enum lists `IndependentReview`, `SecurityCheck` and `HumanApproval`, and no
+   supported path can produce them. `VerificationMethod` deliberately derives
+   no `Ord`: the variants are a closed vocabulary, not a strength ranking, and
+   no code may treat their declaration order as one.
+2. **V9 method escalation cannot fire on a proof-method difference in v1.**
+   `check_criteria_preservation` raises `method_changed` whenever a child's
+   declared method differs from the parent's derived method, and routes that to
+   V9. The mechanism is correct and reachable; it has no differing input in v1
+   because the parent side is always the default.
+3. **INV-046 is not weakened by this, and is not fully enforced by it either.**
+   INV-046 forbids weakening parent acceptance criteria, security policy, scope
+   and human-approval requirements. Criteria coverage, scope containment and
+   baseline risk are enforced (V3, scope containment, V5). Human-approval
+   requirements are not enforced as *proof obligations*, because the v1
+   contract cannot express one. This is a stated limit of G7, not a claim of
+   coverage.
+
+### Why this is not solved in G7
+
+The roadmap assigns G8 the Verification gate, whose planned capabilities name
+the Observed Effect / Claim Verification contract separating `AgentClaim`,
+`EvidenceRequirement`, `ObservedEffect` and `ClaimVerification`. A typed
+requirement-to-evidence relationship is that contract's subject. Adding a
+per-criterion proof method to the Task contract in G7 would mean designing a
+narrower version of `EvidenceRequirement` before G8 has decided its shape, then
+migrating twice — a new IPC version and a schema migration for a model that is
+already scheduled to be replaced.
+
+Until G8 lands, a Runlith Task's acceptance obligations are criterion
+identities proved by automated test. That is the honest description of the
+system, and it belongs in the contract rather than in a reviewer's finding.
+
+### Not a licence to widen the gap
+
+This amendment describes v1; it does not authorize new code to depend on the
+default. Specifically: no path may write `Task::verification` or
+`Task::required_review` without a contract that also says who reads them, and
+no path may infer obligation strength from `VerificationMethod` ordering.
