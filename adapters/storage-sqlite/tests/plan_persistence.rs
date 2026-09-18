@@ -1773,7 +1773,7 @@ fn child_materialization_commits_ready_children_and_reuses_them_on_exact_retry()
 fn malformed_persisted_child_retry_evidence_fails_closed_without_partial_state() {
     type Mutation = fn(&rusqlite::Connection);
 
-    let cases: [(&str, Mutation); 19] = [
+    let cases: [(&str, Mutation); 20] = [
         ("missing-created", |connection| {
             connection
                 .execute(
@@ -1967,6 +1967,27 @@ fn malformed_persisted_child_retry_evidence_fails_closed_without_partial_state()
                             provenance
                      FROM event_journal
                      WHERE task_id = 'worker' AND event_type = 'task.created'",
+                    [],
+                )
+                .unwrap();
+        }),
+        // The required pair is intact, but the child carries a third fact.
+        // No shipped path can produce one without also moving the Task row —
+        // claim/start/execution/workspace share one transaction and
+        // dependency_added changes `depends_on` — so a child that has one is
+        // not the clean materialization this retry claims to repeat. Here the
+        // journal says BLOCKED while the Task row still says READY.
+        ("foreign-lifecycle-fact", |connection| {
+            connection
+                .execute(
+                    "INSERT INTO event_journal
+                     (event_type, event_version, task_id, project_id, from_state, to_state,
+                      reason, correlation_id, causation_id, occurred_at, provenance)
+                     SELECT 'task.blocked', event_version, task_id, project_id, 'READY',
+                            'BLOCKED', 'impediment', 'plan-child:foreign', causation_id,
+                            occurred_at, provenance
+                     FROM event_journal
+                     WHERE task_id = 'worker' AND event_type = 'task.marked_ready'",
                     [],
                 )
                 .unwrap();
