@@ -683,7 +683,10 @@ fn proposal_prompt(input: ProposalPromptInput<'_>) -> String {
             "Required response keys: base_plan_revision, reason, node_additions, node_updates, node_removals, ",
             "edge_additions, edge_removals, expected_outcome, risk_delta, budget_delta, scope_delta, coverage_map. ",
             "node_additions entries: {{id,scope:[workspace:path],criteria:[{{id,method}}],risk_class,required_gate}}. ",
-            "method is automated-test|independent-review|security-check|human-approval; ",
+            // G7 v1 materializes automated-test obligations only; a child declaring
+            // another method is refused at materialization (ADR-0027 TASK-0096),
+            // so the prompt must not offer what the system will reject.
+            "method is automated-test; ",
             "risk_class is low|medium|high|critical; required_gate is string|null. ",
             "node_updates entries: {{target,scope:null|[...],risk_class:null|string,required_gate:null|{{set:string}}|{{clear:true}}}}. ",
             "edges are {{from,to}} and mean from MUST complete before to may run. ",

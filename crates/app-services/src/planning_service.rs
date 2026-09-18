@@ -32,9 +32,10 @@ use plan_domain::{
     PlanningBudget, PlanningCostReceipt, PlanningCostReceiptRef, PlanningInputSnapshot,
     PlanningInputSnapshotId, ReplanRequest, RevisionProposedBy, RiskClass, RiskEscalationGrant,
     ScopeBound, TaskPlanningAuthority, ValidatedBy, ValidationContext, ValidationOutcome,
-    ValidationRefusal, MAX_DECOMPOSITION_DEPTH, MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
-    MAX_PLANNER_CUMULATIVE_INPUT_TOKENS, MAX_PLANNER_INPUT_TOKENS, MAX_PLANNER_OUTPUT_TOKENS,
-    MAX_PLANNER_WALL_CLOCK_SECS, MAX_REVISIONS_PER_CYCLE_PER_BRANCH,
+    ValidationRefusal, VerificationMethod, MAX_DECOMPOSITION_DEPTH,
+    MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH, MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
+    MAX_PLANNER_INPUT_TOKENS, MAX_PLANNER_OUTPUT_TOKENS, MAX_PLANNER_WALL_CLOCK_SECS,
+    MAX_REVISIONS_PER_CYCLE_PER_BRANCH,
 };
 use storage_sqlite::{
     ApprovedPlanProposal, ChildTaskMaterialization, EventType, NewHumanDecisionRequest,
@@ -1678,6 +1679,27 @@ impl<C: Clock> PlanningService<C> {
         for addition in &proposal.node_additions {
             if !pending_children.contains(addition.id.as_str()) {
                 continue;
+            }
+            // The plan model carries a typed proof obligation per criterion;
+            // the canonical Task contract carries criterion identities only.
+            // Materialization is therefore where a non-automated-test
+            // obligation would be silently downgraded — including one a human
+            // has already approved through V9. Refuse instead: the loss is
+            // not representable, so it must not be performed (ADR-0027
+            // TASK-0096 amendment).
+            if let Some(criterion) = addition
+                .criteria
+                .iter()
+                .find(|criterion| criterion.method != VerificationMethod::AutomatedTest)
+            {
+                return Err(PlanningServiceError::InvalidContext(format!(
+                    "child {} declares criterion {} with proof method {}, which the canonical \
+                     Task contract cannot carry; G7 v1 materializes automated-test obligations \
+                     only",
+                    addition.id.as_str(),
+                    criterion.id.as_str(),
+                    criterion.method.as_str()
+                )));
             }
             let task_id = TaskId::new(addition.id.as_str().to_owned())
                 .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
