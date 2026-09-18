@@ -75,6 +75,12 @@ pub struct PlanningPolicyContext {
     /// scope/acceptance/risk/candidate authority inside the publishing
     /// transaction and refuses stale snapshots. Hand-built trusted fixture
     /// contexts are not Task-derived and leave this false.
+    ///
+    /// Scope of the flag since TASK-0091: it governs the **staleness** fence
+    /// only. Parent admission — the parent Task exists, its state authorizes
+    /// decomposition, and every child carries the parent's project — is an
+    /// invariant of publication enforced unconditionally, so clearing this
+    /// cannot reach it.
     pub canonical_task_authority: bool,
     pub lineage_fingerprints: Vec<String>,
     pub risk_grant: Option<RiskEscalationGrant>,

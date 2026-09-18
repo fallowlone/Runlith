@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0094
+completed_through: TASK-0095
 current_gate: G7
-gate_status: IN_PROGRESS  # F-01..F-03 and R-01..R-04 closed (TASK-0090..0094); R-05..R-07 are documentation/shape items and TASK-0087 needs a final conformance pass
+gate_status: IN_PROGRESS  # every F-0x and R-0x finding from TASK-0089 and the independent review is now closed (TASK-0090..0095); TASK-0087 needs a final independent conformance pass before G7 closure is attempted
 
 items:
   - id: TASK-0012
@@ -2138,3 +2138,41 @@ items:
       - docs/development/G7_INDEPENDENT_REVIEW_TASK_0087_CHAIN.md
       - crates/plan/src/validation.rs
       - crates/plan/tests/validation_rules.rs
+
+  - id: TASK-0095
+    gate: G7
+    title: G7 Independent Review Residuals
+    objective: Close the remaining independent-review observations R-05, R-06
+      and R-07 at the weight they actually carry, without inventing mechanisms
+      for items the reviewer classified as documentation or shape.
+    scope: >-
+      Documentation only: the task-engine open-item entry for DRAFT to READY
+      preconditions, and the scope of the canonical_task_authority flag. No
+      API change, no behaviour change, no new mechanism.
+    exit_criteria_summary: >-
+      The lifecycle document no longer overstates what is open, the authority
+      flag documents what it can and cannot reach, queue bookkeeping is
+      self-consistent, and full workspace verification, clippy and fmt pass.
+    outcome: >-
+      R-05, R-06 AND R-07 CLOSED. R-05: task-engine section 16 listed exact
+      DRAFT to READY preconditions as wholly undecided, which stopped being
+      true for planner-materialized children once TASK-0088 and TASK-0091 were
+      accepted; the entry now records the resolved case and keeps the general
+      User / authorized client checklist open, which is still undecided. R-06:
+      the canonical_task_authority flag was re-examined rather than reshaped.
+      The reviewer classified it as a trust-boundary shape, not a defect, and
+      since TASK-0091 it governs only the staleness fence, because parent
+      admission is unconditional; the flag now documents that limit instead of
+      the API being changed for a LOW observation. R-07 closed by normal
+      progression: the queue header and the newest entry agree, and historical
+      outcome texts are left as the record of their own moment rather than
+      rewritten. TASK-0087 remains merged and unaccepted, pending a final
+      conformance pass that should be independent, since this chain has already
+      shown what self-review misses.
+    depends_on:
+      - TASK-0094
+    blocked_by: []
+    references:
+      - docs/development/G7_INDEPENDENT_REVIEW_TASK_0087_CHAIN.md
+      - docs/architecture/task-engine.md
+      - crates/app-services/src/planning_service.rs
