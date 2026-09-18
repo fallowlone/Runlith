@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0097
+completed_through: TASK-0098
 current_gate: G7
-gate_status: IN_PROGRESS  # F-NEW-01 remediated (TASK-0096) and handoff scope reconciled with G9 (TASK-0097); a flaky daemon test remains, and TASK-0087 needs its conformance pass re-run against the remediated tree
+gate_status: IN_PROGRESS  # every audit finding through F-A2-01 is remediated (TASK-0090..0098); TASK-0087 acceptance now needs an independent conformance pass re-run against the remediated tree
 
 items:
   - id: TASK-0012
@@ -2258,3 +2258,47 @@ items:
       - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
       - planning/roadmap.yaml
       - crates/plan/src/human_decision.rs
+
+  - id: TASK-0098
+    gate: G7
+    title: G7 Readiness Slot Determinism
+    objective: Remediate audit finding F-A2-01 so the agentd control-admission
+      test does not race its own readiness probe, since a non-deterministic
+      workspace run undermines the exit criterion of every task in this chain.
+    scope: >-
+      The agentd lib-test readiness helper and the one test that saturates
+      MAX_CONTROL_CLIENTS. No production code, no transport or admission
+      change.
+    exit_criteria_summary: >-
+      Readiness no longer releases a control slot that the same test then
+      competes for, and full workspace verification, clippy and fmt pass.
+    outcome: >-
+      F-A2-01 REMEDIATED BY CONSTRUCTION. wait_ready performed a full handshake
+      and dropped the session, but a control slot is released when the daemon
+      observes the close, asynchronously with the client-side drop. Under
+      full-workspace load that release lagged, so the eighth holder was the
+      daemon's ninth live connection and was refused — a timing accident in the
+      harness, not a product defect: production makes no such ordering
+      assumption. The probe now becomes the first holder through
+      wait_ready_session, so the slot is never released and therefore cannot be
+      released late. Stated honestly: isolation runs prove nothing here,
+      because isolation was already green before the fix at forty runs in the
+      audit. The argument is structural, not statistical, and one green
+      workspace run does not prove a rare flake is gone.
+
+      A second, older non-determinism surfaced during this task's own
+      verification and is fixed with it: execution_composition's
+      success_leaves_task_verifying_never_completed waited for a concluded
+      attempt and then asserted the Task had reached VERIFYING. Those are
+      different events — the lifecycle runs SUBMITTED, AWAITING_REVIEW,
+      VERIFYING — so under load the poll returned while the Task was still
+      AWAITING_REVIEW. TASK-0084 recorded this as a pre-existing flake that
+      passed in isolation and left it; the wait condition now matches the
+      assertion. Both fixes align a wait with what is being proved rather than
+      retrying until the timing is lucky.
+    depends_on:
+      - TASK-0097
+    blocked_by: []
+    references:
+      - bins/agentd/src/lib.rs
+      - docs/development/G7_INDEPENDENT_REVIEW_TASK_0087_CHAIN.md
