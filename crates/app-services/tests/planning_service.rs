@@ -157,6 +157,8 @@ enum ProposalCase {
     ParentAsChild,
     /// The new child `node-{base+1}` depends on the previous head's child.
     BehindPrevious,
+    /// The child declares a proof method the canonical Task cannot carry.
+    NonAutomatedCriterion,
 }
 
 struct TestPlanner {
@@ -259,6 +261,13 @@ impl TestPlanner {
                         to: child_id,
                     },
                 ];
+            }
+            ProposalCase::NonAutomatedCriterion => {
+                let criterion = proposal.node_additions[0].criteria[0].id.clone();
+                proposal.node_additions[0].criteria = vec![CriterionDecl::new(
+                    criterion,
+                    VerificationMethod::HumanApproval,
+                )];
             }
             ProposalCase::MissingCriteria => {
                 proposal.node_additions[0].criteria.clear();
@@ -2459,6 +2468,38 @@ fn accepted_decomposition_materializes_planner_child_ready_under_the_parent() {
                 hash,
             ),
         ]
+    );
+}
+
+/// ADR-0027 TASK-0096: the plan model carries a typed proof obligation, the
+/// canonical Task contract does not. Materialization is where that difference
+/// becomes data loss, so it refuses rather than silently downgrading the
+/// obligation to automated-test. With no parent criteria there is no V3
+/// coverage comparison and no V9 grant in the way, which is exactly the path
+/// that made the loss silent.
+#[test]
+fn materialization_refuses_a_child_whose_proof_method_the_task_cannot_carry() {
+    let db = TestDb::new("child-nonautomated-method");
+    let error = db
+        .service()
+        .propose_decomposition(
+            &TestPlanner::new(ProposalCase::NonAutomatedCriterion),
+            &branch(),
+            request("child-method"),
+            &policy(false),
+        )
+        .expect_err("a proof method the Task cannot carry must refuse materialization");
+    let detail = format!("{error:?}");
+    assert!(
+        detail.contains("human-approval") || detail.contains("proof method"),
+        "unexpected error {detail}"
+    );
+    assert!(
+        db.store()
+            .get_task(&TaskId::new("node-1").unwrap())
+            .unwrap()
+            .is_none(),
+        "no child may survive a refused materialization"
     );
 }
 

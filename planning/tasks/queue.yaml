@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0095
+completed_through: TASK-0096
 current_gate: G7
-gate_status: IN_PROGRESS  # every F-0x and R-0x finding from TASK-0089 and the independent review is now closed (TASK-0090..0095); TASK-0087 needs a final independent conformance pass before G7 closure is attempted
+gate_status: IN_PROGRESS  # two independent audits blocked TASK-0087 on F-NEW-01, remediated by TASK-0096; handoff contract drift and a flaky daemon test remain before G7 closure is attempted
 
 items:
   - id: TASK-0012
@@ -2176,3 +2176,44 @@ items:
       - docs/development/G7_INDEPENDENT_REVIEW_TASK_0087_CHAIN.md
       - docs/architecture/task-engine.md
       - crates/app-services/src/planning_service.rs
+
+  - id: TASK-0096
+    gate: G7
+    title: G7 Materialization Proof-Method Guard
+    objective: Remediate F-NEW-01, raised by two independent audits: a proof
+      obligation the canonical Task cannot carry must refuse materialization
+      instead of being silently downgraded to automated-test.
+    scope: >-
+      The materialization guard, the correction of the false TASK-0093 clauses
+      and the warrant comment that cited them, the planner prompt narrowing,
+      and one regression test. No Task contract field, no migration, no IPC
+      change, no change to V3/V9 or the durable plan model.
+    exit_criteria_summary: >-
+      A child declaring a non-automated-test criterion refuses materialization
+      with no Task minted; ADR-0027 no longer asserts that such methods are
+      unreachable; full workspace verification, clippy and fmt pass.
+    outcome: >-
+      F-NEW-01 REMEDIATED. Both audits were right and the TASK-0093 premise was
+      false by two independent routes: the shipped planner prompt and parser
+      handled all four methods, and node_removals feed real stored methods into
+      the parent side, so V3/V9 did fire on method differences. The damage was
+      not documentary: a human could grant a V9 approval for a strengthened
+      obligation, after which materialization dropped the method, the child
+      Task kept criterion identities only, and decomposing that child
+      re-derived automated-test so a grandchild needed no further grant.
+      materialize_child_tasks now refuses such a child before any Task is
+      minted, which applies the accepted non-weakening clause literally rather
+      than assuming the case away. The plan model, VerificationMethod, V3, V9
+      and durable plan-side storage keep the full vocabulary as the foundation
+      for G8 EvidenceRequirement; only the lossy boundary refuses. The prompt is
+      narrowed to automated-test as guidance, with the guard standing on its
+      own. Written test-first: the new case failed at the expect_err boundary
+      because the proposal was accepted and the child materialized.
+    depends_on:
+      - TASK-0095
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - crates/app-services/src/planning_service.rs
+      - crates/app-services/tests/planning_service.rs
+      - adapters/provider-claude/src/planner.rs
