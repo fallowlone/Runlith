@@ -237,6 +237,15 @@ The authoritative write boundary must fence concurrent changes to:
 Any mismatch refuses publication. TASK-0086 does not weaken TASK-0084's
 Task-derived authority checks.
 
+> **Clarified by the ADR-0027 TASK-0091 amendment (2026-09-18).** Item 4 is
+> implemented as an unconditional admission invariant, not as snapshot
+> equality: publication proves the parent Task exists, is in the admission set
+> (`READY`, `CLAIMED`, `RUNNING`, `BLOCKED`, `RETRY_READY`) and owns every
+> materialized child's project. Equality would be wrong here, because
+> DRAFT-only planning metadata means derived authority does not move with
+> lifecycle state, while legitimate `READY -> CLAIMED -> RUNNING` progress
+> would otherwise invalidate a planner call in flight.
+
 ### Planner input contract
 
 New child materialization does not require adding existing candidate Task IDs

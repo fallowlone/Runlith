@@ -85,10 +85,17 @@ impl Sandbox {
         let parent_id = task_domain::TaskId::new(fixture_parent(task)).unwrap();
         tasks
             .create_task(
-                &task_domain::Task::draft(parent_id, project_id, format!("objective {task}"))
-                    .unwrap(),
+                &task_domain::Task::draft(
+                    parent_id.clone(),
+                    project_id,
+                    format!("objective {task}"),
+                )
+                .unwrap(),
             )
             .unwrap();
+        // Publication admits a decomposition only while the parent is doing
+        // work (ADR-0027 TASK-0091 amendment).
+        tasks.mark_ready(&parent_id).unwrap();
         seed_accepted_plan(&self.db, task);
     }
 }
