@@ -8,7 +8,7 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0103
+completed_through: TASK-0104
 current_gate: G7
 gate_status: IN_PROGRESS  # TASK-0087 ACCEPTED by TASK-0099 after three independent audits by three different systems; G7 closure is a separate owner decision and still needs its OS-level verification envelope settled
 
@@ -2531,3 +2531,57 @@ items:
     references:
       - external-research/studies/2026-09-19-provider-authentication-boundary.md
       - adapters/runner-macos-seatbelt/src/lib.rs
+
+  - id: TASK-0104
+    gate: G7
+    title: Provider Authentication Precondition
+    objective: Resolve the providers.md open item on provider auth-state
+      detection semantics, and make an unauthenticated provider a named
+      refusal instead of an opaque exit.
+    scope: >-
+      The providers.md contract amendment, a bounded authentication probe in
+      the Claude adapter, and its enforcement in the shared provider launch
+      preparation. No sandbox profile change: the confined-child credential
+      problem stays TASK-0102 and unsolved.
+    exit_criteria_summary: >-
+      The contract defines authentication state distinctly from availability,
+      the probe implements that vocabulary under the detection discipline, and
+      a provider recognized as real is refused before launch when not signed
+      in.
+    outcome: >-
+      DONE, contract first. Investigation found an accepted decision pointing
+      the other way — detect() and providers.md §2 state that auth is
+      deliberately not probed and AUTH_REQUIRED deliberately absent from §9 —
+      while §16 simultaneously listed provider auth-state detection semantics
+      as an open item. The task therefore resolves a named open question
+      rather than overturning a settled one. The original reasoning is kept:
+      installation and version compatibility are installation facts, being
+      signed in is not, so §9 remains closed and untouched. Only its second
+      premise died, that auth cannot be observed without burning quota or
+      risking a prompt; `claude auth status` answers from local state at no
+      cost. New §9a carries its own closed vocabulary, with UNKNOWN refusing
+      like UNAUTHENTICATED because an unestablished state is not consent, and
+      the rule that the runtime never performs a login itself. The probe reads
+      only the loggedIn boolean and a test asserts account identifiers from
+      real output never reach the operator-facing detail or refusal text.
+      Enforcement is gated on detect() reporting AVAILABLE, so only a provider
+      recognized as the real compatible CLI is asked; that gate was found the
+      hard way, by an unconditional placement that refused deterministic
+      fixtures and broke 29 tests across 7 suites, which was reverted and
+      recorded as open before the owner chose this resolution. Two honesty
+      items are written into the contract rather than left implicit: §9a
+      states the precondition observes the operator's host state and cannot
+      promise a confined child can authenticate, and §15 now names USER
+      alongside HOME as the authentication anchor, reconciling a staleness
+      this orchestrator introduced in TASK-0101 by changing code without the
+      contract. Verification: two consecutive full workspace runs at cargo
+      exit 0, the second on a cleaned process table; clippy and fmt clean; the
+      G6 real-provider smoke run explicitly to prove the gate admits rather
+      than blocks a real authenticated CLI, its unchanged failure remaining
+      the TASK-0102 isolation issue.
+    depends_on:
+      - TASK-0103
+    blocked_by: []
+    references:
+      - docs/architecture/providers.md
+      - adapters/provider-claude/src/authentication.rs
