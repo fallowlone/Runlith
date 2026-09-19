@@ -273,6 +273,29 @@ Binding rules:
   credential (§7). Observing *that* a provider is signed in is not observing
   *what* it is signed in with.
 
+What the precondition does NOT establish: it observes the **operator's**
+authentication state on the host, not the confined child's ability to reach
+the provider's credential mechanism from inside an isolation profile. Those
+are different questions. A launch may satisfy §9a and still fail when the
+profile denies the mechanism the provider authenticates through — on macOS,
+Keychain access via the platform credential daemon (TASK-0102, measured and
+not adopted). That remains an open isolation issue and §9a must not be read
+as closing it. The precondition's value is narrower and real: an operator who
+is simply not signed in now gets a named refusal instead of an opaque
+provider exit.
+
+Enforcement point: **open, and deliberately not decided here.** The
+vocabulary, the refusal semantics and the probe discipline above are accepted
+and implemented (`provider_claude::probe_authentication`). Where the refusal
+fires is not. A first attempt placed it in the shared pre-launch path in
+`agentd`, which every provider launch traverses, and that is wrong twice: it
+makes a generic chokepoint call a Claude-specific probe, and it refuses the
+deterministic fixture executables the adapter suites launch, which implement
+no auth protocol and are not meant to. Resolving it means deciding how a
+deterministic fixture declares authentication, or how a composition declares
+that its launch targets a real provider. Until that is decided, the contract
+does not claim the precondition is enforced.
+
 Rationale and external corroboration: the surveyed orchestrators and the
 Agent Client Protocol all separate an interactive login phase from the
 working launch, and all represent an unauthenticated provider as a typed
@@ -455,6 +478,7 @@ provider session identity format
 provider availability canonical owner/persistence/freshness
 model identity representation
 provider/model configuration representation
+authentication precondition enforcement point (§9a)
 provider cancellation race semantics
 streaming output contract
 provider tool-call normalization

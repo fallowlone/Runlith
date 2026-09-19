@@ -29,6 +29,7 @@
 //! attempt.
 
 mod argv;
+mod authentication;
 mod capabilities;
 mod config;
 mod detect;
@@ -44,6 +45,7 @@ mod tracker;
 mod usage;
 
 pub use argv::build_argv;
+pub use authentication::{probe_authentication, Authentication, AuthenticationState};
 pub use capabilities::{probe_capabilities, ClaudeCapabilities};
 pub use config::ClaudeConfig;
 pub use detect::{detect, find_on_path, CliVersion, Detection, ProviderAvailability};
