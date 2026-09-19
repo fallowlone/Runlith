@@ -17,7 +17,7 @@ use fake_evaluator::{EvaluatorMode, FakeEvaluator};
 use fake_planner::{FakePlanner, FakePlannerScenario};
 use plan_domain::{
     AffectedParentCriterion, CriterionId, DecompositionRequest, EvidenceRef, PlanBranchId,
-    PlanningBudget, RiskClass, ScopeBound, VerificationMethod,
+    PlannerCallSpend, PlannerFault, PlanningBudget, RiskClass, ScopeBound, VerificationMethod,
     MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH, MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
 };
 use policy::CapabilityKind;
@@ -575,6 +575,75 @@ fn production_claude_planner_composition_crosses_g6_runner_before_provider_call(
             "secured planner call must emit {event:?} through the production G6 boundary"
         );
     }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn authenticated_claude_planner_refuses_with_not_started_spend_before_provider_work() {
+    let db = TestDb::new();
+    let marker = db.dir.join("planner-provider-work-started");
+    let provider = fixture(
+        &db.dir,
+        "planner-authenticated.sh",
+        &format!(
+            "if [ \"$1\" = \"--version\" ]; then printf '2.1.277 (Claude Code)\\n'; exit 0; fi\n\
+             if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then printf '{{\"loggedIn\":true}}\\n'; exit 0; fi\n\
+             touch {:?}\n\
+             exit 99\n",
+            marker
+        ),
+    );
+    let composition = ExecutionComposition::new(db.path.clone(), Some(provider));
+    {
+        let mut orchestration =
+            OrchestrationService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("orchestration");
+        seed_planning_parent(
+            &mut orchestration,
+            "P-AUTH-CONFINEMENT",
+            "TASK-0114",
+            &["auth-child"],
+        );
+    }
+    let mut planning = composition.planning_service().expect("planning service");
+    let planner = composition
+        .secured_claude_planner("TASK-0114")
+        .expect("secured planner composition");
+    let branch = PlanBranchId::new("task-0114-auth-confinement").expect("branch");
+
+    let error = planning
+        .propose_decomposition(
+            &planner,
+            &branch,
+            request("fixture:auth-confinement"),
+            &policy("TASK-0114", "policy:auth-confinement"),
+        )
+        .expect_err("confinement-incompatible auth must refuse before planner work");
+    match error {
+        app_services::PlanningServiceError::Planner(PlannerFault::ProviderFailure {
+            typed_cause,
+            spend,
+        }) => {
+            assert!(
+                typed_cause
+                    .contains("provider_authentication_unsupported_in_mandatory_confinement"),
+                "unexpected typed cause: {typed_cause}"
+            );
+            assert_eq!(spend, PlannerCallSpend::NotStarted);
+        }
+        other => panic!("unexpected planner refusal: {other:?}"),
+    }
+    assert!(!marker.exists(), "planner provider work must not start");
+    let audit = planning
+        .store()
+        .list_security_audit_ordered()
+        .expect("security audit");
+    assert!(
+        !audit.iter().any(|record| {
+            record.fact.event == storage_sqlite::SecurityAuditEvent::ProviderInvocation
+                && record.fact.task_id.as_deref() == Some("TASK-0114")
+        }),
+        "pre-launch planner refusal must not record provider invocation"
+    );
 }
 
 #[cfg(target_os = "macos")]
