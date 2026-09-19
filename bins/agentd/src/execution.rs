@@ -118,6 +118,14 @@ enum ConfinementAuthVerdict {
 /// time by `production_confinement_and_provider_auth_verdict_stay_paired`,
 /// which checks the verdict against the backend's *reported axes* rather than
 /// against the shape of the `cfg`.
+///
+/// What that guard does not prove: it compares presence of confinement against
+/// presence of a verdict, never the verdict's continued truth. A verdict that
+/// goes stale — a Seatbelt profile later permitting the authentication path
+/// while the reported axes stay unchanged — keeps it green. The verdict is a
+/// hand-maintained TASK-0112 measurement, and nothing here re-measures it.
+/// A backend selected at runtime rather than by `cfg` would also be measured
+/// on the test host, which need not match production.
 #[cfg(target_os = "macos")]
 mod production_platform {
     use super::{ConfinementAuthVerdict, IsolationBackend, PathBuf};
