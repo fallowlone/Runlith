@@ -638,6 +638,7 @@ impl<C: Clock> PlanningService<C> {
             .map(|criterion| criterion.id.clone())
             .collect();
         request.scope_bound = policy.scope_bound.clone();
+        request.baseline_risk = policy.baseline_risk;
         request.depth_remaining = request.depth_remaining.min(base.remaining_depth);
         request.budget_remaining = remaining_budget(&base.state);
 
@@ -698,6 +699,7 @@ impl<C: Clock> PlanningService<C> {
         request.branch_root_ref = policy.parent_task_ref.clone();
         request.base_plan_revision = base.head;
         request.scope_bound = policy.scope_bound.clone();
+        request.baseline_risk = policy.baseline_risk;
         request.depth_remaining = request.depth_remaining.min(base.remaining_depth);
         request.budget_remaining = remaining_budget(&base.state);
 

@@ -229,6 +229,7 @@ impl<C: Clock> HumanDecisionService<C> {
                 base_plan_revision: record.precondition.plan_head,
                 triggering_evidence_refs: vec![evidence],
                 scope_bound: policy.scope_bound.clone(),
+                baseline_risk: policy.baseline_risk,
                 depth_remaining: MAX_DECOMPOSITION_DEPTH,
                 budget_remaining: PlanningBudget {
                     calls_remaining: MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,

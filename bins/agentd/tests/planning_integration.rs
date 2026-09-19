@@ -183,6 +183,7 @@ fn request(evidence: &str) -> DecompositionRequest {
         scope_bound: ScopeBound::new(vec!["caller:ignored".to_owned()]).expect("caller scope"),
         evidence_refs: vec![EvidenceRef::new(evidence).expect("evidence")],
         depth_remaining: 4,
+        baseline_risk: RiskClass::Low,
         budget_remaining: PlanningBudget {
             calls_remaining: MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
             input_tokens_remaining: MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,

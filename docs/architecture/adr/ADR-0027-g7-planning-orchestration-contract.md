@@ -903,3 +903,59 @@ those in this gate already.
 implementation now agree. G7 closure no longer requires TAKEOVER. Any future
 work that reintroduces the wider contract must amend this ADR rather than
 restate the wide form in a queue entry.
+
+## Amendment — TASK-0107 planner baseline risk (2026-09-19)
+
+### Problem
+
+§1 fixes `DecompositionRequest` and `ReplanRequest` as normative and stable,
+and states the rationale for what they carry: the planner receives its
+remaining depth and budget headroom "so it can refuse before an LLM call
+instead of proposing into a certain rejection."
+
+Neither request carried the baseline risk the proposal is judged against.
+V5 (§3) refuses any added node whose `risk_class` exceeds the branch baseline
+without a `required_gate`. The planner could not know the threshold, so it
+could not satisfy the rule except by accident.
+
+This was not a theoretical gap. TASK-0106's real-provider smoke asked the
+live Claude CLI for a decomposition against a `Low` baseline and received a
+well-formed proposal containing a `medium` node with `required_gate: null` —
+a certain V5 refusal, produced by a planner that had no way to know better.
+
+### Decision: the baseline travels with the request
+
+`DecompositionRequest` and `ReplanRequest` each gain one field:
+
+```text
+baseline_risk: RiskClass
+```
+
+It is the branch baseline the proposal will be validated against, and the
+trusted planning service overwrites any caller-supplied value from
+`PlanningPolicyContext.baseline_risk`, exactly as it already does for
+`scope_bound`. A planner never chooses the baseline it is judged by; it is
+told, for the same reason it is told its depth and budget headroom.
+
+Adapters must state the baseline and the gate rule in provider input. The
+Claude adapter carries `"baseline_risk"` in the request object and the
+explicit rule that a node above the baseline must name a `required_gate`.
+
+### Why this is not a weakening
+
+The baseline is an input bound, not an authority. It tells the planner what
+will be refused; it does not let the planner change what is refused. V5 keeps
+running against `PlanningPolicyContext`, on the trusted side, over a proposal
+that remains untrusted data (§1, INV-093). A planner that lies about, ignores
+or echoes back a different baseline still has its nodes validated against the
+policy value, and still loses.
+
+What changes is only that an honest planner can now succeed. Before this
+amendment the contract asked for something it withheld the means to produce.
+
+### Scope
+
+No change to `PlanChangeSet`, the validation rules, the guardrail bounds, the
+budget envelope, `PlannerCallSpend`, `PlannerFault` or the composition-root
+rule. `AtomicityRequest` is unchanged: assessment proposes no nodes, so it is
+never judged by V5.
