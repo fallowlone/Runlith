@@ -1,0 +1,50 @@
+# Re-runs the verification suite that task acceptance already cites as
+# evidence, so a merge no longer depends on one operator's local run.
+name: verification
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    # Runlith's only mandatory-confinement backend is macOS Seatbelt
+    # (adapters/runner-macos-seatbelt). The non-macOS arm selects the
+    # trusted-host NativeRunner, which the shared runner verifier refuses for
+    # a confined launch, so macOS is the platform the product actually
+    # supports. This workflow therefore proves nothing about any other
+    # platform: the non-macOS cfg arm in bins/agentd/src/execution.rs stays
+    # verified only by inspection until a second runner job exists.
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The workspace declares neither a rust-toolchain file nor an MSRV, so
+      # the CI contract is pinned here. Local development is unpinned; bump
+      # this deliberately rather than letting the runner's default drift.
+      - name: Pin toolchain
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.95.0
+          rustc -vV
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Real-provider smokes stay ignored: they need RUNLITH_CLAUDE_SMOKE=1 and
+      # an authenticated Claude CLI, neither of which exists on a runner.
+      - name: Test
+        run: cargo test --workspace

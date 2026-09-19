@@ -3195,3 +3195,59 @@ items:
       - docs/architecture/runners.md
       - bins/agentd/src/execution.rs
       - crates/runner/src/lib.rs
+
+  - id: TASK-0118
+    gate: G7
+    title: Continuous Verification for Accepted Task Merges
+    objective: >-
+      Stop every gate and task acceptance from resting on one operator's
+      local run by re-running the project's own verification suite
+      automatically on push and pull request.
+    scope: >-
+      One GitHub Actions workflow running the verification commands the queue
+      already cites as acceptance evidence: fmt, clippy with warnings denied,
+      and the workspace test suite. Pin the toolchain explicitly, since the
+      workspace declares neither a rust-toolchain file nor an MSRV. No change
+      to any product crate, test, ADR or gate status, and no new repository
+      dependency beyond the workflow itself.
+    exit_criteria_summary: >-
+      A workflow exists that runs cargo fmt --check, cargo clippy --workspace
+      --all-targets -D warnings and the workspace test suite on push to main
+      and on pull request; its assertions match what is reproducibly green
+      locally, with real-provider smokes left ignored; the toolchain is pinned;
+      the platform coverage it does and does not provide is stated explicitly
+      rather than implied.
+    outcome: >-
+      ACCEPTED. .github/workflows/verification.yml runs cargo fmt --check,
+      cargo clippy --workspace --all-targets -D warnings and cargo test
+      --workspace on push to main and on pull request, on macos-latest, with
+      the toolchain pinned to 1.95.0 because the workspace declares neither a
+      rust-toolchain file nor an MSRV. The three assertions are exactly the
+      commands the recent task outcomes already cite as acceptance evidence,
+      and all three were reproduced green on main at a781d0f immediately
+      before this task: fmt clean, clippy clean, cargo test --workspace 1097
+      passed / 3 ignored in 212s. The three ignored tests are the real-provider
+      smokes, which need RUNLITH_CLAUDE_SMOKE=1 and an authenticated Claude
+      CLI; they stay ignored on a runner and the workflow does not pretend
+      otherwise. Only actions/checkout is used, so no third-party action enters
+      the supply chain; no cache action was added, which trades a longer run
+      for a smaller dependency surface and can be revisited if duration hurts.
+      permissions is contents:read and no workflow input is interpolated into
+      a shell command. Platform coverage is stated in the job comment rather
+      than implied: macOS Seatbelt is the only mandatory-confinement backend,
+      so this proves the supported platform only, and the non-macOS cfg arm in
+      bins/agentd/src/execution.rs stays verified by inspection until a second
+      runner job exists — which is also the evidence TASK-0117 named as
+      outstanding. Known limitation: the workflow itself has never executed.
+      GitHub Actions cannot be run locally against a macOS runner, so its YAML
+      was validated by parse and its commands by local reproduction; the first
+      push to origin is what proves the workflow green. completed_through
+      remains TASK-0115 because TASK-0116 (G7-BLOCKER-05 / F-07) is still
+      open; product identity advances to TASK-0118 and G7 remains IN_PROGRESS.
+    depends_on:
+      - TASK-0117
+    blocked_by: []
+    references:
+      - AGENT.md
+      - planning/tasks/queue.yaml
+      - docs/development/VERSIONING.md
