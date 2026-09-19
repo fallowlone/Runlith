@@ -85,6 +85,16 @@ pub struct ClaudeConfig {
     /// Task/Execution/Attempt identity — provider state only, validated as
     /// opaque bounded text.
     resume_session: Option<String>,
+    /// Session system prompt passed as `--system-prompt`, replacing the
+    /// provider's default. Adapter-authored only: it states the role the
+    /// session is, so the role stops competing with the provider's own
+    /// prompt from inside the message body (TASK-0106 D5).
+    system_prompt: Option<String>,
+    /// Structural proposal-only mode. Emits `--tools ""` plus
+    /// `--disallowedTools "mcp__*"`, so the child has no tool to call at
+    /// all. Stronger than a permission mode, which only asks the model to
+    /// refrain (TASK-0109).
+    proposal_only: bool,
     /// Grace period for capture finalization after natural child exit.
     /// Bounds the join of the stdout/stderr drain threads once the child
     /// is reaped; detached threads never block execution finalization.
@@ -100,6 +110,8 @@ impl Default for ClaudeConfig {
             max_summary_chars: DEFAULT_MAX_SUMMARY_CHARS,
             permission_mode: None,
             resume_session: None,
+            system_prompt: None,
+            proposal_only: false,
             capture_grace: DEFAULT_CAPTURE_GRACE,
         }
     }
@@ -131,6 +143,39 @@ impl ClaudeConfig {
 
     /// Provider-native `--permission-mode` override. Refuses values that
     /// would bypass the provider's own permission system.
+    /// Replaces the provider's default system prompt for this session.
+    /// Adapter-authored text only; never operator or model input.
+    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Result<Self, String> {
+        let prompt = prompt.into();
+        if prompt.trim().is_empty() {
+            return Err("system prompt must not be blank".to_owned());
+        }
+        if prompt.chars().count() > MAX_PROMPT_CHARS {
+            return Err("system prompt exceeds the provider prompt bound".to_owned());
+        }
+        self.system_prompt = Some(prompt);
+        Ok(self)
+    }
+
+    /// Removes every built-in and MCP tool from the child process.
+    #[must_use]
+    pub fn proposal_only(mut self) -> Self {
+        self.proposal_only = true;
+        self
+    }
+
+    /// Session system prompt, when one replaces the provider default.
+    #[must_use]
+    pub fn system_prompt(&self) -> Option<&str> {
+        self.system_prompt.as_deref()
+    }
+
+    /// Whether this configuration removes all tool capability.
+    #[must_use]
+    pub fn is_proposal_only(&self) -> bool {
+        self.proposal_only
+    }
+
     pub fn with_permission_mode(mut self, mode: impl Into<String>) -> Result<Self, String> {
         let mode = mode.into();
         let trimmed = mode.trim();

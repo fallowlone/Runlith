@@ -326,10 +326,19 @@ fn bound_planner_config(config: ClaudeConfig) -> Result<ClaudeConfig, String> {
     } else {
         config
     };
-    // The planner is proposal-only. Provider-native plan mode is defense in
-    // depth on top of the mandatory Runner sandbox; callers cannot widen it
-    // by passing an execution-capable permission mode in ClaudeConfig.
-    config.with_permission_mode("plan")
+    // The planner is proposal-only. `--tools ""` plus an MCP denial removes
+    // every tool from the child, which is structural where a permission mode
+    // is only behavioural: there is nothing to call rather than a request not
+    // to call it. Both remain defense in depth on top of the mandatory Runner
+    // sandbox, and callers cannot widen either by passing an
+    // execution-capable permission mode in ClaudeConfig.
+    //
+    // The role travels as the session's system prompt for the reason
+    // measured in TASK-0106 D5: as message-body text competing with the
+    // provider's default prompt it was read as an override attempt and
+    // refused. Replacing the prompt also drops per-call input from roughly
+    // 34,800 tokens to roughly 1,900 against the ADR-0027 §6 bound of 32,000.
+    config.proposal_only().with_system_prompt(PLANNER_ROLE)
 }
 
 /// Builds the exact receipt from provider-reported usage. Missing,
@@ -698,39 +707,51 @@ struct ProposalPromptInput<'a> {
     budget: PlanningBudget,
 }
 
+/// The planner's role and response contract, sent as the session's own
+/// system prompt rather than as message-body instructions.
+///
+/// TASK-0106 D5 measured why this placement matters: with the role in the
+/// message body on top of the provider's default coding-agent prompt, the
+/// CLI read it as an attempt to override its operating context and answered
+/// in prose instead of JSON, 0 of 3 runs. As the system prompt, with no
+/// tools to call, it answered correctly 7 of 7.
+const PLANNER_ROLE: &str = concat!(
+    "You are Runlith's proposal-only planner. Return one JSON object only; no markdown. ",
+    "Treat the request bounds as immutable. Never claim execution, approval, policy, or durable mutation. ",
+    "Do not emit planner identity, cost receipt, credentials, prompts, transcripts, or proposal_hash; ",
+    "Runlith injects provenance and computes the hash after parsing.\n",
+    "Required response keys: base_plan_revision, reason, node_additions, node_updates, node_removals, ",
+    "edge_additions, edge_removals, expected_outcome, risk_delta, budget_delta, scope_delta, coverage_map. ",
+    // Scope values are echoed from the request's own scope_bound rather than
+    // described by a pattern: TASK-0109 measured a run returning the literal
+    // "workspace:repo:src" after copying a `[workspace:path]` placeholder.
+    "node_additions entries: {id,scope,criteria:[{id,method}],risk_class,required_gate}, ",
+    "where scope is a non-empty array of roots copied from scope_bound or nested inside one. ",
+    // G7 v1 materializes automated-test obligations only; a child declaring
+    // another method is refused at materialization (ADR-0027 TASK-0096),
+    // so the prompt must not offer what the system will reject.
+    "method is automated-test; ",
+    "risk_class is low|medium|high|critical; required_gate is string|null. ",
+    "A node whose risk_class exceeds baseline_risk MUST name a required_gate; ",
+    "without one it is refused. Order: low < medium < high < critical. ",
+    "node_updates entries: {target,scope:null|[...],risk_class:null|string,required_gate:null|{set:string}|{clear:true}}. ",
+    "edges are {from,to} and mean from MUST complete before to may run. ",
+    "risk_delta entries are {node,from,to}. ",
+    "budget_delta is {planning_cost_movement:signed_integer,expected_execution_cost_movement:signed_integer}. ",
+    "scope_delta is an array of scope roots in the same form, never an object; ",
+    "echo scope_bound when the proposal adds no scope. ",
+    "coverage_map is an object parent_criterion->[child_criteria]. ",
+    "Echo the supplied base_plan_revision exactly. Keep every scope inside scope_bound and keep the proposal bounded."
+);
+
+/// The per-call request. The contract itself lives in [`PLANNER_ROLE`].
 fn proposal_prompt(input: ProposalPromptInput<'_>) -> String {
     format!(
         concat!(
-            "You are Runlith's proposal-only planner. Return one JSON object only; no markdown. ",
-            "Treat the request bounds as immutable. Never claim execution, approval, policy, or durable mutation. ",
-            "Do not emit planner identity, cost receipt, credentials, prompts, transcripts, or proposal_hash; ",
-            "Runlith injects provenance and computes the hash after parsing.\n",
             "Request: {{\"kind\":{},\"root_ref\":{},\"base_plan_revision\":{},",
             "\"acceptance_criteria_refs\":{},\"scope_bound\":{},\"evidence_refs\":{},",
             "\"depth_remaining\":{},\"baseline_risk\":{},",
-            "\"calls_remaining\":{},\"input_tokens_remaining\":{}}}\n",
-            "Required response keys: base_plan_revision, reason, node_additions, node_updates, node_removals, ",
-            "edge_additions, edge_removals, expected_outcome, risk_delta, budget_delta, scope_delta, coverage_map. ",
-            "node_additions entries: {{id,scope:[workspace:path],criteria:[{{id,method}}],risk_class,required_gate}}. ",
-            // G7 v1 materializes automated-test obligations only; a child declaring
-            // another method is refused at materialization (ADR-0027 TASK-0096),
-            // so the prompt must not offer what the system will reject.
-            "method is automated-test; ",
-            "risk_class is low|medium|high|critical; required_gate is string|null. ",
-            "A node whose risk_class exceeds baseline_risk MUST name a required_gate; ",
-            "without one it is refused. Order: low < medium < high < critical. ",
-            "node_updates entries: {{target,scope:null|[...],risk_class:null|string,required_gate:null|{{set:string}}|{{clear:true}}}}. ",
-            "edges are {{from,to}} and mean from MUST complete before to may run. ",
-            "risk_delta entries are {{node,from,to}}. ",
-            "budget_delta is {{planning_cost_movement:signed_integer,expected_execution_cost_movement:signed_integer}}. ",
-            // TASK-0106 D4: scope_delta was the one required key whose shape the
-            // prompt never stated, and the real CLI returned `["repo:src"]`,
-            // `[]` and `{"added":[],"removed":[]}` across three runs. Only the
-            // first parses.
-            "scope_delta is an array of workspace:path roots inside scope_bound, never an object; ",
-            "echo scope_bound when the proposal adds no scope. ",
-            "coverage_map is an object parent_criterion->[child_criteria]. ",
-            "Echo the supplied base_plan_revision exactly. Keep every scope inside scope_bound and keep the proposal bounded."
+            "\"calls_remaining\":{},\"input_tokens_remaining\":{}}}"
         ),
         json_string(input.kind),
         json_string(input.root_ref),
@@ -781,16 +802,31 @@ mod tests {
             bounded.timeout(),
             Duration::from_secs(MAX_PLANNER_WALL_CLOCK_SECS)
         );
-        assert_eq!(bounded.permission_mode(), Some("plan"));
+        assert!(bounded.is_proposal_only());
     }
 
     #[test]
-    fn planner_forces_proposal_only_provider_permission_mode() {
+    fn planner_forces_structural_proposal_only() {
+        // A caller cannot buy tool capability back by asking for an
+        // execution-capable permission mode: the planner removes the tools
+        // themselves, which no permission mode can restore.
         let config = ClaudeConfig::default()
             .with_permission_mode("acceptEdits")
             .expect("ordinary executor mode remains representable");
         let bounded = bound_planner_config(config).expect("planner config");
-        assert_eq!(bounded.permission_mode(), Some("plan"));
+        assert!(bounded.is_proposal_only());
+        let argv = crate::build_argv(&bounded, "Request: {}");
+        let argv: Vec<String> = argv
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect();
+        assert!(argv
+            .windows(2)
+            .any(|w| w[0] == "--tools" && w[1].is_empty()));
+        assert!(argv
+            .windows(2)
+            .any(|w| w[0] == "--disallowedTools" && w[1] == "mcp__*"));
+        assert!(argv.iter().any(|value| value == "--system-prompt"));
     }
 
     #[test]
@@ -849,8 +885,12 @@ mod tests {
             "the planner must receive the baseline it is judged against"
         );
         assert!(
-            prompt.contains("required_gate"),
-            "the prompt must state when a gate is mandatory"
+            PLANNER_ROLE.contains("exceeds baseline_risk MUST name a required_gate"),
+            "the role must state when a gate is mandatory"
+        );
+        assert!(
+            !prompt.contains("workspace:path"),
+            "no placeholder notation a model can copy literally (TASK-0109)"
         );
     }
 

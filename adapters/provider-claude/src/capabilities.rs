@@ -38,6 +38,17 @@ pub struct ClaudeCapabilities {
     pub permission_modes: bool,
     /// Provider-native safe mode (`--safe-mode`).
     pub safe_mode: bool,
+    /// Built-in tool restriction (`--tools`). `--tools ""` removes every
+    /// built-in tool, which is a structural proposal-only control rather
+    /// than the behavioural one `--permission-mode plan` provides.
+    pub tool_restriction: bool,
+    /// MCP tool denial (`--disallowedTools`). `--tools` does not cover MCP
+    /// tools, so proposal-only needs both.
+    pub mcp_tool_denial: bool,
+    /// System-prompt replacement (`--system-prompt`). Lets an adapter state
+    /// a role as the session's own context instead of as a message-body
+    /// instruction competing with the provider's default prompt.
+    pub system_prompt_override: bool,
     /// Execution inside a caller-bound working directory. Always true:
     /// cwd binding is adapter-enforced (`current_dir`), not CLI-advertised.
     pub workspace_execution: bool,
@@ -66,6 +77,9 @@ impl ClaudeCapabilities {
             session_control: false,
             permission_modes: false,
             safe_mode: false,
+            tool_restriction: false,
+            mcp_tool_denial: false,
+            system_prompt_override: false,
             workspace_execution: true,
             cancellation: true,
             usage_reporting: false,
@@ -97,6 +111,9 @@ pub fn probe_capabilities(executable: &OsStr, version: Option<CliVersion>) -> Cl
         session_control: help.contains("--session-id"),
         permission_modes: help.contains("--permission-mode"),
         safe_mode: help.contains("--safe-mode"),
+        tool_restriction: help.contains("--tools"),
+        mcp_tool_denial: help.contains("--disallowedTools") || help.contains("--disallowed-tools"),
+        system_prompt_override: help.contains("--system-prompt"),
         workspace_execution: true,
         cancellation: true,
         usage_reporting: structured_json,

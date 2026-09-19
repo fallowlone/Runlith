@@ -16,20 +16,37 @@ use crate::config::ClaudeConfig;
 
 /// Builds the full argument vector for one provider execution.
 ///
-/// Layout: `-p --safe-mode --output-format json [--permission-mode M] [--resume S]
-/// <prompt>`. The prompt is always the final positional value and is
+/// Layout: `-p --safe-mode [--tools "" --disallowedTools "mcp__*"]
+/// --output-format json [--system-prompt T] [--permission-mode M]
+/// [--resume S] <prompt>`.
+///
+/// The tool flags are variadic (`<tools...>`) and consume every following
+/// value until the next option, so they are emitted *before* the
+/// unconditional `--output-format json`, which terminates them. Emitting
+/// them last makes the variadic list swallow the positional prompt and the
+/// CLI exits with "Input must be provided" (measured, TASK-0109). The prompt is always the final positional value and is
 /// never split, interpolated, or shell-escaped — argv carries it whole.
 /// Only flags probed against the installed CLI are ever emitted (see
 /// [`crate::probe_capabilities`]); unknown future flags are never
 /// guessed here.
 #[must_use]
 pub fn build_argv(config: &ClaudeConfig, prompt: &str) -> Vec<OsString> {
-    let mut argv = vec![
-        OsString::from("-p"),
-        OsString::from("--safe-mode"),
-        OsString::from("--output-format"),
-        OsString::from("json"),
-    ];
+    let mut argv = vec![OsString::from("-p"), OsString::from("--safe-mode")];
+    if config.is_proposal_only() {
+        // `--tools ""` removes every built-in tool; it does not cover MCP
+        // tools, which need their own denial. Both together leave the child
+        // with nothing to call. Order matters: see the note above.
+        argv.push(OsString::from("--tools"));
+        argv.push(OsString::new());
+        argv.push(OsString::from("--disallowedTools"));
+        argv.push(OsString::from("mcp__*"));
+    }
+    argv.push(OsString::from("--output-format"));
+    argv.push(OsString::from("json"));
+    if let Some(prompt) = config.system_prompt() {
+        argv.push(OsString::from("--system-prompt"));
+        argv.push(OsString::from(prompt));
+    }
     if let Some(mode) = config.permission_mode() {
         argv.push(OsString::from("--permission-mode"));
         argv.push(OsString::from(mode));
@@ -49,6 +66,37 @@ mod tests {
 
     fn config() -> ClaudeConfig {
         ClaudeConfig::default()
+    }
+
+    #[test]
+    fn variadic_tool_flags_never_swallow_the_prompt() {
+        // `--tools`/`--disallowedTools` take `<tools...>` and consume every
+        // following value until the next option. If they are emitted last,
+        // the positional prompt joins the tool list and the CLI refuses with
+        // "Input must be provided either through stdin or as a prompt
+        // argument". A non-variadic option must always follow them.
+        let config = ClaudeConfig::default()
+            .proposal_only()
+            .with_system_prompt("role")
+            .expect("system prompt");
+        let argv: Vec<String> = build_argv(&config, "the prompt")
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect();
+        let last_variadic = argv
+            .iter()
+            .rposition(|value| value == "--tools" || value == "--disallowedTools")
+            .expect("proposal-only emits the tool flags");
+        let next_option = argv[last_variadic + 1..]
+            .iter()
+            .position(|value| value.starts_with("--"))
+            .map(|offset| last_variadic + 1 + offset)
+            .expect("a non-variadic option must terminate the tool list");
+        assert!(
+            next_option < argv.len() - 1,
+            "an option must terminate the variadic list before the prompt: {argv:?}"
+        );
+        assert_eq!(argv.last().unwrap(), "the prompt");
     }
 
     #[test]
