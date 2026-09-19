@@ -225,6 +225,173 @@ mod tests {
     }
 
     #[test]
+    fn planning_queue_has_no_unquoted_mapping_colons() {
+        // `gate_matches_planning_queue` reads the queue by line prefix, so it
+        // stays green on a file no YAML parser will accept. This pins the
+        // defect class that blindness hides: a plain (unquoted) scalar whose
+        // text contains `": "`, which a strict parser reads as a nested
+        // mapping key and rejects with "mapping values are not allowed in
+        // this context". The fix is always the same — give the value the
+        // `>-` folded-block form the file already uses for prose.
+        //
+        // Deliberately a structural guard, not a parse: this crate is
+        // dependency-free by design (see the module docs) and a YAML parser
+        // would be a new third-party surface added to a domain crate for a
+        // planning-file lint. It therefore proves the absence of one defect
+        // class, not that the document as a whole is well-formed.
+        const QUEUE: &str = include_str!("../../../planning/tasks/queue.yaml");
+        let offenders = unquoted_mapping_colons(QUEUE);
+        assert!(
+            offenders.is_empty(),
+            "planning/tasks/queue.yaml line(s) {offenders:?} hold an unquoted \
+             scalar containing \": \"; rewrite the value as a `>-` block"
+        );
+    }
+
+    #[test]
+    fn unquoted_mapping_colon_scan_separates_legal_from_illegal_colons() {
+        // Pins the scan itself, so the guard above cannot quietly become
+        // vacuous as the queue grows. Every fixture was cross-checked
+        // against a strict parser: the rejected ones raise "mapping values
+        // are not allowed in this context" on the line reported here, the
+        // accepted ones load.
+        let illegal = [
+            // A colon inside a plain value on the key's own line.
+            ("items:\n  - title: G7 Guard: proof-method\n", vec![2]),
+            // A colon inside a wrapped continuation of a plain value.
+            (
+                "objective: Materialize the contracts\n  canonical note: no persistence.\n",
+                vec![2],
+            ),
+            // A plain value that ends on a colon and wraps.
+            ("objective: Remediate this:\n  and then stop.\n", vec![1]),
+        ];
+        for (input, expected) in illegal {
+            assert_eq!(
+                unquoted_mapping_colons(input),
+                expected,
+                "must reject {input:?}"
+            );
+        }
+        let legal = [
+            // Block-scalar bodies are literal text; colons are content.
+            "outcome: >-\n  F-NEW-01 REMEDIATED. Both audits: right.\n",
+            // A trailing comment is not part of the plain scalar.
+            "gate_status: IN_PROGRESS  # note: G7 closure is a separate call\n",
+            // A whole-line comment, including the file header's own colon.
+            "# Authority: ADRs > roadmap > task queue.\nsemver: 1\n",
+            // Ordinary nesting and sequences.
+            "items:\n  - id: TASK-0012\n    references:\n      - docs/architecture/task-engine.md\n",
+        ];
+        for input in legal {
+            assert_eq!(
+                unquoted_mapping_colons(input),
+                Vec::<usize>::new(),
+                "must accept {input:?}"
+            );
+        }
+    }
+
+    /// Scalar context while walking the queue line by line.
+    enum Scalar {
+        /// Not inside a multi-line scalar.
+        None,
+        /// Inside a plain (unquoted) scalar opened at this column.
+        Plain(usize),
+        /// Inside a `>`/`|` block scalar opened at this column; its body is
+        /// literal text where `": "` is legal, so it is skipped.
+        Block(usize),
+    }
+
+    /// Returns the 1-based line numbers of plain scalars containing `": "`
+    /// (or ending in `:`), which a strict YAML parser refuses.
+    fn unquoted_mapping_colons(input: &str) -> Vec<usize> {
+        let mut state = Scalar::None;
+        let mut offenders = Vec::new();
+        for (index, raw) in input.lines().enumerate() {
+            let line_number = index + 1;
+            let trimmed = raw.trim_start();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // Leading whitespace is ASCII, so the byte delta is the column.
+            let indent = raw.len() - trimmed.len();
+            match state {
+                Scalar::Plain(anchor) if indent > anchor => {
+                    if is_mapping_shaped(trimmed) {
+                        offenders.push(line_number);
+                    }
+                    continue;
+                }
+                Scalar::Block(anchor) if indent > anchor => continue,
+                _ => state = Scalar::None,
+            }
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            // Step over sequence dashes; the entry's own column is what
+            // bounds any scalar it opens.
+            let mut rest = trimmed;
+            let mut column = indent;
+            while let Some(after) = rest.strip_prefix("- ") {
+                let after = after.trim_start();
+                column += rest.len() - after.len();
+                rest = after;
+            }
+            let Some((key, tail)) = rest.split_once(':') else {
+                // A sequence entry with no colon: a plain scalar of its own.
+                state = Scalar::Plain(column);
+                continue;
+            };
+            if !is_plain_key(key) || !(tail.is_empty() || tail.starts_with(' ')) {
+                // Not a mapping entry, so the whole line is scalar text.
+                if is_mapping_shaped(rest) {
+                    offenders.push(line_number);
+                }
+                state = Scalar::Plain(column);
+                continue;
+            }
+            let value = strip_comment(tail).trim();
+            let Some(first) = value.chars().next() else {
+                continue;
+            };
+            match first {
+                '>' | '|' => state = Scalar::Block(column),
+                '"' | '\'' => state = Scalar::None,
+                _ => {
+                    if is_mapping_shaped(value) {
+                        offenders.push(line_number);
+                    }
+                    state = Scalar::Plain(column);
+                }
+            }
+        }
+        offenders
+    }
+
+    /// True when scalar text carries a colon a parser would read as a
+    /// mapping separator.
+    fn is_mapping_shaped(text: &str) -> bool {
+        let text = strip_comment(text).trim_end();
+        text.contains(": ") || text.ends_with(':')
+    }
+
+    /// Drops a trailing plain-scalar comment (` #` ends a plain scalar).
+    fn strip_comment(text: &str) -> &str {
+        match text.split_once(" #") {
+            Some((before, _)) => before,
+            None => text,
+        }
+    }
+
+    fn is_plain_key(key: &str) -> bool {
+        !key.is_empty()
+            && key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
+    }
+
+    #[test]
     fn future_task_example_validates() {
         let version = parse_version(
             "semver = \"0.1.0\"\ndevelopment = \"0.1.0-dev.task0042\"\ntask = \"TASK-0042\"\ngate = \"G4\"\n",
