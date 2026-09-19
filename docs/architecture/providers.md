@@ -81,7 +81,9 @@ executors pass the same seam today:
   hand-rolled JSON parsing, structured-signal failure mapping with a
   narrow auth-marker fallback. Subscription-native authentication stays
   provider-owned (§7): the adapter never reads, persists, logs,
-  forwards, or repairs credentials, and detection never probes auth.
+  forwards, or repairs credentials. Detection answers installation and
+  version compatibility only and never probes auth; authentication state
+  is a separate pre-launch precondition (§9a).
 
 A future `provider-codex` implements the same trait behind its own
 factory closure; orchestration, storage, workspace, and completion
@@ -227,6 +229,58 @@ Availability is observable provider/runtime state. Exact canonical
 ownership, persistence, and freshness semantics are open design items where
 current architecture does not define them precisely.
 
+## 9a. Authentication state
+
+Authentication state is **not** availability and never enters the §9
+vocabulary. The original reasoning holds: whether a provider is installed and
+version-compatible is an installation fact, while whether its owner is signed
+in is not. `AUTH_REQUIRED` remains absent from §9.
+
+What changed is only the second half of that reasoning. The earlier contract
+also held that auth could not be observed at all without burning quota or
+risking an interactive prompt, and therefore had to surface as execution-time
+failure evidence. For the current Claude CLI that is measurably false:
+`claude auth status` answers from local state with machine-readable output,
+consumes no quota, and prompts for nothing. The vocabulary decision stands on
+its own merits; the unobservability premise does not.
+
+Accepted provider-neutral authentication vocabulary — exactly these states,
+no additions, no removals:
+
+```text
+AUTHENTICATED
+UNAUTHENTICATED
+UNKNOWN
+```
+
+Binding rules:
+
+- Authentication is a **precondition verified before launch**, not a failure
+  discovered during one. A provider launch requiring authentication refuses
+  closed when the state is `UNAUTHENTICATED`, and the refusal names the
+  operator action rather than reporting an opaque provider exit.
+- `UNKNOWN` is not permission to proceed. It refuses like `UNAUTHENTICATED`
+  and says which of the two it could not distinguish.
+- The runtime never performs, completes, repairs, or automates a login, and
+  never presents a credential prompt from inside an execution. Authentication
+  is an interactive act performed by the operator, outside any sandboxed
+  launch, against the provider's own flow.
+- A probe obeys the §2 detection discipline: one fixed executable, fixed
+  argv, no shell, bounded capture, short timeout. A probe that could consume
+  quota, mutate provider state, or trigger an interactive prompt is not a
+  permitted probe.
+- The adapter still never reads, persists, logs, forwards, or repairs a
+  credential (§7). Observing *that* a provider is signed in is not observing
+  *what* it is signed in with.
+
+Rationale and external corroboration: the surveyed orchestrators and the
+Agent Client Protocol all separate an interactive login phase from the
+working launch, and all represent an unauthenticated provider as a typed
+condition rather than an exit code — see
+`external-research/studies/2026-09-19-provider-authentication-boundary.md`.
+Runlith needs the separation more sharply than they do, because it is the
+only one of them that genuinely confines the working launch.
+
 ## 10. Errors
 
 Provider/runtime failures are eventually normalized into provider-neutral
@@ -371,9 +425,12 @@ environment by the existing managed worktree identity, so restart/recovery does
 not invent a second workspace identity.
 
 Provider-native authentication remains provider-owned. For the current Claude
-CLI, the real `HOME`/profile is an explicit authentication anchor because
-removing it makes the authenticated CLI report `Not logged in`; credentials
-are neither copied nor scraped. Ambient API-key/cloud/Git/SSH/provider/plugin
+CLI, the real `HOME`/profile and the POSIX login principal `USER` are together
+the explicit authentication anchor: the CLI resolves its stored credentials
+through the login principal, so a child given `HOME` without `USER` reports
+`Not logged in` and exits with no diagnostic (TASK-0101). Credentials are
+neither copied nor scraped; `USER` carries no credential material and is
+already implied by `HOME`'s path. Ambient API-key/cloud/Git/SSH/provider/plugin
 environment variables are not inherited. `--safe-mode` disables user/project
 customizations as defense in depth. These mechanics grant no authority:
 Policy/approval/Runner remain canonical and unsupported mandatory isolation
@@ -398,7 +455,6 @@ provider session identity format
 provider availability canonical owner/persistence/freshness
 model identity representation
 provider/model configuration representation
-provider auth-state detection semantics
 provider cancellation race semantics
 streaming output contract
 provider tool-call normalization
