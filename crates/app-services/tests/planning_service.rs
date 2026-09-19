@@ -349,6 +349,7 @@ fn replan_as_decomposition(input: ReplanRequest) -> DecompositionRequest {
         scope_bound: input.scope_bound,
         evidence_refs: input.triggering_evidence_refs,
         depth_remaining: input.depth_remaining,
+        baseline_risk: input.baseline_risk,
         budget_remaining: input.budget_remaining,
     }
 }
@@ -580,6 +581,7 @@ fn request_with(evidence_refs: Vec<EvidenceRef>) -> DecompositionRequest {
         scope_bound: ScopeBound::new(vec!["caller:ignored".to_owned()]).expect("caller scope"),
         evidence_refs,
         depth_remaining: 4,
+        baseline_risk: RiskClass::Low,
         budget_remaining: PlanningBudget {
             calls_remaining: MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
             input_tokens_remaining: MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,

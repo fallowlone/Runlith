@@ -518,6 +518,11 @@ pub struct DecompositionRequest {
     pub evidence_refs: Vec<EvidenceRef>,
     /// Remaining decomposition depth headroom.
     pub depth_remaining: u32,
+    /// Baseline risk the proposal is judged against (V5). A node above this
+    /// baseline must carry a `required_gate`, so the planner needs the
+    /// threshold for the same reason it needs depth and budget headroom:
+    /// otherwise it proposes into a certain rejection.
+    pub baseline_risk: RiskClass,
     /// Remaining planner-call budget headroom.
     pub budget_remaining: PlanningBudget,
 }
@@ -536,6 +541,9 @@ pub struct ReplanRequest {
     pub scope_bound: ScopeBound,
     /// Remaining decomposition depth headroom.
     pub depth_remaining: u32,
+    /// Baseline risk the proposal is judged against (V5), as in
+    /// [`DecompositionRequest::baseline_risk`].
+    pub baseline_risk: RiskClass,
     /// Remaining planner-call budget headroom.
     pub budget_remaining: PlanningBudget,
 }

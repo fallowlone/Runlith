@@ -7,7 +7,7 @@
 use plan_domain::{
     call_within_envelope, verify_proposal_hash, AtomicityRequest, AtomicityVerdict, CriterionId,
     DecompositionRequest, EvidenceRef, PlannerCallSpend, PlannerFault, PlannerPort, PlanningBudget,
-    ReplanRequest, ScopeBound, MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
+    ReplanRequest, RiskClass, ScopeBound, MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
     MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
 };
 
@@ -72,6 +72,7 @@ pub fn contract_decomposition_request() -> DecompositionRequest {
         scope_bound: bound(),
         evidence_refs: vec![evidence()],
         depth_remaining: 4,
+        baseline_risk: RiskClass::Low,
         budget_remaining: budget(),
     }
 }
@@ -85,6 +86,7 @@ pub fn contract_replan_request() -> ReplanRequest {
         triggering_evidence_refs: vec![evidence()],
         scope_bound: bound(),
         depth_remaining: 3,
+        baseline_risk: RiskClass::Low,
         budget_remaining: budget(),
     }
 }
