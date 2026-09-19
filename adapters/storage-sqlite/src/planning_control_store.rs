@@ -239,6 +239,26 @@ impl SqliteStore {
         let tx = self
             .connection_mut()
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if join_identical_active {
+            let current_head: Option<i64> = tx
+                .query_row(
+                    "SELECT head_revision FROM plan_branches WHERE plan_branch_id = ?1",
+                    params![snapshot.plan_branch_id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let found_head = current_head
+                .map(|value| nonnegative_u64(value, "plan head"))
+                .transpose()?
+                .unwrap_or(0);
+            if found_head != snapshot.expected_plan_head {
+                return Err(StorageError::PlanStale {
+                    branch: snapshot.plan_branch_id.as_str().to_owned(),
+                    expected: snapshot.expected_plan_head,
+                    found: found_head,
+                });
+            }
+        }
         persist_snapshot(&tx, snapshot, created_at_ms)?;
 
         tx.execute(

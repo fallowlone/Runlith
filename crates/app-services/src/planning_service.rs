@@ -804,11 +804,30 @@ impl<C: Clock> PlanningService<C> {
         });
         resumed_policy.risk_decision_id = Some(id.clone());
 
-        let base = self.prepare_approved_proposal(
+        let base = match self.prepare_approved_proposal(
             &record.plan_branch_id,
             &approved.changeset.source_evidence_refs,
             &resumed_policy,
-        )?;
+        ) {
+            Ok(base) => base,
+            Err(PlanningServiceError::Storage(StorageError::PlanStale { .. })) => {
+                return match self.store.supersede_unusable_human_decision(id) {
+                    Ok(_) => Err(PlanningServiceError::Storage(
+                        StorageError::HumanDecisionStale {
+                            request_id: id.as_str().to_owned(),
+                            reason: "V9 RESUME decision is stale".to_owned(),
+                        },
+                    )),
+                    Err(StorageError::HumanDecisionState { request_id, state }) => {
+                        Err(PlanningServiceError::Storage(
+                            StorageError::HumanDecisionState { request_id, state },
+                        ))
+                    }
+                    Err(error) => Err(error.into()),
+                };
+            }
+            Err(error) => return Err(error),
+        };
         let run = base.run.clone();
         let outcome = self.validate_persist_proposal(
             &record.plan_branch_id,
