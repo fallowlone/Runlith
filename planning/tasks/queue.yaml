@@ -2970,12 +2970,29 @@ items:
       cause precise enough to choose a G6-preserving architecture path before
       any remediation task is opened; no credential values enter logs,
       durable state or evidence.
+    outcome: >-
+      DIAGNOSED. On Claude Code 2.1.277 the host and sanitized PATH+HOME+USER
+      controls are authenticated and a harmless real-provider marker succeeds;
+      permissive Seatbelt also succeeds, while the production-shaped profile
+      exits 1 without the marker. Differential probes falsified the suspected
+      randomized Bun-helper cause. The confined provider requires three
+      capabilities together: mach-lookup of com.apple.SecurityServer,
+      file-read-data for the login Keychain database, and exact process-exec
+      of /usr/bin/security. Every one- and two-capability ablation remains red;
+      all three make the marker succeed. No credential contents were read or
+      recorded. That capability set is not adopted because it would expose the
+      worker to the user's general login-Keychain mechanism and Seatbelt cannot
+      bind /usr/bin/security argv to one Claude credential item. The selected
+      G6-preserving direction is a typed pre-launch authentication/unsupported
+      refusal for provider auth mechanisms that cannot operate inside the
+      required confinement; production isolation is not widened.
     depends_on:
       - TASK-0113
     blocked_by: []
     references:
       - external-research/studies/2026-09-19-provider-authentication-boundary.md
       - docs/development/G7_PLANNER_REAL_PROVIDER_FINDINGS.md
+      - docs/development/G7_TASK_0112_PROVIDER_AUTH_DIAGNOSIS.md
       - adapters/provider-claude/src/authentication.rs
       - adapters/provider-claude/src/environment.rs
       - adapters/runner-macos-seatbelt/src/lib.rs
