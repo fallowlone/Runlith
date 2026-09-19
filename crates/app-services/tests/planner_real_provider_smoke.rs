@@ -32,6 +32,17 @@
 //! - Everything else fails, including a well-formed proposal the validator
 //!   refuses and a per-call budget the real CLI's reported usage cannot fit.
 //!   Those are findings about the prompt or the bound, not noise to tolerate.
+//!
+//! Current state: RED, on D5. TASK-0107 fixed the fenced output, the missing
+//! baseline risk and the unspecified `scope_delta` shape, so the path now
+//! reaches the validator. It still fails because `permission_mode: "plan"`,
+//! which the planner forces as proposal-only defense in depth, makes the CLI
+//! refuse the prompt in prose rather than answer it (0 of 3 valid responses
+//! with plan mode, 3 of 3 without). That is an open contract question, not a
+//! defect to silence here — see
+//! `docs/development/G7_PLANNER_REAL_PROVIDER_FINDINGS.md`. The test is
+//! deliberately left failing rather than relaxed: it is the only evidence
+//! that G7's own capability does not yet work against a real provider.
 
 #![cfg(unix)]
 
@@ -153,6 +164,7 @@ fn request() -> DecompositionRequest {
         scope_bound: ScopeBound::new(vec![SCOPE_ROOT.to_owned()]).expect("scope bound"),
         evidence_refs: vec![evidence()],
         depth_remaining: 4,
+        baseline_risk: RiskClass::Low,
         budget_remaining: PlanningBudget {
             calls_remaining: MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
             input_tokens_remaining: MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,

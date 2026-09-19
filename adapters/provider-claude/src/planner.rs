@@ -211,7 +211,7 @@ impl ClaudePlanner {
         allowed_evidence: &[EvidenceRef],
         receipt: PlanningCostReceipt,
     ) -> Parsed<AtomicityAssessment> {
-        let json = parse_json(text).map_err(malformed)?;
+        let json = parse_json(json_payload(text)).map_err(malformed)?;
         let verdict = required_str(&json, "verdict")?;
         let rationale = required_str(&json, "rationale")?.to_owned();
         let evidence_refs = match json.get("evidence_refs") {
@@ -250,7 +250,7 @@ impl ClaudePlanner {
         receipt: PlanningCostReceipt,
         source_evidence_refs: Vec<EvidenceRef>,
     ) -> Parsed<PlanChangeSet> {
-        let json = parse_json(text).map_err(malformed)?;
+        let json = parse_json(json_payload(text)).map_err(malformed)?;
         let mut proposal = PlanChangeSet {
             base_plan_revision: required_u64(&json, "base_plan_revision")?,
             reason: required_str(&json, "reason")?.to_owned(),
@@ -378,6 +378,31 @@ fn malformed_after_spend(detail: Malformed, receipt: PlanningCostReceipt) -> Pla
 
 fn malformed(error: impl std::fmt::Display) -> Malformed {
     Malformed(error.to_string())
+}
+
+/// Returns the JSON payload of a provider response.
+///
+/// The real CLI wraps its answer in a fenced code block even when the prompt
+/// forbids markdown (measured in TASK-0106: every run returned ```json).
+/// One cleanly fenced document is unwrapped; anything else is returned
+/// untouched so the JSON parser refuses it.
+///
+/// This locates a payload, it does not trust one. providers.md §11 keeps
+/// provider output untrusted either way, and the deliberately narrow rule —
+/// the fence must open the response and close it, with nothing outside —
+/// means a model cannot hide a second document behind surrounding prose.
+fn json_payload(text: &str) -> &str {
+    let trimmed = text.trim();
+    let Some(after_open) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let Some(body) = after_open.split_once('\n').map(|(_language, rest)| rest) else {
+        return trimmed;
+    };
+    match body.trim_end().strip_suffix("```") {
+        Some(payload) => payload.trim(),
+        None => trimmed,
+    }
 }
 
 fn required<'a>(json: &'a Json, key: &str) -> Parsed<&'a Json> {
@@ -638,6 +663,7 @@ fn decomposition_prompt(input: &DecompositionRequest) -> String {
             .map(|value| value.as_str())
             .collect(),
         depth_remaining: input.depth_remaining,
+        baseline_risk: input.baseline_risk,
         budget: input.budget_remaining,
     })
 }
@@ -655,6 +681,7 @@ fn replan_prompt(input: &ReplanRequest) -> String {
             .map(|value| value.as_str())
             .collect(),
         depth_remaining: input.depth_remaining,
+        baseline_risk: input.baseline_risk,
         budget: input.budget_remaining,
     })
 }
@@ -667,6 +694,7 @@ struct ProposalPromptInput<'a> {
     scope_roots: Vec<String>,
     evidence: Vec<&'a str>,
     depth_remaining: u32,
+    baseline_risk: RiskClass,
     budget: PlanningBudget,
 }
 
@@ -679,7 +707,8 @@ fn proposal_prompt(input: ProposalPromptInput<'_>) -> String {
             "Runlith injects provenance and computes the hash after parsing.\n",
             "Request: {{\"kind\":{},\"root_ref\":{},\"base_plan_revision\":{},",
             "\"acceptance_criteria_refs\":{},\"scope_bound\":{},\"evidence_refs\":{},",
-            "\"depth_remaining\":{},\"calls_remaining\":{},\"input_tokens_remaining\":{}}}\n",
+            "\"depth_remaining\":{},\"baseline_risk\":{},",
+            "\"calls_remaining\":{},\"input_tokens_remaining\":{}}}\n",
             "Required response keys: base_plan_revision, reason, node_additions, node_updates, node_removals, ",
             "edge_additions, edge_removals, expected_outcome, risk_delta, budget_delta, scope_delta, coverage_map. ",
             "node_additions entries: {{id,scope:[workspace:path],criteria:[{{id,method}}],risk_class,required_gate}}. ",
@@ -688,10 +717,18 @@ fn proposal_prompt(input: ProposalPromptInput<'_>) -> String {
             // so the prompt must not offer what the system will reject.
             "method is automated-test; ",
             "risk_class is low|medium|high|critical; required_gate is string|null. ",
+            "A node whose risk_class exceeds baseline_risk MUST name a required_gate; ",
+            "without one it is refused. Order: low < medium < high < critical. ",
             "node_updates entries: {{target,scope:null|[...],risk_class:null|string,required_gate:null|{{set:string}}|{{clear:true}}}}. ",
             "edges are {{from,to}} and mean from MUST complete before to may run. ",
             "risk_delta entries are {{node,from,to}}. ",
             "budget_delta is {{planning_cost_movement:signed_integer,expected_execution_cost_movement:signed_integer}}. ",
+            // TASK-0106 D4: scope_delta was the one required key whose shape the
+            // prompt never stated, and the real CLI returned `["repo:src"]`,
+            // `[]` and `{"added":[],"removed":[]}` across three runs. Only the
+            // first parses.
+            "scope_delta is an array of workspace:path roots inside scope_bound, never an object; ",
+            "echo scope_bound when the proposal adds no scope. ",
             "coverage_map is an object parent_criterion->[child_criteria]. ",
             "Echo the supplied base_plan_revision exactly. Keep every scope inside scope_bound and keep the proposal bounded."
         ),
@@ -702,6 +739,7 @@ fn proposal_prompt(input: ProposalPromptInput<'_>) -> String {
         json_strings(input.scope_roots.iter().map(String::as_str)),
         json_strings(input.evidence.into_iter()),
         input.depth_remaining,
+        json_string(input.baseline_risk.as_str()),
         input.budget.calls_remaining,
         input.budget.input_tokens_remaining,
     )
@@ -733,6 +771,7 @@ fn json_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plan_domain::ScopeBound;
 
     #[test]
     fn planner_timeout_is_clamped_to_g7_bound() {
@@ -757,6 +796,62 @@ mod tests {
     #[test]
     fn json_string_escapes_provider_input_without_shell_semantics() {
         assert_eq!(json_string("a\"b\\c\n"), "\"a\\\"b\\\\c\\n\"");
+    }
+
+    #[test]
+    fn fenced_provider_output_is_unwrapped_to_its_payload() {
+        // TASK-0106 measured this against the real CLI: every run wrapped the
+        // proposal in a ```json block despite the prompt forbidding markdown.
+        assert_eq!(json_payload("```json\n{\"a\":1}\n```"), "{\"a\":1}");
+        assert_eq!(json_payload("```\n{\"a\":1}\n```"), "{\"a\":1}");
+        assert_eq!(json_payload("  ```json\n{\"a\":1}\n```  "), "{\"a\":1}");
+        assert_eq!(json_payload("{\"a\":1}"), "{\"a\":1}");
+    }
+
+    #[test]
+    fn payload_extraction_never_scans_past_surrounding_prose() {
+        // §11 keeps provider output untrusted. Unwrapping one well-formed
+        // fence locates a payload; hunting for a brace somewhere inside prose
+        // would let a model hide a second document behind arbitrary text.
+        for hostile in [
+            "here you go:\n```json\n{\"a\":1}\n```",
+            "{\"a\":1} trailing prose",
+            "```json\n{\"a\":1}\n``` and then more",
+        ] {
+            assert_eq!(
+                json_payload(hostile),
+                hostile.trim(),
+                "only a cleanly fenced document is unwrapped"
+            );
+        }
+    }
+
+    #[test]
+    fn proposal_prompt_states_the_baseline_and_the_gate_rule() {
+        // Without the baseline the planner cannot know which risk classes
+        // need a `required_gate`, so it proposes into a certain V5 rejection
+        // (TASK-0106 D2).
+        let prompt = decomposition_prompt(&DecompositionRequest {
+            parent_task_ref: "TASK-0107".to_owned(),
+            base_plan_revision: 0,
+            acceptance_criteria_refs: vec![],
+            scope_bound: ScopeBound::new(vec!["repo:src".to_owned()]).expect("bound"),
+            evidence_refs: vec![],
+            depth_remaining: 3,
+            baseline_risk: RiskClass::Medium,
+            budget_remaining: PlanningBudget {
+                calls_remaining: 4,
+                input_tokens_remaining: 1_000,
+            },
+        });
+        assert!(
+            prompt.contains("\"baseline_risk\":\"medium\""),
+            "the planner must receive the baseline it is judged against"
+        );
+        assert!(
+            prompt.contains("required_gate"),
+            "the prompt must state when a gate is mandatory"
+        );
     }
 
     #[test]
