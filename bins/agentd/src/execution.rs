@@ -84,12 +84,21 @@ const PROVIDER_LAUNCH_REQUESTER: &str = "agent-runtime";
 const PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED: &str =
     "provider_authentication_unsupported_in_mandatory_confinement";
 
-pub(crate) fn production_runner_backend(
-    support_read: Vec<PathBuf>,
-    support_write: Vec<PathBuf>,
-) -> Result<Arc<dyn IsolationBackend>, String> {
-    #[cfg(target_os = "macos")]
-    {
+/// The production isolation backend and the provider-authentication
+/// confinement verdict are two halves of one platform decision, so they are
+/// defined together rather than at two independent `cfg` sites. A platform
+/// cannot gain a mandatory-confinement backend without stating, in the same
+/// edit, whether the provider's own authentication mechanism can operate
+/// inside that confinement.
+#[cfg(target_os = "macos")]
+mod production_platform {
+    use super::{IsolationBackend, PathBuf};
+    use std::sync::Arc;
+
+    pub(super) fn runner_backend(
+        support_read: Vec<PathBuf>,
+        support_write: Vec<PathBuf>,
+    ) -> Result<Arc<dyn IsolationBackend>, String> {
         Ok(Arc::new(
             runner_macos_seatbelt::MacOsSeatbeltRunner::with_support_roots(
                 support_read,
@@ -98,11 +107,40 @@ pub(crate) fn production_runner_backend(
         ))
     }
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (support_read, support_write);
+    /// TASK-0112 measured the provider-owned macOS authentication path as
+    /// requiring Keychain authority G6 deliberately withholds, so TASK-0114
+    /// refuses an otherwise valid authenticated CLI before provider work.
+    pub(super) const AUTH_CONFINEMENT_REFUSAL: Option<&str> = Some(
+        "authenticated Claude CLI state is host-valid, but TASK-0112 measured that the current \
+         provider-owned macOS authentication path requires Keychain authority intentionally \
+         unavailable to the mandatory G6 sandbox",
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+mod production_platform {
+    use super::{IsolationBackend, PathBuf};
+    use std::sync::Arc;
+
+    pub(super) fn runner_backend(
+        _support_read: Vec<PathBuf>,
+        _support_write: Vec<PathBuf>,
+    ) -> Result<Arc<dyn IsolationBackend>, String> {
         Ok(Arc::new(runner_native::NativeRunner))
     }
+
+    /// No mandatory-confinement backend exists here: `NativeRunner` reports no
+    /// enforcement axes, so the shared runner verifier refuses a confined
+    /// launch on its own axis before any provider work. There is no separate
+    /// provider-authentication verdict to state until that changes.
+    pub(super) const AUTH_CONFINEMENT_REFUSAL: Option<&str> = None;
+}
+
+pub(crate) fn production_runner_backend(
+    support_read: Vec<PathBuf>,
+    support_write: Vec<PathBuf>,
+) -> Result<Arc<dyn IsolationBackend>, String> {
+    production_platform::runner_backend(support_read, support_write)
 }
 
 /// Bound for server-local path inputs on the wire (repository paths).
@@ -432,12 +470,9 @@ pub(crate) fn prepare_provider_launch(
         if !authentication.state.permits_launch() {
             return Err(authentication.refusal());
         }
-        #[cfg(target_os = "macos")]
-        return Err(format!(
-            "{PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED}: authenticated Claude CLI state is host-valid, \
-             but TASK-0112 measured that the current provider-owned macOS authentication path \
-             requires Keychain authority intentionally unavailable to the mandatory G6 sandbox"
-        ));
+        if let Some(reason) = production_platform::AUTH_CONFINEMENT_REFUSAL {
+            return Err(format!("{PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED}: {reason}"));
+        }
     }
 
     let mut security = G6SecurityService::open(db_path, app_services::SystemClock)
@@ -2390,7 +2425,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "real provider: needs RUNLITH_CLAUDE_SMOKE=1 plus authenticated claude CLI"]
-    fn real_claude_runs_through_production_g6_isolation() {
+    fn real_claude_refuses_before_provider_work_under_production_g6_confinement() {
         if std::env::var("RUNLITH_CLAUDE_SMOKE").as_deref() != Ok("1") {
             eprintln!("smoke skipped: set RUNLITH_CLAUDE_SMOKE=1");
             return;
