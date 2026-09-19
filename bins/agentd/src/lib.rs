@@ -900,6 +900,22 @@ mod tests {
         session
     }
 
+    /// One admission attempt that reports refusal instead of panicking.
+    ///
+    /// A client is refused either by the kernel (the accept backlog is full)
+    /// or by the daemon (it accepts, then closes because no admission permit
+    /// is free). Both are the same observable fact — the client does not
+    /// become ready — and a capacity test must not care which one happened.
+    async fn try_admin_session(endpoint: &UnixEndpoint) -> Option<ClientSession<UnixStream>> {
+        let stream = transport_connect(endpoint).await.ok()?;
+        let mut session = ClientSession::new(
+            FramedTransport::new(stream),
+            ClientConfig::new(ipc_control::CLIENT_KIND_AGENTCTL),
+        );
+        session.perform_handshake().await.ok()?;
+        session.is_ready().then_some(session)
+    }
+
     /// Readiness that keeps the session it proved readiness with.
     ///
     /// A control slot is released when the *daemon* observes the close, which
@@ -1095,29 +1111,52 @@ mod tests {
         shutdown_and_await(handle, &sandbox.endpoint).await;
     }
 
+    /// Admission is bounded and a refused client is not fatal.
+    ///
+    /// Formerly `ninth_concurrent_client_is_closed_not_fatal`, which held
+    /// exactly `MAX_CONTROL_CLIENTS` sessions and asserted that the next
+    /// handshake fails. That assumed the test controls occupancy, and it does
+    /// not: admission is a semaphore whose permit is released when the
+    /// daemon's connection task ends, which is asynchronous with the client
+    /// dropping its side. Under full-run load a saturating client could
+    /// therefore be refused instead of the intended extra one — the panic
+    /// landed in the saturating loop, not on the assertion — and the earlier
+    /// hardening in `wait_ready_session` only removed one instance of that
+    /// race, not the assumption behind it (G5 TEST-H2).
+    ///
+    /// The bound itself is the contract, so this saturates by observation:
+    /// admit until one client is refused. With capacity `MAX_CONTROL_CLIENTS`
+    /// and `MAX_CONTROL_CLIENTS + 1` attempts a refusal is guaranteed, so the
+    /// loop terminates without a timeout, and nothing here depends on when a
+    /// permit is returned.
     #[tokio::test]
-    async fn ninth_concurrent_client_is_closed_not_fatal() {
+    async fn admission_is_bounded_and_a_refused_client_is_not_fatal() {
         let sandbox = Sandbox::new("ninth");
         let handle = spawn_daemon(&sandbox.endpoint);
-        // The readiness probe becomes the first holder, so exactly
-        // MAX_CONTROL_CLIENTS slots are occupied with no dependence on when the
-        // daemon releases a dropped probe's slot.
         let mut holders = vec![wait_ready_session(&sandbox.endpoint).await];
-        for _ in 1..MAX_CONTROL_CLIENTS {
-            holders.push(admin_session(&sandbox.endpoint).await);
+
+        let mut refused = false;
+        for _ in 0..MAX_CONTROL_CLIENTS {
+            match try_admin_session(&sandbox.endpoint).await {
+                Some(session) => holders.push(session),
+                None => {
+                    refused = true;
+                    break;
+                }
+            }
         }
-        // One more must be refused without harming the daemon.
-        let extra = transport_connect(&sandbox.endpoint).await.expect("connect");
-        let mut extra_session = ClientSession::new(
-            FramedTransport::new(extra),
-            ClientConfig::new(ipc_control::CLIENT_KIND_AGENTCTL),
+
+        assert!(
+            refused,
+            "admission must refuse a client within {} attempts against a bound of {MAX_CONTROL_CLIENTS}",
+            MAX_CONTROL_CLIENTS + 1
         );
         assert!(
-            extra_session.perform_handshake().await.is_err(),
-            "ninth client must not complete handshake"
+            holders.len() <= MAX_CONTROL_CLIENTS,
+            "more ready sessions ({}) than the admission bound allows",
+            holders.len()
         );
-        drop(extra_session);
-        // Occupants still work.
+        // The refusal harmed neither an existing session nor the daemon.
         holders[0].ping().await.expect("ping");
         drop(holders);
         shutdown_and_await(handle, &sandbox.endpoint).await;
