@@ -804,11 +804,31 @@ impl<C: Clock> PlanningService<C> {
         });
         resumed_policy.risk_decision_id = Some(id.clone());
 
-        let base = self.prepare_approved_proposal(
+        let base = match self.prepare_approved_proposal(
             &record.plan_branch_id,
             &approved.changeset.source_evidence_refs,
             &resumed_policy,
-        )?;
+            record.precondition.plan_head,
+        ) {
+            Ok(base) => base,
+            Err(PlanningServiceError::Storage(StorageError::PlanStale { .. })) => {
+                return match self.store.supersede_unusable_human_decision(id) {
+                    Ok(_) => Err(PlanningServiceError::Storage(
+                        StorageError::HumanDecisionStale {
+                            request_id: id.as_str().to_owned(),
+                            reason: "V9 RESUME decision is stale".to_owned(),
+                        },
+                    )),
+                    Err(StorageError::HumanDecisionState { request_id, state }) => {
+                        Err(PlanningServiceError::Storage(
+                            StorageError::HumanDecisionState { request_id, state },
+                        ))
+                    }
+                    Err(error) => Err(error.into()),
+                };
+            }
+            Err(error) => return Err(error),
+        };
         let run = base.run.clone();
         let outcome = self.validate_persist_proposal(
             &record.plan_branch_id,
@@ -844,19 +864,21 @@ impl<C: Clock> PlanningService<C> {
         branch: &PlanBranchId,
         triggering_evidence: &[EvidenceRef],
         policy: &PlanningPolicyContext,
+        approved_plan_head: u64,
     ) -> Result<ProposalBase, PlanningServiceError> {
         let trigger_key = trigger_key(triggering_evidence)?;
         let (head, graph) = self.load_base(branch)?;
         let lineage = self.store.get_plan_lineage(branch)?;
         let remaining_depth = remaining_depth(&graph);
         let state = self.guardrail_snapshot(branch, &trigger_key, &lineage)?;
-        let (snapshot, run) = self.start_approved_control_run(
+        let (snapshot, run) = self.start_control_run_with_mode(
             branch,
             triggering_evidence,
             policy,
             head,
             &lineage,
             &trigger_key,
+            Some(approved_plan_head),
         )?;
         Ok(ProposalBase {
             head,
@@ -970,27 +992,7 @@ impl<C: Clock> PlanningService<C> {
             head,
             durable_lineage,
             trigger_key,
-            false,
-        )
-    }
-
-    fn start_approved_control_run(
-        &mut self,
-        branch: &PlanBranchId,
-        triggering_evidence: &[EvidenceRef],
-        policy: &PlanningPolicyContext,
-        head: u64,
-        durable_lineage: &[PlanRevisionLineageRecord],
-        trigger_key: &str,
-    ) -> Result<(PlanningInputSnapshot, PlanningRunRecord), PlanningServiceError> {
-        self.start_control_run_with_mode(
-            branch,
-            triggering_evidence,
-            policy,
-            head,
-            durable_lineage,
-            trigger_key,
-            true,
+            None,
         )
     }
 
@@ -1003,7 +1005,7 @@ impl<C: Clock> PlanningService<C> {
         head: u64,
         durable_lineage: &[PlanRevisionLineageRecord],
         trigger_key: &str,
-        join_identical_active: bool,
+        approved_plan_head: Option<u64>,
     ) -> Result<(PlanningInputSnapshot, PlanningRunRecord), PlanningServiceError> {
         let mut lineage_fingerprints = policy.lineage_fingerprints.clone();
         lineage_fingerprints.extend(
@@ -1026,10 +1028,11 @@ impl<C: Clock> PlanningService<C> {
             policy.risk_grant.clone(),
             policy.policy_fingerprint.clone(),
         )?;
-        let run = if join_identical_active {
+        let run = if let Some(approved_plan_head) = approved_plan_head {
             self.store.start_or_join_identical_planning_run(
                 &snapshot,
                 trigger_key,
+                approved_plan_head,
                 self.clock.now_millis(),
             )?
         } else {

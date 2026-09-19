@@ -985,6 +985,61 @@ fn superseded_planning_run_generation_cannot_publish_a_revision() {
 }
 
 #[test]
+fn stale_planning_run_cannot_replace_current_input_after_plan_head_moves() {
+    let db = TestDb::new("stale-planning-run-start");
+    let mut store = db.open();
+    seed_child_parent(&mut store);
+    let branch = PlanBranchId::new("branch-main").unwrap();
+    let first = changeset(0, "first revision", &[evidence("attempt-1")]);
+    commit_revision(
+        &mut store,
+        &first,
+        &revision(&branch, 1, &first),
+        &graph_v1(),
+        &lineage(),
+        &journal_evidence(1),
+    )
+    .unwrap();
+    assert!(store
+        .revision_has_current_planning_input(&branch, 1)
+        .unwrap());
+
+    let stale_evidence = vec![evidence("late-resume")];
+    let stale_snapshot = PlanningInputSnapshot::new(
+        branch.clone(),
+        "task-root".to_owned(),
+        1,
+        ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+        RiskClass::Low,
+        vec![],
+        stale_evidence.clone(),
+        vec![],
+        None,
+        "policy:abc123".to_owned(),
+    )
+    .unwrap();
+    let error = store
+        .start_or_join_identical_planning_run(
+            &stale_snapshot,
+            &planning_evidence_key(&stale_evidence),
+            0,
+            1_800_000_000_010,
+        )
+        .expect_err("an approved replay bound to the old head must not replace current input");
+    assert!(matches!(
+        error,
+        StorageError::PlanStale {
+            expected: 0,
+            found: 1,
+            ..
+        }
+    ));
+    assert!(store
+        .revision_has_current_planning_input(&branch, 1)
+        .unwrap());
+}
+
+#[test]
 fn canonical_task_authority_fence_rechecks_task_facts_inside_publication_transaction() {
     let db = TestDb::new("canonical-task-authority-fence");
     let mut store = db.open();
@@ -1174,6 +1229,9 @@ fn risk_decision_consumption_rolls_back_when_plan_commit_fails_then_consumes_on_
     let run = store
         .start_planning_run(&resumed_snapshot, &trigger_key, created_at - 1)
         .unwrap();
+    store
+        .validate_human_decision_current(&decision.id, created_at)
+        .expect("exact RESUME grant snapshot must not stale its own human decision");
     let lineage = PlanRevisionLineage {
         parent_task_ref: task_id.as_str().to_owned(),
         trigger_evidence_key: trigger_key,

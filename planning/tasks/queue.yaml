@@ -2884,3 +2884,31 @@ items:
     references:
       - docs/architecture/adr/ADR-0029-planner-evidence-resolution.md
       - docs/development/G7_PLANNER_REAL_PROVIDER_FINDINGS.md
+
+  - id: TASK-0113
+    gate: G7
+    title: V9 Concurrent RESUME Single-Winner Remediation
+    objective: >-
+      Fix the V9 RESUME race where concurrent consumers can stale or
+      supersede the same valid HumanDecision while replaying its exact
+      approved risk grant, and prevent stale replay from replacing the
+      current planning input after the plan head advances.
+    scope: >-
+      HumanDecision freshness for the exact RESUME grant transition,
+      approved-replay planning-run head fencing, typed loser semantics in
+      PlanningService, and focused storage/app-services regression coverage.
+      No provider, sandbox, policy, public-contract or architecture change.
+    exit_criteria_summary: >-
+      Concurrent RESUME has exactly one publisher/consumer; losers fail
+      closed with typed stale/state refusals; a legal decision-bound
+      grant-bearing transition does not stale its own HumanDecision; stale
+      replay cannot replace current planning input after plan-head movement;
+      storage-sqlite and app-services regressions are green.
+    depends_on:
+      - TASK-0110
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - adapters/storage-sqlite/src/human_decision_store.rs
+      - adapters/storage-sqlite/src/planning_control_store.rs
+      - crates/app-services/src/planning_service.rs
