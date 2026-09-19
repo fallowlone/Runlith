@@ -112,6 +112,7 @@ fn request(evidence: &str) -> DecompositionRequest {
         scope_bound: ScopeBound::new(vec!["caller:ignored".to_owned()]).unwrap(),
         evidence_refs: vec![EvidenceRef::new(evidence).unwrap()],
         depth_remaining: 4,
+        baseline_risk: RiskClass::Low,
         budget_remaining: PlanningBudget {
             calls_remaining: MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
             input_tokens_remaining: MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
@@ -126,6 +127,7 @@ fn replan_request(evidence: &str) -> ReplanRequest {
         triggering_evidence_refs: vec![EvidenceRef::new(evidence).unwrap()],
         scope_bound: ScopeBound::new(vec!["caller:ignored".to_owned()]).unwrap(),
         depth_remaining: 4,
+        baseline_risk: RiskClass::Low,
         budget_remaining: PlanningBudget {
             calls_remaining: MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
             input_tokens_remaining: MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
@@ -231,6 +233,7 @@ impl PlannerPort for DriftingPlanner {
             scope_bound: input.scope_bound,
             evidence_refs: input.triggering_evidence_refs,
             depth_remaining: input.depth_remaining,
+            baseline_risk: input.baseline_risk,
             budget_remaining: input.budget_remaining,
         })
     }

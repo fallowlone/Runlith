@@ -276,6 +276,7 @@ pub fn dispatch_control(
                 acceptance_criteria_refs: Vec::new(),
                 scope_bound: policy.scope_bound.clone(),
                 evidence_refs: vec![evidence],
+                baseline_risk: policy.baseline_risk,
                 depth_remaining: MAX_DECOMPOSITION_DEPTH,
                 budget_remaining: PlanningBudget {
                     calls_remaining: MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,

@@ -2086,6 +2086,7 @@ mod tests {
             scope_bound: scope.clone(),
             evidence_refs: vec![evidence],
             depth_remaining: plan_domain::MAX_DECOMPOSITION_DEPTH,
+            baseline_risk: plan_domain::RiskClass::Low,
             budget_remaining: plan_domain::PlanningBudget {
                 calls_remaining: plan_domain::MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
                 input_tokens_remaining: plan_domain::MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,

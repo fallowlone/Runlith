@@ -486,7 +486,14 @@ provider cancellation race semantics
 streaming output contract
 provider tool-call normalization
 provider usage/cost evidence contract
+planner evidence-reference resolution (may a planner propose against refs
+  it cannot resolve? TASK-0106 D5)
+planner permission-mode vs provider compliance (TASK-0106 D5)
+per-call planner input bound vs provider overhead (TASK-0106 D3)
 ```
+
+The three planner items are measured rather than hypothesized; the evidence
+is in [`../development/G7_PLANNER_REAL_PROVIDER_FINDINGS.md`](../development/G7_PLANNER_REAL_PROVIDER_FINDINGS.md).
 
 ## 17. Non-goals
 
