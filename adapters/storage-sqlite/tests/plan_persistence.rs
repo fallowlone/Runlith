@@ -1008,7 +1008,7 @@ fn stale_planning_run_cannot_replace_current_input_after_plan_head_moves() {
     let stale_snapshot = PlanningInputSnapshot::new(
         branch.clone(),
         "task-root".to_owned(),
-        0,
+        1,
         ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
         RiskClass::Low,
         vec![],
@@ -1022,9 +1022,10 @@ fn stale_planning_run_cannot_replace_current_input_after_plan_head_moves() {
         .start_or_join_identical_planning_run(
             &stale_snapshot,
             &planning_evidence_key(&stale_evidence),
+            0,
             1_800_000_000_010,
         )
-        .expect_err("a stale run must not replace current planning input");
+        .expect_err("an approved replay bound to the old head must not replace current input");
     assert!(matches!(
         error,
         StorageError::PlanStale {
