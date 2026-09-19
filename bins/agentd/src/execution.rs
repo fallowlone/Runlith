@@ -415,6 +415,23 @@ pub(crate) fn prepare_provider_launch(
     support_write: Vec<PathBuf>,
     environment_pairs: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 ) -> Result<PreparedProviderLaunch, String> {
+    // providers.md §9a: authentication is verified before the launch, never
+    // discovered during it. Only a provider detection recognizes as the real,
+    // compatible CLI is asked: a fixture or an unrecognized binary has not
+    // claimed to be the working provider and owns no credential, and §9
+    // already answers those. Scope limit: this observes the operator's state
+    // on the host, not a confined child's ability to reach the credential
+    // mechanism from inside an isolation profile.
+    let provider_executable = std::ffi::OsStr::new(launch.executable.as_str());
+    if provider_claude::detect(provider_executable).status
+        == provider_claude::ProviderAvailability::Available
+    {
+        let authentication = provider_claude::probe_authentication(provider_executable);
+        if !authentication.state.permits_launch() {
+            return Err(authentication.refusal());
+        }
+    }
+
     let mut security = G6SecurityService::open(db_path, app_services::SystemClock)
         .map_err(|error| format!("G6 security boundary refused provider launch: {error}"))?;
     let authorization = security
