@@ -211,7 +211,7 @@ impl SqliteStore {
         trigger_evidence_key: &str,
         created_at_ms: u64,
     ) -> StorageResult<PlanningRunRecord> {
-        self.start_planning_run_inner(snapshot, trigger_evidence_key, created_at_ms, false)
+        self.start_planning_run_inner(snapshot, trigger_evidence_key, created_at_ms, None)
     }
 
     /// Claims the current planning generation for immutable approved-proposal
@@ -222,9 +222,15 @@ impl SqliteStore {
         &mut self,
         snapshot: &PlanningInputSnapshot,
         trigger_evidence_key: &str,
+        approved_plan_head: u64,
         created_at_ms: u64,
     ) -> StorageResult<PlanningRunRecord> {
-        self.start_planning_run_inner(snapshot, trigger_evidence_key, created_at_ms, true)
+        self.start_planning_run_inner(
+            snapshot,
+            trigger_evidence_key,
+            created_at_ms,
+            Some(approved_plan_head),
+        )
     }
 
     fn start_planning_run_inner(
@@ -232,13 +238,39 @@ impl SqliteStore {
         snapshot: &PlanningInputSnapshot,
         trigger_evidence_key: &str,
         created_at_ms: u64,
-        join_identical_active: bool,
+        approved_plan_head: Option<u64>,
     ) -> StorageResult<PlanningRunRecord> {
         require_evidence_key(trigger_evidence_key)?;
         require_evidence_key(&snapshot.input_fingerprint)?;
         let tx = self
             .connection_mut()
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(approved_plan_head) = approved_plan_head {
+            let current_head: Option<i64> = tx
+                .query_row(
+                    "SELECT head_revision FROM plan_branches WHERE plan_branch_id = ?1",
+                    params![snapshot.plan_branch_id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let found_head = current_head
+                .map(|value| nonnegative_u64(value, "plan head"))
+                .transpose()?
+                .unwrap_or(0);
+            if found_head != approved_plan_head {
+                return Err(StorageError::PlanStale {
+                    branch: snapshot.plan_branch_id.as_str().to_owned(),
+                    expected: approved_plan_head,
+                    found: found_head,
+                });
+            }
+            if snapshot.expected_plan_head != approved_plan_head {
+                return Err(StorageError::ConstraintViolation(
+                    "approved replay snapshot head does not match its bound HumanDecision plan head"
+                        .to_owned(),
+                ));
+            }
+        }
         persist_snapshot(&tx, snapshot, created_at_ms)?;
 
         tx.execute(
@@ -254,7 +286,7 @@ impl SqliteStore {
             ],
         )?;
 
-        if join_identical_active {
+        if approved_plan_head.is_some() {
             if let Some(current) = load_current_run(&tx, &snapshot.plan_branch_id)? {
                 if current.state == PlanningRunState::Active
                     && current.snapshot_id == snapshot.id

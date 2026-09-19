@@ -988,6 +988,45 @@ fn same_planning_input_except_risk_grant(
         && left.candidate_task_refs == right.candidate_task_refs
 }
 
+fn is_exact_resume_input_transition(
+    connection: &Connection,
+    record: &HumanDecisionRequest,
+    current_snapshot_id: &str,
+    current_fingerprint: &str,
+) -> bool {
+    if record.status != HumanDecisionStatus::Resolved
+        || record.reason != HumanDecisionReason::RiskEscalation
+        || record.selected != Some(HumanContinuation::Resume)
+    {
+        return false;
+    }
+    let (Some(proposal_hash), Some(expires_at_ms)) =
+        (record.proposal_hash.as_ref(), record.expires_at_ms)
+    else {
+        return false;
+    };
+    let (Ok(bound), Ok(current)) = (
+        load_planning_input_binding(
+            connection,
+            record.precondition.planning_input_snapshot_id.as_str(),
+        ),
+        load_planning_input_binding(connection, current_snapshot_id),
+    ) else {
+        return false;
+    };
+
+    bound.input_fingerprint == record.precondition.planning_input_fingerprint
+        && current.input_fingerprint == current_fingerprint
+        && same_planning_input_except_risk_grant(&bound, &current)
+        && bound.risk_grant.is_none()
+        && current.risk_grant
+            == Some(PlanningRiskGrantBinding {
+                proposal_hash: proposal_hash.clone(),
+                expires_at_ms,
+                consumed: false,
+            })
+}
+
 fn load_snapshot_values(
     connection: &Connection,
     table: &str,
@@ -1181,7 +1220,12 @@ fn validate_record_current(
             snapshot == record.precondition.planning_input_snapshot_id.as_str()
                 && fingerprint == &record.precondition.planning_input_fingerprint
         });
-    if !exact {
+    let exact_resume_transition = current_input
+        .as_ref()
+        .is_some_and(|(snapshot, fingerprint)| {
+            is_exact_resume_input_transition(connection, record, snapshot, fingerprint)
+        });
+    if !exact && !exact_resume_transition {
         let reason = current_input
             .and_then(|(snapshot, _)| current_snapshot_scope_risk(connection, &snapshot).ok())
             .map(|(scope, risk, policy)| {
