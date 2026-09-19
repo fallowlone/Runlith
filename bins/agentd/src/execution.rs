@@ -84,12 +84,57 @@ const PROVIDER_LAUNCH_REQUESTER: &str = "agent-runtime";
 const PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED: &str =
     "provider_authentication_unsupported_in_mandatory_confinement";
 
-pub(crate) fn production_runner_backend(
-    support_read: Vec<PathBuf>,
-    support_write: Vec<PathBuf>,
-) -> Result<Arc<dyn IsolationBackend>, String> {
-    #[cfg(target_os = "macos")]
-    {
+/// What this platform's production isolation backend implies for the
+/// provider's own authentication mechanism.
+///
+/// Every platform build constructs exactly one of these, so the remaining
+/// variants are necessarily unconstructed in that build.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+enum ConfinementAuthVerdict {
+    /// No mandatory confinement is installed here. The shared runner verifier
+    /// refuses a confined launch on its own axis before any provider work, so
+    /// there is no separate authentication question to answer.
+    NoMandatoryConfinement,
+    /// Measured: the provider can authenticate from inside this platform's
+    /// confinement. No platform reports this today; the variant exists so a
+    /// confining platform must choose it deliberately rather than inherit
+    /// silence.
+    Compatible,
+    /// Measured: the provider's mechanism needs authority the confinement
+    /// withholds, so the launch is refused before any provider work.
+    Unsupported(&'static str),
+}
+
+/// The production isolation backend and the provider-authentication verdict
+/// are two halves of one platform decision, so they are defined together
+/// rather than at two independent `cfg` sites. A newly added `cfg` arm cannot
+/// omit the verdict, because `prepare_provider_launch` reads it unconditionally.
+///
+/// Co-location is a review aid, not an enforced coupling: an author could
+/// still make an existing arm return a confining backend while leaving its
+/// verdict untouched, and a backend could start reporting enforcement axes
+/// without this module changing at all. Those two paths are covered at test
+/// time by `production_confinement_and_provider_auth_verdict_stay_paired`,
+/// which checks the verdict against the backend's *reported axes* rather than
+/// against the shape of the `cfg`.
+///
+/// What that guard does not prove: it compares presence of confinement against
+/// presence of a verdict, never the verdict's continued truth. A verdict that
+/// goes stale — a Seatbelt profile later permitting the authentication path
+/// while the reported axes stay unchanged — keeps it green. The verdict is a
+/// hand-maintained TASK-0112 measurement, and nothing here re-measures it.
+/// A backend selected at runtime rather than by `cfg` would also be measured
+/// on the test host, which need not match production.
+#[cfg(target_os = "macos")]
+mod production_platform {
+    use super::{ConfinementAuthVerdict, IsolationBackend, PathBuf};
+    use std::sync::Arc;
+
+    pub(super) fn runner_backend(
+        support_read: Vec<PathBuf>,
+        support_write: Vec<PathBuf>,
+    ) -> Result<Arc<dyn IsolationBackend>, String> {
         Ok(Arc::new(
             runner_macos_seatbelt::MacOsSeatbeltRunner::with_support_roots(
                 support_read,
@@ -98,11 +143,41 @@ pub(crate) fn production_runner_backend(
         ))
     }
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (support_read, support_write);
+    /// TASK-0112 measured the provider-owned macOS authentication path as
+    /// requiring Keychain authority G6 deliberately withholds, so TASK-0114
+    /// refuses an otherwise valid authenticated CLI before provider work.
+    pub(super) const AUTH_CONFINEMENT_VERDICT: ConfinementAuthVerdict =
+        ConfinementAuthVerdict::Unsupported(
+            "authenticated Claude CLI state is host-valid, but TASK-0112 measured that the \
+             current provider-owned macOS authentication path requires Keychain authority \
+             intentionally unavailable to the mandatory G6 sandbox",
+        );
+}
+
+#[cfg(not(target_os = "macos"))]
+mod production_platform {
+    use super::{ConfinementAuthVerdict, IsolationBackend, PathBuf};
+    use std::sync::Arc;
+
+    pub(super) fn runner_backend(
+        _support_read: Vec<PathBuf>,
+        _support_write: Vec<PathBuf>,
+    ) -> Result<Arc<dyn IsolationBackend>, String> {
         Ok(Arc::new(runner_native::NativeRunner))
     }
+
+    /// `NativeRunner` reports no enforcement axes, so the shared runner
+    /// verifier refuses a confined launch on its own axis before any provider
+    /// work and no separate authentication verdict applies.
+    pub(super) const AUTH_CONFINEMENT_VERDICT: ConfinementAuthVerdict =
+        ConfinementAuthVerdict::NoMandatoryConfinement;
+}
+
+pub(crate) fn production_runner_backend(
+    support_read: Vec<PathBuf>,
+    support_write: Vec<PathBuf>,
+) -> Result<Arc<dyn IsolationBackend>, String> {
+    production_platform::runner_backend(support_read, support_write)
 }
 
 /// Bound for server-local path inputs on the wire (repository paths).
@@ -432,12 +507,11 @@ pub(crate) fn prepare_provider_launch(
         if !authentication.state.permits_launch() {
             return Err(authentication.refusal());
         }
-        #[cfg(target_os = "macos")]
-        return Err(format!(
-            "{PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED}: authenticated Claude CLI state is host-valid, \
-             but TASK-0112 measured that the current provider-owned macOS authentication path \
-             requires Keychain authority intentionally unavailable to the mandatory G6 sandbox"
-        ));
+        if let ConfinementAuthVerdict::Unsupported(reason) =
+            production_platform::AUTH_CONFINEMENT_VERDICT
+        {
+            return Err(format!("{PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED}: {reason}"));
+        }
     }
 
     let mut security = G6SecurityService::open(db_path, app_services::SystemClock)
@@ -2339,6 +2413,48 @@ mod tests {
         );
     }
 
+    /// Drift guard for the pairing documented on `production_platform`. The
+    /// verdict is checked against what the production backend actually
+    /// reports, not against the shape of the `cfg`, so a platform that gains
+    /// mandatory confinement without choosing a verdict fails here even when
+    /// it reuses an existing `cfg` arm or changes only the backend adapter.
+    #[test]
+    fn production_confinement_and_provider_auth_verdict_stay_paired() {
+        let backend =
+            production_runner_backend(Vec::new(), Vec::new()).expect("production backend");
+        let plan = runner::IsolationPlan::compile(
+            &EffectiveCapabilities::new(vec![Capability::process("/usr/bin/true").unwrap()]),
+            "/tmp",
+            ScopeId::new("/usr/bin/true").unwrap(),
+            IsolationRequirements::new(true, true, true),
+            ChildEnvironment::from_explicit([(
+                std::ffi::OsString::from("PATH"),
+                std::ffi::OsString::from("/usr/bin:/bin"),
+            )])
+            .expect("child environment"),
+        )
+        .expect("isolation plan");
+        let enforces_confinement = !backend
+            .enforce(&plan)
+            .expect("enforcement report")
+            .enforced()
+            .is_empty();
+
+        match production_platform::AUTH_CONFINEMENT_VERDICT {
+            ConfinementAuthVerdict::NoMandatoryConfinement => assert!(
+                !enforces_confinement,
+                "this platform's production backend enforces mandatory confinement, so it must \
+                 state whether provider authentication can operate inside it instead of \
+                 inheriting NoMandatoryConfinement"
+            ),
+            ConfinementAuthVerdict::Compatible | ConfinementAuthVerdict::Unsupported(_) => assert!(
+                enforces_confinement,
+                "a provider-authentication confinement verdict is stated for a platform whose \
+                 production backend enforces no axes, so the verdict could never apply"
+            ),
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn authenticated_real_like_claude_refuses_before_provider_work() {
@@ -2390,7 +2506,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "real provider: needs RUNLITH_CLAUDE_SMOKE=1 plus authenticated claude CLI"]
-    fn real_claude_runs_through_production_g6_isolation() {
+    fn real_claude_refuses_before_provider_work_under_production_g6_confinement() {
         if std::env::var("RUNLITH_CLAUDE_SMOKE").as_deref() != Ok("1") {
             eprintln!("smoke skipped: set RUNLITH_CLAUDE_SMOKE=1");
             return;
