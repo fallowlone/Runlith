@@ -3112,3 +3112,82 @@ items:
       - docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md
       - crates/app-services/src/planning_service.rs
       - adapters/storage-sqlite/src/planning_control_store.rs
+
+  - id: TASK-0117
+    gate: G7
+    title: Provider Auth Confinement Preflight Portability and Honest Smoke Naming
+    objective: >-
+      Remove the silent platform assumption in the TASK-0114 provider
+      authentication preflight, and stop the production real-provider smoke
+      from carrying a name that asserts the opposite of what it verifies.
+    scope: >-
+      The shared agentd provider-launch preflight and its own test module in
+      bins/agentd/src/execution.rs. Bind the confinement-auth decision to the
+      same platform selection that chooses the production isolation backend,
+      and add platform-neutral coverage that fails when a new confining
+      backend is added without answering the provider-auth question. Rename
+      the inverted smoke to state its actual assertion. No Seatbelt widening,
+      no credential brokering, no scheduler/port contract change, no ADR
+      change, and no change to the refusal behaviour itself.
+    exit_criteria_summary: >-
+      The confinement refusal and the production isolation backend are
+      selected by one paired platform decision rather than two independent
+      cfg sites; a platform-neutral test fails if a platform enforces
+      mandatory confinement without a stated provider-auth compatibility
+      answer; the real-provider smoke name matches its assertion; existing
+      TASK-0114 refusal behaviour, G6 isolation and provider fixture paths
+      remain green.
+    outcome: >-
+      ACCEPTED after one REQUEST_CHANGES round. The production isolation
+      backend and the provider-auth verdict now live in one cfg-selected
+      production_platform module in bins/agentd/src/execution.rs, and the
+      preflight call site is platform-neutral, which also stops
+      PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED from becoming dead code on
+      non-macOS builds. The verdict is a three-state ConfinementAuthVerdict
+      (NoMandatoryConfinement / Compatible / Unsupported) rather than an
+      Option, so a confining platform must choose between compatible and
+      unsupported instead of inheriting an absent answer that would permit the
+      launch. The inverted keeper is renamed to
+      real_claude_refuses_before_provider_work_under_production_g6_confinement
+      so its name states the assertion it makes. TASK-0114 refusal behaviour
+      is byte-identical on macOS and unchanged elsewhere.
+      First submission was rejected by independent review: it promised
+      platform-neutral drift coverage in scope and exit criteria, shipped none,
+      and recorded ACCEPTED anyway, and its module doc claimed a drift
+      guarantee the type system does not provide. Both are fixed here.
+      production_confinement_and_provider_auth_verdict_stay_paired asserts the
+      stated verdict against the backend's reported EnforcementAxes rather than
+      against the shape of the cfg, so it also catches a confining backend
+      introduced without editing this module. Its RED state was demonstrated by
+      temporarily setting the macOS verdict to NoMandatoryConfinement, which
+      failed with the intended message before being reverted. The module doc
+      now states co-location is a review aid, not an enforced coupling, and
+      names the test as the actual guard. docs/architecture/runners.md section
+      6 records the invariant so it is discoverable outside the source.
+      Known limitations carried forward, not fixed here: no executable evidence
+      exists that a real provider can complete work under production G6
+      confinement, because TASK-0114 refuses that configuration by design, so
+      the success path stays uncovered until confinement-compatible provider
+      authentication exists; and non-macOS runtime behaviour remains verified
+      only statically, because this host is macOS and cross-checking the
+      non-macOS arm fails in the libsqlite3-sys C cross-build for reasons
+      unrelated to this change. A Linux or Windows CI job would settle it.
+      Verification: cargo test -p agentd (71 passed, 1 ignored), cargo test -p
+      runner -p runner-macos-seatbelt -p runner-native -p provider-claude -p
+      product-version (135 passed, 1 ignored), cargo clippy --workspace
+      --all-targets -D warnings clean, cargo fmt --check clean.
+      completed_through remains TASK-0115 because TASK-0116 (G7-BLOCKER-05 /
+      F-07) is still open; product identity advances to TASK-0117 and G7
+      remains IN_PROGRESS. Historical G6/G7 audit records citing the old test
+      name are left unedited as dated run logs; the one live reproduction
+      recipe in the TASK-0112 diagnosis was updated to state that TASK-0114
+      made that receipt unreproducible.
+    depends_on:
+      - TASK-0114
+    blocked_by: []
+    references:
+      - docs/development/G7_TASK_0112_PROVIDER_AUTH_DIAGNOSIS.md
+      - docs/architecture/providers.md
+      - docs/architecture/runners.md
+      - bins/agentd/src/execution.rs
+      - crates/runner/src/lib.rs
