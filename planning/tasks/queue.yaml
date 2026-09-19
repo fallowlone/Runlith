@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0114
+completed_through: TASK-0115
 current_gate: G7
-gate_status: IN_PROGRESS  # TASK-0087 ACCEPTED by TASK-0099 after three independent audits by three different systems; G7 closure is a separate owner decision and still needs its OS-level verification envelope settled
+gate_status: IN_PROGRESS  # TASK-0115 final re-audit: G7_REMEDIATION_REQUIRED due G7-BLOCKER-05 / F-07 accepted-ADR conflict in assess_atomicity durability semantics
 
 items:
   - id: TASK-0012
@@ -3037,3 +3037,78 @@ items:
       - docs/architecture/runners.md
       - bins/agentd/src/execution.rs
       - bins/agentd/src/planning.rs
+
+  - id: TASK-0115
+    gate: G7
+    title: Final Independent G7 Closure Re-Audit
+    objective: >-
+      Re-audit the complete accepted G7 contract after TASK-0114 from a fresh
+      context and return exactly G7_CLOSED or G7_REMEDIATION_REQUIRED without
+      implementing repairs.
+    scope: >-
+      Audit only: re-test the four original G7 blockers, all accepted planning
+      and HumanDecision contracts, shipped IPC/agentctl reachability, planning
+      input/head/run fencing, Task authority and materialization, L3/L4,
+      malformed/adversarial output, restart durability, G6 isolation regression
+      and both real-provider evidence paths. No production behavior changes.
+    exit_criteria_summary: >-
+      A fresh closure report records one hard G7 verdict backed by current code,
+      executable tests and real-provider evidence; any blocker is assigned to a
+      separate remediation task before another closure audit.
+    outcome: >-
+      G7_REMEDIATION_REQUIRED. The four original blockers are independently
+      re-verified closed: planner node identity is bounded by canonical Task
+      authority; shipped planning/continuation and accepted-Plan execution
+      admission are reachable; stale/expired/failed HumanDecision continuations
+      recover through durable supersession; and V9 RESUME rehydrates the exact
+      approved proposal with one concurrent publisher/consumer and no planner
+      replay. Full workspace tests, clippy -D warnings, fmt and diff-check are
+      green. A live trusted-host Claude planner produced a durable revision with
+      measured spend, while the production macOS Claude smoke proved the
+      expected fail-closed confinement-auth refusal without widening G6.
+      Closure is blocked by G7-BLOCKER-05 / historical F-07: ADR-0027 says
+      assess_atomicity performs zero durable writes, while ADR-0028 requires
+      durable accounting for every PlannerPort call and the implementation also
+      publishes the assessment PlanningInputSnapshot as current. The behavior
+      is fail-closed, but two Accepted ADRs prescribe incompatible semantics.
+      Remediation must be a separate task, followed by a fresh re-audit.
+    depends_on:
+      - TASK-0114
+    blocked_by: []
+    references:
+      - docs/development/G7_TASK_0115_FINAL_CLOSURE_REAUDIT.md
+      - docs/development/G7_CLOSURE_AUDIT.md
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md
+      - docs/architecture/adr/ADR-0029-planner-evidence-resolution.md
+      - crates/app-services/src/planning_service.rs
+      - adapters/storage-sqlite/src/planning_control_store.rs
+
+  - id: TASK-0116
+    gate: G7
+    title: Atomicity Assessment Durability Contract Reconciliation
+    objective: >-
+      Remediate G7-BLOCKER-05 / historical F-07 by making the accepted
+      `assess_atomicity` durability semantics coherent across ADR-0027,
+      ADR-0028 and the implementation before another G7 closure re-audit.
+    scope: >-
+      Decide and record whether atomicity assessment may durably reserve/settle
+      PlannerPort spend and advance the branch current PlanningInputSnapshot;
+      make the smallest contract or implementation change required by that
+      decision and add focused executable coverage. No unrelated planning
+      behavior, provider-auth, G6 authority, IPC, schema, or G8 work.
+    exit_criteria_summary: >-
+      ADR-0027 and ADR-0028 prescribe one compatible assessment durability
+      model; executable coverage pins the chosen current-input/admission
+      semantics; existing planning, V9, G6 and workspace verification remains
+      green. The task makes no G7_CLOSED claim; a fresh independent closure
+      re-audit follows it.
+    depends_on:
+      - TASK-0115
+    blocked_by: []
+    references:
+      - docs/development/G7_TASK_0115_FINAL_CLOSURE_REAUDIT.md
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md
+      - crates/app-services/src/planning_service.rs
+      - adapters/storage-sqlite/src/planning_control_store.rs
