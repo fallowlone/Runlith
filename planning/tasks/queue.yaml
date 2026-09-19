@@ -2180,7 +2180,8 @@ items:
   - id: TASK-0096
     gate: G7
     title: G7 Materialization Proof-Method Guard
-    objective: Remediate F-NEW-01, raised by two independent audits: a proof
+    objective: >-
+      Remediate F-NEW-01, raised by two independent audits: a proof
       obligation the canonical Task cannot carry must refuse materialization
       instead of being silently downgraded to automated-test.
     scope: >-
