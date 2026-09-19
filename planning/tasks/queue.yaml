@@ -8,7 +8,7 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0105
+completed_through: TASK-0107
 current_gate: G7
 gate_status: IN_PROGRESS  # TASK-0087 ACCEPTED by TASK-0099 after three independent audits by three different systems; G7 closure is a separate owner decision and still needs its OS-level verification envelope settled
 
@@ -2633,3 +2633,150 @@ items:
     references:
       - bins/agentd/src/lib.rs
       - docs/development/G5_FINAL_CLOSURE_AUDIT.md
+
+  - id: TASK-0106
+    gate: G7
+    title: Real-Provider Planner Smoke
+    objective: Execute the G7 planning capability against the real Claude CLI
+      once, end to end, so the gate's own path has a real test.
+    scope: >-
+      One ignored, env-gated integration test. No production change.
+    exit_criteria_summary: >-
+      A test drives the real CLI through ClaudePlanner and PlanningService to
+      a durable plan revision, and what may make it pass is constrained so a
+      tolerated failure cannot be mistaken for a success.
+    outcome: >-
+      BUILT, and RED on first contact — which is its result, not its failure.
+      The chosen G7 closure envelope had named this test and never built it:
+      both the adapter contract suite and the claude_fixture harness in
+      planning_service.rs substitute a shell script for the CLI, so real CLI
+      -> provider parsing -> PlanChangeSet -> durable revision had never
+      executed. The harness was verified against a hand-built known-good
+      proposal before its verdict was trusted, reaching Accepted with durable
+      head 1, so a real-CLI failure is a statement about the provider path
+      rather than about the test. Three runs against the authenticated CLI
+      failed identically. The pass conditions are deliberately narrow after
+      TASK-0101: absence of a CLI, of availability or of authentication
+      returns early because those are absences of an environment rather than
+      results; quota, rate-limit, network and timeout pass through named;
+      everything else fails, including a proposal the validator refuses and a
+      budget the reported usage cannot fit. Findings D1 (fenced output), D2
+      (prompt withholds the baseline risk), D3 (per-call token bound) are
+      remediated or escalated by TASK-0107; D4 and D5 were found there too.
+      One orchestrator error is recorded rather than smoothed over: the first
+      contract-drift guard matched "malformed_output", which is not the
+      string the adapter emits, so the test reached the right verdict by the
+      wrong branch and reported drift as a non-environment reason until
+      fixed. Verification: one full workspace run at cargo exit 0 with 116
+      suites; clippy and fmt clean. Its post-merge run on main went red on a
+      pre-existing flake it did not cause, which became TASK-0108.
+    depends_on:
+      - TASK-0105
+    blocked_by: []
+    references:
+      - crates/app-services/tests/planner_real_provider_smoke.rs
+      - docs/development/G7_PLANNER_REAL_PROVIDER_FINDINGS.md
+
+  - id: TASK-0108
+    gate: G7
+    title: Entry-Race Refusal Mechanism
+    objective: Fix the app-services entry-atomicity flake by asserting the
+      contract the entry boundary guarantees instead of one of the two
+      mechanisms that deliver it.
+    scope: >-
+      The entry_atomicity race helper and its three callers. No production
+      behaviour change.
+    exit_criteria_summary: >-
+      The helper establishes exactly one admission and an honest refusal,
+      each race shape asserts the mechanisms it actually permits, and an A/B
+      against a reproducing control shows the flake gone.
+    outcome: >-
+      FIXED, and the long-unidentified app-services flake is now named. It
+      was seen once during the TASK-0104 post-merge with its test name never
+      captured; the TASK-0106 post-merge run caught it again as
+      concurrent_exact_duplicate_entry_is_honest. `enter` refuses a losing
+      racer two ways, chosen by interleaving: a loser reaching the atomic
+      admission loses there with a typed conflict, while a loser racing for
+      the same task can have its read-only readiness check land after the
+      winner's claim commits and return NotRunnable{Running} from the
+      short-circuit ahead of the identity preflight. Both mean not admitted
+      with zero mutations, which is all the boundary promises. split_race
+      accepted only the first, so it asserted an interleaving it does not
+      control — the same defect TASK-0105 fixed in the G5 IPC capacity test,
+      in a second suite, which is why it surfaced under the load of full
+      workspace runs and never in isolated ones. The helper now returns a
+      typed LoserRefusal and each race shape asserts what it permits; the two
+      distinct-task races become stricter, not looser, because their loser
+      holds its own runnable task and a readiness refusal there would be a
+      real defect. The same-task race accepts either mechanism and requires a
+      readiness refusal to name Running. Evidence is an A/B with a
+      reproducing control interleaved on one machine in one window so the
+      control proves the window was live: 7 of 32 failed before, 0 of 32
+      after, 0 of 18 full-suite runs under the same load. Verification: one
+      full workspace run at cargo exit 0 with 116 suites, and a post-merge
+      run on main likewise green; clippy and fmt clean.
+    depends_on:
+      - TASK-0106
+    blocked_by: []
+    references:
+      - crates/app-services/tests/entry_atomicity.rs
+      - crates/app-services/src/orchestration_service.rs
+
+  - id: TASK-0107
+    gate: G7
+    title: Planner Real-Provider Conformance
+    objective: Fix the defects TASK-0106 measured on the real provider path,
+      and escalate the ones that are contract questions rather than bugs.
+    scope: >-
+      Claude adapter output handling and prompt, the baseline-risk field on
+      the two planner requests and its producers, an ADR-0027 amendment, and
+      the findings record. No change to validation rules or guardrail bounds.
+    exit_criteria_summary: >-
+      The real provider path reaches the validator, the contract change
+      carries its amendment, and the unresolved questions are recorded with
+      their measurements rather than silently fixed.
+    outcome: >-
+      DONE for D1, D2 and D4; D3 and D5 escalated with evidence. D1: the CLI
+      fences its JSON, so parse_json died at byte 0 while the document inside
+      was well formed. json_payload unwraps exactly one cleanly fenced
+      document and passes anything else through untouched — a deliberately
+      narrow rule, because scanning for a brace inside prose would let a
+      model hide a second document behind surrounding text, and §11 keeps
+      provider output untrusted regardless. D2: V5 refuses a node above the
+      branch baseline without a required_gate, and the prompt never stated
+      the baseline, so the planner could not comply except by accident; the
+      live CLI duly returned a medium node with a null gate against a Low
+      baseline. baseline_risk now travels on both requests, overwritten by
+      the trusted service from policy exactly as scope_bound is. It is an
+      input bound and not an authority: V5 still runs trusted-side against
+      the policy value, so a planner that misreports it still loses. ADR-0027
+      §1 fixes those shapes as normative, so this carries an amendment rather
+      than an in-place edit. D4: scope_delta was the only required key whose
+      type the prompt omitted, and three runs returned three shapes of which
+      one parsed. Verified live rather than by inspection, with the real
+      prompt extracted from the code so transcription could not drift:
+      scope_delta parses 3 of 3 where it was 1 of 3, and zero V5 violations 3
+      of 3. D5, escalated: permission_mode "plan", forced by
+      bound_planner_config as proposal-only defense in depth, is itself what
+      makes the CLI refuse — 0 of 3 valid responses with it against 3 of 3
+      without, the refusals being prose citing the plan-mode rule. Dropping
+      it would weaken a deliberate tested control to suit an implementation,
+      and would remove the model's objection rather than answer it, since in
+      the passing configuration the CLI decomposes against criteria and
+      evidence it cannot resolve. D3, escalated: a trivial request measures
+      24,282-24,343 input tokens under adapter isolation and 34,844-34,893
+      against a warm host cache, versus a 32,000 bound that TASK-0078 also
+      reserves in full per call; the dominant term is the CLI's own system
+      prompt rather than our 1,815-byte prompt, so the bound tracks provider
+      overhead and a larger constant would preserve the structure. No number
+      was chosen. The TASK-0106 smoke stays red on D5 by design.
+      Verification: one full workspace run at cargo exit 0 with 116 suites;
+      clippy and fmt clean.
+    depends_on:
+      - TASK-0106
+      - TASK-0108
+    blocked_by: []
+    references:
+      - adapters/provider-claude/src/planner.rs
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - docs/development/G7_PLANNER_REAL_PROVIDER_FINDINGS.md
