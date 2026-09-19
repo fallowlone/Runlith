@@ -2997,3 +2997,31 @@ items:
       - adapters/provider-claude/src/environment.rs
       - adapters/runner-macos-seatbelt/src/lib.rs
       - bins/agentd/src/execution.rs
+
+  - id: TASK-0114
+    gate: G7
+    title: Fail-Closed Provider Authentication Confinement Preflight
+    objective: >-
+      Refuse a real provider before work starts when host authentication is
+      valid but the provider-owned authentication mechanism cannot operate
+      inside mandatory production confinement without authority G6 forbids.
+    scope: >-
+      Shared agentd provider-launch preflight and focused execution/planner
+      regression coverage. Preserve the existing host authentication probe.
+      Do not widen Seatbelt, broker credentials, automate login, or change
+      provider-neutral domain contracts.
+    exit_criteria_summary: >-
+      Unauthenticated state still refuses before provider work; authenticated
+      macOS Claude state refuses with a stable explicit confinement-auth cause
+      before provider invocation; planner failure carries NotStarted spend;
+      no Keychain, SecurityServer or /usr/bin/security authority is added;
+      existing G6 isolation and provider fixture paths remain green.
+    depends_on:
+      - TASK-0112
+    blocked_by: []
+    references:
+      - docs/development/G7_TASK_0112_PROVIDER_AUTH_DIAGNOSIS.md
+      - docs/architecture/providers.md
+      - docs/architecture/runners.md
+      - bins/agentd/src/execution.rs
+      - bins/agentd/src/planning.rs
