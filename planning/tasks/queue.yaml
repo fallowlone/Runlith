@@ -8,7 +8,7 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0104
+completed_through: TASK-0105
 current_gate: G7
 gate_status: IN_PROGRESS  # TASK-0087 ACCEPTED by TASK-0099 after three independent audits by three different systems; G7 closure is a separate owner decision and still needs its OS-level verification envelope settled
 
@@ -2585,3 +2585,51 @@ items:
     references:
       - docs/architecture/providers.md
       - adapters/provider-claude/src/authentication.rs
+
+  - id: TASK-0105
+    gate: G7
+    title: IPC Admission Test Hardening
+    objective: Fix G5 TEST-H2 structurally, so the IPC capacity test stops
+      asserting an instantaneous value of an asynchronous counter it does not
+      control.
+    scope: >-
+      The capacity test and one non-panicking admission helper in
+      bins/agentd/src/lib.rs. No product behaviour change: admission was
+      already correct under both refusal mechanisms.
+    exit_criteria_summary: >-
+      The test asserts the admission bound rather than exact occupancy, and an
+      A/B against a reproducing control shows the flake gone.
+    outcome: >-
+      FIXED, and the original diagnosis corrected. G5 attributed TEST-H2 to a
+      saturating transport_connect refused by the kernel. That is one
+      instance, not the cause: the failure observed here landed on
+      perform_handshake inside admin_session, meaning the connection was
+      accepted and then closed mid-handshake. The shared root is that
+      admission is a semaphore whose permit returns when the daemon's
+      connection task ends, asynchronously with the client dropping its side,
+      so a test holding exactly MAX_CONTROL_CLIENTS sessions asserts an
+      instantaneous value of someone else's counter and cannot control it by
+      construction. The earlier hardening in wait_ready_session removed one
+      instance of the race and left the assumption, which is why it returned.
+      The test now saturates by observation — admit until one client is
+      refused, guaranteed within MAX_CONTROL_CLIENTS + 1 attempts against a
+      bound of MAX_CONTROL_CLIENTS, so it terminates without a timeout and
+      depends on no permit timing. It asserts the contract: a refusal occurs
+      within the bound, ready sessions never exceed it, and the refusal harms
+      neither an existing session nor the daemon. Kernel refusal and daemon
+      refusal are treated as the single fact the contract cares about.
+      Evidence is an A/B with a reproducing control on one machine in one
+      window: ten runs of `-p agentd --lib` on main with the old test failed
+      2 of 10, matching the rate G5 measured; ten runs on this branch failed
+      0 of 10; three full workspace runs failed 0 of 3. Renamed to match what
+      it proves, with the former name and the TEST-H2 reference kept in the
+      doc comment so the audit trail does not dangle. Still open and
+      unreproduced: a single app-services workspace_service failure seen once
+      during TASK-0104 post-merge whose test name was never captured; it did
+      not recur in any run of this task.
+    depends_on:
+      - TASK-0104
+    blocked_by: []
+    references:
+      - bins/agentd/src/lib.rs
+      - docs/development/G5_FINAL_CLOSURE_AUDIT.md
