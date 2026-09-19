@@ -8,7 +8,7 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0107
+completed_through: TASK-0110
 current_gate: G7
 gate_status: IN_PROGRESS  # TASK-0087 ACCEPTED by TASK-0099 after three independent audits by three different systems; G7 closure is a separate owner decision and still needs its OS-level verification envelope settled
 
@@ -2779,4 +2779,107 @@ items:
     references:
       - adapters/provider-claude/src/planner.rs
       - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - docs/development/G7_PLANNER_REAL_PROVIDER_FINDINGS.md
+
+  - id: TASK-0109
+    gate: G7
+    title: Planner Call Shape
+    objective: Resolve the two TASK-0106 escalations by research rather than
+      by guessing, and make the real-provider planner path work.
+    scope: >-
+      Claude adapter call construction, capability probe, planner prompt
+      placement, and the study recording the evidence. No change to
+      validation rules, guardrail constants or the planner port.
+    exit_criteria_summary: >-
+      The real-provider smoke passes repeatedly through the adapter, the
+      proposal-only control is at least as strong as before, and no flag is
+      emitted that the installed CLI was not probed for.
+    outcome: >-
+      DONE. Research against the CLI reference plus twenty measured calls
+      found D3 and D5 had one cause and it was ours: the call was shaped
+      wrong. The planner role went in the user message body on top of the
+      provider's full coding-agent system prompt under `--permission-mode
+      plan`, so the model saw competing instruction sets and read ours as an
+      override attempt, and the token measurement was of the default system
+      prompt we never replaced. The role now travels as `--system-prompt`;
+      proposal-only is enforced structurally by `--tools ""` plus
+      `--disallowedTools "mcp__*"`, which strengthens the guarantee rather
+      than relaxing it, because a permission mode asks the model to refrain
+      while removing the tools leaves nothing to call. The test that pinned
+      plan mode was repinned on the stronger control, including that a
+      caller cannot buy capability back with an execution-capable permission
+      mode. The `[workspace:path]` placeholder left the prompt after a
+      measured run copied it literally. No flag is guessed: probe_capabilities
+      gained tool_restriction, mcp_tool_denial and system_prompt_override,
+      and `--system-prompt-file` was rejected because it is absent from
+      `claude --help`. One defect was introduced and fixed here rather than
+      hidden: `--tools` and `--disallowedTools` are variadic and swallowed
+      the positional prompt when emitted last, so they now precede the
+      unconditional `--output-format json`, and a test asserts the property
+      — a non-variadic option must follow them — instead of the literal
+      order. Measured through the adapter: valid proposals 0 of 3 became 4
+      of 4, per-call input roughly 34,800 tokens became 1,725 against the
+      ADR-0027 §6 bound of 32,000. D3 needs no constant change and none was
+      made; the bound was never too small, the call was too fat. Also
+      measured and recorded so it is not re-derived: `--bare` reports "Not
+      logged in" on an authenticated CLI, the TASK-0101 shape again.
+      Verification: four real-provider smoke runs green, one full workspace
+      run at cargo exit 0 with 116 suites, clippy and fmt clean; post-merge
+      on main likewise green.
+    depends_on:
+      - TASK-0107
+    blocked_by: []
+    references:
+      - external-research/studies/2026-09-19-planner-call-shape.md
+      - adapters/provider-claude/src/argv.rs
+      - adapters/provider-claude/src/planner.rs
+
+  - id: TASK-0110
+    gate: G7
+    title: Planner Evidence Resolution Semantics
+    objective: Settle the substantive half of D5 before G7 closure, so the
+      gate does not close while the contract implies a capability the code
+      cannot perform.
+    scope: >-
+      ADR-0029, a note in ADR-0027 §1, the adapter prompt's account of
+      evidence refs, providers.md §16, and the findings record. No code
+      behaviour change beyond prompt text.
+    exit_criteria_summary: >-
+      The limitation is an accepted recorded decision rather than an
+      accident, and nothing in contract or prompt claims the planner can
+      read evidence.
+    outcome: >-
+      ACCEPTED, option A. TASK-0109's green smoke separated D5's mechanical
+      half from its substantive one and did not answer the second: the
+      provider complies because the role is legitimately its own, not
+      because evidence became resolvable. The decisive evidence is in the
+      repository rather than in an opinion — nothing resolves an EvidenceRef
+      to content, there is no resolver anywhere, and in production they are
+      identity strings like `attempt:<id>` with exactly two jobs, keying the
+      per-triggering-evidence budget through planning_evidence_key and
+      carrying provenance into PlanChangeSet.source_evidence_refs. A planner
+      therefore receives usable bounds and unusable identifiers, and
+      produces plausible rather than informed structure. Not unsafe —
+      INV-043, V1-V9, INV-093 and materialization all hold — but the
+      contract and prompt both spoke as though it could read evidence.
+      Option A states identity-only as the v1 semantic. Resolving refs to
+      content is named successor work carrying its privacy question, since
+      content would leave the device with the provider call where
+      identifiers largely do not, and its budget question, since content is
+      the one thing that would regrow the per-call input TASK-0109 reduced.
+      Dropping evidence_refs was rejected: it would break the budget key and
+      the provenance echo. The prompt now says the refs are opaque, that
+      Runlith records them, and that their absence is not missing context,
+      which removes both measured failure modes. The findings record states
+      explicitly what a green smoke does not mean, because this session
+      caught that shape of self-deception three times in tests and it should
+      not return through documentation. Verification: three real-provider
+      smoke runs green after the prompt change with input stable at 1,806
+      tokens, 75 adapter unit tests, one full workspace run at cargo exit 0
+      with 116 suites, clippy and fmt clean.
+    depends_on:
+      - TASK-0109
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0029-planner-evidence-resolution.md
       - docs/development/G7_PLANNER_REAL_PROVIDER_FINDINGS.md
