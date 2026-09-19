@@ -81,6 +81,8 @@ pub const PROVIDER_TIMEOUT: Duration = Duration::from_secs(300);
 pub const CAPTURE_GRACE: Duration = Duration::from_secs(5);
 
 const PROVIDER_LAUNCH_REQUESTER: &str = "agent-runtime";
+const PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED: &str =
+    "provider_authentication_unsupported_in_mandatory_confinement";
 
 pub(crate) fn production_runner_backend(
     support_read: Vec<PathBuf>,
@@ -430,6 +432,12 @@ pub(crate) fn prepare_provider_launch(
         if !authentication.state.permits_launch() {
             return Err(authentication.refusal());
         }
+        #[cfg(target_os = "macos")]
+        return Err(format!(
+            "{PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED}: authenticated Claude CLI state is host-valid, \
+             but TASK-0112 measured that the current provider-owned macOS authentication path \
+             requires Keychain authority intentionally unavailable to the mandatory G6 sandbox"
+        ));
     }
 
     let mut security = G6SecurityService::open(db_path, app_services::SystemClock)
@@ -2331,29 +2339,55 @@ mod tests {
         );
     }
 
-    /// Genuine environment facts a real-provider smoke may pass through:
-    /// the account or network is unavailable, not the integration. Config
-    /// drift (an unknown model), authentication gaps and undiagnosed exits
-    /// are defects and must fail.
-    fn is_tolerable_provider_environment_failure(detail: &str) -> bool {
-        const ENVIRONMENT_MARKERS: &[&str] = &[
-            "rate limit",
-            "rate_limit",
-            "usage limit",
-            "quota",
-            "overloaded",
-            "network",
-            "enotfound",
-            "econnrefused",
-            "timed out",
-            "timeout",
-        ];
-        let haystack = detail.to_ascii_lowercase();
-        ENVIRONMENT_MARKERS
-            .iter()
-            .any(|marker| haystack.contains(marker))
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn authenticated_real_like_claude_refuses_before_provider_work() {
+        let sandbox = Sandbox::named("g6-auth-confinement-refusal");
+        seed_ready(&sandbox.db, "P-AUTH", "T-AUTH");
+        let marker = sandbox.dir.join("provider-work-started");
+        let fixture = fixture_script(
+            &sandbox.dir,
+            "claude-authenticated.sh",
+            &format!(
+                "if [ \"$1\" = \"--version\" ]; then printf '2.1.277 (Claude Code)\\n'; exit 0; fi\n\
+                 if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then printf '{{\"loggedIn\":true}}\\n'; exit 0; fi\n\
+                 touch {:?}\n\
+                 exit 99\n",
+                marker
+            ),
+        );
+        let composition = sandbox.composition(Some(fixture));
+        let (response, job) = run_via_dispatch(&composition, run_request("T-AUTH", &sandbox.repo));
+        let _ = run_payload(&response);
+        run_background(job.expect("accepted run yields a background job"));
+
+        let store = storage_sqlite::SqliteStore::open(&sandbox.db).expect("open store");
+        let attempt = store
+            .get_attempt(&agent_runtime::AttemptId::new("A-T-AUTH").unwrap())
+            .expect("read attempt")
+            .expect("attempt exists");
+        assert_eq!(attempt.outcome(), Some(AttemptOutcome::Failed));
+        assert!(
+            attempt
+                .detail()
+                .unwrap_or_default()
+                .contains(PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED),
+            "refusal must carry the stable confinement-auth cause"
+        );
+        assert!(!marker.exists(), "provider work must not start");
+        let audit = store
+            .list_security_audit_ordered()
+            .expect("read security audit");
+        assert!(
+            !audit.iter().any(|record| {
+                record.fact.event == storage_sqlite::SecurityAuditEvent::ProviderInvocation
+                    && record.fact.execution_id.as_deref() == Some("E-T-AUTH")
+            }),
+            "pre-launch refusal must not record a provider invocation"
+        );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "real provider: needs RUNLITH_CLAUDE_SMOKE=1 plus authenticated claude CLI"]
     fn real_claude_runs_through_production_g6_isolation() {
@@ -2387,44 +2421,18 @@ mod tests {
             .get_attempt(&agent_runtime::AttemptId::new("A-T-G6-REAL").unwrap())
             .expect("read real-provider attempt")
             .expect("real-provider attempt exists");
-        let task = store
-            .get_task(&TaskId::new("T-G6-REAL").unwrap())
-            .expect("read real-provider task")
-            .expect("real-provider task exists");
-        match attempt.outcome() {
-            Some(AttemptOutcome::Succeeded) => assert_eq!(
-                task.state(),
-                task_domain::TaskState::Verifying,
-                "provider success must reach independent verification, never self-complete"
-            ),
-            Some(AttemptOutcome::Failed) => {
-                let detail = attempt.detail().unwrap_or_default();
-                assert!(
-                    !detail.contains("operation not permitted")
-                        && !detail.contains("EPERM")
-                        && !detail.contains("sandbox-exec")
-                        && !detail.contains("runtime launch preparation refused"),
-                    "production sandbox blocked the real provider: {detail}"
-                );
-                // Tolerate only named environment facts. An earlier revision
-                // tolerated `unrecognized_model`, which made a stale model pin
-                // the pass condition: the smoke stayed green for two gates
-                // while the real call never succeeded. Anything unrecognized,
-                // including a bare exit with no diagnostic, is a defect until
-                // proven otherwise.
-                assert!(
-                    is_tolerable_provider_environment_failure(detail),
-                    "real provider failed for a non-environment reason: {detail}"
-                );
-            }
-            other => panic!("unexpected real-provider outcome: {other:?}"),
-        }
+        assert_eq!(attempt.outcome(), Some(AttemptOutcome::Failed));
+        let detail = attempt.detail().unwrap_or_default();
+        assert!(
+            detail.contains(PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED),
+            "authenticated macOS provider must fail closed with the diagnosed typed cause: {detail}"
+        );
 
         let audit = store
             .list_security_audit_ordered()
             .expect("read production security audit");
-        assert!(audit.iter().any(|record| {
-            record.fact.event == storage_sqlite::SecurityAuditEvent::IsolationEnforcement
+        assert!(!audit.iter().any(|record| {
+            record.fact.event == storage_sqlite::SecurityAuditEvent::ProviderInvocation
                 && record.fact.execution_id.as_deref() == Some("E-T-G6-REAL")
         }));
     }
