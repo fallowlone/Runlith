@@ -631,6 +631,23 @@ fn r1_h2_plan_carries_only_the_explicit_child_environment() {
     assert!(!plan.environment().contains("AWS_SECRET_ACCESS_KEY"));
 }
 
+/// The login principal must survive the plan: refusing it silently strips
+/// provider-owned authentication, which the provider then reports only as a
+/// bare exit 1. Paired with the provider-side passthrough in
+/// `provider_claude::ProviderEnvironment`.
+#[test]
+fn login_principal_is_carried_into_the_plan() {
+    let environment = ChildEnvironment::from_explicit([
+        (OsString::from("PATH"), OsString::from("/usr/bin")),
+        (OsString::from("USER"), OsString::from("principal")),
+    ])
+    .expect("USER must be allowlisted for provider-owned authentication");
+    assert!(environment
+        .vars()
+        .iter()
+        .any(|(name, value)| name == OsStr::new("USER") && value == OsStr::new("principal")));
+}
+
 /// TASK-SEC-R1 R1-H2: ambient-shaped names cannot be smuggled into a plan, so
 /// a composition mistake cannot turn inheritance back on.
 #[test]
