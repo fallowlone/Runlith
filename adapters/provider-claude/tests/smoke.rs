@@ -116,14 +116,35 @@ fn real_claude_smoke_replies_with_marker() {
             );
         }
         Err(error) => {
-            // Auth/quota/network failures are environment facts, not
-            // integration defects: report loudly but do not fail. Only a
-            // structural failure (malformed CLI contract) fails.
+            // Quota and network failures are environment facts and pass
+            // through. Everything else fails, including an exit that carries
+            // no diagnostic at all: a tolerant default let a stale model pin
+            // and a missing login principal keep this smoke green across two
+            // gate closures while the real call never once succeeded.
             eprintln!("smoke provider error: {error:?}");
             let detail = format!("{error:?}");
             assert!(
                 !detail.contains("malformed_output"),
                 "CLI contract drift is a real defect: {detail:?}"
+            );
+            const ENVIRONMENT_MARKERS: &[&str] = &[
+                "rate limit",
+                "rate_limit",
+                "usage limit",
+                "quota",
+                "overloaded",
+                "network",
+                "enotfound",
+                "econnrefused",
+                "timed out",
+                "timeout",
+            ];
+            let haystack = detail.to_ascii_lowercase();
+            assert!(
+                ENVIRONMENT_MARKERS
+                    .iter()
+                    .any(|marker| haystack.contains(marker)),
+                "real provider failed for a non-environment reason: {detail:?}"
             );
         }
     }
