@@ -25,6 +25,7 @@ pub struct ProviderEnvironment {
     scratch_dir: PathBuf,
     path: OsString,
     home: Option<OsString>,
+    user: Option<OsString>,
     #[cfg(windows)]
     user_profile: Option<OsString>,
     #[cfg(windows)]
@@ -84,6 +85,17 @@ impl ProviderEnvironment {
                 "provider environment requires HOME for provider-owned authentication".to_owned(),
             );
         }
+        let user = non_empty_env("USER");
+        // Fail closed here rather than letting the child discover it: without
+        // the login principal the provider cannot resolve its own stored
+        // credentials, and it reports that as a bare exit 1 with no stderr,
+        // which is indistinguishable from an unrelated launch failure.
+        #[cfg(unix)]
+        if user.is_none() {
+            return Err(
+                "provider environment requires USER for provider-owned authentication".to_owned(),
+            );
+        }
 
         Ok(Self {
             workdir: workdir.to_path_buf(),
@@ -95,6 +107,7 @@ impl ProviderEnvironment {
             scratch_dir,
             path,
             home,
+            user,
             #[cfg(windows)]
             user_profile: non_empty_env("USERPROFILE"),
             #[cfg(windows)]
@@ -131,6 +144,9 @@ impl ProviderEnvironment {
         pairs.push((OsString::from("PATH"), self.path.clone()));
         if let Some(home) = &self.home {
             pairs.push((OsString::from("HOME"), home.clone()));
+        }
+        if let Some(user) = &self.user {
+            pairs.push((OsString::from("USER"), user.clone()));
         }
         pairs.push((OsString::from("PWD"), self.workdir.as_os_str().to_owned()));
         for (name, value) in [
@@ -278,6 +294,41 @@ fn ensure_private_dir(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn child_environment_carries_the_authentication_principal() {
+        // HOME alone does not authenticate the provider: the CLI resolves its
+        // stored credentials through the OS login principal, so a child that
+        // receives HOME without USER reports "Not logged in" and exits 1 with
+        // empty stderr. The adapter's own contract (`prepare` requires HOME
+        // "for provider-owned authentication") is only met when both pass.
+        let root = std::env::temp_dir().join(format!(
+            "runlith-provider-env-principal-{}",
+            std::process::id()
+        ));
+        let workdir = root.join("work");
+        fs::create_dir_all(&workdir).unwrap();
+        let environment = ProviderEnvironment::prepare(&workdir, &root.join("provider"))
+            .expect("provider environment");
+        let pairs = environment.child_environment();
+        let names: Vec<&std::ffi::OsStr> = pairs.iter().map(|(name, _)| name.as_os_str()).collect();
+        assert!(
+            names.contains(&std::ffi::OsStr::new("USER")),
+            "child environment must carry USER for provider-owned authentication; got {names:?}"
+        );
+        let user = pairs
+            .iter()
+            .find(|(name, _)| name == std::ffi::OsStr::new("USER"))
+            .map(|(_, value)| value.clone())
+            .expect("USER pair");
+        assert_eq!(
+            user,
+            std::env::var_os("USER").expect("host USER"),
+            "USER must be the real login principal, not a synthesized value"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn runtime_root_must_be_outside_worktree() {

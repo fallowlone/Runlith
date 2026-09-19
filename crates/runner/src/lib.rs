@@ -35,6 +35,11 @@ pub const CHILD_ENV_ALLOWLIST: &[&str] = &[
     // Process/runtime basics.
     "PATH",
     "HOME",
+    // The POSIX login principal. Provider-owned authentication resolves the
+    // caller's stored credentials through it, so a child that gets HOME
+    // without USER is unauthenticated. It carries no credential material and
+    // is already implied by HOME's path, so allowlisting it widens nothing.
+    "USER",
     "TMPDIR",
     "PWD",
     "LANG",

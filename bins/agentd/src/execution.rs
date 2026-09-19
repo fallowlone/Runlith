@@ -2313,6 +2313,29 @@ mod tests {
         );
     }
 
+    /// Genuine environment facts a real-provider smoke may pass through:
+    /// the account or network is unavailable, not the integration. Config
+    /// drift (an unknown model), authentication gaps and undiagnosed exits
+    /// are defects and must fail.
+    fn is_tolerable_provider_environment_failure(detail: &str) -> bool {
+        const ENVIRONMENT_MARKERS: &[&str] = &[
+            "rate limit",
+            "rate_limit",
+            "usage limit",
+            "quota",
+            "overloaded",
+            "network",
+            "enotfound",
+            "econnrefused",
+            "timed out",
+            "timeout",
+        ];
+        let haystack = detail.to_ascii_lowercase();
+        ENVIRONMENT_MARKERS
+            .iter()
+            .any(|marker| haystack.contains(marker))
+    }
+
     #[test]
     #[ignore = "real provider: needs RUNLITH_CLAUDE_SMOKE=1 plus authenticated claude CLI"]
     fn real_claude_runs_through_production_g6_isolation() {
@@ -2359,15 +2382,21 @@ mod tests {
             Some(AttemptOutcome::Failed) => {
                 let detail = attempt.detail().unwrap_or_default();
                 assert!(
-                    detail.contains("unrecognized_model"),
-                    "real provider failed for a non-environment reason: {detail}"
-                );
-                assert!(
                     !detail.contains("operation not permitted")
                         && !detail.contains("EPERM")
                         && !detail.contains("sandbox-exec")
                         && !detail.contains("runtime launch preparation refused"),
                     "production sandbox blocked the real provider: {detail}"
+                );
+                // Tolerate only named environment facts. An earlier revision
+                // tolerated `unrecognized_model`, which made a stale model pin
+                // the pass condition: the smoke stayed green for two gates
+                // while the real call never succeeded. Anything unrecognized,
+                // including a bare exit with no diagnostic, is a defect until
+                // proven otherwise.
+                assert!(
+                    is_tolerable_provider_environment_failure(detail),
+                    "real provider failed for a non-environment reason: {detail}"
                 );
             }
             other => panic!("unexpected real-provider outcome: {other:?}"),
