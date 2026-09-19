@@ -486,14 +486,25 @@ provider cancellation race semantics
 streaming output contract
 provider tool-call normalization
 provider usage/cost evidence contract
-planner evidence-reference resolution (may a planner propose against refs
-  it cannot resolve? TASK-0106 D5)
-planner permission-mode vs provider compliance (TASK-0106 D5)
 per-call planner input bound vs provider overhead (TASK-0106 D3)
 ```
 
-The three planner items are measured rather than hypothesized; the evidence
-is in [`../development/G7_PLANNER_REAL_PROVIDER_FINDINGS.md`](../development/G7_PLANNER_REAL_PROVIDER_FINDINGS.md).
+That item is measured rather than hypothesized; the evidence is in
+[`../development/G7_PLANNER_REAL_PROVIDER_FINDINGS.md`](../development/G7_PLANNER_REAL_PROVIDER_FINDINGS.md).
+It is no longer urgent — TASK-0109 dropped per-call input from roughly
+34,800 tokens to roughly 1,725 against a 32,000 bound — but the principle
+stands: a bound on provider-reported *total* input counts provider overhead
+and drifts with CLI versions.
+
+Two former items are closed. Planner permission-mode compliance was the
+call being shaped wrong, resolved by TASK-0109: the role travels as the
+session's system prompt and proposal-only is enforced structurally by
+removing every tool rather than by a permission mode. Planner
+evidence-reference resolution is settled by
+[`adr/ADR-0029-planner-evidence-resolution.md`](adr/ADR-0029-planner-evidence-resolution.md):
+evidence refs are cycle identity and provenance, a v1 planner proposes from
+its bounds, and resolving refs to content is named successor work with its
+own privacy and budget questions.
 
 ## 17. Non-goals
 

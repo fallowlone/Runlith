@@ -77,7 +77,7 @@ whose type the prompt never specified — node `scope` is documented as
 **Resolved.** The prompt now states the shape and what to send when the
 proposal adds no scope.
 
-## D5 — `plan` permission mode makes the CLI refuse the planner prompt (ESCALATED)
+## D5 — `plan` permission mode makes the CLI refuse the planner prompt (RESOLVED mechanically, TASK-0109; semantics settled by ADR-0029)
 
 **Observed.** Same prompt, same directory, six runs, the only variable being
 `--permission-mode plan`:
@@ -123,7 +123,7 @@ references it cannot resolve, and if not, what resolution boundary the seam
 needs. This changes what `DecompositionRequest` means and touches ADR-0027 §1
 and providers.md. It is not decided here.
 
-## D3 — the per-call input bound may be measuring the wrong thing (ESCALATED)
+## D3 — the per-call input bound may be measuring the wrong thing (NO CHANGE NEEDED, TASK-0109)
 
 `MAX_PLANNER_INPUT_TOKENS` is 32,000 (ADR-0027 §6), and the TASK-0078
 accounting amendment reserves that full amount per call before invoking the
@@ -156,7 +156,21 @@ tracks provider cost rather than planning size.
 
 ## State of the smoke
 
-Red, on D5, in the configuration the architecture currently requires. D1, D2
-and D4 are fixed and the path now reaches the validator. The smoke is
-`#[ignore]`d and gated, so this costs no CI signal; it records honestly that
-G7's own capability does not yet work end to end against a real provider.
+**Green, 4 of 4** since TASK-0109. The G7 path real CLI -> provider parsing
+-> `PlanChangeSet` -> durable revision executes end to end, reaching durable
+head 1 with a measured provider-reported receipt, at roughly 1,725 input
+tokens against the 32,000 bound.
+
+TASK-0109 found both escalations had one cause and it was ours: the planner
+role was sent as message-body text competing with the provider's own system
+prompt, under a permission mode that made the model read it as an override
+attempt, and the token measurement was of the default system prompt we never
+replaced. The role now travels as `--system-prompt`, proposal-only is
+enforced structurally with `--tools ""` plus an MCP denial rather than
+behaviourally with a permission mode, and no constant changed.
+
+What a green smoke does **not** mean, recorded so it is not misread later:
+the planner still proposes against evidence references nothing resolves. It
+complies because the role is legitimately its own, not because the evidence
+became readable. ADR-0029 accepts that as the v1 semantic, with the prompt
+now saying so plainly instead of implying otherwise.
