@@ -141,6 +141,15 @@ Result: BLOCKED / REQUIRE USER ACTION
 
 Never fallback to NativeRunner silently.
 
+A platform whose production backend enforces mandatory confinement must also
+state whether the provider's own authentication mechanism can operate inside
+that confinement; a platform that enforces nothing must state that instead.
+The two are one decision, and leaving the authentication question unanswered
+is not a neutral default — it permits the launch. See
+`docs/architecture/providers.md` §9a for the provider-side contract and
+TASK-0117 for the drift guard that checks the stated verdict against the
+backend's reported enforcement axes.
+
 ## 7. Network isolation
 
 ```text

@@ -49,13 +49,20 @@ Fresh control receipts from the same host:
 | same argv under `env -i` with only `PATH`, `HOME`, `USER` | `0` | present |
 | same sanitized argv under `/usr/bin/sandbox-exec` with `(allow default)` | `0` | present |
 
-The production receipt is reproducible with exactly:
+The production receipt above was measured with exactly:
 
 ```text
 RUNLITH_CLAUDE_SMOKE=1 cargo test -p agentd \
   execution::tests::real_claude_runs_through_production_g6_isolation \
   -- --ignored --exact --nocapture
 ```
+
+That receipt is no longer reproducible on this branch: TASK-0114 made the
+pre-launch boundary refuse this configuration before any provider invocation,
+so the measured child exit can no longer occur. TASK-0117 renamed the keeper to
+`execution::tests::real_claude_refuses_before_provider_work_under_production_g6_confinement`,
+which now asserts that refusal. The measurement above stands as the diagnosis
+that justified the refusal, not as a command to re-run.
 
 On the same host this exits `101` at the Cargo/test level. The provider attempt
 records Claude child exit `1`, the fixed marker is absent, and the test rejects
