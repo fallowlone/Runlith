@@ -2486,3 +2486,48 @@ items:
     blocked_by: []
     references:
       - external-research/studies/2026-09-19-provider-authentication-boundary.md
+
+  - id: TASK-0102
+    gate: G7
+    title: Seatbelt Platform Credential Capability
+    objective: Grant the sandboxed provider child access to the macOS platform
+      credential store, so provider-owned authentication works inside the
+      production isolation profile.
+    scope: >-
+      The Seatbelt profile and the vocabulary needed to declare the grant.
+      Superseded before merge by TASK-0103; nothing from this branch is on
+      main.
+    exit_criteria_summary: >-
+      The G6 real-provider smoke passes inside the production sandbox without
+      weakening any other isolation guarantee.
+    outcome: >-
+      NOT ADOPTED. Implemented on branch
+      task-0102-seatbelt-authentication-capability (9a4a292), never merged,
+      branch kept as the record. The work stands as measurement, not as
+      product. Measured on the review host: granting mach-lookup of
+      com.apple.SecurityServer is necessary — under a permissive profile it is
+      exactly the difference between "Not logged in" and a successful call —
+      but it is not sufficient. Under a production-shaped profile
+      authentication still fails unless process-exec is also unrestricted, and
+      process-exec restricted to the exact authorized binary is one of G6's
+      core guarantees. Ruled out by direct probe as the missing piece: Keychain
+      file paths, wide network, process-info* both on self and unrestricted,
+      process-codesigning-status-get, and exec paths /usr, /bin, /sbin,
+      /System and $HOME/.local. The remaining primitive was never identified,
+      and the search was stopped deliberately once its cost exceeded its value.
+      TASK-0103 then explained why it ran out of road: this direction asked a
+      confined non-interactive worker to perform an act that every reviewed
+      external system treats as a separate interactive phase with a human
+      present. The branch's SupportService vocabulary is also not salvaged.
+      PlatformCredentials was its only variant, so keeping the enum without it
+      would leave a variant-less abstraction plus dead plumbing through agentd
+      and the backend — speculative generality the coding rules forbid. It can
+      be reconstructed from this branch if a real second user ever appears.
+      The succeeding work is TASK-0104, which moves the boundary instead of
+      widening it.
+    depends_on:
+      - TASK-0103
+    blocked_by: []
+    references:
+      - external-research/studies/2026-09-19-provider-authentication-boundary.md
+      - adapters/runner-macos-seatbelt/src/lib.rs
