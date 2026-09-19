@@ -8,7 +8,7 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0113
+completed_through: TASK-0114
 current_gate: G7
 gate_status: IN_PROGRESS  # TASK-0087 ACCEPTED by TASK-0099 after three independent audits by three different systems; G7 closure is a separate owner decision and still needs its OS-level verification envelope settled
 
@@ -3016,6 +3016,18 @@ items:
       before provider invocation; planner failure carries NotStarted spend;
       no Keychain, SecurityServer or /usr/bin/security authority is added;
       existing G6 isolation and provider fixture paths remain green.
+    outcome: >-
+      ACCEPTED. The shared pre-launch boundary now refuses a host-authenticated
+      Claude CLI on macOS with the stable
+      provider_authentication_unsupported_in_mandatory_confinement cause before
+      any provider invocation when its authentication mechanism is incompatible
+      with mandatory G6 confinement. The planner path reports NotStarted spend.
+      No Keychain, SecurityServer or /usr/bin/security authority was added.
+      Deterministic execution/planner regressions, the macOS Seatbelt suite,
+      provider authentication tests, full agentd tests and clippy/fmt were
+      green; the confined real-provider smoke proves the explicit refusal and
+      the trusted-host real planner still produced a durable revision with
+      provider-reported usage. Independent review accepted the final logic.
     depends_on:
       - TASK-0112
     blocked_by: []
