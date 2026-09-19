@@ -277,12 +277,15 @@ What the precondition does NOT establish: it observes the **operator's**
 authentication state on the host, not the confined child's ability to reach
 the provider's credential mechanism from inside an isolation profile. Those
 are different questions. A launch may satisfy §9a and still fail when the
-profile denies the mechanism the provider authenticates through — on macOS,
-Keychain access via the platform credential daemon (TASK-0102, measured and
-not adopted). That remains an open isolation issue and §9a must not be read
-as closing it. The precondition's value is narrower and real: an operator who
-is simply not signed in now gets a named refusal instead of an opaque
-provider exit.
+profile denies the mechanism the provider authenticates through. TASK-0112
+measured the current macOS Claude path as requiring the login Keychain,
+SecurityServer and `/usr/bin/security`; that authority is deliberately not
+adopted by G6. TASK-0114 therefore refuses that authenticated-but-unusable
+configuration before provider work with the stable cause
+`provider_authentication_unsupported_in_mandatory_confinement`. The runtime
+does not widen Seatbelt to make the call succeed. The host precondition still
+has separate value: an operator who is simply not signed in gets a named
+authentication-required refusal instead of an opaque provider exit.
 
 Enforcement point: the requirement applies **only to a provider that
 detection recognizes as the real, compatible CLI** — `detect()` reporting
