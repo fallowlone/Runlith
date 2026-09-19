@@ -24,7 +24,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_runtime::{AttemptId, ExecutionId};
 use app_services::{
-    ExecutionEntry, OrchestrationIds, OrchestrationService, ServiceError, SystemClock, TaskService,
+    ExecutionEntry, OrchestrationIds, OrchestrationOutcome, OrchestrationService, ServiceError,
+    SystemClock, TaskService,
 };
 use storage_sqlite::{EventType, SqliteStore, StorageError};
 use task_domain::{Project, ProjectId, Task, TaskId, TaskState};
@@ -227,32 +228,96 @@ fn task_state(env: &Env, task: &str) -> TaskState {
         .state()
 }
 
-/// Splits two race results into exactly one runnable winner plus the
-/// loser's typed conflict. Panics otherwise — both-admitted and
+/// How the entry boundary refused the loser of a race.
+///
+/// The boundary guarantees one fact — exactly one racer is admitted — and
+/// reaches it through two mechanisms, chosen by thread interleaving. A
+/// loser that reaches the atomic admission loses there with a typed
+/// conflict. A loser racing for the *same* task can instead have its
+/// read-only readiness check land after the winner's claim commits, and
+/// then it never reaches admission: `enter` returns `NotRunnable` from the
+/// derived-readiness short-circuit ahead of the identity preflight
+/// (`orchestration_service.rs`). Both mean not admitted, with zero
+/// mutations.
+#[derive(Debug)]
+enum LoserRefusal {
+    /// Lost at the atomic admission boundary.
+    Conflict(ServiceError),
+    /// Refused by derived readiness because the winner already claimed the
+    /// shared task.
+    NotRunnable(OrchestrationOutcome),
+}
+
+/// Splits two race results into exactly one runnable winner plus the way
+/// the loser was refused. Panics otherwise — both-admitted and
 /// both-refused are entry-boundary failures.
+///
+/// Callers assert which refusal mechanisms their race shape permits;
+/// this function only establishes that exactly one entry was admitted and
+/// that the loser was refused rather than silently admitted.
 fn split_race(
     round: u64,
     context: &str,
     result_a: RaceResult,
     result_b: RaceResult,
-) -> (RaceResult, ServiceError) {
+) -> (RaceResult, LoserRefusal) {
+    let refused = |error: ServiceError| {
+        assert!(
+            is_typed_conflict(&error),
+            "round {round} ({context}): loser must receive a typed conflict, got {error:?}"
+        );
+        LoserRefusal::Conflict(error)
+    };
     match (result_a, result_b) {
         (Ok(entry), Err(error)) if matches!(entry, ExecutionEntry::Runnable(_)) => {
-            assert!(
-                is_typed_conflict(&error),
-                "round {round} ({context}): loser must receive a typed conflict, got {error:?}"
-            );
-            (Ok(entry), error)
+            (Ok(entry), refused(error))
         }
         (Err(error), Ok(entry)) if matches!(entry, ExecutionEntry::Runnable(_)) => {
-            assert!(
-                is_typed_conflict(&error),
-                "round {round} ({context}): loser must receive a typed conflict, got {error:?}"
-            );
-            (Ok(entry), error)
+            (Ok(entry), refused(error))
         }
+        (Ok(ExecutionEntry::Runnable(work)), Ok(ExecutionEntry::NotRunnable(outcome)))
+        | (Ok(ExecutionEntry::NotRunnable(outcome)), Ok(ExecutionEntry::Runnable(work))) => (
+            Ok(ExecutionEntry::Runnable(work)),
+            LoserRefusal::NotRunnable(outcome),
+        ),
         (first, second) => {
             panic!("round {round} ({context}): entry boundary failure: {first:?} vs {second:?}")
+        }
+    }
+}
+
+impl LoserRefusal {
+    /// Asserts the loser lost at the atomic admission boundary. Race shapes
+    /// whose racers hold *distinct* tasks must refuse this way: the loser's
+    /// own task is still runnable, so a readiness refusal would be wrong.
+    fn expect_conflict(self, round: u64, context: &str) -> ServiceError {
+        match self {
+            Self::Conflict(error) => error,
+            Self::NotRunnable(outcome) => panic!(
+                "round {round} ({context}): loser holds its own runnable task, so it must lose \
+                 at admission rather than on readiness, got {outcome:?}"
+            ),
+        }
+    }
+
+    /// Asserts a same-task loser was refused by either mechanism, and that
+    /// a readiness refusal names the winner's claim rather than some other
+    /// reason the task is not runnable.
+    fn expect_same_task_refusal(self, round: u64, context: &str, task: &str) {
+        match self {
+            Self::Conflict(_) => {}
+            Self::NotRunnable(OrchestrationOutcome::NotRunnable { task_id, state }) => {
+                assert_eq!(task_id, TaskId::new(task).unwrap());
+                assert_eq!(
+                    state,
+                    TaskState::Running,
+                    "round {round} ({context}): a same-task loser is refused because the winner \
+                     claimed the task, never for another reason"
+                );
+            }
+            Self::NotRunnable(outcome) => {
+                panic!("round {round} ({context}): unexpected readiness refusal {outcome:?}")
+            }
         }
     }
 }
@@ -292,7 +357,8 @@ fn concurrent_duplicate_execution_id_leaves_loser_honest() {
 
         // Winner is whoever admitted the shared execution; the loser is
         // the task that does NOT own it afterwards.
-        let (_winner, _loser_error) = split_race(round, "exec-id", result_a, result_b);
+        let (_winner, loser) = split_race(round, "exec-id", result_a, result_b);
+        let _loser_error = loser.expect_conflict(round, "exec-id");
         let store = env.store();
         let owner = store
             .get_execution(&ExecutionId::new(&shared_execution).unwrap())
@@ -371,7 +437,8 @@ fn concurrent_duplicate_attempt_id_leaves_loser_honest() {
         );
         let result_a = handle_a.join().expect("racer A");
         let result_b = handle_b.join().expect("racer B");
-        let (_winner, _loser_error) = split_race(round, "attempt-id", result_a, result_b);
+        let (_winner, loser) = split_race(round, "attempt-id", result_a, result_b);
+        let _loser_error = loser.expect_conflict(round, "attempt-id");
 
         let store = env.store();
         let (owner, _) = store
@@ -552,7 +619,8 @@ fn concurrent_exact_duplicate_entry_is_honest() {
         );
         let result_a = handle_a.join().expect("racer A");
         let result_b = handle_b.join().expect("racer B");
-        let (_winner, _loser_error) = split_race(round, "exact-dup", result_a, result_b);
+        let (_winner, loser) = split_race(round, "exact-dup", result_a, result_b);
+        loser.expect_same_task_refusal(round, "exact-dup", &task);
         // No additional facts beyond the single admitted entry.
         assert_winner_journal(&env, round, &task);
 
