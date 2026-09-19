@@ -284,17 +284,21 @@ as closing it. The precondition's value is narrower and real: an operator who
 is simply not signed in now gets a named refusal instead of an opaque
 provider exit.
 
-Enforcement point: **open, and deliberately not decided here.** The
-vocabulary, the refusal semantics and the probe discipline above are accepted
-and implemented (`provider_claude::probe_authentication`). Where the refusal
-fires is not. A first attempt placed it in the shared pre-launch path in
-`agentd`, which every provider launch traverses, and that is wrong twice: it
-makes a generic chokepoint call a Claude-specific probe, and it refuses the
-deterministic fixture executables the adapter suites launch, which implement
-no auth protocol and are not meant to. Resolving it means deciding how a
-deterministic fixture declares authentication, or how a composition declares
-that its launch targets a real provider. Until that is decided, the contract
-does not claim the precondition is enforced.
+Enforcement point: the requirement applies **only to a provider that
+detection recognizes as the real, compatible CLI** — `detect()` reporting
+`AVAILABLE` (§9). Anything else is not asked for authentication, because
+anything else has not claimed to be the working provider: a deterministic
+fixture, a missing binary and an incompatible version are each already
+answered by §9 and none of them owns a credential.
+
+This is deliberately not a test escape hatch. Nothing declares itself exempt;
+the gate is the same installation fact §9 already publishes, and a fixture
+falls outside it for the same reason it would fail any other real-provider
+expectation. A first attempt enforced unconditionally in the shared pre-launch
+path and refused those fixtures, which is how the gate was found.
+
+The cost is one extra bounded local probe per provider launch. Both probes
+obey §2: fixed argv, no shell, bounded capture, short timeout.
 
 Rationale and external corroboration: the surveyed orchestrators and the
 Agent Client Protocol all separate an interactive login phase from the
@@ -478,7 +482,6 @@ provider session identity format
 provider availability canonical owner/persistence/freshness
 model identity representation
 provider/model configuration representation
-authentication precondition enforcement point (§9a)
 provider cancellation race semantics
 streaming output contract
 provider tool-call normalization
