@@ -24,6 +24,10 @@ No external repository is an implementation dependency. External code is not cop
 ## Layout
 
 - `repos/` — repository-specific re-audits with commit-pinned source evidence.
+- `studies/` — cross-product architecture studies. These answer one question
+  across several external systems rather than auditing one repository. Their
+  evidence level is stated in each file and is weaker than `repos/` when the
+  sources are vendor documentation rather than source.
 - `PATTERN_LIBRARY.md` — reusable architecture concepts, independent of backlog.
 - `ANTI_PATTERN_LIBRARY.md` — reusable failure/security lessons.
 - `IMPLEMENTATION_KNOWLEDGE_QUEUE.md` — only evidenced gaps that are eligible for later architecture/task consideration.
