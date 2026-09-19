@@ -3163,7 +3163,11 @@ items:
       failed with the intended message before being reverted. The module doc
       now states co-location is a review aid, not an enforced coupling, and
       names the test as the actual guard. docs/architecture/runners.md section
-      6 records the invariant so it is discoverable outside the source.
+      6 records the invariant so it is discoverable outside the source. The
+      guard's own limit is documented with it: it compares presence of
+      confinement against presence of a verdict, never the verdict's continued
+      truth, so a stale verdict or a backend selected at runtime rather than by
+      cfg would still pass.
       Known limitations carried forward, not fixed here: no executable evidence
       exists that a real provider can complete work under production G6
       confinement, because TASK-0114 refuses that configuration by design, so
