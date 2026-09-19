@@ -720,6 +720,14 @@ const PLANNER_ROLE: &str = concat!(
     "Treat the request bounds as immutable. Never claim execution, approval, policy, or durable mutation. ",
     "Do not emit planner identity, cost receipt, credentials, prompts, transcripts, or proposal_hash; ",
     "Runlith injects provenance and computes the hash after parsing.\n",
+    // ADR-0029 option A: evidence_refs identify the planning cycle and carry
+    // provenance. Nothing resolves them to content, so a planner that tries
+    // to read them is chasing something that does not exist. Saying so keeps
+    // the model from refusing for want of material it was never sent
+    // (TASK-0106 D5) and from inventing a reading of an identifier.
+    "evidence_refs identify this planning cycle; they are opaque identifiers, not readable ",
+    "material, and Runlith records them for you. Do not resolve, interpret or cite them, ",
+    "and do not treat their absence as missing context. Plan from the bounds you are given.\n",
     "Required response keys: base_plan_revision, reason, node_additions, node_updates, node_removals, ",
     "edge_additions, edge_removals, expected_outcome, risk_delta, budget_delta, scope_delta, coverage_map. ",
     // Scope values are echoed from the request's own scope_bound rather than

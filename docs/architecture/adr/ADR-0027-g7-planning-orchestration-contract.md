@@ -86,6 +86,13 @@ names and semantics below are normative and stable):
   budget_remaining }` — replan addresses one affected branch only;
   regenerating the whole project plan is forbidden input (ADR-0017:
   revise the affected branch).
+- `evidence_refs` / `triggering_evidence_refs` on the two proposal requests
+  are **cycle identity and provenance, not planner reading material**. They
+  key the per-triggering-evidence budget (`planning_evidence_key`) and are
+  echoed into `PlanChangeSet.source_evidence_refs`; nothing resolves them to
+  content. A v1 planner proposes from its bounds, and validation is the
+  safety net. ADR-0029 records this as an accepted limitation rather than an
+  accident, and owns the successor question.
 - `PlanChangeSet` — §2 below. Returned changesets carry no authority.
 - `PlannerCallSpend ∈ { NOT_STARTED, MEASURED { receipt }, UNMEASURED }`
   is adapter-authored control-flow evidence. `NOT_STARTED` means no
