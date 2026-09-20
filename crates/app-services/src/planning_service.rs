@@ -92,6 +92,24 @@ pub struct PlanningPolicyContext {
     pub policy_fingerprint: String,
 }
 
+/// Which planning operation is claiming a generation.
+///
+/// Every mode advances the run generation, so every planner call is fenced and
+/// its spend is durably reserved (ADR-0028 §3, §4). They differ only in whether
+/// the claim republishes the branch's current planning input.
+#[derive(Clone, Copy, Debug)]
+enum ControlRunMode {
+    /// Intends to publish a revision, so its snapshot becomes current input.
+    /// The pre-call human gate also uses this: a durable `HumanDecision` can
+    /// only be created, and later resumed, while its bound snapshot is the
+    /// branch's current planning input.
+    Proposal,
+    /// V9 approved replay, fenced against its `HumanDecision` plan head.
+    ApprovedReplay { approved_plan_head: u64 },
+    /// Atomicity assessment; proposes nothing and leaves current input alone.
+    Assessment,
+}
+
 /// Durable guardrail view for one plan branch + triggering-evidence event.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PlanningGuardrailState {
@@ -500,8 +518,17 @@ impl<C: Clock> PlanningService<C> {
             .collect();
 
         let (head, _) = self.load_base(branch)?;
-        let (snapshot, run) =
-            self.start_control_run(branch, &request.evidence_refs, policy, head, &lineage, &key)?;
+        // Assessment proposes nothing, so it reserves a run for its planner
+        // spend without republishing current input (ADR-0027, TASK-0116).
+        let (snapshot, run) = self.start_control_run_with_mode(
+            branch,
+            &request.evidence_refs,
+            policy,
+            head,
+            &lineage,
+            &key,
+            ControlRunMode::Assessment,
+        )?;
 
         let metered = self.metered_call(
             branch,
@@ -878,7 +905,7 @@ impl<C: Clock> PlanningService<C> {
             head,
             &lineage,
             &trigger_key,
-            Some(approved_plan_head),
+            ControlRunMode::ApprovedReplay { approved_plan_head },
         )?;
         Ok(ProposalBase {
             head,
@@ -976,6 +1003,8 @@ impl<C: Clock> PlanningService<C> {
         }))
     }
 
+    /// Claims a planning generation for an operation that intends to publish a
+    /// revision, so its snapshot becomes the branch's current planning input.
     fn start_control_run(
         &mut self,
         branch: &PlanBranchId,
@@ -992,7 +1021,7 @@ impl<C: Clock> PlanningService<C> {
             head,
             durable_lineage,
             trigger_key,
-            None,
+            ControlRunMode::Proposal,
         )
     }
 
@@ -1005,7 +1034,7 @@ impl<C: Clock> PlanningService<C> {
         head: u64,
         durable_lineage: &[PlanRevisionLineageRecord],
         trigger_key: &str,
-        approved_plan_head: Option<u64>,
+        mode: ControlRunMode,
     ) -> Result<(PlanningInputSnapshot, PlanningRunRecord), PlanningServiceError> {
         let mut lineage_fingerprints = policy.lineage_fingerprints.clone();
         lineage_fingerprints.extend(
@@ -1028,16 +1057,24 @@ impl<C: Clock> PlanningService<C> {
             policy.risk_grant.clone(),
             policy.policy_fingerprint.clone(),
         )?;
-        let run = if let Some(approved_plan_head) = approved_plan_head {
-            self.store.start_or_join_identical_planning_run(
+        let run = match mode {
+            ControlRunMode::ApprovedReplay { approved_plan_head } => {
+                self.store.start_or_join_identical_planning_run(
+                    &snapshot,
+                    trigger_key,
+                    approved_plan_head,
+                    self.clock.now_millis(),
+                )?
+            }
+            ControlRunMode::Proposal => {
+                self.store
+                    .start_planning_run(&snapshot, trigger_key, self.clock.now_millis())?
+            }
+            ControlRunMode::Assessment => self.store.start_assessment_planning_run(
                 &snapshot,
                 trigger_key,
-                approved_plan_head,
                 self.clock.now_millis(),
-            )?
-        } else {
-            self.store
-                .start_planning_run(&snapshot, trigger_key, self.clock.now_millis())?
+            )?,
         };
         Ok((snapshot, run))
     }
