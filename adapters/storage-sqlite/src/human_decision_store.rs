@@ -46,34 +46,70 @@ pub struct NewHumanDecisionRequest {
 }
 
 impl SqliteStore {
+    /// Creates a durable `HumanDecisionRequest` in its own transaction.
+    ///
+    /// Correct only for a caller whose snapshot is already the branch's
+    /// current planning input — on the proposal path the run claim published
+    /// it when it claimed the generation, so there is nothing left to publish
+    /// here. A caller that still has to publish must not use this: its
+    /// publication and its decision have to commit together, through
+    /// [`SqliteStore::publish_planning_input_and_create_human_decision`]
+    /// (TASK-0119).
     pub fn create_human_decision_request(
         &mut self,
         mut request: NewHumanDecisionRequest,
         created_at_ms: u64,
     ) -> StorageResult<HumanDecisionRequest> {
         normalize_new(&mut request)?;
+        let tx = self
+            .connection_mut()
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let id = Self::create_human_decision_request_in_tx(&tx, request, created_at_ms)?;
+        tx.commit()?;
+        self.load_created_human_decision(&id)
+    }
+
+    pub(crate) fn load_created_human_decision(
+        &self,
+        id: &HumanDecisionRequestId,
+    ) -> StorageResult<HumanDecisionRequest> {
+        self.get_human_decision(id)?.ok_or_else(|| {
+            StorageError::Corrupt(format!(
+                "human decision {} vanished after commit",
+                id.as_str()
+            ))
+        })
+    }
+
+    /// Writes the request inside a caller-owned transaction, so a caller that
+    /// must commit it together with another write can do so.
+    ///
+    /// The caller normalizes the request first, so an invalid request is
+    /// refused with its typed error before any write lock is taken.
+    pub(crate) fn create_human_decision_request_in_tx(
+        tx: &Transaction<'_>,
+        request: NewHumanDecisionRequest,
+        created_at_ms: u64,
+    ) -> StorageResult<HumanDecisionRequestId> {
         let approved = request.approved_proposal.as_ref().map(|approved| {
             (
                 crate::approved_proposal_codec::encode(&approved.changeset),
                 approved.receipt_ref.as_str().to_owned(),
             )
         });
-        let tx = self
-            .connection_mut()
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         require_plan_precondition(
-            &tx,
+            tx,
             &request.plan_branch_id,
             request.plan_head,
             &request.planning_input_snapshot_id,
             &request.planning_input_fingerprint,
         )?;
-        let task_state = current_task_state(&tx, &request.task_id)?;
-        let task_event_seq = latest_task_event_seq_tx(&tx, &request.task_id)?;
+        let task_state = current_task_state(tx, &request.task_id)?;
+        let task_event_seq = latest_task_event_seq_tx(tx, &request.task_id)?;
 
         if let Some(approved) = &request.approved_proposal {
             let stored_receipt =
-                load_plan_cost_receipt(&tx, &approved.receipt_ref)?.ok_or_else(|| {
+                load_plan_cost_receipt(tx, &approved.receipt_ref)?.ok_or_else(|| {
                     StorageError::ConstraintViolation(format!(
                         "approved proposal receipt {} is not durable",
                         approved.receipt_ref.as_str()
@@ -116,13 +152,13 @@ impl SqliteStore {
             if updated == 0 {
                 continue;
             }
-            let predecessor = load_request(&tx, &predecessor_id)?.ok_or_else(|| {
+            let predecessor = load_request(tx, &predecessor_id)?.ok_or_else(|| {
                 StorageError::Corrupt(format!(
                     "human decision {predecessor_id} vanished during replacement"
                 ))
             })?;
             append_human_decision_audit(
-                &tx,
+                tx,
                 HumanDecisionAuditFact {
                     event: SecurityAuditEvent::HumanDecisionSuperseded,
                     outcome: SecurityAuditOutcome::Superseded,
@@ -177,7 +213,7 @@ impl SqliteStore {
             ],
         )?;
         insert_values(
-            &tx,
+            tx,
             "human_decision_scope_roots",
             "scope_root",
             id.as_str(),
@@ -189,7 +225,7 @@ impl SqliteStore {
             .map(|value| value.as_str().to_owned())
             .collect::<Vec<_>>();
         insert_values(
-            &tx,
+            tx,
             "human_decision_options",
             "continuation",
             id.as_str(),
@@ -201,14 +237,14 @@ impl SqliteStore {
             .map(|value| value.as_str().to_owned())
             .collect::<Vec<_>>();
         insert_values(
-            &tx,
+            tx,
             "human_decision_evidence",
             "evidence_ref",
             id.as_str(),
             &evidence,
         )?;
         append_human_decision_audit(
-            &tx,
+            tx,
             HumanDecisionAuditFact {
                 event: SecurityAuditEvent::HumanDecisionRequested,
                 outcome: SecurityAuditOutcome::Requested,
@@ -219,13 +255,7 @@ impl SqliteStore {
                 occurred_at_ms: created_at_ms,
             },
         )?;
-        tx.commit()?;
-        self.get_human_decision(&id)?.ok_or_else(|| {
-            StorageError::Corrupt(format!(
-                "human decision {} vanished after commit",
-                id.as_str()
-            ))
-        })
+        Ok(id)
     }
 
     pub fn get_human_decision(
@@ -1057,7 +1087,7 @@ fn load_snapshot_pairs(
     Ok(values)
 }
 
-fn normalize_new(request: &mut NewHumanDecisionRequest) -> StorageResult<()> {
+pub(crate) fn normalize_new(request: &mut NewHumanDecisionRequest) -> StorageResult<()> {
     request.options.sort();
     request.options.dedup();
     request.evidence.sort();

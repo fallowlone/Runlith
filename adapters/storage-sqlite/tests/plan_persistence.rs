@@ -1088,10 +1088,11 @@ fn assessment_run_reserves_a_generation_without_replacing_current_input() {
     );
 }
 
-/// TASK-0116: `publish_planning_input` is the one writer of
+/// TASK-0116: the human-gate writer is the one writer of
 /// `planning_input_heads` not fused into a run claim, so it carries its own
 /// generation fence. A superseded run must not republish its stale snapshot
-/// over a newer generation's.
+/// over a newer generation's. TASK-0119 moved that fence behind the gate's
+/// fused publish-and-record writer; the fence itself is unchanged.
 #[test]
 fn publishing_planning_input_from_a_superseded_run_is_refused() {
     let db = TestDb::new("publish-input-superseded-run");
@@ -1143,9 +1144,215 @@ fn publishing_planning_input_from_a_superseded_run_is_refused() {
         )
         .expect("a newer assessment supersedes the first run");
 
-    store
-        .publish_planning_input(&first, &first_snapshot)
+    let refusal = store
+        .publish_planning_input_and_create_human_decision(
+            &first,
+            &first_snapshot,
+            NewHumanDecisionRequest {
+                task_id: TaskId::new("task-root").unwrap(),
+                plan_branch_id: branch.clone(),
+                reason: HumanDecisionReason::PlannerBlocked,
+                risk: RiskClass::Low,
+                affected_scope: ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+                options: vec![HumanContinuation::Replan, HumanContinuation::Abort],
+                recommendation: None,
+                evidence: first_evidence,
+                proposal_hash: None,
+                approved_proposal: None,
+                plan_head: 0,
+                planning_input_snapshot_id: first_snapshot.id.clone(),
+                planning_input_fingerprint: first_snapshot.input_fingerprint.clone(),
+                policy_fingerprint: "policy:abc123".to_owned(),
+                expires_at_ms: Some(1_800_000_060_000),
+            },
+            1_800_000_000_030,
+        )
         .expect_err("a superseded run must not republish its snapshot as current input");
+    assert!(
+        matches!(refusal, StorageError::PlanningRunStale { .. }),
+        "the refusal must come from the generation fence, not from a later \
+         check in the same call: got {refusal:?}"
+    );
+}
+/// TASK-0119: a human gate publishes its snapshot as the branch's current
+/// planning input and records its `HumanDecision` in one transaction. When the
+/// decision cannot be created, the publication must not survive on its own:
+/// that state de-admits the accepted revision and restart does not heal it.
+#[test]
+fn a_failed_gate_decision_leaves_the_accepted_revision_admissible() {
+    let db = TestDb::new("gate-atomic-failure");
+    let mut store = db.open();
+    seed_child_parent(&mut store);
+    let branch = PlanBranchId::new("branch-main").unwrap();
+
+    let accepted = changeset(0, "accepted revision", &[evidence("accepted-work")]);
+    commit_revision(
+        &mut store,
+        &accepted,
+        &revision(&branch, 1, &accepted),
+        &graph_v1(),
+        &lineage(),
+        &journal_evidence(1),
+    )
+    .unwrap();
+    assert!(store
+        .revision_has_current_planning_input(&branch, 1)
+        .unwrap());
+
+    let gate_evidence = vec![evidence("gate-trigger")];
+    let gate_snapshot = PlanningInputSnapshot::new(
+        branch.clone(),
+        "task-root".to_owned(),
+        1,
+        ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+        RiskClass::Low,
+        vec![],
+        gate_evidence.clone(),
+        vec![],
+        None,
+        "policy:abc123".to_owned(),
+    )
+    .unwrap();
+    let run = store
+        .start_human_gate_planning_run(
+            &gate_snapshot,
+            &planning_evidence_key(&gate_evidence),
+            1_800_000_000_500,
+        )
+        .unwrap();
+    assert!(
+        store
+            .revision_has_current_planning_input(&branch, 1)
+            .unwrap(),
+        "a human gate's run claim publishes nothing on its own"
+    );
+
+    // The decision cannot be created: its owner Task is not durable.
+    let doomed = NewHumanDecisionRequest {
+        task_id: TaskId::new("task-not-durable").unwrap(),
+        plan_branch_id: branch.clone(),
+        reason: HumanDecisionReason::PlannerBlocked,
+        risk: RiskClass::Low,
+        affected_scope: ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+        options: vec![HumanContinuation::Replan, HumanContinuation::Abort],
+        recommendation: None,
+        evidence: gate_evidence.clone(),
+        proposal_hash: None,
+        approved_proposal: None,
+        plan_head: 1,
+        planning_input_snapshot_id: gate_snapshot.id.clone(),
+        planning_input_fingerprint: gate_snapshot.input_fingerprint.clone(),
+        policy_fingerprint: "policy:abc123".to_owned(),
+        expires_at_ms: Some(1_800_000_060_000),
+    };
+
+    store
+        .publish_planning_input_and_create_human_decision(
+            &run,
+            &gate_snapshot,
+            doomed,
+            1_800_000_000_600,
+        )
+        .expect_err("the gate's decision cannot be created");
+
+    assert!(
+        store
+            .revision_has_current_planning_input(&branch, 1)
+            .unwrap(),
+        "a gate that failed to record its decision must not leave the accepted \
+         revision de-admitted"
+    );
+}
+
+/// TASK-0119: the succeeding half of the same boundary. A gate that records
+/// its decision must leave its own snapshot current, or the decision it just
+/// created could never be resumed.
+#[test]
+fn a_recorded_gate_decision_publishes_its_own_snapshot() {
+    let db = TestDb::new("gate-atomic-success");
+    let mut store = db.open();
+    seed_child_parent(&mut store);
+    let branch = PlanBranchId::new("branch-main").unwrap();
+
+    let accepted = changeset(0, "accepted revision", &[evidence("accepted-work")]);
+    commit_revision(
+        &mut store,
+        &accepted,
+        &revision(&branch, 1, &accepted),
+        &graph_v1(),
+        &lineage(),
+        &journal_evidence(1),
+    )
+    .unwrap();
+
+    let gate_evidence = vec![evidence("gate-trigger")];
+    let gate_snapshot = PlanningInputSnapshot::new(
+        branch.clone(),
+        "task-root".to_owned(),
+        1,
+        ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+        RiskClass::Low,
+        vec![],
+        gate_evidence.clone(),
+        vec![],
+        None,
+        "policy:abc123".to_owned(),
+    )
+    .unwrap();
+    let run = store
+        .start_human_gate_planning_run(
+            &gate_snapshot,
+            &planning_evidence_key(&gate_evidence),
+            1_800_000_000_500,
+        )
+        .unwrap();
+    assert!(
+        store
+            .revision_has_current_planning_input(&branch, 1)
+            .unwrap(),
+        "a human gate's run claim publishes nothing on its own"
+    );
+
+    let decision = store
+        .publish_planning_input_and_create_human_decision(
+            &run,
+            &gate_snapshot,
+            NewHumanDecisionRequest {
+                task_id: TaskId::new("task-root").unwrap(),
+                plan_branch_id: branch.clone(),
+                reason: HumanDecisionReason::PlannerBlocked,
+                risk: RiskClass::Low,
+                affected_scope: ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+                options: vec![HumanContinuation::Replan, HumanContinuation::Abort],
+                recommendation: None,
+                evidence: gate_evidence,
+                proposal_hash: None,
+                approved_proposal: None,
+                plan_head: 1,
+                planning_input_snapshot_id: gate_snapshot.id.clone(),
+                planning_input_fingerprint: gate_snapshot.input_fingerprint.clone(),
+                policy_fingerprint: "policy:abc123".to_owned(),
+                expires_at_ms: Some(1_800_000_060_000),
+            },
+            1_800_000_000_600,
+        )
+        .expect("the gate publishes and records in one transaction");
+
+    assert_eq!(decision.status, HumanDecisionStatus::Pending);
+    assert_eq!(
+        decision.precondition.planning_input_snapshot_id,
+        gate_snapshot.id
+    );
+    assert!(
+        store
+            .current_planning_input_matches(
+                &branch,
+                &gate_snapshot.id,
+                &gate_snapshot.input_fingerprint,
+            )
+            .unwrap(),
+        "the recorded decision's bound snapshot is the branch's current input"
+    );
 }
 
 #[test]

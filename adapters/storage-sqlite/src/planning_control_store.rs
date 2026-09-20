@@ -1,14 +1,15 @@
 //! Durable planning-input and planning-run control state (ADR-0028).
 
 use plan_domain::{
-    trusted_candidate_task_refs, AffectedParentCriterion, PlanBranchId, PlanningInputSnapshot,
-    PlanningInputSnapshotId, PlanningRunId, RiskClass, RiskEscalationGrant, ScopeBound,
-    TaskPlanningAuthority,
+    trusted_candidate_task_refs, AffectedParentCriterion, HumanDecisionRequest, PlanBranchId,
+    PlanningInputSnapshot, PlanningInputSnapshotId, PlanningRunId, RiskClass, RiskEscalationGrant,
+    ScopeBound, TaskPlanningAuthority,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use task_domain::TaskId;
 
 use crate::error::{StorageError, StorageResult};
+use crate::human_decision_store::NewHumanDecisionRequest;
 use crate::plan_guardrail_store::require_evidence_key;
 use crate::plan_store::PlanRevisionLineage;
 use crate::task_store::{list_project_tasks, load_task, SqliteStore};
@@ -88,6 +89,10 @@ enum PlanningRunClaim {
     /// Atomicity assessment: proposes nothing, so it reserves a run without
     /// republishing current input (ADR-0027 TASK-0116 amendment).
     Assessment,
+    /// A planning human gate. It publishes nothing at claim time: the gate's
+    /// snapshot becomes current input only in the same transaction that
+    /// records its `HumanDecision` (TASK-0119).
+    HumanGate,
 }
 
 impl PlanningRunClaim {
@@ -265,6 +270,25 @@ impl SqliteStore {
         )
     }
 
+    /// Claims a planning generation for a human gate. The gate publishes its
+    /// snapshot only together with its durable `HumanDecision`, through
+    /// [`SqliteStore::publish_planning_input_and_create_human_decision`], so a
+    /// crash cannot leave the branch's current input moved with no gate
+    /// recorded (TASK-0119).
+    pub fn start_human_gate_planning_run(
+        &mut self,
+        snapshot: &PlanningInputSnapshot,
+        trigger_evidence_key: &str,
+        created_at_ms: u64,
+    ) -> StorageResult<PlanningRunRecord> {
+        self.start_planning_run_inner(
+            snapshot,
+            trigger_evidence_key,
+            created_at_ms,
+            PlanningRunClaim::HumanGate,
+        )
+    }
+
     /// Claims the current planning generation for immutable approved-proposal
     /// replay. Concurrent callers for the exact same snapshot/evidence join
     /// the already-active run instead of superseding each other; any different
@@ -284,20 +308,51 @@ impl SqliteStore {
         )
     }
 
-    /// Publishes an already-persisted snapshot as the branch's current
-    /// planning input, fenced by the run that owns it.
+    /// Publishes a human gate's snapshot as the branch's current planning
+    /// input and records the gate's `HumanDecision` in one transaction.
     ///
-    /// A human gate needs this even when its operation proposes nothing: a
-    /// durable `HumanDecision` can only be created, and later resumed, while
-    /// its bound snapshot is current. Assessment otherwise leaves the pointer
-    /// alone (TASK-0116).
+    /// Both writes commit together or neither happens (TASK-0119). Split
+    /// across two transactions, a crash in between left the branch's current
+    /// input moved with no decision recorded, which de-admits the previously
+    /// accepted revision. Restart does not heal that state: the stranded
+    /// revision's bound snapshot never becomes current again on its own, so
+    /// recovery required producing a new accepted revision.
     ///
-    /// The run generation is verified inside the same immediate transaction as
-    /// the write, so a superseded run cannot republish its stale snapshot over
-    /// a newer generation's. Every other writer of `planning_input_heads` is
-    /// fused into a run claim; this one carries its own fence instead.
-    pub fn publish_planning_input(
+    /// The run generation is verified inside this same transaction, so a
+    /// superseded run cannot republish its stale snapshot over a newer
+    /// generation's. Every other writer of `planning_input_heads` is fused
+    /// into a run claim, and this is the only one that is not, so nothing can
+    /// publish outside a run claim in a transaction of its own.
+    ///
+    /// That is narrower than it may sound, and the difference matters when
+    /// adding a gate. A claim publishes atomically with the *claim*, not with
+    /// the decision, so a gate that claims through `start_planning_run`
+    /// (`PlanningRunClaim::Proposal`, which publishes at claim time) and then
+    /// records its decision separately reopens exactly the window TASK-0119
+    /// closed. `PlanningRunClaim::HumanGate` exists to prevent that. A partial
+    /// revert — a `HumanGate` claim plus a separate
+    /// `create_human_decision_request` — fails closed instead, because
+    /// `require_plan_precondition` finds the gate's snapshot is not the
+    /// published head.
+    pub fn publish_planning_input_and_create_human_decision(
         &mut self,
+        run: &PlanningRunRecord,
+        snapshot: &PlanningInputSnapshot,
+        mut request: NewHumanDecisionRequest,
+        created_at_ms: u64,
+    ) -> StorageResult<HumanDecisionRequest> {
+        crate::human_decision_store::normalize_new(&mut request)?;
+        let tx = self
+            .connection_mut()
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::publish_planning_input_in_tx(&tx, run, snapshot)?;
+        let id = Self::create_human_decision_request_in_tx(&tx, request, created_at_ms)?;
+        tx.commit()?;
+        self.load_created_human_decision(&id)
+    }
+
+    fn publish_planning_input_in_tx(
+        tx: &Transaction<'_>,
         run: &PlanningRunRecord,
         snapshot: &PlanningInputSnapshot,
     ) -> StorageResult<()> {
@@ -307,11 +362,8 @@ impl SqliteStore {
                 "planning input publication must use the snapshot its run is bound to".to_owned(),
             ));
         }
-        let tx = self
-            .connection_mut()
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         require_current_run(
-            &tx,
+            tx,
             snapshot.plan_branch_id.as_str(),
             run.id.as_str(),
             run.generation,
@@ -328,7 +380,6 @@ impl SqliteStore {
                 snapshot.input_fingerprint,
             ],
         )?;
-        tx.commit()?;
         Ok(())
     }
 
