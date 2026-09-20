@@ -1152,6 +1152,65 @@ fn pre_provider_refusal_counts_the_call_but_charges_no_tokens() {
     );
 }
 
+/// TASK-0116: assessment answers a question and proposes nothing, so it must
+/// not republish the branch's current planning input. Before this, an
+/// assessment carrying a different evidence set made the accepted revision
+/// fail the publication fence until something reconciled it.
+#[test]
+fn atomicity_assessment_does_not_de_admit_the_accepted_revision() {
+    let db = TestDb::new("assessment-keeps-current-input");
+    db.seed_tasks(&["TASK-0078"], true);
+    let mut service = db.service();
+    let planner = FakePlanner::for_scenario(FakePlannerScenario::Valid);
+
+    let accepted = match service
+        .propose_decomposition(
+            &planner,
+            &branch(),
+            request("proposal-evidence"),
+            &policy(false),
+        )
+        .expect("proposal")
+    {
+        PlanningProposalOutcome::Accepted(accepted) => accepted,
+        other => panic!("expected an accepted revision, got {other:?}"),
+    };
+    assert!(
+        service
+            .store()
+            .current_planning_input_matches(
+                &branch(),
+                accepted.planning_input_snapshot_id(),
+                accepted.planning_input_fingerprint(),
+            )
+            .unwrap(),
+        "the accepted revision starts as the branch's current planning input"
+    );
+
+    let outcome = service
+        .assess_atomicity(
+            &planner,
+            &branch(),
+            assessment_request("unrelated-question"),
+            &policy(false),
+        )
+        .expect("assessment");
+    assert!(matches!(outcome, PlanningAssessmentOutcome::Assessed(_)));
+
+    assert!(
+        service
+            .store()
+            .current_planning_input_matches(
+                &branch(),
+                accepted.planning_input_snapshot_id(),
+                accepted.planning_input_fingerprint(),
+            )
+            .unwrap(),
+        "an assessment with different evidence must not replace the accepted \
+         revision's current planning input"
+    );
+}
+
 #[test]
 fn atomicity_assessment_shares_the_bounded_recorded_call_budget() {
     let db = TestDb::new("assessment-budget");

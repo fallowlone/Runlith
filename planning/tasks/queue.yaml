@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0115
+completed_through: TASK-0118
 current_gate: G7
-gate_status: IN_PROGRESS  # TASK-0115 final re-audit: G7_REMEDIATION_REQUIRED due G7-BLOCKER-05 / F-07 accepted-ADR conflict in assess_atomicity durability semantics
+gate_status: IN_PROGRESS  # TASK-0116 remediated G7-BLOCKER-05 / F-07; no G7_CLOSED claim is made here and a fresh independent closure re-audit has not yet run
 
 items:
   - id: TASK-0012
@@ -3103,6 +3103,44 @@ items:
       semantics; existing planning, V9, G6 and workspace verification remains
       green. The task makes no G7_CLOSED claim; a fresh independent closure
       re-audit follows it.
+    outcome: >-
+      ACCEPTED. ADR-0027 and ADR-0028 now prescribe one assessment durability
+      model, resolved entirely on ADR-0027's side. The decision: assessment
+      keeps the crash-safe spend reservation ADR-0028 section 4 requires, and
+      loses the current-input publication it never needed. ADR-0027 section 1's
+      "assessment is pure, zero durable writes" clause is replaced in place,
+      not merely contradicted by an appended amendment, because leaving the
+      false sentence standing is exactly how this blocker survived a full gate
+      audit; the clause now states that assessment writes no Plan and that
+      calling it twice observes no new accepted revision and no change to the
+      branch's current planning input.
+      Implementation. The storage run claim and the service control-run mode
+      each became an explicit three-state value (Proposal, ApprovedReplay,
+      Assessment) instead of an Option that silently encoded a third case.
+      Only an operation that intends to publish a revision now writes
+      planning_input_heads. Generation fencing is unchanged for all three, so
+      every planner call is still fenced and its spend still reserved.
+      One carve-out is explicit rather than silent: the pre-call human gate
+      keeps Proposal mode even when reached from assessment, because a durable
+      HumanDecision can only be created, and later resumed, while its bound
+      snapshot is the branch's current planning input. Both fences were read
+      in human_decision_store.rs before the mode was chosen, not assumed.
+      Evidence this was a real defect and not only a contract conflict: the
+      new service test atomicity_assessment_does_not_de_admit_the_accepted_
+      revision was run against the previous behaviour by flipping the
+      assessment mode back to Proposal, and it failed with the intended
+      message; it passes on the shipped code. A storage-level test pins that
+      an assessment claim binds its own snapshot without replacing current
+      input. Verification: cargo test --workspace --locked --no-fail-fast 1099
+      passed / 3 ignored, up from 1097 by exactly the two new tests; clippy
+      --workspace --all-targets --locked -D warnings clean; fmt --all clean.
+      completed_through advances to TASK-0118: TASK-0116 was the last open
+      item below it, and TASK-0117 and TASK-0118 are already accepted. Product
+      identity advances to TASK-0116 per VERSIONING.md, which keys identity on
+      the task responsible for the current state rather than on numeric order.
+      G7 remains IN_PROGRESS and this task makes no G7_CLOSED claim: the
+      blocker is remediated, but a fresh independent closure re-audit has not
+      run, and that audit is what would close the gate.
     depends_on:
       - TASK-0115
     blocked_by: []

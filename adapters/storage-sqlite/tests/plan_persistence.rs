@@ -984,6 +984,65 @@ fn superseded_planning_run_generation_cannot_publish_a_revision() {
     assert!(store.list_events_ordered().unwrap().is_empty());
 }
 
+/// TASK-0116: atomicity assessment reserves a run so its PlannerPort spend is
+/// crash-safe (ADR-0028 §4), but it proposes nothing, so it must not republish
+/// the branch's current planning input and de-admit the accepted revision.
+#[test]
+fn assessment_run_reserves_a_generation_without_replacing_current_input() {
+    let db = TestDb::new("assessment-run-current-input");
+    let mut store = db.open();
+    seed_child_parent(&mut store);
+    let branch = PlanBranchId::new("branch-main").unwrap();
+    let first = changeset(0, "first revision", &[evidence("attempt-1")]);
+    commit_revision(
+        &mut store,
+        &first,
+        &revision(&branch, 1, &first),
+        &graph_v1(),
+        &lineage(),
+        &journal_evidence(1),
+    )
+    .unwrap();
+    assert!(store
+        .revision_has_current_planning_input(&branch, 1)
+        .unwrap());
+
+    let assessment_evidence = vec![evidence("is-this-atomic")];
+    let assessment_snapshot = PlanningInputSnapshot::new(
+        branch.clone(),
+        "task-root".to_owned(),
+        1,
+        ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+        RiskClass::Low,
+        vec![],
+        assessment_evidence.clone(),
+        vec![],
+        None,
+        "policy:abc123".to_owned(),
+    )
+    .unwrap();
+
+    let run = store
+        .start_assessment_planning_run(
+            &assessment_snapshot,
+            &planning_evidence_key(&assessment_evidence),
+            1_800_000_000_010,
+        )
+        .expect("assessment claims a run for spend accounting");
+
+    assert_eq!(
+        run.snapshot_id, assessment_snapshot.id,
+        "the run binds to the assessment's own snapshot"
+    );
+    assert!(
+        store
+            .revision_has_current_planning_input(&branch, 1)
+            .unwrap(),
+        "an assessment proposes nothing, so it must not replace the accepted \
+         revision's current planning input"
+    );
+}
+
 #[test]
 fn stale_planning_run_cannot_replace_current_input_after_plan_head_moves() {
     let db = TestDb::new("stale-planning-run-start");
