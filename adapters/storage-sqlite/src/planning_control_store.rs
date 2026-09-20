@@ -285,18 +285,38 @@ impl SqliteStore {
     }
 
     /// Publishes an already-persisted snapshot as the branch's current
-    /// planning input.
+    /// planning input, fenced by the run that owns it.
     ///
     /// A human gate needs this even when its operation proposes nothing: a
     /// durable `HumanDecision` can only be created, and later resumed, while
     /// its bound snapshot is current. Assessment otherwise leaves the pointer
     /// alone (TASK-0116).
+    ///
+    /// The run generation is verified inside the same immediate transaction as
+    /// the write, so a superseded run cannot republish its stale snapshot over
+    /// a newer generation's. Every other writer of `planning_input_heads` is
+    /// fused into a run claim; this one carries its own fence instead.
     pub fn publish_planning_input(
         &mut self,
+        run: &PlanningRunRecord,
         snapshot: &PlanningInputSnapshot,
     ) -> StorageResult<()> {
         require_evidence_key(&snapshot.input_fingerprint)?;
-        self.connection().execute(
+        if run.snapshot_id != snapshot.id {
+            return Err(StorageError::ConstraintViolation(
+                "planning input publication must use the snapshot its run is bound to".to_owned(),
+            ));
+        }
+        let tx = self
+            .connection_mut()
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        require_current_run(
+            &tx,
+            snapshot.plan_branch_id.as_str(),
+            run.id.as_str(),
+            run.generation,
+        )?;
+        tx.execute(
             "INSERT INTO planning_input_heads (plan_branch_id, snapshot_id, input_fingerprint)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(plan_branch_id) DO UPDATE SET
@@ -308,6 +328,7 @@ impl SqliteStore {
                 snapshot.input_fingerprint,
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
