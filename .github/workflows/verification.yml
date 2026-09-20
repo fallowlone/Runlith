@@ -1,5 +1,7 @@
-# Re-runs the verification suite that task acceptance already cites as
-# evidence, so a merge no longer depends on one operator's local run.
+# Re-runs the verification suite that task acceptance cites as evidence, as a
+# second machine-run opinion on what landed. It reports after the fact and
+# gates nothing: acceptance still rests on the operator's local run. See
+# TASK-0118 in planning/tasks/queue.yaml for what this does and does not give.
 name: verification
 
 on:

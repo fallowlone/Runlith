@@ -3232,10 +3232,12 @@ items:
       RUNLITH_CLAUDE_SMOKE=1 and an authenticated Claude CLI; they stay
       ignored on a runner and the workflow does not pretend otherwise.
       What this does NOT do, which the first submission failed to state and
-      independent review blocked on: the workflow gates nothing. No branch
-      protection or required status check exists, and none can be configured
-      from repository content, so no merge is ever blocked by a red run. It
-      reports after the fact on whatever tip was pushed. Because merges land
+      independent review blocked on: the workflow gates nothing. No required
+      status check is configured by this change, and none can be configured
+      from repository content at all; whether any branch protection exists on
+      the remote was not verifiable from here, so nothing should be assumed
+      either way. On the evidence available, no merge is blocked by a red run.
+      It reports after the fact on whatever tip was pushed. Because merges land
       locally in worktrees and pushes are batched (origin/main was 18 commits
       behind local main when this was written), one run can cover many
       accepted merges and a failure cannot be attributed to a single task.
