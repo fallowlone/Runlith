@@ -1005,21 +1005,24 @@ and blocked G7 closure.
 
 ### Decision: separate crash-safe spend from current-input publication
 
-§1's purity clause is replaced. Assessment is **not** a zero-write operation,
-and pretending otherwise is what created the conflict. It is instead bounded
-by what it may write:
+§1's purity clause is corrected in place by a blockquote beneath it, following
+the precedent at ADR-0028 §"TASK-0086 child materialization": the accepted
+sentence stays readable and its correction sits directly under it. Assessment
+is **not** a zero-write operation, and pretending otherwise is what created
+the conflict. It is instead bounded by what it may write:
 
 - Assessment **may** persist its own immutable `PlanningInputSnapshot`,
   advance the branch's planning-run generation, and durably reserve and settle
   its own `PlannerPort` spend. ADR-0028 §3 and §4 apply to it unchanged: its
   call is fenced and a crash after the call cannot erase possible spend.
-- Assessment **must not** republish the branch's current planning input. It
-  proposes nothing, so it must not affect whether any accepted revision is
-  admissible.
+- Assessment **must not** republish the branch's current planning input,
+  except through a human gate (carve-out below). It proposes nothing, so it
+  must not otherwise affect whether any accepted revision is admissible.
 - Assessment still writes no `Plan`: no `PlanRevision`, no `PlanGraph`, no
   accepted-revision journal fact. The testable form of the old clause becomes:
-  calling assessment twice observes no new accepted revision and no change to
-  the branch's current planning input — not zero durable rows.
+  calling assessment twice, without opening a gate, observes no new accepted
+  revision and no change to the branch's current planning input — not zero
+  durable rows.
 
 One carve-out is explicit rather than silent, and it covers **both** of
 assessment's human gates:
@@ -1038,8 +1041,24 @@ implementation of this amendment carved out the pre-call gate alone, and the
 post-call gate consequently returned a `PlanningInputStale` storage error
 instead of the designed `WaitingForHuman` outcome — reachable in production
 through the shipped Claude planner adapter, which raises `BudgetExhausted`
-from assessment. Independent review caught it; the executable coverage named
-below exists so it cannot recur silently.
+from assessment. Independent review caught it. Executable coverage for this
+amendment, so none of it can regress silently:
+
+- `assessment_planner_fault_opens_a_human_gate_rather_than_failing`
+  (`crates/app-services/tests/planning_service.rs`) — a faulting assessment
+  reaches `WaitingForHuman`, and the decision's bound snapshot is current
+  input, which is what makes it resumable;
+- `atomicity_assessment_does_not_de_admit_the_accepted_revision` (same file) —
+  an ungated assessment leaves an accepted revision admissible;
+- `assessment_run_reserves_a_generation_without_replacing_current_input`
+  (`adapters/storage-sqlite/tests/plan_persistence.rs`) — the claim still
+  advances the generation and takes over the run head per ADR-0028 §3;
+- `publishing_planning_input_from_a_superseded_run_is_refused` (same file) —
+  the gate's publication is fenced by its own run generation, since it is the
+  one writer of `planning_input_heads` not fused into a run claim.
+
+Spend reservation and settlement stay pinned by the pre-existing
+`atomicity_assessment_shares_the_bounded_recorded_call_budget`.
 
 ### Why this is not a weakening
 

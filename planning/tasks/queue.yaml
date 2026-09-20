@@ -3139,21 +3139,37 @@ items:
       revision was run against the previous behaviour by flipping the
       assessment mode back to Proposal, and it failed with the intended
       message; it passes on the shipped code.
-      Coverage. Three tests: the storage claim binds its own snapshot without
+      Coverage. Four tests: the storage claim binds its own snapshot without
       replacing current input and still advances the generation and takes over
       the run head (ADR-0028 section 3); an assessment with different evidence
-      leaves an accepted revision admissible; and a faulting assessment opens
-      a human gate whose bound snapshot is current, which is what makes the
-      decision resumable. Spend reservation was already pinned by the
-      pre-existing bounded-call-budget test. Known coverage limit: the
-      pre-call gate's publication is exercised only indirectly.
+      leaves an accepted revision admissible; a faulting assessment opens a
+      human gate whose bound snapshot is current, which is what makes the
+      decision resumable; and a superseded run cannot republish its snapshot.
+      Spend reservation was already pinned by the pre-existing
+      bounded-call-budget test. Known coverage limit: the pre-call gate's
+      publication is exercised only indirectly.
+      A second review round found two stale sentences this task had introduced
+      into the very ADR it was correcting - a claim that section 1's clause was
+      replaced when round two had restored it under a blockquote, and a
+      forward reference to coverage "named below" that named nothing. Both are
+      fixed; the amendment now lists the four tests by name. The same round
+      found that publish_planning_input, the one writer of planning_input_heads
+      not fused into a run claim, had no generation fence: a superseded run
+      could republish its stale snapshot. It now verifies the run generation
+      inside the same immediate transaction as the write, and refuses a
+      snapshot the run is not bound to. Residual, disclosed rather than fixed:
+      the gate still publishes and creates its decision in two transactions,
+      so a crash between them leaves the pointer moved with no gate recorded;
+      the realistic in-flight race is already caught earlier by
+      ensure_current_run, and closing the remainder means moving the publish
+      inside create_human_decision_request's transaction.
       ADR-0027 section 1's original clause is preserved and corrected beneath
       it with a "Corrected by" blockquote, matching the existing precedent at
       ADR-0028 line 240. The first submission deleted the sentence instead, on
       a stated premise that the repo had no such precedent; that premise was
       simply wrong, and review corrected it.
-      Verification: cargo test --workspace --locked --no-fail-fast 1100 passed
-      / 3 ignored, up from 1097 by exactly the three new tests; clippy
+      Verification: cargo test --workspace --locked --no-fail-fast 1101 passed
+      / 3 ignored, up from 1097 by exactly the four new tests; clippy
       --workspace --all-targets --locked -D warnings clean; fmt --all clean.
       completed_through advances to TASK-0118: TASK-0116 was the last open
       item below it, and TASK-0117 and TASK-0118 are already accepted. Product
