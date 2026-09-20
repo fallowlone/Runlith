@@ -3157,12 +3157,19 @@ items:
       not fused into a run claim, had no generation fence: a superseded run
       could republish its stale snapshot. It now verifies the run generation
       inside the same immediate transaction as the write, and refuses a
-      snapshot the run is not bound to. Residual, disclosed rather than fixed:
-      the gate still publishes and creates its decision in two transactions,
-      so a crash between them leaves the pointer moved with no gate recorded;
-      the realistic in-flight race is already caught earlier by
-      ensure_current_run, and closing the remainder means moving the publish
-      inside create_human_decision_request's transaction.
+      snapshot the run is not bound to. Residual, disclosed rather than fixed
+      and queued as TASK-0119: the gate still publishes and creates its
+      decision in two transactions, so a crash between them leaves the pointer
+      moved with no gate recorded, and that state is recoverable only by
+      producing a new accepted revision - restart alone does not heal it,
+      because the stranded revision's bound snapshot never becomes current
+      again. The realistic in-flight race is already caught earlier by
+      ensure_current_run. This is not deferred to avoid work: the same window
+      already exists on the pre-call gate, which has published in one
+      transaction and created in another since before this task, so fixing
+      only the post-call gate would leave the two inconsistent, and closing it
+      properly changes the human-decision store's write contract for a
+      planning-store concern.
       ADR-0027 section 1's original clause is preserved and corrected beneath
       it with a "Corrected by" blockquote, matching the existing precedent at
       ADR-0028 line 240. The first submission deleted the sentence instead, on
@@ -3355,3 +3362,32 @@ items:
       - AGENT.md
       - planning/tasks/queue.yaml
       - docs/development/VERSIONING.md
+
+  - id: TASK-0119
+    gate: G7
+    title: Atomic Human-Gate Input Publication
+    objective: >-
+      Close the two-transaction window in which a planning human gate
+      publishes the branch's current planning input and then fails to record
+      the decision, stranding the previously accepted revision.
+    scope: >-
+      Both planning human gates - the pre-call gate reached through
+      pre_call_human_intervention and the post-call gate reached through
+      open_assessment_human_gate - and the transaction boundary between
+      publishing planning_input_heads and creating the HumanDecision. Define
+      and cover the recovery criteria as well as the atomicity. No change to
+      the TASK-0116 assessment durability decision, the publication fence
+      itself, or provider/G6 behaviour.
+    exit_criteria_summary: >-
+      A gate either publishes its snapshot and records its decision or does
+      neither, for both gates; the stranded state is either unreachable or has
+      a defined recovery path with executable coverage; existing planning, V9
+      and workspace verification remains green.
+    depends_on:
+      - TASK-0116
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - crates/app-services/src/planning_service.rs
+      - adapters/storage-sqlite/src/planning_control_store.rs
+      - adapters/storage-sqlite/src/human_decision_store.rs
