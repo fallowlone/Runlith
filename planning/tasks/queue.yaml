@@ -3198,11 +3198,13 @@ items:
 
   - id: TASK-0118
     gate: G7
-    title: Continuous Verification for Accepted Task Merges
+    title: Post-Push Continuous Verification of main
     objective: >-
-      Stop every gate and task acceptance from resting on one operator's
-      local run by re-running the project's own verification suite
-      automatically on push and pull request.
+      Give accepted work a second, machine-run verification that does not
+      depend on one operator's local environment, by re-running the project's
+      own verification suite on every push to main and every pull request.
+      This detects after the fact; it does not gate a merge, and it does not
+      replace the local run an acceptance is still made on.
     scope: >-
       One GitHub Actions workflow running the verification commands the queue
       already cites as acceptance evidence: fmt, clippy with warnings denied,
@@ -3218,32 +3220,57 @@ items:
       the platform coverage it does and does not provide is stated explicitly
       rather than implied.
     outcome: >-
-      ACCEPTED. .github/workflows/verification.yml runs cargo fmt --check,
-      cargo clippy --workspace --all-targets -D warnings and cargo test
-      --workspace on push to main and on pull request, on macos-latest, with
-      the toolchain pinned to 1.95.0 because the workspace declares neither a
-      rust-toolchain file nor an MSRV. The three assertions are exactly the
-      commands the recent task outcomes already cite as acceptance evidence,
-      and all three were reproduced green on main at a781d0f immediately
-      before this task: fmt clean, clippy clean, cargo test --workspace 1097
-      passed / 3 ignored in 212s. The three ignored tests are the real-provider
-      smokes, which need RUNLITH_CLAUDE_SMOKE=1 and an authenticated Claude
-      CLI; they stay ignored on a runner and the workflow does not pretend
-      otherwise. Only actions/checkout is used, so no third-party action enters
-      the supply chain; no cache action was added, which trades a longer run
-      for a smaller dependency surface and can be revisited if duration hurts.
-      permissions is contents:read and no workflow input is interpolated into
-      a shell command. Platform coverage is stated in the job comment rather
-      than implied: macOS Seatbelt is the only mandatory-confinement backend,
-      so this proves the supported platform only, and the non-macOS cfg arm in
+      ACCEPTED after one REQUEST_CHANGES round.
+      .github/workflows/verification.yml runs cargo fmt --all --check, cargo
+      clippy --workspace --all-targets --locked -D warnings and cargo test
+      --workspace --locked --no-fail-fast on push to main and on pull request
+      against main, on macos-latest, with the toolchain pinned to 1.95.0
+      because the workspace declares neither a rust-toolchain file nor an MSRV.
+      All three were reproduced green on the committed tree, not only on the
+      baseline: fmt clean, clippy clean, cargo test --workspace 1097 passed /
+      3 ignored. The three ignored are the real-provider smokes, which need
+      RUNLITH_CLAUDE_SMOKE=1 and an authenticated Claude CLI; they stay
+      ignored on a runner and the workflow does not pretend otherwise.
+      What this does NOT do, which the first submission failed to state and
+      independent review blocked on: the workflow gates nothing. No branch
+      protection or required status check exists, and none can be configured
+      from repository content, so no merge is ever blocked by a red run. It
+      reports after the fact on whatever tip was pushed. Because merges land
+      locally in worktrees and pushes are batched (origin/main was 18 commits
+      behind local main when this was written), one run can cover many
+      accepted merges and a failure cannot be attributed to a single task.
+      Acceptance therefore still rests on the operator's local run at the
+      moment it is made; this is a second opinion, not a gate. Per-merge
+      verification needs each accepted merge pushed, plus branch protection
+      configured outside the repository.
+      Two further limits are recorded rather than implied. The workflow has
+      never executed: GitHub Actions cannot be run locally against a macOS
+      runner, so its YAML was validated by parse and its commands by local
+      reproduction, and the first push to origin is what proves it green; the
+      likeliest avoidable first-run failure is the runner image not shipping
+      rustup, which was not verifiable without network access. And the queue's
+      own precedent (TASK-0099) required three to four consecutive full-suite
+      runs on a process-and-socket-heavy suite with two historically named
+      flakes, while this job runs the suite once — so a green run is weaker
+      evidence of determinism than the local practice it supplements.
+      Supply chain: one GitHub-owned action, no cache action, no third-party
+      action, no secrets, permissions contents:read, correct pull_request
+      (not pull_request_target) trigger, and no workflow input interpolated
+      into any shell command. actions/checkout is pinned to the mutable @v4
+      tag rather than a commit SHA because this change was authored without
+      network access to resolve one, and persist-credentials is disabled so
+      the job keeps no git credential while running repository-authored code.
+      The runner image label is likewise left mutable on purpose, since an
+      unverifiable label is the likeliest way to make the first run red; both
+      pins are worth revisiting once a known-green run exists.
+      Platform coverage is stated in the job comment rather than implied:
+      macOS Seatbelt is the only mandatory-confinement backend, so this proves
+      the supported platform only, and the non-macOS cfg arm in
       bins/agentd/src/execution.rs stays verified by inspection until a second
-      runner job exists — which is also the evidence TASK-0117 named as
-      outstanding. Known limitation: the workflow itself has never executed.
-      GitHub Actions cannot be run locally against a macOS runner, so its YAML
-      was validated by parse and its commands by local reproduction; the first
-      push to origin is what proves the workflow green. completed_through
-      remains TASK-0115 because TASK-0116 (G7-BLOCKER-05 / F-07) is still
-      open; product identity advances to TASK-0118 and G7 remains IN_PROGRESS.
+      runner job exists — the evidence TASK-0117 named as outstanding.
+      completed_through remains TASK-0115 because TASK-0116 (G7-BLOCKER-05 /
+      F-07) is still open; product identity advances to TASK-0118 and G7
+      remains IN_PROGRESS.
     depends_on:
       - TASK-0117
     blocked_by: []
