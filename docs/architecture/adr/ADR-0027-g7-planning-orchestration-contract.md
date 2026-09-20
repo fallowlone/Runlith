@@ -72,15 +72,23 @@ names and semantics below are normative and stable):
 - `AtomicityAssessment { verdict, rationale, evidence_refs,
   planning_cost_receipt }` where
   `verdict ∈ { ATOMIC, DECOMPOSABLE, BLOCKED }`; `BLOCKED` carries a
-  typed blocker. Assessment writes no `Plan`: calling it twice observes
-  no new accepted revision and no change to the branch's current
-  planning input. It is **not** free of durable writes — it persists its
-  own snapshot, advances the planning-run generation and reserves its
-  own spend, per ADR-0028 §3–§4. See *Amendment — TASK-0116 assessment
-  durability*, which replaced an earlier "zero durable writes" claim
-  that contradicted ADR-0028. The receipt is provider-usage evidence for
-  this `PlannerPort` call, not authority and not planner-authored
-  business state.
+  typed blocker. Assessment is pure: it performs zero durable writes
+  (a test calling it twice must observe zero new journal rows). The
+  receipt is provider-usage evidence for this `PlannerPort` call, not
+  authority and not planner-authored business state.
+
+  > **Corrected by the TASK-0116 assessment durability amendment
+  > (2026-09-20).** Assessment is not free of durable writes, and this
+  > clause contradicted ADR-0028 §4's requirement to reserve spend before
+  > every `PlannerPort` call. What holds is narrower: assessment writes no
+  > `Plan` — no `PlanRevision`, no `PlanGraph`, no accepted-revision
+  > journal fact — and does not republish the branch's current planning
+  > input. It does persist its own snapshot, advance the planning-run
+  > generation and reserve its own spend. One exception: when assessment
+  > opens a human gate, that gate publishes current input, because a
+  > durable `HumanDecision` can only be created and resumed while its
+  > bound snapshot is current.
+
 - `DecompositionRequest { parent_task_ref, base_plan_revision,
   acceptance_criteria_refs, scope_bound, evidence_refs,
   depth_remaining, budget_remaining }` — the planner receives its
@@ -1013,12 +1021,25 @@ by what it may write:
   calling assessment twice observes no new accepted revision and no change to
   the branch's current planning input — not zero durable rows.
 
-One carve-out is explicit rather than silent. When assessment trips a
-guardrail and opens a pre-call human gate, that path **does** publish current
-input, because a durable `HumanDecision` can only be created, and later
-resumed, while its bound snapshot is the branch's current planning input.
-That is a human gate that exists to lead to publication, not an assessment
+One carve-out is explicit rather than silent, and it covers **both** of
+assessment's human gates:
+
+- the **pre-call** gate, when a guardrail trips before the planner is invoked;
+- the **post-call** gate, when the planner call itself trips a bound or faults
+  with `DepthExhausted`, `Unplannable` or `BudgetExhausted`.
+
+Both publish current input, because a durable `HumanDecision` can only be
+created, and later resumed, while its bound snapshot is the branch's current
+planning input. A gate exists to lead to publication; it is not an assessment
 result.
+
+Enumerating only the pre-call gate is not a documentation nicety. The first
+implementation of this amendment carved out the pre-call gate alone, and the
+post-call gate consequently returned a `PlanningInputStale` storage error
+instead of the designed `WaitingForHuman` outcome — reachable in production
+through the shipped Claude planner adapter, which raises `BudgetExhausted`
+from assessment. Independent review caught it; the executable coverage named
+below exists so it cannot recur silently.
 
 ### Why this is not a weakening
 

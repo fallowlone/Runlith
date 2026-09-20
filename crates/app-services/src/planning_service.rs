@@ -545,13 +545,14 @@ impl<C: Clock> PlanningService<C> {
             }
             Metered::Tripped(trip) => {
                 if let Some(reason) = human_reason_for_guardrail(&trip) {
-                    let decision = self.create_planning_human_decision(
-                        branch,
-                        policy,
-                        &snapshot,
-                        reason,
-                        &snapshot.triggering_evidence,
-                    )?;
+                    let decision =
+                        match self.open_assessment_human_gate(branch, policy, &snapshot, reason) {
+                            Ok(decision) => decision,
+                            Err(error) => {
+                                self.finish_run(&run, PlanningRunState::Refused)?;
+                                return Err(error);
+                            }
+                        };
                     self.finish_run(&run, PlanningRunState::Refused)?;
                     return Ok(PlanningAssessmentOutcome::WaitingForHuman(Box::new(
                         decision,
@@ -571,13 +572,14 @@ impl<C: Clock> PlanningService<C> {
                     PlannerFault::ProviderFailure { .. } => None,
                 };
                 if let Some(reason) = human_reason {
-                    let decision = self.create_planning_human_decision(
-                        branch,
-                        policy,
-                        &snapshot,
-                        reason,
-                        &snapshot.triggering_evidence,
-                    )?;
+                    let decision =
+                        match self.open_assessment_human_gate(branch, policy, &snapshot, reason) {
+                            Ok(decision) => decision,
+                            Err(error) => {
+                                self.finish_run(&run, PlanningRunState::Failed)?;
+                                return Err(error);
+                            }
+                        };
                     self.finish_run(&run, PlanningRunState::Failed)?;
                     return Ok(PlanningAssessmentOutcome::WaitingForHuman(Box::new(
                         decision,
@@ -1001,6 +1003,30 @@ impl<C: Clock> PlanningService<C> {
             snapshot,
             run,
         }))
+    }
+
+    /// Opens a human gate from an assessment.
+    ///
+    /// Assessment holds its snapshot back from the branch's current planning
+    /// input, but a gate is not an assessment result: the durable
+    /// `HumanDecision` can only be created, and later resumed, while its bound
+    /// snapshot is current. Publishing here is the same carve-out the pre-call
+    /// gate already relies on, applied to the post-call gate (TASK-0116).
+    fn open_assessment_human_gate(
+        &mut self,
+        branch: &PlanBranchId,
+        policy: &PlanningPolicyContext,
+        snapshot: &PlanningInputSnapshot,
+        reason: HumanDecisionReason,
+    ) -> Result<HumanDecisionRequest, PlanningServiceError> {
+        self.store.publish_planning_input(snapshot)?;
+        self.create_planning_human_decision(
+            branch,
+            policy,
+            snapshot,
+            reason,
+            &snapshot.triggering_evidence,
+        )
     }
 
     /// Claims a planning generation for an operation that intends to publish a

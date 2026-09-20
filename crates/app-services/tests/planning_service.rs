@@ -1152,6 +1152,67 @@ fn pre_provider_refusal_counts_the_call_but_charges_no_tokens() {
     );
 }
 
+/// A planner whose assessment call faults in a way that opens a human gate.
+struct BlockedAssessmentPlanner;
+
+impl PlannerPort for BlockedAssessmentPlanner {
+    fn assess_atomicity(&self, _: AtomicityRequest) -> Result<AtomicityAssessment, PlannerFault> {
+        Err(PlannerFault::DepthExhausted)
+    }
+
+    fn propose_decomposition(
+        &self,
+        _: DecompositionRequest,
+    ) -> Result<PlanChangeSet, PlannerFault> {
+        Err(PlannerFault::DepthExhausted)
+    }
+
+    fn propose_replan(&self, _: ReplanRequest) -> Result<PlanChangeSet, PlannerFault> {
+        Err(PlannerFault::DepthExhausted)
+    }
+}
+
+/// TASK-0116: a blocked assessment opens a human gate. The gate publishes the
+/// branch's current planning input, because a durable HumanDecision can only
+/// be created, and later resumed, while its bound snapshot is current. Holding
+/// assessment's snapshot back from current input must not turn this designed
+/// WaitingForHuman outcome into a storage error.
+#[test]
+fn assessment_planner_fault_opens_a_human_gate_rather_than_failing() {
+    let db = TestDb::new("assessment-post-call-gate");
+    db.seed_tasks(&["TASK-0078"], true);
+    let mut service = db.service();
+
+    let outcome = service
+        .assess_atomicity(
+            &BlockedAssessmentPlanner,
+            &branch(),
+            assessment_request("blocked-assessment"),
+            &policy(false),
+        )
+        .expect("a blocked assessment must open a human gate, not fail closed on the input fence");
+    match outcome {
+        PlanningAssessmentOutcome::WaitingForHuman(decision) => {
+            assert_eq!(decision.reason, HumanDecisionReason::PlannerBlocked);
+            // The carve-out, pinned: the gate published its bound snapshot as
+            // current input, which is what makes the decision resumable.
+            assert!(
+                service
+                    .store()
+                    .current_planning_input_matches(
+                        &branch(),
+                        &decision.precondition.planning_input_snapshot_id,
+                        &decision.precondition.planning_input_fingerprint,
+                    )
+                    .unwrap(),
+                "a human gate must leave its bound snapshot as current input, or \
+                 the decision it just created could never be resumed"
+            );
+        }
+        other => panic!("expected a human gate, got {other:?}"),
+    }
+}
+
 /// TASK-0116: assessment answers a question and proposes nothing, so it must
 /// not republish the branch's current planning input. Before this, an
 /// assessment carrying a different evidence set made the accepted revision

@@ -1041,6 +1041,51 @@ fn assessment_run_reserves_a_generation_without_replacing_current_input() {
         "an assessment proposes nothing, so it must not replace the accepted \
          revision's current planning input"
     );
+
+    // ADR-0028 §3 still applies to assessment: a second claim advances the
+    // branch's planning generation and takes over the run head, so a stale
+    // worker from the earlier generation can no longer publish.
+    let later_evidence = vec![evidence("is-this-still-atomic")];
+    let later_snapshot = PlanningInputSnapshot::new(
+        branch.clone(),
+        "task-root".to_owned(),
+        1,
+        ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+        RiskClass::Low,
+        vec![],
+        later_evidence.clone(),
+        vec![],
+        None,
+        "policy:abc123".to_owned(),
+    )
+    .unwrap();
+    let later = store
+        .start_assessment_planning_run(
+            &later_snapshot,
+            &planning_evidence_key(&later_evidence),
+            1_800_000_000_020,
+        )
+        .expect("a second assessment claims the next generation");
+    assert_eq!(
+        later.generation,
+        run.generation + 1,
+        "assessment still advances the planning-run generation"
+    );
+    assert_eq!(
+        store
+            .current_planning_run(&branch)
+            .unwrap()
+            .expect("a current planning run")
+            .id,
+        later.id,
+        "the newer assessment run takes over the run head"
+    );
+    assert!(
+        store
+            .revision_has_current_planning_input(&branch, 1)
+            .unwrap(),
+        "neither assessment replaces current planning input"
+    );
 }
 
 #[test]

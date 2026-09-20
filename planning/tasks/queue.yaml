@@ -3117,22 +3117,43 @@ items:
       Implementation. The storage run claim and the service control-run mode
       each became an explicit three-state value (Proposal, ApprovedReplay,
       Assessment) instead of an Option that silently encoded a third case.
-      Only an operation that intends to publish a revision now writes
-      planning_input_heads. Generation fencing is unchanged for all three, so
-      every planner call is still fenced and its spend still reserved.
-      One carve-out is explicit rather than silent: the pre-call human gate
-      keeps Proposal mode even when reached from assessment, because a durable
-      HumanDecision can only be created, and later resumed, while its bound
-      snapshot is the branch's current planning input. Both fences were read
-      in human_decision_store.rs before the mode was chosen, not assumed.
+      Assessment's own run claim no longer writes planning_input_heads.
+      Generation fencing is unchanged for all three, so every planner call is
+      still fenced and its spend still reserved.
+      The carve-out covers both of assessment's human gates, and getting that
+      wrong was this task's own blocking defect. The first submission carved
+      out only the pre-call gate. The post-call gate — reached when the
+      planner call trips a bound or faults with DepthExhausted, Unplannable or
+      BudgetExhausted — then bound its HumanDecision to a snapshot that was no
+      longer current, so create_human_decision_request refused with
+      PlanningInputStale and a designed WaitingForHuman outcome became a hard
+      storage error. It was production-reachable through the shipped Claude
+      planner adapter, which raises BudgetExhausted from assessment, and no
+      test in the workspace covered that path. Independent review found it and
+      proved it with probes against both the baseline and the candidate; the
+      regression was reproduced here before being fixed. Both gates now
+      publish current input through one named helper, and a run is finished
+      rather than left ACTIVE if gate creation fails.
       Evidence this was a real defect and not only a contract conflict: the
       new service test atomicity_assessment_does_not_de_admit_the_accepted_
       revision was run against the previous behaviour by flipping the
       assessment mode back to Proposal, and it failed with the intended
-      message; it passes on the shipped code. A storage-level test pins that
-      an assessment claim binds its own snapshot without replacing current
-      input. Verification: cargo test --workspace --locked --no-fail-fast 1099
-      passed / 3 ignored, up from 1097 by exactly the two new tests; clippy
+      message; it passes on the shipped code.
+      Coverage. Three tests: the storage claim binds its own snapshot without
+      replacing current input and still advances the generation and takes over
+      the run head (ADR-0028 section 3); an assessment with different evidence
+      leaves an accepted revision admissible; and a faulting assessment opens
+      a human gate whose bound snapshot is current, which is what makes the
+      decision resumable. Spend reservation was already pinned by the
+      pre-existing bounded-call-budget test. Known coverage limit: the
+      pre-call gate's publication is exercised only indirectly.
+      ADR-0027 section 1's original clause is preserved and corrected beneath
+      it with a "Corrected by" blockquote, matching the existing precedent at
+      ADR-0028 line 240. The first submission deleted the sentence instead, on
+      a stated premise that the repo had no such precedent; that premise was
+      simply wrong, and review corrected it.
+      Verification: cargo test --workspace --locked --no-fail-fast 1100 passed
+      / 3 ignored, up from 1097 by exactly the three new tests; clippy
       --workspace --all-targets --locked -D warnings clean; fmt --all clean.
       completed_through advances to TASK-0118: TASK-0116 was the last open
       item below it, and TASK-0117 and TASK-0118 are already accepted. Product

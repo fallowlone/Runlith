@@ -284,6 +284,33 @@ impl SqliteStore {
         )
     }
 
+    /// Publishes an already-persisted snapshot as the branch's current
+    /// planning input.
+    ///
+    /// A human gate needs this even when its operation proposes nothing: a
+    /// durable `HumanDecision` can only be created, and later resumed, while
+    /// its bound snapshot is current. Assessment otherwise leaves the pointer
+    /// alone (TASK-0116).
+    pub fn publish_planning_input(
+        &mut self,
+        snapshot: &PlanningInputSnapshot,
+    ) -> StorageResult<()> {
+        require_evidence_key(&snapshot.input_fingerprint)?;
+        self.connection().execute(
+            "INSERT INTO planning_input_heads (plan_branch_id, snapshot_id, input_fingerprint)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(plan_branch_id) DO UPDATE SET
+               snapshot_id = excluded.snapshot_id,
+               input_fingerprint = excluded.input_fingerprint",
+            params![
+                snapshot.plan_branch_id.as_str(),
+                snapshot.id.as_str(),
+                snapshot.input_fingerprint,
+            ],
+        )?;
+        Ok(())
+    }
+
     fn start_planning_run_inner(
         &mut self,
         snapshot: &PlanningInputSnapshot,
