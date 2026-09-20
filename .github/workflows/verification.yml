@@ -1,0 +1,75 @@
+# Re-runs the verification suite that task acceptance cites as evidence, as a
+# second machine-run opinion on what landed. It reports after the fact and
+# gates nothing: acceptance still rests on the operator's local run. See
+# TASK-0118 in planning/tasks/queue.yaml for what this does and does not give.
+name: verification
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Superseding a pull-request run is fine; superseding a main-branch run is
+  # not. A cancelled run is not a failure, so cancelling on main would leave
+  # that commit silently without a verdict.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    # Runlith's only mandatory-confinement backend is macOS Seatbelt
+    # (adapters/runner-macos-seatbelt). The non-macOS arm selects the
+    # trusted-host NativeRunner, which the shared runner verifier refuses for
+    # a confined launch, so macOS is the platform the product actually
+    # supports. This workflow therefore proves nothing about any other
+    # platform: the non-macOS cfg arm in bins/agentd/src/execution.rs stays
+    # verified only by inspection until a second runner job exists.
+    #
+    # The image label is mutable while the toolchain below is pinned. That is
+    # deliberate for now: an unverifiable version label is the likeliest way to
+    # make the very first run red, and the Seatbelt path depends on Apple's
+    # deprecated /usr/bin/sandbox-exec, so an image rollover is exactly the
+    # kind of breakage this job should surface rather than hide. Pin it once
+    # the workflow has a known-green run to compare against.
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      # The job runs repository-authored code (build scripts, ~1100 tests), so
+      # it keeps no git credential afterwards. The @v4 tag is mutable; it is
+      # not pinned to a SHA because this change was authored without network
+      # access to resolve one. Blast radius is a read-only token on an
+      # ephemeral runner with no secrets.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The workspace declares neither a rust-toolchain file nor an MSRV, so
+      # the CI contract is pinned here. Local development is unpinned; bump
+      # this deliberately rather than letting the runner's default drift.
+      - name: Pin toolchain
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.95.0
+          rustc -vV
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      # --locked so a manifest change with a stale Cargo.lock fails here
+      # instead of silently re-resolving to a dependency set that is not what
+      # the repository carries.
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # --no-fail-fast to match the command the gate closure audits cite: a red
+      # run should report the whole failure set, not abort at the first binary.
+      # Real-provider smokes stay ignored — they need RUNLITH_CLAUDE_SMOKE=1 and
+      # an authenticated Claude CLI, neither of which exists on a runner.
+      - name: Test
+        run: cargo test --workspace --locked --no-fail-fast
