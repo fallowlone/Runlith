@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0115
+completed_through: TASK-0118
 current_gate: G7
-gate_status: IN_PROGRESS  # TASK-0115 final re-audit: G7_REMEDIATION_REQUIRED due G7-BLOCKER-05 / F-07 accepted-ADR conflict in assess_atomicity durability semantics
+gate_status: IN_PROGRESS  # TASK-0116 remediated G7-BLOCKER-05 / F-07; no G7_CLOSED claim is made here and a fresh independent closure re-audit has not yet run
 
 items:
   - id: TASK-0012
@@ -3103,6 +3103,88 @@ items:
       semantics; existing planning, V9, G6 and workspace verification remains
       green. The task makes no G7_CLOSED claim; a fresh independent closure
       re-audit follows it.
+    outcome: >-
+      ACCEPTED. ADR-0027 and ADR-0028 now prescribe one assessment durability
+      model, resolved entirely on ADR-0027's side. The decision: assessment
+      keeps the crash-safe spend reservation ADR-0028 section 4 requires, and
+      loses the current-input publication it never needed. ADR-0027 section 1's
+      "assessment is pure, zero durable writes" clause is replaced in place,
+      not merely contradicted by an appended amendment, because leaving the
+      false sentence standing is exactly how this blocker survived a full gate
+      audit; the clause now states that assessment writes no Plan and that
+      calling it twice observes no new accepted revision and no change to the
+      branch's current planning input.
+      Implementation. The storage run claim and the service control-run mode
+      each became an explicit three-state value (Proposal, ApprovedReplay,
+      Assessment) instead of an Option that silently encoded a third case.
+      Assessment's own run claim no longer writes planning_input_heads.
+      Generation fencing is unchanged for all three, so every planner call is
+      still fenced and its spend still reserved.
+      The carve-out covers both of assessment's human gates, and getting that
+      wrong was this task's own blocking defect. The first submission carved
+      out only the pre-call gate. The post-call gate — reached when the
+      planner call trips a bound or faults with DepthExhausted, Unplannable or
+      BudgetExhausted — then bound its HumanDecision to a snapshot that was no
+      longer current, so create_human_decision_request refused with
+      PlanningInputStale and a designed WaitingForHuman outcome became a hard
+      storage error. It was production-reachable through the shipped Claude
+      planner adapter, which raises BudgetExhausted from assessment, and no
+      test in the workspace covered that path. Independent review found it and
+      proved it with probes against both the baseline and the candidate; the
+      regression was reproduced here before being fixed. Both gates now
+      publish current input through one named helper, and a run is finished
+      rather than left ACTIVE if gate creation fails.
+      Evidence this was a real defect and not only a contract conflict: the
+      new service test atomicity_assessment_does_not_de_admit_the_accepted_
+      revision was run against the previous behaviour by flipping the
+      assessment mode back to Proposal, and it failed with the intended
+      message; it passes on the shipped code.
+      Coverage. Four tests: the storage claim binds its own snapshot without
+      replacing current input and still advances the generation and takes over
+      the run head (ADR-0028 section 3); an assessment with different evidence
+      leaves an accepted revision admissible; a faulting assessment opens a
+      human gate whose bound snapshot is current, which is what makes the
+      decision resumable; and a superseded run cannot republish its snapshot.
+      Spend reservation was already pinned by the pre-existing
+      bounded-call-budget test. Known coverage limit: the pre-call gate's
+      publication is exercised only indirectly.
+      A second review round found two stale sentences this task had introduced
+      into the very ADR it was correcting - a claim that section 1's clause was
+      replaced when round two had restored it under a blockquote, and a
+      forward reference to coverage "named below" that named nothing. Both are
+      fixed; the amendment now lists the four tests by name. The same round
+      found that publish_planning_input, the one writer of planning_input_heads
+      not fused into a run claim, had no generation fence: a superseded run
+      could republish its stale snapshot. It now verifies the run generation
+      inside the same immediate transaction as the write, and refuses a
+      snapshot the run is not bound to. Residual, disclosed rather than fixed
+      and queued as TASK-0119: the gate still publishes and creates its
+      decision in two transactions, so a crash between them leaves the pointer
+      moved with no gate recorded, and that state is recoverable only by
+      producing a new accepted revision - restart alone does not heal it,
+      because the stranded revision's bound snapshot never becomes current
+      again. The realistic in-flight race is already caught earlier by
+      ensure_current_run. This is not deferred to avoid work: the same window
+      already exists on the pre-call gate, which has published in one
+      transaction and created in another since before this task, so fixing
+      only the post-call gate would leave the two inconsistent, and closing it
+      properly changes the human-decision store's write contract for a
+      planning-store concern.
+      ADR-0027 section 1's original clause is preserved and corrected beneath
+      it with a "Corrected by" blockquote, matching the existing precedent at
+      ADR-0028 line 240. The first submission deleted the sentence instead, on
+      a stated premise that the repo had no such precedent; that premise was
+      simply wrong, and review corrected it.
+      Verification: cargo test --workspace --locked --no-fail-fast 1101 passed
+      / 3 ignored, up from 1097 by exactly the four new tests; clippy
+      --workspace --all-targets --locked -D warnings clean; fmt --all clean.
+      completed_through advances to TASK-0118: TASK-0116 was the last open
+      item below it, and TASK-0117 and TASK-0118 are already accepted. Product
+      identity advances to TASK-0116 per VERSIONING.md, which keys identity on
+      the task responsible for the current state rather than on numeric order.
+      G7 remains IN_PROGRESS and this task makes no G7_CLOSED claim: the
+      blocker is remediated, but a fresh independent closure re-audit has not
+      run, and that audit is what would close the gate.
     depends_on:
       - TASK-0115
     blocked_by: []
@@ -3280,3 +3362,32 @@ items:
       - AGENT.md
       - planning/tasks/queue.yaml
       - docs/development/VERSIONING.md
+
+  - id: TASK-0119
+    gate: G7
+    title: Atomic Human-Gate Input Publication
+    objective: >-
+      Close the two-transaction window in which a planning human gate
+      publishes the branch's current planning input and then fails to record
+      the decision, stranding the previously accepted revision.
+    scope: >-
+      Both planning human gates - the pre-call gate reached through
+      pre_call_human_intervention and the post-call gate reached through
+      open_assessment_human_gate - and the transaction boundary between
+      publishing planning_input_heads and creating the HumanDecision. Define
+      and cover the recovery criteria as well as the atomicity. No change to
+      the TASK-0116 assessment durability decision, the publication fence
+      itself, or provider/G6 behaviour.
+    exit_criteria_summary: >-
+      A gate either publishes its snapshot and records its decision or does
+      neither, for both gates; the stranded state is either unreachable or has
+      a defined recovery path with executable coverage; existing planning, V9
+      and workspace verification remains green.
+    depends_on:
+      - TASK-0116
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - crates/app-services/src/planning_service.rs
+      - adapters/storage-sqlite/src/planning_control_store.rs
+      - adapters/storage-sqlite/src/human_decision_store.rs

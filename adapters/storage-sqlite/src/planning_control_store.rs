@@ -71,6 +71,33 @@ impl PlanningRunState {
     }
 }
 
+/// Why a planning generation is being claimed.
+///
+/// All three claims persist the snapshot and advance the run generation, so
+/// every planner call is fenced and its spend is durably reserved (ADR-0028
+/// §3, §4). They differ in two things only: whether the claim is checked
+/// against a bound `HumanDecision` plan head, and whether it republishes the
+/// branch's current planning input.
+#[derive(Clone, Copy, Debug)]
+enum PlanningRunClaim {
+    /// A proposal that intends to publish a revision.
+    Proposal,
+    /// V9 approved replay, fenced against the plan head its `HumanDecision`
+    /// was bound to.
+    ApprovedReplay { approved_plan_head: u64 },
+    /// Atomicity assessment: proposes nothing, so it reserves a run without
+    /// republishing current input (ADR-0027 TASK-0116 amendment).
+    Assessment,
+}
+
+impl PlanningRunClaim {
+    /// Whether this claim makes its snapshot the branch's current planning
+    /// input. Only an operation that intends to publish a revision does.
+    const fn publishes_current_input(self) -> bool {
+        matches!(self, Self::Proposal | Self::ApprovedReplay { .. })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanningRunRecord {
     pub id: PlanningRunId,
@@ -211,7 +238,31 @@ impl SqliteStore {
         trigger_evidence_key: &str,
         created_at_ms: u64,
     ) -> StorageResult<PlanningRunRecord> {
-        self.start_planning_run_inner(snapshot, trigger_evidence_key, created_at_ms, None)
+        self.start_planning_run_inner(
+            snapshot,
+            trigger_evidence_key,
+            created_at_ms,
+            PlanningRunClaim::Proposal,
+        )
+    }
+
+    /// Claims a planning generation for atomicity assessment. Assessment calls
+    /// a `PlannerPort`, so ADR-0028 §4 requires its spend to be durably
+    /// reserved against a run before the call. It proposes nothing, so unlike
+    /// a proposal it does not republish the branch's current planning input
+    /// and cannot de-admit an accepted revision (ADR-0027, TASK-0116).
+    pub fn start_assessment_planning_run(
+        &mut self,
+        snapshot: &PlanningInputSnapshot,
+        trigger_evidence_key: &str,
+        created_at_ms: u64,
+    ) -> StorageResult<PlanningRunRecord> {
+        self.start_planning_run_inner(
+            snapshot,
+            trigger_evidence_key,
+            created_at_ms,
+            PlanningRunClaim::Assessment,
+        )
     }
 
     /// Claims the current planning generation for immutable approved-proposal
@@ -229,8 +280,56 @@ impl SqliteStore {
             snapshot,
             trigger_evidence_key,
             created_at_ms,
-            Some(approved_plan_head),
+            PlanningRunClaim::ApprovedReplay { approved_plan_head },
         )
+    }
+
+    /// Publishes an already-persisted snapshot as the branch's current
+    /// planning input, fenced by the run that owns it.
+    ///
+    /// A human gate needs this even when its operation proposes nothing: a
+    /// durable `HumanDecision` can only be created, and later resumed, while
+    /// its bound snapshot is current. Assessment otherwise leaves the pointer
+    /// alone (TASK-0116).
+    ///
+    /// The run generation is verified inside the same immediate transaction as
+    /// the write, so a superseded run cannot republish its stale snapshot over
+    /// a newer generation's. Every other writer of `planning_input_heads` is
+    /// fused into a run claim; this one carries its own fence instead.
+    pub fn publish_planning_input(
+        &mut self,
+        run: &PlanningRunRecord,
+        snapshot: &PlanningInputSnapshot,
+    ) -> StorageResult<()> {
+        require_evidence_key(&snapshot.input_fingerprint)?;
+        if run.snapshot_id != snapshot.id {
+            return Err(StorageError::ConstraintViolation(
+                "planning input publication must use the snapshot its run is bound to".to_owned(),
+            ));
+        }
+        let tx = self
+            .connection_mut()
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        require_current_run(
+            &tx,
+            snapshot.plan_branch_id.as_str(),
+            run.id.as_str(),
+            run.generation,
+        )?;
+        tx.execute(
+            "INSERT INTO planning_input_heads (plan_branch_id, snapshot_id, input_fingerprint)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(plan_branch_id) DO UPDATE SET
+               snapshot_id = excluded.snapshot_id,
+               input_fingerprint = excluded.input_fingerprint",
+            params![
+                snapshot.plan_branch_id.as_str(),
+                snapshot.id.as_str(),
+                snapshot.input_fingerprint,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     fn start_planning_run_inner(
@@ -238,14 +337,14 @@ impl SqliteStore {
         snapshot: &PlanningInputSnapshot,
         trigger_evidence_key: &str,
         created_at_ms: u64,
-        approved_plan_head: Option<u64>,
+        claim: PlanningRunClaim,
     ) -> StorageResult<PlanningRunRecord> {
         require_evidence_key(trigger_evidence_key)?;
         require_evidence_key(&snapshot.input_fingerprint)?;
         let tx = self
             .connection_mut()
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(approved_plan_head) = approved_plan_head {
+        if let PlanningRunClaim::ApprovedReplay { approved_plan_head } = claim {
             let current_head: Option<i64> = tx
                 .query_row(
                     "SELECT head_revision FROM plan_branches WHERE plan_branch_id = ?1",
@@ -273,20 +372,26 @@ impl SqliteStore {
         }
         persist_snapshot(&tx, snapshot, created_at_ms)?;
 
-        tx.execute(
-            "INSERT INTO planning_input_heads (plan_branch_id, snapshot_id, input_fingerprint)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(plan_branch_id) DO UPDATE SET
-               snapshot_id = excluded.snapshot_id,
-               input_fingerprint = excluded.input_fingerprint",
-            params![
-                snapshot.plan_branch_id.as_str(),
-                snapshot.id.as_str(),
-                snapshot.input_fingerprint,
-            ],
-        )?;
+        // Only an operation that intends to publish a revision republishes the
+        // branch's current planning input. Assessment proposes nothing, so
+        // advancing this pointer would make an already-accepted revision fail
+        // the publication fence for a question that changed no plan.
+        if claim.publishes_current_input() {
+            tx.execute(
+                "INSERT INTO planning_input_heads (plan_branch_id, snapshot_id, input_fingerprint)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(plan_branch_id) DO UPDATE SET
+                   snapshot_id = excluded.snapshot_id,
+                   input_fingerprint = excluded.input_fingerprint",
+                params![
+                    snapshot.plan_branch_id.as_str(),
+                    snapshot.id.as_str(),
+                    snapshot.input_fingerprint,
+                ],
+            )?;
+        }
 
-        if approved_plan_head.is_some() {
+        if matches!(claim, PlanningRunClaim::ApprovedReplay { .. }) {
             if let Some(current) = load_current_run(&tx, &snapshot.plan_branch_id)? {
                 if current.state == PlanningRunState::Active
                     && current.snapshot_id == snapshot.id
