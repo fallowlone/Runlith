@@ -75,6 +75,13 @@ SQLite (e.g. ADR-0024 §6 execution entry) are out of scope by
 construction; their *preparation* and *finalization* halves, which cross
 the boundary, are the protocol's natural consumers.
 
+The frozen v1 registry (§4) is a dogfood slice, not a completeness claim.
+Named consumers deferred to later work, recorded here so the gap is
+visible rather than accidental: attempt conclusion and post-attempt
+crash/orphan recovery stay under ADR-0025's explicit G11 deferral (this
+protocol is the vocabulary that deferral will consume), and remote
+publication stays with the SoT publish-pending direction (G11/G12).
+
 ### 2. The state machine (normative)
 
 States and transitions are exactly:
@@ -162,7 +169,11 @@ allowed to read actual target state:
 
 The trusted side-effect boundary applies every rule. Rule IDs are stable
 and MUST appear verbatim in implementing test names (TASK-0126; the
-ADR-0027 §3 pattern).
+ADR-0027 §3 pattern). Dispatch of every kind additionally obeys the
+standing isolation rule: where a kind requires sandboxed or otherwise
+restricted execution, dispatch fails closed when the required backend is
+unavailable — the intent records `FAILED` or `ESCALATE`, never a silent
+downgrade to an unconstrained execution (INV-076).
 
 - **SE-1 INTENT BEFORE EFFECT** — no external mutation is dispatched
   before `INTENT_RECORDED` is durable. An intent that cannot be persisted
