@@ -2,7 +2,7 @@
    content wherever the layout mounts them (research §12–§13). */
 import { useState } from "react";
 import { FIXTURE, type AttentionItem, type ExpiredApproval, type HumanDecisionRequest } from "../fixture";
-import { Badge, Button } from "./ui";
+import { Badge, Button, PRETTY_STATE } from "./ui";
 
 const t = FIXTURE.task;
 
@@ -30,7 +30,9 @@ export function AttemptsList() {
       {t.attempts.map((a) => (
         <div key={a.n} className="row-h flex items-center gap-3 px-3">
           <strong className="text-sm">Attempt {a.n}</strong>
-          <Badge state={a.outcome === "SUCCEEDED" ? "COMPLETED" : "FAILED"}>{a.outcome}</Badge>
+          <Badge state={a.outcome === "SUCCEEDED" ? "COMPLETED" : "FAILED"} title={a.outcome}>
+            {PRETTY_STATE[a.outcome] ?? a.outcome}
+          </Badge>
           <span className="min-w-0 flex-1 truncate text-xs text-ink2">{a.note}</span>
           <span className="shrink-0 text-xs text-ink2">{a.ended}</span>
         </div>

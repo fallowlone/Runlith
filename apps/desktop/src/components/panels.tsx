@@ -1,7 +1,7 @@
 /* Task Workspace panels — content is identical regardless of where the
    layout places it (research §9.1, §13). Ported from the D05 proto.js. */
 import { FIXTURE } from "../fixture";
-import { Badge, Button, Callout, Group } from "./ui";
+import { Badge, Button, Callout, Group, PRETTY_STATE } from "./ui";
 
 const t = FIXTURE.task;
 
@@ -11,14 +11,17 @@ export function OverviewPanel({ onOpenDiagnostics, onOpenDecision }: { onOpenDia
   return (
     <div>
       <Callout tone="info">
-        <strong>{t.lifecycle}</strong> — {t.headlineReason}. <span className="text-ink2">{t.nextCommand}</span>
+        <strong>{PRETTY_STATE[t.lifecycle] ?? t.lifecycle}</strong> — {t.headlineReason}.{" "}
+        <span className="text-ink2">{t.nextCommand}</span>
       </Callout>
 
       <Group title="Execution / Attempts">
         <p className="mb-2 text-xs leading-4 text-ink2">{t.execution.observation}</p>
         {t.attempts.map((a) => (
           <div key={a.n} className="row-h flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-[4px] px-1 py-1 hover:bg-surface">
-            <Badge state={a.outcome === "SUCCEEDED" ? "COMPLETED" : "FAILED"}>{a.outcome}</Badge>
+            <Badge state={a.outcome === "SUCCEEDED" ? "COMPLETED" : "FAILED"} title={a.outcome}>
+              {PRETTY_STATE[a.outcome] ?? a.outcome}
+            </Badge>
             <span className="min-w-0 flex-1 basis-48 truncate">
               Attempt {a.n} — {a.note}
             </span>

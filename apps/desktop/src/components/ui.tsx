@@ -41,17 +41,39 @@ export function Button({ className, variant, size, type = "button", ...props }: 
   return <button type={type} className={cn(buttonVariants({ variant, size }), className)} {...props} />;
 }
 
-/* ---------- Badge (state first, then color — §12.1) ---------- */
+/* ---------- Badge (state first, then color — §12.1) ----------
+   Soft tinted chips: background and text carry the state, the dot is the
+   color-independent carrier. Neutral states stay gray. */
 
-const lifecycleDot: Partial<Record<TaskLifecycle, string>> = {
-  CLAIMED: "bg-accent",
-  RUNNING: "bg-accent",
-  VERIFYING: "bg-accent",
-  SUBMITTED: "bg-accent",
-  BLOCKED: "bg-attention",
-  AWAITING_REVIEW: "bg-attention",
-  COMPLETED: "bg-positive",
-  FAILED: "bg-danger",
+const lifecycleChip: Partial<Record<TaskLifecycle, { chip: string; dot: string }>> = {
+  CLAIMED: { chip: "border-transparent bg-accent/10 text-accent", dot: "bg-accent" },
+  RUNNING: { chip: "border-transparent bg-accent/10 text-accent", dot: "bg-accent" },
+  VERIFYING: { chip: "border-transparent bg-accent/10 text-accent", dot: "bg-accent" },
+  SUBMITTED: { chip: "border-transparent bg-accent/10 text-accent", dot: "bg-accent" },
+  BLOCKED: { chip: "border-transparent bg-attention/12 text-attention", dot: "bg-attention" },
+  AWAITING_REVIEW: { chip: "border-transparent bg-attention/12 text-attention", dot: "bg-attention" },
+  COMPLETED: { chip: "border-transparent bg-positive/12 text-positive", dot: "bg-positive" },
+  FAILED: { chip: "border-transparent bg-danger/10 text-danger", dot: "bg-danger" },
+};
+
+/* Presentation labels for canonical enum values (§12.2); the enum itself is
+   never renamed and stays in title/aria. Attempt outcomes use the same map. */
+export const PRETTY_STATE: Record<string, string> = {
+  DRAFT: "Draft",
+  READY: "Ready",
+  CLAIMED: "Claimed",
+  RUNNING: "Running",
+  BLOCKED: "Blocked",
+  SUBMITTED: "Submitted",
+  AWAITING_REVIEW: "Awaiting review",
+  VERIFYING: "Verifying",
+  RETRY_READY: "Retry ready",
+  COMPLETED: "Completed",
+  FAILED: "Failed",
+  CANCELLED: "Cancelled",
+  // Attempt outcomes (concluded, immutable)
+  SUCCEEDED: "Succeeded",
+  TIMED_OUT: "Timed out",
 };
 
 export function Badge({
@@ -61,21 +83,25 @@ export function Badge({
   title,
 }: {
   state?: TaskLifecycle;
-  children: ReactNode;
+  children?: ReactNode;
   className?: string;
   title?: string;
 }) {
+  const chip = state ? lifecycleChip[state] : undefined;
+  // Canonical enum stays accessible via title; the visible label is a
+  // friendly presentation form (research §12.2 candidate labels).
+  const pretty = state ? PRETTY_STATE[state] : undefined;
   return (
     <span
-      title={title}
+      title={title ?? (state ? `${state}` : undefined)}
       className={cn(
-        "inline-flex shrink-0 items-center gap-1.5 rounded-full border border-edge bg-shell px-2 py-0.5 text-xs leading-4 font-medium text-ink",
-        !state && "text-ink2",
+        "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs leading-4 font-medium",
+        chip ? chip.chip : "border-edge bg-surface text-ink2",
         className,
       )}
     >
-      <span aria-hidden className={cn("size-2 rounded-full", state ? lifecycleDot[state] ?? "bg-ink2" : "bg-ink2")} />
-      {children}
+      <span aria-hidden className={cn("size-1.5 rounded-full", chip ? chip.dot : "bg-ink2")} />
+      {children && children !== state ? children : pretty ?? children}
     </span>
   );
 }
