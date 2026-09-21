@@ -73,6 +73,7 @@ Runner / isolation execution work
 → fake-agent.md
 → adr/ADR-0013-policy-engine-os-isolation.md
 → adr/ADR-0008-worktree-isolation.md
+→ adr/ADR-0031-g8-side-effect-execution-protocol.md
 
 Context / continuity work
 → context-engine.md
