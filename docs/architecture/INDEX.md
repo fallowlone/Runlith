@@ -43,6 +43,7 @@ Planning / reconciliation work
 
 Evaluation / completion-authority work
 → adr/ADR-0018-independent-evaluation.md
+→ adr/ADR-0030-g8-observed-effect-claim-verification-contract.md
 
 ADR governance / activation / coverage
 → adr/ADR-0019-gate-scoped-adr-activation.md
