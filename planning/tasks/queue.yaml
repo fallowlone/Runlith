@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0118
+completed_through: TASK-0119
 current_gate: G7
-gate_status: IN_PROGRESS  # TASK-0116 remediated G7-BLOCKER-05 / F-07; no G7_CLOSED claim is made here and a fresh independent closure re-audit has not yet run
+gate_status: IN_PROGRESS  # every known G7 blocker is remediated through TASK-0119; no G7_CLOSED claim is made here and a fresh independent closure re-audit has not yet run
 
 items:
   - id: TASK-0012
@@ -3383,6 +3383,82 @@ items:
       neither, for both gates; the stranded state is either unreachable or has
       a defined recovery path with executable coverage; existing planning, V9
       and workspace verification remains green.
+    outcome: >-
+      ACCEPTED. Both planning human gates now publish the branch's current
+      planning input and record their HumanDecision in one transaction.
+      SqliteStore::publish_planning_input_and_create_human_decision opens one
+      IMMEDIATE transaction, verifies the run generation, writes
+      planning_input_heads and writes the decision, and commits once; the two
+      entry points share an in-transaction body. The exit criteria are met by
+      the unreachability branch, not by a recovery path: there is no stranded
+      state left to recover from on either gate.
+      The pre-call gate was the other half of the defect and is the behavioural
+      change here. It previously claimed its generation as a Proposal, which
+      publishes at claim time, and then created its decision separately. It now
+      claims as PlanningRunClaim::HumanGate, which publishes nothing, so its
+      publication happens only with its decision. The standalone
+      publish_planning_input is deleted - it had no production caller left -
+      and publish_planning_input_in_tx is private with one caller, so the fused
+      writer is the only way to publish outside a run claim.
+      What that does NOT mean, because the first wording of this claim was
+      wrong and shipped in two doc comments: the window is not closed by
+      construction. A claim publishes atomically with the claim, not with the
+      decision, and start_planning_run remains public with a Proposal claim, so
+      a future gate written in main's old shape would reopen this exact window
+      and no test would catch it. PlanningRunClaim::HumanGate is what prevents
+      it, by convention rather than by enforcement. A partial revert - a
+      HumanGate claim plus a separate create_human_decision_request - does fail
+      closed, because require_plan_precondition finds the gate's snapshot is
+      not the published head.
+      Not fixed, and outside this task's scope: the proposal path publishes
+      when it claims its generation (ADR-0028), so the same de-admitted state
+      remains reachable there, and it is not a crash-only window. It is the
+      ordinary outcome of any proposal refusal that opens no gate - a guardrail
+      trip whose bound maps to no human reason returns GuardrailTripped with no
+      decision (planning_service.rs:1416, human_reason_for_guardrail:2267), and
+      a validation refusal returns a plain Ok(outcome) unless L3 no-progress
+      tripped (planning_service.rs:1956). In both cases the run already
+      published its snapshot, nothing restores the pointer, and the previously
+      accepted revision stays inadmissible until a new revision is accepted.
+      Five decision-creation sites sit inside that window, not four: the four
+      create_planning_human_decision call sites plus the V9 risk escalation at
+      planning_service.rs:1577, which calls the store directly and is invisible
+      to a grep for the helper. No transaction fusion closes any of them,
+      because there the publication is the claim. A future task may decide
+      whether that residue is acceptable; this task does not.
+      Coverage. Three new tests plus one retargeted. Atomicity is covered at
+      the storage boundary only: a failed gate decision leaves the accepted
+      revision admissible, and a recorded one publishes its own snapshot. The
+      RED state was confirmed before the fix, not assumed - a baseline probe
+      ran the two-transaction sequence and failed on the stranded revision.
+      TASK-0116's generation-fence test is retargeted onto the fused writer and
+      now asserts StorageError::PlanningRunStale rather than a bare expect_err;
+      removing require_current_run makes it fail, so the fence is still
+      genuinely covered. The service-level test asserts end state only: it
+      passes against the pre-TASK-0119 sequence AND against a Proposal-claimed
+      gate, so it guards neither the fusion nor the claim mode. It catches the
+      end state and a partial revert. The post-call gate has no new
+      service-level test of its own.
+      Review. Three rounds, all findings in the record rather than the code.
+      The code fix was correct from the first submission and never changed
+      substantively. Round one: the residual proposal-path failure was framed
+      as crash-only when it is the ordinary refusal outcome, the site count
+      said four when it is five, a new doc comment stated an absolute rule that
+      planning_service.rs:1577 violates, and the exit criterion rested on
+      convention. Round two: the fix for the last of those introduced a new
+      false claim - that the window could not return by construction - in two
+      doc comments and the commit message, which pointed a future gate author
+      at the defect. Round three: the replacement still overstated that the
+      service test pinned the claim mode. Each was verified independently
+      before being accepted, and each was a sentence written while trying to
+      disclose a limitation.
+      Verification: cargo test --workspace --locked --no-fail-fast 1104 passed
+      / 3 ignored, up from 1101 by exactly the three new tests; clippy
+      --workspace --all-targets --locked -D warnings clean; fmt --all --check
+      clean; git diff --check clean.
+      G7 remains IN_PROGRESS and this task makes no G7_CLOSED claim. The fresh
+      independent closure re-audit has not run, and that audit is what would
+      close the gate.
     depends_on:
       - TASK-0116
     blocked_by: []
