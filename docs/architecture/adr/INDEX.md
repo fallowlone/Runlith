@@ -33,5 +33,7 @@
 | [ADR-0026](./ADR-0026-g6-security-authority-and-capability-contracts.md) | G6 security authority and capability contracts | Accepted | policy, capabilities, approvals, secrets, audit, runners, g6 sequencing |
 | [ADR-0027](./ADR-0027-g7-planning-orchestration-contract.md) | G7 planning/orchestration contract (`PlannerPort`, `PlanChangeSet`, validation, revision provenance, guardrails, vocabulary reconcile, G6 follow-up re-homing) | Accepted | planning, orchestration, planner seam, plan revisions, guardrails, human decisions, g7 sequencing |
 | [ADR-0028](./ADR-0028-g7-planning-input-run-and-execution-fencing.md) | G7 planning input/run separation, stale-writer fencing, durable spend accounting, and mandatory accepted-Plan execution admission | Accepted | planning inputs, planning runs, plan revisions, execution admission, stale fencing, g7 sequencing |
+| [ADR-0029](./ADR-0029-planner-evidence-resolution.md) | Planner evidence resolution: identity-only `evidence_refs` accepted as the v1 semantic | Accepted | planner evidence, evidence refs, cycle identity, provenance, g7 |
+| [ADR-0030](./ADR-0030-g8-observed-effect-claim-verification-contract.md) | G8 observed effect / claim verification contract (`AgentClaim`, `EvidenceRequirement`, `ObservedEffect`, `ClaimVerification`, CV-1..CV-9) | Accepted | verification, claims, evidence requirements, observed effects, claim verification, completion authority, g8 sequencing |
 
 Coverage register (not an ADR): [COVERAGE.md](./COVERAGE.md).
