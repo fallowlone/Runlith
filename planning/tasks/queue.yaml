@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0120
+completed_through: TASK-0122
 current_gate: G8
-gate_status: IN_PROGRESS  # G7 closed by the TASK-0120 independent closure re-audit (G7_CLOSED); G8 breakdown materialized (TASK-0121..TASK-0127 queued, contract ADRs first)
+gate_status: IN_PROGRESS  # G7 closed by the TASK-0120 independent closure re-audit (G7_CLOSED); G8 breakdown materialized (TASK-0121..TASK-0127 queued, contract ADRs first); TASK-0121 and TASK-0122 accepted after independent review
 
 items:
   - id: TASK-0012
@@ -3558,6 +3558,24 @@ items:
       guessing, referenced from docs/architecture/INDEX.md, with every rule
       executable-as-specified and the TASK-0093/TASK-0096 v1 boundary
       explicitly carried or superseded.
+    outcome: >-
+      ACCEPTED 2026-09-21 by owner decision after three independent
+      review rounds. Round 1 returned CHANGES-REQUIRED with three HIGH
+      and five lower findings (ClaimVerification schema contradiction
+      between sections 2 and 3, the unbounded CV-4 policy carve-out, the
+      migration risk of reproducing the TASK-0096 silent downgrade, and
+      five more); round 2 resolved all eight and found four new items on
+      the new exemption machinery (untyped risk key, no HUMAN_APPROVAL
+      fence, exemption staleness, undefined exempted state); round 3
+      verified every resolution against existing machinery and returned
+      ACCEPTABLE. Record:
+      docs/architecture/adr/ADR-0030-g8-observed-effect-claim-verification-contract.md.
+      The ADR freezes AgentClaim, EvidenceRequirement, ObservedEffect and
+      ClaimVerification with normative field schemas, kind registries,
+      the four-state verdict taxonomy, rules CV-1..CV-9 and the
+      TASK-0093/TASK-0096 migration path; status ACCEPTED in the ADR, the
+      per-ADR index and COVERAGE.md; adr/INDEX.md also back-fills the
+      previously missing ADR-0029 registration.
     depends_on:
       - TASK-0120
     blocked_by: []
@@ -3577,7 +3595,9 @@ items:
       silently retried while its outcome is unknown.
     scope: >-
       Contract only: the PREPARED, INTENT_RECORDED, EXECUTING, CONFIRMED,
-      FAILED, AMBIGUOUS and RECONCILE state machine with typed transitions;
+      FAILED, AMBIGUOUS and RECONCILE state machine — RECONCILE resolving
+      to CONFIRMED, SAFE_TO_RETRY, SAFE_TO_CONTINUE or ESCALATE — with
+      typed transitions;
       idempotency identity carried by INTENT_RECORDED; AMBIGUOUS is
       distinct from FAILED and NOT_EXECUTED; RECONCILE before any retry
       whose external outcome is uncertain; provider-specific read-back and
@@ -3590,6 +3610,29 @@ items:
       An accepted ADR naming states, transitions, durable fields, ports and
       recovery obligations precisely enough for TASK-0126 to implement the
       workspace/Git dogfood consumer without inventing semantics.
+    outcome: >-
+      ACCEPTED 2026-09-21 by owner decision after three independent
+      review rounds. Round 1 returned CHANGES-REQUIRED with two HIGH
+      findings (the state machine could not express the proven
+      TASK-0057 branch-only recovery; SE-1 in universal form made the
+      existing G5 provider seam a standing violation) and three MEDIUM
+      findings (ESCALATE with no legal exit; the kind registry without
+      port-operation and canonical-parameter mapping; the missing
+      SAFE_TO_RETRY re-entry edge), plus three LOW items. Round 2
+      verified all eight resolutions and found two new items on the new
+      machinery (WORKSPACE_CLEANUP without a named continuation; the
+      idempotency minting rule contradicted by carry-forward); the round-3
+      verification returned ACCEPTABLE. Record:
+      docs/architecture/adr/ADR-0031-g8-side-effect-execution-protocol.md.
+      Accepted shape: the SoT 105.2 machine refined with a documented
+      SAFE_TO_CONTINUE outcome, applicability-by-registration, terminal
+      ESCALATE with the intent-resolution record, a two-kind registry with
+      per-kind operation and canonical-parameter tables, and explicit
+      re-entry edges. Two non-blocking observations are recorded for
+      TASK-0126: implement the liveness re-check as part of the cleanup
+      catch-up continuation, and keep the queue state enumerations in
+      sync with the ADR machine (fixed for the RECONCILE outcomes in this
+      pass).
     depends_on:
       - TASK-0120
     blocked_by: []
