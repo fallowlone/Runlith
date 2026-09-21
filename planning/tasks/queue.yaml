@@ -3467,3 +3467,34 @@ items:
       - crates/app-services/src/planning_service.rs
       - adapters/storage-sqlite/src/planning_control_store.rs
       - adapters/storage-sqlite/src/human_decision_store.rs
+
+  - id: TASK-0120
+    gate: G7
+    title: Final Independent G7 Closure Re-Audit
+    objective: >-
+      Re-audit the complete accepted G7 contract after TASK-0119 from a fresh
+      context and return exactly G7_CLOSED or G7_REMEDIATION_REQUIRED without
+      implementing repairs.
+    scope: >-
+      Audit only: re-test the four original G7 blockers, the TASK-0116
+      assessment durability reconciliation (G7-BLOCKER-05 / F-07), the
+      TASK-0119 human-gate publication atomicity and its disclosed
+      proposal-path de-admission residue, all accepted planning and
+      HumanDecision contracts, shipped IPC/agentctl reachability, planning
+      input/head/run fencing, Task authority and child materialization,
+      L3/L4, malformed/adversarial planner output, restart durability, G6
+      isolation regression and both real-provider evidence paths. No
+      production behavior changes.
+    exit_criteria_summary: >-
+      A fresh closure report records one hard G7 verdict backed by current
+      code, executable tests and real-provider evidence; any blocker is
+      assigned to a separate remediation task before another closure audit.
+    depends_on:
+      - TASK-0119
+    blocked_by: []
+    references:
+      - docs/development/G7_CLOSURE_AUDIT.md
+      - docs/development/G7_TASK_0115_FINAL_CLOSURE_REAUDIT.md
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md
+      - docs/architecture/adr/ADR-0029-planner-evidence-resolution.md
