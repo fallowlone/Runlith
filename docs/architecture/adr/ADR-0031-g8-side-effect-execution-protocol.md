@@ -4,9 +4,12 @@
   independent contract review before TASK-0126 implements against it)
 - Date: 2026-09-21
 - Gate: G8
-- Independent of: ADR-0030 (claim verification). Its only touchpoint is
-  downstream: reconciliation evidence later feeds `ObservedEffect`
-  provenance.
+- Independent of: ADR-0030 (claim verification — a parallel PROPOSED
+  contract on branch `task-0121-claim-verification-contract`; the only
+  touchpoint is downstream: reconciliation evidence may later feed
+  `ObservedEffect` provenance). Neither depends on the other's
+  acceptance; `adr/INDEX.md` in this branch registers ADR-0030 when that
+  branch merges first (merge order: 0121, then this branch rebased).
 
 > Contract-only ADR (TASK-0122). It freezes the durable side-effect
 > intent/recovery protocol — the state machine, the `SideEffectIntent`
@@ -52,8 +55,9 @@ EVENT_SOURCING guardrail stands: durable relational state plus
 append-oriented journals and explicit reconciliation are sufficient; this
 protocol is not event sourcing.
 
-Binding constraints (never weakened below): INV-001 (state survives
-restart), INV-007 (destructive/privileged actions pass Policy), INV-008 /
+Binding constraints (never weakened below): INV-001 (Task state survives
+every agent/session/process restart; §3 carries the analogous demand for
+intent state), INV-007 (destructive/privileged actions pass Policy), INV-008 /
 INV-151 (no secrets in durable state), INV-010 (persistent mutations are
 auditable), INV-012 (provider neutrality), INV-050 / INV-091 (no silent
 unbounded retry), INV-066 (no transparent side-effect replay across
@@ -82,6 +86,16 @@ crash/orphan recovery stay under ADR-0025's explicit G11 deferral (this
 protocol is the vocabulary that deferral will consume), and remote
 publication stays with the SoT publish-pending direction (G11/G12).
 
+**Applicability is by registration.** The rules below bind operation
+kinds registered for them at the time of the operation (§4). Side-effect
+classes not yet registered — today, the G5 provider execution seam and
+its attempt lifecycle (ADR-0024/ADR-0025, whose recovery semantics are
+their own accepted contracts), and later remote publication and daemon
+reconciliation — are **deferred consumers of this vocabulary, not
+standing violations of it**. Registering a class maps it onto the §2
+machine by amendment or a scoped consumer contract; until then its
+existing recovery semantics govern.
+
 ### 2. The state machine (normative)
 
 States and transitions are exactly:
@@ -103,19 +117,56 @@ RECONCILE           trusted reconciliation inspects actual target state
   -> CONFIRMED      reconciliation proves the effect landed
   -> SAFE_TO_RETRY  reconciliation proves the effect did not land and the
                     target matches the pre-effect state
-  -> ESCALATE       reconciliation cannot prove either within its bounded
-                    budget, or the target contradicts both
+  -> SAFE_TO_CONTINUE  reconciliation proves the effect partially landed
+                    in a state from which a named, deterministic,
+                    previously-proven continuation operation completes
+                    it without discretionary choices
+  -> ESCALATE       reconciliation cannot prove any of the above within
+                    its bounded budget, or the target contradicts every
+                    known continuation
+SAFE_TO_RETRY       explicit re-dispatch of the same operation (same
+                    intent, same idempotency identity)
+  -> EXECUTING
+SAFE_TO_CONTINUE    explicit dispatch of the named continuation
+                    operation (same intent, same idempotency identity)
+  -> EXECUTING
 ESCALATE            typed durable blocker; enters the existing bounded
                     human-decision lane where one is in scope, else a
-                    typed operator-visible blocker. Never auto-retried.
+                    typed operator-visible blocker. Terminal for
+                    autonomous transitions (below). Never auto-retried.
 ```
 
-No other transition exists. In particular: there is no `AMBIGUOUS ->
-FAILED`, no `EXECUTING -> PREPARED`, and no re-entry into `EXECUTING`
-except from `SAFE_TO_RETRY` as a retry of the **same** intent (SE-4).
-`FAILED` is terminal for the intent; a logically new attempt mints a new
-intent. Terminal states are `CONFIRMED`, `FAILED`, and an `ESCALATE`d
-intent resolved through its human/operator lane.
+Two re-entry edges exist, both explicit: `SAFE_TO_RETRY -> EXECUTING`
+re-dispatches the original operation; `SAFE_TO_CONTINUE -> EXECUTING`
+dispatches the intent kind's named continuation operation (for
+`WORKTREE_MATERIALIZE`, the ADR-0025 TASK-0057 branch-only attachment —
+the fused `worktree add -b` may have created the managed branch before
+crashing, and the proven continuation attaches rather than re-creates,
+which a blind retry would refuse with a branch collision). Both edges
+are entered only on an explicit, auditable control-plane instruction;
+automatic retry is not authorized by this contract (its authorization
+question is deferred to the G11 consumption contract, Open).
+
+`SAFE_TO_CONTINUE` is a deliberate G8 refinement of the SoT §105.2
+outcome list (`CONFIRMED | SAFE_TO_RETRY | ESCALATE`), recorded here
+with rationale: the SoT non-negotiable — reconcile the actual target
+state before retrying any side effect that could already have completed
+— is honored, because a continuation dispatch happens only after
+reconciliation proves the exact partial state and names the proven
+completion. Forcing the branch-only recovery shape through `ESCALATE`
+would convert ADR-0025's proven automatic (post-explicit-resume)
+recovery into a mandatory human escalation — changing externally proven
+behavior this ADR commits to carrying.
+
+`ESCALATE` is terminal for autonomous transitions: no rule may leave it
+autonomously. Resolution is an explicit, durable, product-authored
+**intent-resolution record** made by the operator/human lane,
+referencing the intent and its reconciliation evidence. A resolution
+either (i) closes the intent as resolved-discarded (the resolution
+record is its terminal evidence), or (ii) authorizes a fresh intent
+that carries the original `idempotency_key` forward (linkage
+preserved), dispatched only on explicit operator instruction. The
+resolution decision itself is audited (INV-010).
 
 
 ### 3. The durable record
@@ -123,10 +174,10 @@ intent resolved through its human/operator lane.
 ```text
 SideEffectIntent
   intent_id           // unique, product-minted
-  operation_kind      // typed registry, §4 (e.g. GIT_BRANCH_CREATE,
-                      // WORKTREE_MATERIALIZE, WORKSPACE_CLEANUP)
+  operation_kind      // typed registry, §4
   target_ref          // bounded identity of the external target
-  params_hash         // SHA-256 over canonical operation parameters
+  params_hash         // SHA-256 over the kind's canonical parameter set
+                      // (defined per kind in §4)
   idempotency_key     // product-minted per intent; re-presented on every
                       // retry of the SAME intent (SE-4)
   state               // the §2 machine state
@@ -147,9 +198,20 @@ provider session identity (INV-008, INV-151, INV-012).
 ### 4. Operation-kind registry and reconciliation authority
 
 v1 freezes the kind registry to the workspace/Git failure domain
-(TASK-0126's dogfood surface): `GIT_BRANCH_CREATE`,
-`WORKTREE_MATERIALIZE`, `WORKSPACE_CLEANUP`. Kinds are extended only by
-ADR amendment; an unknown kind fails closed and can never enter
+(TASK-0126's dogfood surface), with one kind per durable intent and the
+kind defining the intent's operation **and** its named continuation:
+
+| Kind | Port operation | Canonical parameters (`params_hash` input) | Retry / continuation behavior |
+|---|---|---|---|
+| `WORKTREE_MATERIALIZE` | fused `create_worktree` (`git worktree add -b`): one dispatch creates managed branch + worktree | (managed branch name, target path, exact base revision, owning lease/execution identity) | retry re-dispatches the same fused operation after `SAFE_TO_RETRY`; after `SAFE_TO_CONTINUE` dispatches `attach_worktree` (the TASK-0057 branch-only attachment), which a blind retry could never reach |
+| `WORKSPACE_CLEANUP` | `remove_worktree` (with attached-branch deletion per the ADR-0023 cleanup contract) | (worktree path, owning lease/execution identity, branch deletion scope) | retry re-dispatches after `SAFE_TO_RETRY`; idempotent already-absent outcomes are `CONFIRMED` with the observed evidence, per ADR-0023's idempotent-cleanup semantics |
+
+There is no standalone `GIT_BRANCH_CREATE` kind: in v1, managed-branch
+creation is always fused into `WORKTREE_MATERIALIZE` (one Git-native
+dispatch), and branch deletion is part of `WORKSPACE_CLEANUP`. A future
+unfused branch operation requires an ADR amendment adding its kind,
+operations and canonical parameters. Kinds are extended only by ADR
+amendment; an unknown kind fails closed and can never enter
 `EXECUTING`.
 
 Each kind declares its reconciliation authority — the trusted component
@@ -160,14 +222,18 @@ allowed to read actual target state:
   already practice);
 - remote/provider targets reconcile through provider-specific read-back
   or receipt mechanisms **behind ports**, never through provider
-  self-report parsed as authority (INV-012; provider output is evidence
-  input, not proof);
+  self-report parsed as authority; provider output is evidence input,
+  never proof — a boundary owned by SoT §105.1 and ADR-0018, not by
+  INV-012, which here governs provider neutrality of the record itself);
 - a target whose actual state cannot be read within the bounded
   reconciliation budget goes to `ESCALATE`, never to a guess (SE-6).
 
 ### 5. Protocol rules (executable-as-specified)
 
-The trusted side-effect boundary applies every rule. Rule IDs are stable
+The trusted side-effect boundary applies every rule **to operation kinds
+registered for them at operation time (§4)**; unregistered side-effect
+classes are deferred consumers of this vocabulary, not standing
+violations of it (§1). Rule IDs are stable
 and MUST appear verbatim in implementing test names (TASK-0126; the
 ADR-0027 §3 pattern). Dispatch of every kind additionally obeys the
 standing isolation rule: where a kind requires sandboxed or otherwise
@@ -187,10 +253,12 @@ downgrade to an unconstrained execution (INV-076).
   analogue).
 - **SE-3 RECONCILE BEFORE RETRY** — an `AMBIGUOUS` intent is never
   retried, re-dispatched, or "cleaned up" until `RECONCILE` proves
-  `CONFIRMED` or `SAFE_TO_RETRY` from actual target state. Reconciliation
-  evidence is durable and referenced from the transition
-  (`outcome_evidence_refs`).
-- **SE-4 IDEMPOTENCY IDENTITY** — every retry of a `SAFE_TO_RETRY` intent
+  `CONFIRMED`, `SAFE_TO_RETRY`, or `SAFE_TO_CONTINUE` from actual target
+  state. Reconciliation evidence is durable and referenced from the
+  transition (`outcome_evidence_refs`).
+- **SE-4 IDEMPOTENCY IDENTITY** — every re-dispatch of a
+  `SAFE_TO_RETRY` intent (of the original operation) or a
+  `SAFE_TO_CONTINUE` intent (of its named continuation operation)
   re-presents the exact `idempotency_key` and `params_hash`. A replay of
   the same accepted effect is distinguished from a conflicting attempt by
   durable provenance (the ADR-0028 materialization retry-equivalence
@@ -257,10 +325,12 @@ downgrade to an unconstrained execution (INV-076).
 ## Consequences
 
 - TASK-0126 implements the §3 record, the §2 machine, and the §5 rules for
-  the three §4 kinds, mapping the existing ADR-0023/ADR-0025 workspace/Git
+  the §4 kinds, mapping the existing ADR-0023/ADR-0025 workspace/Git
   reconciliations onto the protocol; every SE rule ID MUST appear in test
   names, including crash-injected AMBIGUOUS recovery tests that prove no
-  duplicate external mutation and no silent retry.
+  duplicate external mutation and no silent retry — including the
+  branch-only shape, whose `SAFE_TO_CONTINUE` attachment must be proven
+  reachable and exactly-once.
 - Durable intent storage is owned by the side-effect boundary and creates
   no second authority for Task, Execution, Workspace, or provider state
   (the ADR-0027 storage-ownership pattern).
@@ -274,8 +344,10 @@ Destructive kinds pass Policy before `EXECUTING` as they do today
 (INV-007); the protocol adds no new authority, only new evidence. Intent
 rows carry no secrets, credentials, or provider session material
 (INV-008, INV-151). `target_ref` and `pre_state_fingerprint` may contain
-local paths; they stay local-first (INV-011/INV-014) and follow the
-existing redaction discipline for logs and audit payloads. Reconciliation
+local paths; the protocol introduces no new egress — nothing here is
+sent to a cloud service or telemetry channel (INV-011/INV-014 remain
+satisfied by construction) — and captured material follows the existing
+redaction discipline for logs and audit payloads. Reconciliation
 is read-only against targets; the only mutations it authorizes are the
 protocol's own durable transitions.
 
@@ -289,12 +361,19 @@ migration posture. No G6/G7 artifact is migrated or reinterpreted.
 
 ## Open
 
-- Provider read-back/receipt port shapes for remote kinds (G11/G12).
+- Provider read-back/receipt port shapes for remote kinds (G11/G12);
+  provider-output-as-evidence (never proof) follows SoT §105.1 and
+  ADR-0018, which govern that boundary.
 - Whether daemon restart may auto-enter `RECONCILE` for recorded
   `AMBIGUOUS` intents (read-only target inspection) without an explicit
   operator resume, or whether ADR-0025's surface-only rule covers it;
-  decided with the G11 consumption contract, not assumed here.
+  decided with the G11 consumption contract, not assumed here. Automatic
+  *retry* (as opposed to read-only reconciliation) is decided by the same
+  contract and is not authorized by this ADR (§2).
 - Reconciliation budgets per kind (policy-owned tunables, SE-8).
+- Intent durability is this ADR's own normative requirement (§3): intent
+  state must survive every restart; INV-001 names the analogous Task
+  property.
 
 ## References
 
