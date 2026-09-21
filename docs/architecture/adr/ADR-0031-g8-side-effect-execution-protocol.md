@@ -178,8 +178,10 @@ SideEffectIntent
   target_ref          // bounded identity of the external target
   params_hash         // SHA-256 over the kind's canonical parameter set
                       // (defined per kind in §4)
-  idempotency_key     // product-minted per intent; re-presented on every
-                      // retry of the SAME intent (SE-4)
+  idempotency_key     // product-minted per intent lineage; re-presented on
+                      // every re-dispatch of the SAME intent and carried
+                      // forward by resolution-authorized successor
+                      // intents (SE-4, §2 ESCALATE resolution)
   state               // the §2 machine state
   linkage             // owning Task/Execution/Attempt refs (provenance)
   pre_state_fingerprint   // canonical pre-effect target reading, when the
@@ -204,7 +206,7 @@ kind defining the intent's operation **and** its named continuation:
 | Kind | Port operation | Canonical parameters (`params_hash` input) | Retry / continuation behavior |
 |---|---|---|---|
 | `WORKTREE_MATERIALIZE` | fused `create_worktree` (`git worktree add -b`): one dispatch creates managed branch + worktree | (managed branch name, target path, exact base revision, owning lease/execution identity) | retry re-dispatches the same fused operation after `SAFE_TO_RETRY`; after `SAFE_TO_CONTINUE` dispatches `attach_worktree` (the TASK-0057 branch-only attachment), which a blind retry could never reach |
-| `WORKSPACE_CLEANUP` | `remove_worktree` (with attached-branch deletion per the ADR-0023 cleanup contract) | (worktree path, owning lease/execution identity, branch deletion scope) | retry re-dispatches after `SAFE_TO_RETRY`; idempotent already-absent outcomes are `CONFIRMED` with the observed evidence, per ADR-0023's idempotent-cleanup semantics |
+| `WORKSPACE_CLEANUP` | `remove_worktree` (with attached-branch deletion per the ADR-0023 cleanup contract) — one intent covering the whole cleanup; its named continuation is the idempotent catch-up of the remaining half (crash after worktree removal but before branch deletion → re-prove ownership, then `remove_branch`; crash before any removal → full re-dispatch) | (worktree path, owning lease/execution identity, branch deletion scope) | retry re-dispatches after `SAFE_TO_RETRY`; `SAFE_TO_CONTINUE` dispatches the named catch-up half (ADR-0023's "crash implies inspection, then the next safe action"); idempotent already-absent outcomes are `CONFIRMED` with the observed evidence, per ADR-0023's idempotent-cleanup semantics — a partial cleanup therefore continues automatically (post-explicit-resume), it does not escalate |
 
 There is no standalone `GIT_BRANCH_CREATE` kind: in v1, managed-branch
 creation is always fused into `WORKTREE_MATERIALIZE` (one Git-native
@@ -265,7 +267,11 @@ downgrade to an unconstrained execution (INV-076).
   pattern); a matching key with a different `params_hash` or owner is a
   conflict, never a silent reuse. Externally retryable mutations expose
   this idempotency explicitly; idempotency does not replace transactional
-  invariants (SoT cross-cutting note).
+  invariants (SoT cross-cutting note). A resolution-authorized successor
+  intent (§2 ESCALATE resolution) carries the original `idempotency_key`
+  forward with linkage to its intent-resolution record: identical key,
+  `params_hash`, owner and resolution provenance remain a distinguishable
+  replay, not a conflict.
 - **SE-5 NO FABRICATED TERMINAL FACTS** — `CONFIRMED` and `FAILED` are
   recorded only against durable evidence of the actual outcome
   (generalizing ADR-0025's no-terminal-fact-without-evidence rule).
