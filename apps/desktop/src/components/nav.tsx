@@ -10,11 +10,13 @@ export function Nav({
   textSize,
   onDensity,
   onTextSize,
+  onOpenExplorer,
 }: {
   density: string;
   textSize: string;
   onDensity: (v: string) => void;
   onTextSize: (v: string) => void;
+  onOpenExplorer: () => void;
 }) {
   return (
     <nav aria-label="Project navigation" className="flex w-[240px] shrink-0 flex-col">
@@ -36,16 +38,21 @@ export function Nav({
         </svg>
       </button>
 
-      <div role="region" aria-label="Tasks" className="mt-3 px-2">
+      {/* Tree for parent-child only (§14.4): children are indented under
+          their parent; dependency edges belong to the Plan graph instead. */}
+      <div role="tree" aria-label="Tasks" className="mt-3 px-2">
         <p className="px-2.5 pb-1 text-xs font-semibold text-ink2">Tasks</p>
         {F.tasks.map((task) => (
           <a
             key={task.id}
             href="#"
+            role="treeitem"
+            aria-level={task.parent ? 2 : 1}
             onClick={(e) => e.preventDefault()}
             aria-current={task.selected ? "true" : undefined}
             className={cn(
               "row-h flex items-center gap-2 rounded-[8px] px-2.5 text-sm no-underline hover:bg-surface",
+              task.parent && "ml-5 border-l border-edge pl-2",
               task.selected && "bg-surface font-medium",
             )}
           >
@@ -70,6 +77,19 @@ export function Nav({
             </span>
           </a>
         ))}
+        {/* §9.1: Execution Explorer is a secondary diagnostic route, never a
+            primary navigation item. */}
+        <button
+          type="button"
+          onClick={onOpenExplorer}
+          className="row-h flex w-full items-center gap-2 rounded-[8px] px-2.5 text-left text-xs text-ink2 hover:bg-surface hover:text-ink"
+        >
+          <svg aria-hidden width="12" height="12" viewBox="0 0 12 12" className="shrink-0">
+            <path d="M1 6h3l1.5-3.5L8 9l1.5-3H11" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          Execution Explorer
+          <span className="ml-auto text-[10px]">diagnostics</span>
+        </button>
       </div>
 
       <div className="mt-auto border-t border-edge p-2">

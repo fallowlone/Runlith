@@ -1,7 +1,9 @@
 /* Task Workspace panels — content is identical regardless of where the
    layout places it (research §9.1, §13). Ported from the D05 proto.js. */
+import { useState } from "react";
 import { FIXTURE } from "../fixture";
-import { Badge, Button, Callout, Group, PRETTY_STATE } from "./ui";
+import { Badge, Button, Callout, Group, PRETTY_STATE, cn } from "./ui";
+import { CausalLinksCard, PlanGraphView } from "./plan-graph";
 
 const t = FIXTURE.task;
 
@@ -14,6 +16,10 @@ export function OverviewPanel({ onOpenDiagnostics, onOpenDecision }: { onOpenDia
         <strong>{PRETTY_STATE[t.lifecycle] ?? t.lifecycle}</strong> — {t.headlineReason}.{" "}
         <span className="text-ink2">{t.nextCommand}</span>
       </Callout>
+
+      {/* §13.7: causal links instead of agent theater — evidence → revision,
+          HDR → blocked branch, sequential retries. */}
+      <CausalLinksCard />
 
       <Group title="Execution / Attempts">
         <p className="mb-2 text-xs leading-4 text-ink2">{t.execution.observation}</p>
@@ -53,29 +59,57 @@ export function OverviewPanel({ onOpenDiagnostics, onOpenDecision }: { onOpenDia
   );
 }
 
-/* ---------- Plan (§9.3: list first; accepted vs proposal distinct) ---------- */
+/* ---------- Plan (§9.3: list is the default; graph is a secondary view) ---------- */
 
 export function PlanPanel() {
   const p = t.plan;
+  const [view, setView] = useState<"list" | "graph">("list");
   return (
     <div>
-      <Group title={`Accepted revision — ${p.acceptedRevision} (head ${p.head})`}>
-        <p>Accepted plan head of the current branch. Provenance: {p.provenance}.</p>
-        <p className="mt-2 text-xs leading-4 text-ink2">
-          Plan list is the default view (§9.3); the graph is an analysis view, not the only way to read the plan.
-        </p>
-      </Group>
-      <Group title={`Proposed change set ${p.proposed.id} — proposal, not the acting plan`}>
-        <p>
-          {p.proposed.delta} — {p.proposed.summary}
-        </p>
-        <p className="mt-2 text-xs leading-4 text-ink2">
-          Risk: {p.proposed.risk}. {p.proposed.validation}. A proposal never renders as an already-accepted revision.
-        </p>
-        <div className="mt-3">
-          <Button>Review change set</Button>
+      <div className="mb-3 flex items-center gap-2">
+        <div className="flex rounded-[8px] border border-edge bg-surface p-0.5">
+          {(["list", "graph"] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              aria-pressed={view === v}
+              onClick={() => setView(v)}
+              className={cn(
+                "rounded-[6px] px-3 py-1 text-xs font-medium capitalize",
+                view === v ? "bg-shell text-ink shadow-[0_1px_2px_rgba(16,20,25,0.08)]" : "text-ink2 hover:text-ink",
+              )}
+            >
+              {v === "list" ? "List (default)" : "Graph"}
+            </button>
+          ))}
         </div>
-      </Group>
+        <span className="text-xs text-ink2">
+          {view === "graph" ? "Analysis view — dependencies only (§9.3, §14.4)" : "Goal, obligations, dependencies, readiness"}
+        </span>
+      </div>
+      {view === "graph" ? (
+        <PlanGraphView />
+      ) : (
+        <div>
+          <Group title={`Accepted revision — ${p.acceptedRevision} (head ${p.head})`}>
+            <p>Accepted plan head of the current branch. Provenance: {p.provenance}.</p>
+            <p className="mt-2 text-xs leading-4 text-ink2">
+              Plan list is the default view (§9.3); the graph is an analysis view, not the only way to read the plan.
+            </p>
+          </Group>
+          <Group title={`Proposed change set ${p.proposed.id} — proposal, not the acting plan`}>
+            <p>
+              {p.proposed.delta} — {p.proposed.summary}
+            </p>
+            <p className="mt-2 text-xs leading-4 text-ink2">
+              Risk: {p.proposed.risk}. {p.proposed.validation}. A proposal never renders as an already-accepted revision.
+            </p>
+            <div className="mt-3">
+              <Button>Review change set</Button>
+            </div>
+          </Group>
+        </div>
+      )}
     </div>
   );
 }

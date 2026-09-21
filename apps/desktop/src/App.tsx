@@ -11,6 +11,7 @@ import { OverviewHero } from "./components/overview";
 import { Nav } from "./components/nav";
 import { Inspector } from "./components/inspector";
 import { TopBar } from "./components/topbar";
+import { ExecutionExplorer } from "./components/plan-graph";
 
 const TASK = FIXTURE.task;
 
@@ -36,6 +37,9 @@ export default function App() {
   const [diagOpen, setDiagOpen] = useState(false);
   const [density, setDensity] = useState("default");
   const [textSize, setTextSize] = useState("normal");
+  const [explorerOpen, setExplorerOpen] = useState(false);
+  const openExplorer = useCallback(() => setExplorerOpen(true), []);
+  const closeExplorer = useCallback(() => setExplorerOpen(false), []);
 
   useEffect(() => {
     document.documentElement.dataset.density = density;
@@ -56,7 +60,7 @@ export default function App() {
 
   return (
     <div className="relative flex h-full p-3">
-      <Nav density={density} textSize={textSize} onDensity={setDensity} onTextSize={setTextSize} />
+      <Nav density={density} textSize={textSize} onDensity={setDensity} onTextSize={setTextSize} onOpenExplorer={openExplorer} />
 
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar />
@@ -124,6 +128,9 @@ export default function App() {
 
       {/* ---------- agent panel (explicit open/pin/close only) ---------- */}
       {inspectorOpen && <Inspector onClose={closeInspector} />}
+
+      {/* ---------- §9.1: Execution Explorer (secondary diagnostic route) ---------- */}
+      {explorerOpen && <ExecutionExplorer onClose={closeExplorer} />}
     </div>
   );
 }

@@ -271,6 +271,35 @@ export const FIXTURE = {
       { src: "verifier", line: "12:04:29 INFO  criterion C3 -> PENDING (awaiting log scan)" },
     ] as LogLine[],
   },
+  /* §9.3/§16: plan graph fixture — selected branch + nearest dependencies
+     only (not the whole project). Graph is an analysis view; the list
+     stays the default. */
+  planGraph: {
+    branch: "main / plan r4",
+    nodes: [
+      { id: "n1", label: "Authorize retry scope", state: "SUCCEEDED", deps: [], agent: "claude · attempt 1" },
+      { id: "n2", label: "Add retry jitter", state: "SUCCEEDED", deps: ["n1"], agent: "claude · attempt 2" },
+      { id: "n3", label: "Add in-flight guard", state: "SUCCEEDED", deps: ["n1"], agent: "claude · attempt 2" },
+      { id: "n4", label: "Verify C1–C3", state: "VERIFYING", deps: ["n2", "n3"], agent: "claude · attempt 2" },
+      { id: "n5", label: "Update provider docs", state: "READY", deps: ["n4"], agent: null },
+      { id: "n6", label: "Escalate policy note", state: "BLOCKED", deps: ["n4"], agent: null },
+    ],
+  },
+  /* §13.7: causal links instead of agent theater. Agents appear only in
+     Attempt context; retries stay sequential. */
+  causalLinks: [
+    { text: "Evidence EV-118 justified accepted plan r4 (PlanningRun #77 SUCCEEDED).", kind: "evidence" },
+    { text: "HDR-0092 blocks the TASK-0344 branch (NO_PROGRESS) — the branch cannot proceed until resolved.", kind: "hdr" },
+    { text: "Criteria C1/C2 VERIFIED are bound to snapshot 5e11d0… produced by Attempt 2.", kind: "evidence" },
+    { text: "Attempt 1 TIMED_OUT → Attempt 2 is a sequential retry of E-0901, not a parallel agent.", kind: "retry" },
+  ],
+  /* §9.1: Execution Explorer — secondary diagnostic route for several tasks. */
+  explorer: [
+    { id: "TASK-0355", objective: "Planner budget guard", state: "RUNNING", attempt: "Attempt 1", provider: "claude", live: "live · 4s ago" },
+    { id: "TASK-0342", objective: "Make provider auth retries stable…", state: "VERIFYING", attempt: "Attempt 2", provider: "claude", live: "no live run · 12m" },
+    { id: "TASK-0344", objective: "Harden token refresh path", state: "BLOCKED", attempt: "Attempt 2", provider: "claude", live: "stopped · HDR-0092" },
+    { id: "TASK-0338", objective: "Rotate keychain entries", state: "COMPLETED", attempt: "Attempt 1", provider: "claude", live: "concluded" },
+  ],
 };
 
 export type PanelId = "overview" | "plan" | "changes" | "evidence" | "history";

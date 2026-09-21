@@ -127,6 +127,21 @@ restrained aesthetic**, which was recorded there as an initial user preference
 Durable-roles rule (§14.1) still holds: light values are new candidates for
 the same roles, and a dark variant must remain reachable via the token layer.
 
+## Direct research mentions implemented (2026-09-21)
+
+- **§9.3 + §16 experiment:** Plan tab has List (default) and Graph views; the
+  graph shows the selected branch + nearest dependencies only, never the whole
+  project. The list-vs-graph-default question stays open for D06 testing.
+- **§13.7:** causal-links card (evidence → revision, HDR → blocked branch,
+  sequential retry note); agents appear only in Attempt context; no avatars
+  or swarm cards.
+- **§14.4:** tree renders parent-child only (child indent in nav), tables for
+  Attempts/Evidence comparison, graph renders dependencies only.
+- **§15.2:** the graph always carries a text alternative (details block).
+- **§9.1:** Execution Explorer as a secondary diagnostic route (nav →
+  Attention section), read-only table across tasks.
+
+
 ## Verification
 
 Static prototypes (unchanged, still comparable fixtures):
