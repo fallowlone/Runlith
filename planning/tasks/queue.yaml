@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0119
+completed_through: TASK-0120
 current_gate: G7
-gate_status: IN_PROGRESS  # every known G7 blocker is remediated through TASK-0119; no G7_CLOSED claim is made here and a fresh independent closure re-audit has not yet run
+gate_status: CLOSED  # TASK-0120 independent closure re-audit: G7_CLOSED (all five blockers remediated and re-proven; proposal-path residue adjudicated non-blocking); G8 not started
 
 items:
   - id: TASK-0012
@@ -3489,12 +3489,49 @@ items:
       A fresh closure report records one hard G7 verdict backed by current
       code, executable tests and real-provider evidence; any blocker is
       assigned to a separate remediation task before another closure audit.
+    outcome: >-
+      G7_CLOSED. The four original blockers were re-verified closed by name
+      on the audited tree (85bc607): planner node identity stays bounded by
+      canonical Task authority; shipped planning/continuation and
+      accepted-Plan execution admission are reachable through agentctl and
+      agentd; stale, expired and failed HumanDecision continuations recover
+      through durable audited supersession; V9 RESUME rehydrates the exact
+      approved proposal with exactly-once consumption and no planner replay.
+      G7-BLOCKER-05 / F-07 is resolved coherently: ADR-0027 and ADR-0028 now
+      prescribe one assessment durability model and the implementation
+      matches it, with the amendment's four named tests confirmed
+      non-vacuous. TASK-0119's fused gate transaction holds for both human
+      gates, and its disclosed proposal-path de-admission residue is
+      adjudicated as contract-mandated ADR-0028 fencing with a reachable
+      recovery (new accepted revision; durable L3 no-progress backstop), not
+      a closure blocker; the HumanGate claim mode remains
+      convention-enforced, a disclosed and accepted residual. Full workspace
+      verification on the audited tree: 1104 passed, 0 failed, 3 ignored;
+      clippy -D warnings, fmt and diff-check clean; queue integrity 109/109
+      unique. An independent fresh-context read-only second pass re-derived
+      the same verdict with no new closure-blocking defect. Real-provider
+      evidence: the production G6 confinement smoke passed fresh (typed
+      fail-closed refusal before provider work); the trusted-host live
+      planner smoke was blocked by an external weekly account limit
+      reproduced with a bare claude CLI call outside the product, and its
+      evidence is inherited from TASK-0115's live pass because
+      adapters/provider-claude and bins/agentd/src/planning.rs are unchanged
+      since that audited base; the smoke's environment classifier missing the
+      empty-stderr limit shape is recorded as a non-blocking tooling
+      observation, and the smoke must be re-run green before any release
+      decision relying on fresh live-planner evidence. Audit only: no
+      production behavior changed, no G8 work started. Record:
+      docs/development/G7_TASK_0120_FINAL_CLOSURE_REAUDIT.md. Gate
+      bookkeeping: roadmap G7 completed, queue gate_status CLOSED, product
+      identity 0.1.0-dev.task0120 with the gate field unchanged at G7 until
+      the G8 breakdown is materialized.
     depends_on:
       - TASK-0119
     blocked_by: []
     references:
       - docs/development/G7_CLOSURE_AUDIT.md
       - docs/development/G7_TASK_0115_FINAL_CLOSURE_REAUDIT.md
+      - docs/development/G7_TASK_0120_FINAL_CLOSURE_REAUDIT.md
       - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
       - docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md
       - docs/architecture/adr/ADR-0029-planner-evidence-resolution.md
