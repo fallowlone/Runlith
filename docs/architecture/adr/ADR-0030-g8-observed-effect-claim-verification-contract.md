@@ -1,7 +1,9 @@
 # ADR-0030 - G8 Observed Effect / Claim Verification Contract
 
-- Status: **PROPOSED** (TASK-0121; acceptance requires an owner decision and
-  independent contract review before TASK-0123..TASK-0125 implement against it)
+- Status: **ACCEPTED** (owner decision 2026-09-21, after three independent
+  review rounds — round-1 findings F1..F8 and round-2 findings N1..N4
+  resolved, final verdict ACCEPTABLE at `1545ac3`). TASK-0123..TASK-0125
+  implement against it.
 - Date: 2026-09-21
 - Gate: G8
 - Carries forward: the v1 obligation boundary recorded by the ADR-0027
