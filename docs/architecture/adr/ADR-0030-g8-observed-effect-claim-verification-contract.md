@@ -195,6 +195,12 @@ one (ADR-0027 TASK-0093 amendment, carried).
   (INV-131/INV-136): an analytical obligation whose check could not run is
   not a failed check, and neither may be reported as VERIFIED.
 
+An exempted criterion (CV-4) is reported as **EXEMPT**: a policy-discharge
+marker, not a verdict. EXEMPT is never counted as verified evidence in any
+roll-up, and it joins the completion evidence as its own durable record —
+it is the one completion-admissible state that carries no
+`ClaimVerification` row.
+
 Verdicts are durable records, not computed-on-read caches — with one
 defined exception: VERIFIED, REFUTED and BLOCKED are persisted rows, while
 UNVERIFIED is the defined state of a criterion lacking a current
@@ -236,10 +242,17 @@ are stable and MUST appear verbatim in implementing test names
   is an explicit **policy exemption**: the trusted Policy derivation (the
   G6 Policy Engine under its policy fingerprint — the same authority class
   that derives G7 planning requirements) may exempt a criterion from
-  automated requirements only by minting a durable, product-authored
-  exemption record bound to the criterion and the policy fingerprint.
-  Exemptions are forbidden for any Task whose baseline risk is above
-  `Low`, and the exemption record joins the Task's completion evidence, so
+  automated capture requirements only by minting a durable,
+  product-authored exemption record bound to the criterion and the policy
+  fingerprint. Exemptions are gated on typed risk: eligibility reads the
+  canonical typed baseline risk (the `RiskClass` derived by
+  `TaskPlanningAuthority`, not free-form metadata), fails closed when no
+  typed risk is derivable, and is forbidden unless that typed risk is
+  exactly `Low`. An exemption never discharges a `HUMAN_APPROVAL`,
+  `INDEPENDENT_REVIEW`, or `SECURITY_CHECK` requirement (INV-086,
+  INV-146..153); only the automated capture kinds (`PROCESS_EXIT`,
+  `TEST_SUITE`, `ARTIFACT_HASH`, `FS_STATE`, `GIT_STATE`) are exemptible.
+  The exemption record joins the Task's completion evidence, so
   every COMPLETED Task still carries replayable verdict-or-exemption
   references (ADR-0018's consequence preserved: no zero-evidence
   completions). Missing coverage without an exemption record is
@@ -264,7 +277,10 @@ are stable and MUST appear verbatim in implementing test names
   provider, or workspace configuration can never weaken a requirement
   marked `required` (INV-146, INV-148). Requirements are re-derived or
   re-validated at the verification boundary; a requirement minted under a
-  superseded policy fingerprint is stale input, not authority.
+  superseded policy fingerprint is stale input, not authority — and the
+  same staleness applies to CV-4 exemption records: a policy change
+  invalidates previously minted exemptions, which never silently survive a
+  tightening.
 - **CV-8 HUMAN APPROVAL EXACT BINDING** — `HUMAN_APPROVAL` requirements are
   discharged only by a durable approval recorded in the TASK-0062 approval
   store, minted by the trusted evaluation/verification boundary, whose
