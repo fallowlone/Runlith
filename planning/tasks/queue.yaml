@@ -9,8 +9,8 @@
 
 schema_version: 1
 completed_through: TASK-0120
-current_gate: G7
-gate_status: CLOSED  # TASK-0120 independent closure re-audit: G7_CLOSED (all five blockers remediated and re-proven; proposal-path residue adjudicated non-blocking); G8 not started
+current_gate: G8
+gate_status: IN_PROGRESS  # G7 closed by the TASK-0120 independent closure re-audit (G7_CLOSED); G8 breakdown materialized (TASK-0121..TASK-0127 queued, contract ADRs first)
 
 items:
   - id: TASK-0012
@@ -3535,3 +3535,212 @@ items:
       - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
       - docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md
       - docs/architecture/adr/ADR-0029-planner-evidence-resolution.md
+
+  - id: TASK-0121
+    gate: G8
+    title: Observed Effect / Claim Verification contract
+    objective: >-
+      Freeze the G8 verification seam as a contract-only ADR before any
+      implementation, separating AgentClaim, EvidenceRequirement,
+      ObservedEffect and ClaimVerification so that a model or agent
+      statement is never its own completion evidence.
+    scope: >-
+      Contract only, in the TASK-0075 pattern: typed vocabulary and field
+      schemas for AgentClaim, EvidenceRequirement, ObservedEffect and
+      ClaimVerification; verifier-independence rules (INV-009, INV-114);
+      the migration path from the TASK-0093 criterion-identity boundary and
+      the TASK-0096 materialization refusal; verification-method semantics
+      for the closed four-method vocabulary (requirement-to-evidence
+      meaning, never a strength ranking); receipts remain execution
+      provenance, never self-verification (INV-072). No production code.
+    exit_criteria_summary: >-
+      An accepted ADR an implementer can transcribe to tests without
+      guessing, referenced from docs/architecture/INDEX.md, with every rule
+      executable-as-specified and the TASK-0093/TASK-0096 v1 boundary
+      explicitly carried or superseded.
+    depends_on:
+      - TASK-0120
+    blocked_by: []
+    references:
+      - AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - docs/architecture/adr/ADR-0018-independent-evaluation.md
+      - docs/architecture/INVARIANTS.md
+      - planning/roadmap.yaml
+
+  - id: TASK-0122
+    gate: G8
+    title: Side-Effect Execution Protocol contract
+    objective: >-
+      Freeze the durable side-effect intent/recovery contract as a
+      contract-only ADR, so a crash after an external effect is never
+      silently retried while its outcome is unknown.
+    scope: >-
+      Contract only: the PREPARED, INTENT_RECORDED, EXECUTING, CONFIRMED,
+      FAILED, AMBIGUOUS and RECONCILE state machine with typed transitions;
+      idempotency identity carried by INTENT_RECORDED; AMBIGUOUS is
+      distinct from FAILED and NOT_EXECUTED; RECONCILE before any retry
+      whose external outcome is uncertain; provider-specific read-back and
+      receipt mechanisms behind ports; explicit confirmation that durable
+      relational state plus journals is sufficient (no full Event
+      Sourcing, per the roadmap EVENT_SOURCING guardrail); relationship to
+      the existing Git/filesystem versus SQLite failure-domain split
+      (INV-145). No production code.
+    exit_criteria_summary: >-
+      An accepted ADR naming states, transitions, durable fields, ports and
+      recovery obligations precisely enough for TASK-0126 to implement the
+      workspace/Git dogfood consumer without inventing semantics.
+    depends_on:
+      - TASK-0120
+    blocked_by: []
+    references:
+      - AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
+      - docs/architecture/INVARIANTS.md
+      - docs/architecture/adr/ADR-0008-worktree-isolation.md
+      - planning/roadmap.yaml
+
+  - id: TASK-0123
+    gate: G8
+    title: EvidenceRequirement domain model and Task/Plan schema
+    objective: >-
+      Materialize the TASK-0121 contract into the canonical domain model,
+      giving Task and Plan acceptance criteria typed evidence requirements
+      instead of bare criterion identities.
+    scope: >-
+      Verification domain types per the TASK-0121 ADR; SQLite schema
+      migration for evidence requirements on Task acceptance criteria and
+      plan node criteria; the TASK-0096 materialization refusal is replaced
+      by real obligation carriage only where the contract defines it, with
+      every previously refused method transition mapped explicitly; V3/V9
+      method-escalation semantics reconciled with the new model; protocol
+      versioning per ADR-0028 TASK-0084 precedent. No runner or scheduler
+      consumption of the new fields beyond what the ADR specifies.
+    exit_criteria_summary: >-
+      Evidence requirements persist and round-trip for Task and Plan
+      criteria; the TASK-0093 default-to-AutomatedTest assumption is gone
+      from every path the ADR names; migration is restart-safe and fails
+      closed on legacy rows; full workspace verification green.
+    depends_on:
+      - TASK-0121
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - adapters/storage-sqlite/src/plan_store.rs
+      - crates/app-services/src/planning_service.rs
+      - docs/architecture/task-engine.md
+
+  - id: TASK-0124
+    gate: G8
+    title: Observed-effect capture ports and first adapters
+    objective: >-
+      Implement the provider-neutral ObservedEffect capture seam from the
+      TASK-0121 contract, so claimed outcomes can be checked against
+      runtime-observed evidence.
+    scope: >-
+      Capture ports for process exit/stdio envelopes, artifact hashes and
+      filesystem/Git state, behind replaceable ports per the ports-and-
+      adapters boundary; first local adapters with bounded size and
+      timeout policy; observed effects stored with provenance and subject
+      fingerprints, separate from model-visible receipts; no completion
+      authority change (that is TASK-0125).
+    exit_criteria_summary: >-
+      An observed effect produced by a real local run is durable,
+      fingerprinted and retrievable after restart; provider or model text
+      cannot author one; contract suite pattern follows the ADR-0024
+      shared-suite precedent; full workspace verification green.
+    depends_on:
+      - TASK-0121
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0024-g5-provider-execution-seam.md
+      - docs/architecture/INVARIANTS.md
+      - crates/evaluation
+      - adapters/git-cli
+
+  - id: TASK-0125
+    gate: G8
+    title: ClaimVerification binding to completion authority
+    objective: >-
+      Wire ClaimVerification into the ADR-0018 independent-evaluation
+      boundary so an agent self-claim is structurally insufficient for
+      Task completion.
+    scope: >-
+      Completion admission requires ClaimVerification evidence per the
+      EvidenceRequirement of each acceptance criterion, as defined by the
+      TASK-0121 ADR; builder self-claims and provider-local
+      gather-act-verify loops produce evidence, never transitions
+      (INV-009, INV-113); human approval remains durable evidence bound to
+      the exact subject and risk (INV-150); failure taxonomy distinguishes
+      unverified, contradictory and blocked verification from a clean
+      pass; no weakening of existing G6/G7 fences.
+    exit_criteria_summary: >-
+      A Task cannot reach COMPLETED on agent claim alone through any
+      shipped control-plane path; each criterion's verification outcome is
+      typed, durable and auditable; regression evidence that G5/G6/G7
+      completion paths still pass; full workspace verification green.
+    depends_on:
+      - TASK-0123
+      - TASK-0124
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0018-independent-evaluation.md
+      - crates/evaluation
+      - crates/app-services/src/orchestration_service.rs
+      - docs/architecture/task-engine.md
+
+  - id: TASK-0126
+    gate: G8
+    title: Side-effect protocol dogfood on workspace/Git recovery
+    objective: >-
+      Implement the TASK-0122 protocol for the existing workspace/Git
+      failure domain, making crash-ambiguous side effects reconcile before
+      any uncertain retry.
+    scope: >-
+      Durable intent recording and the AMBIGUOUS/RECONCILE flow for the
+      Git/filesystem versus SQLite failure-domain seams named by INV-145
+      (worktree materialization and cleanup, branch mutation, journal
+      versus filesystem drift); local reconciliation of filesystem/Git
+      state; typed escalation when reconciliation cannot prove the target
+      state; restart durability of intent state; no remote side-effect
+      consumers (G11/G12 consume the same semantics later).
+    exit_criteria_summary: >-
+      A crash injected between side effect and state commit recovers
+      through RECONCILE with no duplicate external mutation and no silent
+      retry, proven by adversarial restart tests; the durable intent rows
+      and their audit evidence survive restart; full workspace
+      verification green.
+    depends_on:
+      - TASK-0122
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0008-worktree-isolation.md
+      - adapters/git-cli
+      - crates/workspace
+      - docs/architecture/INVARIANTS.md
+
+  - id: TASK-0127
+    gate: G8
+    title: Independent G8 closure audit
+    objective: >-
+      Re-audit the complete accepted G8 contract from a fresh context and
+      return exactly G8_CLOSED or G8_REMEDIATION_REQUIRED without
+      implementing repairs.
+    scope: >-
+      Audit only: re-test the TASK-0121..TASK-0126 acceptance evidence
+      against the current tree, verifier independence, schema migration
+      safety, side-effect protocol recovery matrix, completion-authority
+      binding, and G5/G6/G7 regression envelopes. No production behavior
+      changes.
+    exit_criteria_summary: >-
+      A closure report records one hard G8 verdict backed by current code,
+      executable tests and real-provider evidence where the contract
+      requires it; any blocker is assigned to a separate remediation task
+      before another closure audit.
+    depends_on:
+      - TASK-0125
+      - TASK-0126
+    blocked_by: []
+    references:
+      - docs/development/G7_TASK_0120_FINAL_CLOSURE_REAUDIT.md
+      - planning/roadmap.yaml
+      - docs/architecture/INDEX.md
