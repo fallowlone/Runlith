@@ -88,14 +88,47 @@ python3 -m http.server -d docs/ui/design/2026-09-21-d05-task-workspace-prototype
   unconfirmed; their assumptions above need confirmation or supersession by
   the canonical contract tasks.
 
+## Tauri implementation (apps/desktop)
+
+Second phase of this branch (user-authorized stack decision): a **Tauri 2 +
+React 19 + TypeScript + Tailwind v4** implementation of the Variant C design,
+replacing the usability comparison goal with a runnable desktop shell.
+
+- `npm run dev` / `npm run tauri dev` — run the desktop shell (dev server on :5173)
+- `npm run build` — typecheck + production build
+- `cargo check` (in `src-tauri/`) — Rust side
+
+Architecture constraints honored:
+
+- **ADR-0007 / AGENT.md §4:** the Tauri shell registers **no commands, no
+  plugins, no shell/process/Git capability**; `lib.rs` is the default builder.
+  All data is the typed fixture (`src/fixture.ts`).
+- **ADR-0015:** shadcn-style primitives (`src/components/ui.tsx`, cva variants +
+  `cn()` merging); migrating to generated shadcn/ui components is drop-in.
+- **ADR-0016:** no invented IPC — backend query surfaces are a separate task.
+- **Root workspace untouched:** `src-tauri` is a standalone crate (`[workspace]`
+  in its `Cargo.toml`) so the architecture-governed root `Cargo.toml` is not
+  modified by a UI shell crate.
+- Bundle step is disabled (`bundle.active: false`); icons are flat placeholder
+  tiles generated for the build check. Packaging is a release-engineering task.
+
+Deviation record: D08 (frontend stack ADR) remains deferred in the roadmap;
+this Tauri/React baseline implements the user's explicit instruction and must
+be ratified (or reverted) by the D08 ADR.
+
 ## Verification
 
-Run from the worktree root:
+Static prototypes (unchanged, still comparable fixtures):
 
 ```sh
 python3 docs/ui/design/2026-09-21-d05-task-workspace-prototypes/verify.py
 ```
 
-Checks: all pages parse as HTML, all three variants load the same fixture.js,
-no unsupported actions leak (TAKEOVER, Cancel Task, active approve on the
-stale approval), density/text tokens present.
+Tauri app:
+
+```sh
+cd apps/desktop
+npm run build   # tsc --noEmit + vite build
+cargo check     # in src-tauri/ (or: cd src-tauri && cargo check)
+npm run tauri dev  # launches the desktop shell
+```

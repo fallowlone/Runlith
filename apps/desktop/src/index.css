@@ -1,0 +1,91 @@
+@import "tailwindcss";
+
+/* Design tokens — candidates per research §14.1/§14.2; durable roles, not
+   raw-state colors. Replacing values here must not change semantics. */
+@theme {
+  --color-canvas: #101419;
+  --color-shell: #15191f;
+  --color-surface: #1b2129;
+  --color-overlay: #242c36;
+  --color-ink: #e6e9ef;
+  --color-ink2: #a4abb7;
+  --color-accent: #76a9fa;
+  --color-positive: #82c99a;
+  --color-teal: #69bfb8;
+  --color-attention: #e9b86e;
+  --color-danger: #f18a8a;
+  --color-edge: rgba(228, 233, 239, 0.08);
+
+  --font-sans: -apple-system, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --radius-ctl: 4px;
+  --radius-panel: 6px;
+  --radius-pop: 8px;
+}
+
+:root {
+  --row-h: 32px;
+  --ring: 2px solid var(--color-accent);
+}
+html[data-density="compact"] { --row-h: 28px; }
+html[data-density="comfortable"] { --row-h: 40px; }
+
+/* Text-size fixture independent of density (§14.1). Tailwind rem utilities
+   scale with the root size. */
+html[data-text="large"] { font-size: 19px; }
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 0.875rem; /* 14/20 at root 16px */
+  line-height: 1.4286;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: rgba(118, 169, 250, 0.28);
+}
+
+:focus-visible {
+  outline: var(--ring);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Row height follows the density fixture; one component, three metrics. */
+.row-h {
+  height: var(--row-h);
+  min-height: var(--row-h);
+}
+
+/* Thin pane dividers instead of boxes around every block (§14.1 borders). */
+.hairline {
+  border-color: var(--color-edge);
+}
+
+/* Diff gutter colors keep additions/deletions distinguishable beyond color
+   alone via their +/- signs (§15: color is never the only carrier). */
+.diff-add { color: var(--color-positive); background: rgba(130, 201, 154, 0.08); }
+.diff-del { color: var(--color-danger); background: rgba(241, 138, 138, 0.08); }
+.diff-ctx { color: var(--color-ink2); }
+
+/* Reduced-motion equivalent: nothing in this UI animates by default; if a
+   transition is added it must check prefers-reduced-motion (§14.1 motion). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
