@@ -267,7 +267,7 @@ fn journal_evidence(seq: u64) -> PlanCommitJournalEvidence {
 fn fresh_database_reaches_schema_16() {
     let db = TestDb::new("schema");
     let store = db.open();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 16);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 17);
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
 }
 
@@ -1688,7 +1688,9 @@ fn schema_13_revision_history_without_lineage_fails_closed_after_upgrade() {
     }
     db.raw()
         .execute_batch(
-            "DROP TABLE planning_input_candidate_tasks;
+            "DROP TABLE task_evidence_requirement_params;
+             DROP TABLE task_evidence_requirements;
+             DROP TABLE planning_input_candidate_tasks;
              DROP TABLE human_decision_evidence;
              DROP TABLE human_decision_options;
              DROP TABLE human_decision_scope_roots;

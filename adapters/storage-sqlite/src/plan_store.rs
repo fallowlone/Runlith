@@ -29,7 +29,10 @@ use crate::journal_store::{
 use crate::plan_cost_store::load_plan_cost_receipt;
 use crate::plan_guardrail_store::{require_evidence_key, reset_rejections};
 use crate::planning_control_store::{enforce_publication_fence, mark_publication_succeeded};
-use crate::task_store::{insert_task_edges, insert_task_row, insert_task_strings, load_task};
+use crate::task_store::{
+    insert_task_edges, insert_task_evidence_requirements, insert_task_row, insert_task_strings,
+    load_task,
+};
 
 /// Trusted application-service envelope for the Event Journal metadata that
 /// surrounds one committed Plan revision. It contains no planner transcript,
@@ -383,6 +386,7 @@ impl crate::task_store::SqliteStore {
             let snapshot = child.task.snapshot();
             insert_task_row(&transaction, &snapshot)?;
             insert_task_strings(&transaction, &snapshot)?;
+            insert_task_evidence_requirements(&transaction, &snapshot)?;
             insert_task_edges(&transaction, &snapshot)?;
             insert_journal_event(&transaction, &child.created_event)?;
             insert_journal_event(&transaction, &child.ready_event)?;

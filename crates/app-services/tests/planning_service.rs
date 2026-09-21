@@ -2675,16 +2675,15 @@ fn accepted_decomposition_materializes_planner_child_ready_under_the_parent() {
     );
 }
 
-/// ADR-0027 TASK-0096: the plan model carries a typed proof obligation, the
-/// canonical Task contract does not. Materialization is where that difference
-/// becomes data loss, so it refuses rather than silently downgrading the
-/// obligation to automated-test. With no parent criteria there is no V3
-/// coverage comparison and no V9 grant in the way, which is exactly the path
-/// that made the loss silent.
+/// ADR-0030 §6 replaces the ADR-0027 TASK-0096 refusal with real carriage:
+/// a criterion whose proof method the v1 Task contract could not carry
+/// materializes as an explicit evidence requirement on the child Task. The
+/// strengthened obligation arrives as itself — never downgraded to
+/// automated-test and never silently dropped.
 #[test]
-fn materialization_refuses_a_child_whose_proof_method_the_task_cannot_carry() {
-    let db = TestDb::new("child-nonautomated-method");
-    let error = db
+fn materialization_carries_a_strengthened_proof_obligation_as_an_explicit_requirement() {
+    let db = TestDb::new("child-method-carried");
+    let outcome = db
         .service()
         .propose_decomposition(
             &TestPlanner::new(ProposalCase::NonAutomatedCriterion),
@@ -2692,18 +2691,28 @@ fn materialization_refuses_a_child_whose_proof_method_the_task_cannot_carry() {
             request("child-method"),
             &policy(false),
         )
-        .expect_err("a proof method the Task cannot carry must refuse materialization");
-    let detail = format!("{error:?}");
-    assert!(
-        detail.contains("human-approval") || detail.contains("proof method"),
-        "unexpected error {detail}"
+        .expect("a human-approval criterion materializes as carried obligation");
+    assert!(matches!(outcome, PlanningProposalOutcome::Accepted(_)));
+    let child = db
+        .store()
+        .get_task(&TaskId::new("node-1").unwrap())
+        .unwrap()
+        .expect("materialized child exists");
+    let facts = child.snapshot();
+    let requirement = facts
+        .evidence_requirements
+        .iter()
+        .find(|requirement| requirement.criterion_id == "criterion-child-1")
+        .expect("the child criterion carries its requirement");
+    assert_eq!(
+        requirement.requirement_kind,
+        task_domain::RequirementKind::HumanApproval,
+        "the human-approval obligation arrives as itself"
     );
-    assert!(
-        db.store()
-            .get_task(&TaskId::new("node-1").unwrap())
-            .unwrap()
-            .is_none(),
-        "no child may survive a refused materialization"
+    assert_eq!(
+        requirement.policy_fingerprint.as_deref(),
+        Some("policy:test"),
+        "materialization stamps the planning policy fingerprint"
     );
 }
 

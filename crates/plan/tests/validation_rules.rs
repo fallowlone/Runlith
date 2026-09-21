@@ -344,6 +344,43 @@ fn v3_acceptance_criteria_preservation_method_change_routes_to_v9() {
     assert_eq!(refusal_code(&graph, &cs, &ctx()), "RISK_GATE_OPEN");
 }
 
+/// ADR-0030 CV-4/V9 reconciliation: when the parent Task's explicit
+/// evidence requirement is human-approval, a child that redeclares
+/// automated-test for that criterion is a method change and routes to V9,
+/// symmetrically with the automated-test -> human-approval direction the
+/// G7 suite pins above. Under the new model the parent side is never the
+/// implicit default; it is what the Task carries.
+#[test]
+fn v3_reconciled_parent_method_routes_weakening_to_v9() {
+    let graph = base_graph();
+    let mut cs = valid_changeset();
+    cs.node_additions[0].criteria = vec![plan_domain::CriterionDecl::new(
+        cid("c1a"),
+        VerificationMethod::AutomatedTest,
+    )];
+    cs.proposal_hash = compute_proposal_hash(&cs);
+    let mut c = ctx();
+    c.affected_parent_criteria = vec![AffectedParentCriterion {
+        id: cid("c1"),
+        method: VerificationMethod::HumanApproval,
+    }];
+    assert_eq!(refusal_code(&graph, &cs, &c), "RISK_GATE_OPEN");
+    c.risk_grant = Some(RiskEscalationGrant {
+        proposal_hash: cs.proposal_hash.clone(),
+        expires_at_ms: 5_000,
+        consumed: false,
+    });
+    match validate_proposal(&graph, &cs, &c) {
+        ValidationOutcome::Accepted { risk_escalated } => {
+            assert!(
+                risk_escalated,
+                "the method change is still marked escalated"
+            )
+        }
+        outcome => panic!("expected an accepted escalated proposal, got {outcome:?}"),
+    }
+}
+
 #[test]
 fn v3_acceptance_criteria_preservation_method_change_accepts_with_grant() {
     let graph = base_graph();
