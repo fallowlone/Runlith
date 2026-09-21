@@ -1,7 +1,8 @@
 # ADR-0031 - G8 Side-Effect Execution Protocol
 
-- Status: **PROPOSED** (TASK-0122; acceptance requires an owner decision and
-  independent contract review before TASK-0126 implements against it)
+- Status: **ACCEPTED** (owner decision 2026-09-21, after three independent
+  review rounds — F1..F8 and N1..N2 resolved, final verdict ACCEPTABLE at
+  `ebbce51`). TASK-0126 implements against it.
 - Date: 2026-09-21
 - Gate: G8
 - Independent of: ADR-0030 (claim verification — a parallel PROPOSED
@@ -206,7 +207,7 @@ kind defining the intent's operation **and** its named continuation:
 | Kind | Port operation | Canonical parameters (`params_hash` input) | Retry / continuation behavior |
 |---|---|---|---|
 | `WORKTREE_MATERIALIZE` | fused `create_worktree` (`git worktree add -b`): one dispatch creates managed branch + worktree | (managed branch name, target path, exact base revision, owning lease/execution identity) | retry re-dispatches the same fused operation after `SAFE_TO_RETRY`; after `SAFE_TO_CONTINUE` dispatches `attach_worktree` (the TASK-0057 branch-only attachment), which a blind retry could never reach |
-| `WORKSPACE_CLEANUP` | `remove_worktree` (with attached-branch deletion per the ADR-0023 cleanup contract) — one intent covering the whole cleanup; its named continuation is the idempotent catch-up of the remaining half (crash after worktree removal but before branch deletion → re-prove ownership, then `remove_branch`; crash before any removal → full re-dispatch) | (worktree path, owning lease/execution identity, branch deletion scope) | retry re-dispatches after `SAFE_TO_RETRY`; `SAFE_TO_CONTINUE` dispatches the named catch-up half (ADR-0023's "crash implies inspection, then the next safe action"); idempotent already-absent outcomes are `CONFIRMED` with the observed evidence, per ADR-0023's idempotent-cleanup semantics — a partial cleanup therefore continues automatically (post-explicit-resume), it does not escalate |
+| `WORKSPACE_CLEANUP` | `remove_worktree` (with attached-branch deletion per the ADR-0023 cleanup contract) — one intent covering the whole cleanup; its named continuation is the idempotent catch-up of the remaining half (crash after worktree removal but before branch deletion → re-prove ownership, then `remove_branch`; crash before any removal → full re-dispatch) | (worktree path, owning lease/execution identity, branch deletion scope) | retry re-dispatches after `SAFE_TO_RETRY`; `SAFE_TO_CONTINUE` dispatches the named catch-up half (ADR-0023: "A crash implies inspection, never destruction" — reconcile, inspect, then perform the next safe action); idempotent already-absent outcomes are `CONFIRMED` with the observed evidence, per ADR-0023's idempotent-cleanup semantics — a partial cleanup therefore continues automatically (post-explicit-resume), it does not escalate |
 
 There is no standalone `GIT_BRANCH_CREATE` kind: in v1, managed-branch
 creation is always fused into `WORKTREE_MATERIALIZE` (one Git-native
