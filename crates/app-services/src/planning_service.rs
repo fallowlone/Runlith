@@ -24,15 +24,15 @@ use std::fmt;
 use std::path::Path;
 
 use plan_domain::{
-    call_within_envelope, l3_no_progress_tripped, planning_evidence_key, validate_proposal,
-    AffectedParentCriterion, AtomicityAssessment, AtomicityBlocker, AtomicityRequest,
-    DecompositionRequest, EvidenceRef, GuardrailTrip, HumanContinuation, HumanDecisionReason,
-    HumanDecisionRequest, HumanDecisionRequestId, HumanDecisionStatus, PlanBranchId, PlanChangeSet,
-    PlanDomainError, PlanGraph, PlanRevision, PlannerCallSpend, PlannerFault, PlannerPort,
-    PlanningBudget, PlanningCostReceipt, PlanningCostReceiptRef, PlanningInputSnapshot,
-    PlanningInputSnapshotId, ReplanRequest, RevisionProposedBy, RiskClass, RiskEscalationGrant,
-    ScopeBound, TaskPlanningAuthority, ValidatedBy, ValidationContext, ValidationOutcome,
-    ValidationRefusal, VerificationMethod, MAX_DECOMPOSITION_DEPTH,
+    call_within_envelope, l3_no_progress_tripped, planning_evidence_key,
+    requirement_kind_for_method, validate_proposal, AffectedParentCriterion, AtomicityAssessment,
+    AtomicityBlocker, AtomicityRequest, DecompositionRequest, EvidenceRef, GuardrailTrip,
+    HumanContinuation, HumanDecisionReason, HumanDecisionRequest, HumanDecisionRequestId,
+    HumanDecisionStatus, PlanBranchId, PlanChangeSet, PlanDomainError, PlanGraph, PlanRevision,
+    PlannerCallSpend, PlannerFault, PlannerPort, PlanningBudget, PlanningCostReceipt,
+    PlanningCostReceiptRef, PlanningInputSnapshot, PlanningInputSnapshotId, ReplanRequest,
+    RevisionProposedBy, RiskClass, RiskEscalationGrant, ScopeBound, TaskPlanningAuthority,
+    ValidatedBy, ValidationContext, ValidationOutcome, ValidationRefusal, MAX_DECOMPOSITION_DEPTH,
     MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH, MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
     MAX_PLANNER_INPUT_TOKENS, MAX_PLANNER_OUTPUT_TOKENS, MAX_PLANNER_WALL_CLOCK_SECS,
     MAX_REVISIONS_PER_CYCLE_PER_BRANCH,
@@ -43,7 +43,7 @@ use storage_sqlite::{
     PlannerCallSettlement, PlanningRunRecord, PlanningRunState, SqliteStore, StorageError,
     CHILD_TASK_MATERIALIZATION_PROVENANCE,
 };
-use task_domain::{Task, TaskId, TaskState};
+use task_domain::{EvidenceRequirement, Task, TaskId, TaskState};
 
 use crate::clock::{format_rfc3339, Clock, SystemClock};
 use crate::plan_graph::{
@@ -326,6 +326,7 @@ impl<C: Clock> PlanningService<C> {
             &facts.allowed_paths,
             &facts.forbidden_paths,
             &facts.acceptance,
+            &facts.evidence_requirements,
             facts.risk.as_deref(),
         )
         .map_err(|PlanDomainError::InvalidInput(detail)| {
@@ -1795,27 +1796,14 @@ impl<C: Clock> PlanningService<C> {
             if !pending_children.contains(addition.id.as_str()) {
                 continue;
             }
-            // The plan model carries a typed proof obligation per criterion;
-            // the canonical Task contract carries criterion identities only.
-            // Materialization is therefore where a non-automated-test
-            // obligation would be silently downgraded — including one a human
-            // has already approved through V9. Refuse instead: the loss is
-            // not representable, so it must not be performed (ADR-0027
-            // TASK-0096 amendment).
-            if let Some(criterion) = addition
-                .criteria
-                .iter()
-                .find(|criterion| criterion.method != VerificationMethod::AutomatedTest)
-            {
-                return Err(PlanningServiceError::InvalidContext(format!(
-                    "child {} declares criterion {} with proof method {}, which the canonical \
-                     Task contract cannot carry; G7 v1 materializes automated-test obligations \
-                     only",
-                    addition.id.as_str(),
-                    criterion.id.as_str(),
-                    criterion.method.as_str()
-                )));
-            }
+            // ADR-0030 §6: the obligation travels. The plan-side proof method
+            // maps onto the child's explicit evidence requirements through the
+            // §3 mapping, so a strengthened obligation (independent review,
+            // security check, human approval) materializes as itself instead
+            // of being refused. This replaces the ADR-0027 TASK-0096
+            // materialization refusal; a method the plan vocabulary cannot
+            // express remains unrepresentable and fails closed at the parser,
+            // never here.
             let task_id = TaskId::new(addition.id.as_str().to_owned())
                 .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
             let project_id = self
@@ -1858,6 +1846,29 @@ impl<C: Clock> PlanningService<C> {
                     // value and break derived planning authority.
                     addition.risk_class.as_str(),
                 )
+                .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
+            // ADR-0030 §6 carriage: the child's criteria arrive as explicit
+            // evidence requirements, derived under the planning policy
+            // fingerprint that validated this proposal. Parameters stay empty
+            // (the verification boundary resolves kind-specific selectors).
+            let requirements = addition
+                .criteria
+                .iter()
+                .map(|criterion| {
+                    let kind = requirement_kind_for_method(criterion.method);
+                    EvidenceRequirement::new(
+                        criterion.id.as_str(),
+                        kind,
+                        kind.default_subject_binding(),
+                        Vec::new(),
+                        Some(policy.policy_fingerprint.clone()),
+                        true,
+                    )
+                })
+                .collect::<Result<Vec<_>, task_domain::DomainError>>()
+                .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
+            child
+                .define_evidence_requirements(requirements)
                 .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
             let created_event = child_lifecycle_event(
                 &child,

@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 
 use crate::error::PlanDomainError;
 use crate::ids::CriterionId;
-use crate::risk::{RiskClass, VerificationMethod};
+use crate::risk::RiskClass;
 use crate::scope::ScopeBound;
 use crate::validation::AffectedParentCriterion;
 
@@ -27,10 +27,18 @@ impl TaskPlanningAuthority {
     /// Derives planning authority from canonical Task facts. Missing scope,
     /// acceptance or risk, forbidden-path constraints the G7 `ScopeBound`
     /// cannot represent, and malformed values all fail closed.
+    ///
+    /// Every acceptance criterion must carry exactly one explicit
+    /// `EvidenceRequirement` (ADR-0030 §2/§6): the planning-side proof method
+    /// is read from the requirement kind, never assumed. A criterion without a
+    /// requirement, a duplicate, or a requirement naming an unknown criterion
+    /// is underivable and fails closed — the TASK-0093 implicit default no
+    /// longer exists on this path.
     pub fn derive(
         allowed_paths: &[String],
         forbidden_paths: &[String],
         acceptance: &[String],
+        requirements: &[task_domain::EvidenceRequirement],
         risk: Option<&str>,
     ) -> Result<Self, PlanDomainError> {
         if allowed_paths.is_empty() {
@@ -52,26 +60,38 @@ impl TaskPlanningAuthority {
         let mut affected_parent_criteria = acceptance
             .iter()
             .map(|criterion| {
+                let matches: Vec<&task_domain::EvidenceRequirement> = requirements
+                    .iter()
+                    .filter(|requirement| requirement.criterion_id == *criterion)
+                    .collect();
+                let requirement = match matches.as_slice() {
+                    [requirement] => *requirement,
+                    [] => {
+                        return Err(PlanDomainError::input(format!(
+                            "has no evidence requirement for criterion {criterion:?}"
+                        )))
+                    }
+                    _ => {
+                        return Err(PlanDomainError::input(format!(
+                            "has multiple evidence requirements for criterion {criterion:?}"
+                        )))
+                    }
+                };
                 Ok(AffectedParentCriterion {
                     id: CriterionId::new(criterion.clone())?,
-                    // G7 v1 has no criterion-to-proof-method field in the Task
-                    // contract; the product-owned v1 default lives here only.
-                    // Accepted and bounded by the ADR-0027 TASK-0093/TASK-0096
-                    // amendments. This default is correct *because* nothing
-                    // with another method can reach a canonical Task:
-                    // materialization refuses such a child outright rather
-                    // than downgrading it here. It is not correct because
-                    // other methods are unreachable — the plan model, the
-                    // provider parser, durable plan storage, V3 and V9 all
-                    // handle them. The planner prompt asks for automated-test
-                    // only, but that is guidance, not the control: the refusal
-                    // does not depend on a provider obeying it. Anchored by
-                    // `v1_derives_every_criterion_as_automated_test` and by
-                    // `materialization_refuses_a_child_whose_proof_method_the_task_cannot_carry`.
-                    method: VerificationMethod::AutomatedTest,
+                    // ADR-0030 §3 mapping, read from explicit Task data.
+                    method: crate::risk::method_for_requirement_kind(requirement.requirement_kind),
                 })
             })
             .collect::<Result<Vec<_>, PlanDomainError>>()?;
+        for requirement in requirements {
+            if !acceptance.contains(&requirement.criterion_id) {
+                return Err(PlanDomainError::input(format!(
+                    "has an evidence requirement for unknown criterion {:?}",
+                    requirement.criterion_id
+                )));
+            }
+        }
         affected_parent_criteria.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
         affected_parent_criteria.dedup_by(|a, b| a.id == b.id);
         Ok(Self {
@@ -112,12 +132,22 @@ mod tests {
         values.iter().map(ToString::to_string).collect()
     }
 
+    fn defaults(criteria: &[&str]) -> Vec<task_domain::EvidenceRequirement> {
+        criteria
+            .iter()
+            .map(|criterion| {
+                task_domain::EvidenceRequirement::authored_default(*criterion).unwrap()
+            })
+            .collect()
+    }
+
     #[test]
     fn derivation_normalizes_scope_and_criteria_order() {
         let a = TaskPlanningAuthority::derive(
             &strings(&["repo:src/./api", "repo:docs"]),
             &[],
             &strings(&["b", "a", "b"]),
+            &defaults(&["a", "b"]),
             Some("medium"),
         )
         .unwrap();
@@ -125,6 +155,7 @@ mod tests {
             &strings(&["repo:docs", "repo:src/api"]),
             &[],
             &strings(&["a", "b"]),
+            &defaults(&["a", "b"]),
             Some("medium"),
         )
         .unwrap();
@@ -137,59 +168,199 @@ mod tests {
     fn derivation_fails_closed_on_missing_or_unrepresentable_facts() {
         let scope = strings(&["repo:src"]);
         let acceptance = strings(&["criterion"]);
-        for (allowed, forbidden, acceptance, risk) in [
-            (vec![], vec![], acceptance.clone(), Some("low")),
+        let complete = defaults(&["criterion"]);
+        for (allowed, forbidden, acceptance, requirements, risk) in [
+            (
+                vec![],
+                vec![],
+                acceptance.clone(),
+                complete.clone(),
+                Some("low"),
+            ),
             (
                 scope.clone(),
                 strings(&["repo:src/x"]),
                 acceptance.clone(),
+                complete.clone(),
                 Some("low"),
             ),
-            (scope.clone(), vec![], vec![], Some("low")),
-            (scope.clone(), vec![], acceptance.clone(), None),
-            (scope.clone(), vec![], acceptance.clone(), Some("LOW")),
+            (scope.clone(), vec![], vec![], vec![], Some("low")),
+            (
+                scope.clone(),
+                vec![],
+                acceptance.clone(),
+                complete.clone(),
+                None,
+            ),
+            (
+                scope.clone(),
+                vec![],
+                acceptance.clone(),
+                complete.clone(),
+                Some("LOW"),
+            ),
             (
                 strings(&["repo:../escape"]),
                 vec![],
                 acceptance.clone(),
+                complete.clone(),
                 Some("low"),
             ),
             (
                 strings(&["no-workspace"]),
                 vec![],
                 acceptance.clone(),
+                complete.clone(),
                 Some("low"),
             ),
-            (scope.clone(), vec![], strings(&["bad\u{7}id"]), Some("low")),
+            (
+                scope.clone(),
+                vec![],
+                strings(&["bad\u{7}id"]),
+                complete.clone(),
+                Some("low"),
+            ),
+            // ADR-0030 §2: a criterion without its explicit requirement is
+            // underivable — the implicit AutomatedTest default is gone.
+            (
+                scope.clone(),
+                vec![],
+                acceptance.clone(),
+                vec![],
+                Some("low"),
+            ),
+            // A requirement for a criterion that is not an acceptance
+            // obligation is underivable.
+            (
+                scope.clone(),
+                vec![],
+                acceptance.clone(),
+                defaults(&["other"]),
+                Some("low"),
+            ),
+            // Duplicate coverage is underivable.
+            (
+                scope.clone(),
+                vec![],
+                acceptance.clone(),
+                vec![
+                    task_domain::EvidenceRequirement::authored_default("criterion").unwrap(),
+                    task_domain::EvidenceRequirement::authored_default("criterion").unwrap(),
+                ],
+                Some("low"),
+            ),
         ] {
             assert!(
-                TaskPlanningAuthority::derive(&allowed, &forbidden, &acceptance, risk).is_err(),
+                TaskPlanningAuthority::derive(
+                    &allowed,
+                    &forbidden,
+                    &acceptance,
+                    &requirements,
+                    risk
+                )
+                .is_err(),
                 "{allowed:?} {forbidden:?} {acceptance:?} {risk:?}"
             );
         }
     }
 
-    /// Anchors the ADR-0027 TASK-0093 v1 obligation boundary. This is not a
-    /// property of the algorithm but a recorded product decision: until G8
-    /// models requirement-to-evidence, every acceptance obligation is proved
-    /// by automated test. If this test starts failing, the contract moved and
-    /// the amendment must move with it.
+    /// Anchors the ADR-0030 §6 replacement of the TASK-0093 boundary: the
+    /// planning-side proof method is read from the Task's explicit evidence
+    /// requirement, so a strengthened obligation derives as itself instead of
+    /// being refused or downgraded.
     #[test]
-    fn v1_derives_every_criterion_as_automated_test() {
+    fn proof_method_comes_from_the_explicit_requirement() {
+        let requirements = vec![
+            task_domain::EvidenceRequirement::authored_default("plain").unwrap(),
+            task_domain::EvidenceRequirement::new(
+                "needs-human-sign-off",
+                task_domain::RequirementKind::HumanApproval,
+                task_domain::RequirementKind::HumanApproval.default_subject_binding(),
+                Vec::new(),
+                Some("policy:v1".to_owned()),
+                true,
+            )
+            .unwrap(),
+            task_domain::EvidenceRequirement::new(
+                "needs-security-check",
+                task_domain::RequirementKind::SecurityCheck,
+                task_domain::RequirementKind::SecurityCheck.default_subject_binding(),
+                Vec::new(),
+                Some("policy:v1".to_owned()),
+                true,
+            )
+            .unwrap(),
+            task_domain::EvidenceRequirement::new(
+                "needs-artifact-hash",
+                task_domain::RequirementKind::ArtifactHash,
+                task_domain::RequirementKind::ArtifactHash.default_subject_binding(),
+                Vec::new(),
+                Some("policy:v1".to_owned()),
+                true,
+            )
+            .unwrap(),
+        ];
         let authority = TaskPlanningAuthority::derive(
             &strings(&["repo:src"]),
             &[],
-            &strings(&["needs-human-sign-off", "needs-security-check", "plain"]),
+            &strings(&[
+                "plain",
+                "needs-human-sign-off",
+                "needs-security-check",
+                "needs-artifact-hash",
+            ]),
+            &requirements,
             Some("critical"),
         )
         .unwrap();
-        assert!(
-            authority
-                .affected_parent_criteria
-                .iter()
-                .all(|criterion| criterion.method == VerificationMethod::AutomatedTest),
-            "v1 has no per-criterion proof method; criterion text must not imply one"
+        let methods: Vec<(&str, crate::risk::VerificationMethod)> = authority
+            .affected_parent_criteria
+            .iter()
+            .map(|criterion| (criterion.id.as_str(), criterion.method))
+            .collect();
+        assert_eq!(
+            methods,
+            vec![
+                (
+                    "needs-artifact-hash",
+                    crate::risk::VerificationMethod::AutomatedTest
+                ),
+                (
+                    "needs-human-sign-off",
+                    crate::risk::VerificationMethod::HumanApproval
+                ),
+                (
+                    "needs-security-check",
+                    crate::risk::VerificationMethod::SecurityCheck
+                ),
+                ("plain", crate::risk::VerificationMethod::AutomatedTest),
+            ]
         );
+    }
+
+    #[test]
+    fn method_and_kind_mappings_round_trip_for_the_closed_vocabulary() {
+        for method in [
+            crate::risk::VerificationMethod::AutomatedTest,
+            crate::risk::VerificationMethod::IndependentReview,
+            crate::risk::VerificationMethod::SecurityCheck,
+            crate::risk::VerificationMethod::HumanApproval,
+        ] {
+            let kind = crate::risk::requirement_kind_for_method(method);
+            assert_eq!(crate::risk::method_for_requirement_kind(kind), method);
+        }
+        // Capture kinds other than test-suite read back as automated-test.
+        for kind in [
+            task_domain::RequirementKind::ProcessExit,
+            task_domain::RequirementKind::ArtifactHash,
+            task_domain::RequirementKind::FsState,
+            task_domain::RequirementKind::GitState,
+        ] {
+            assert_eq!(
+                crate::risk::method_for_requirement_kind(kind),
+                crate::risk::VerificationMethod::AutomatedTest
+            );
+        }
     }
 
     #[test]

@@ -20,7 +20,7 @@ use plan_domain::{
     MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH, MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
 };
 use storage_sqlite::{EventType, SqliteStore, StorageError};
-use task_domain::{Project, ProjectId, Task, TaskId};
+use task_domain::{EvidenceRequirement, Project, ProjectId, Task, TaskId};
 
 const FIXED_MILLIS: u64 = 1_704_067_200_000;
 const ROOT: &str = "T-AUTHORITY";
@@ -173,7 +173,15 @@ fn apply_drift(db_path: &PathBuf, drift: Drift) {
         .snapshot();
     match drift {
         Drift::Scope => snapshot.allowed_paths = vec!["repo:elsewhere".to_owned()],
-        Drift::Acceptance => snapshot.acceptance.push("criterion-added".to_owned()),
+        Drift::Acceptance => {
+            snapshot.acceptance.push("criterion-added".to_owned());
+            // ADR-0030 §2: acceptance and evidence requirements are one
+            // invariant; drift on both stays a well-formed (moved) Task so
+            // the fence — not the domain — is what is being tested.
+            snapshot
+                .evidence_requirements
+                .push(EvidenceRequirement::authored_default("criterion-added").unwrap());
+        }
         Drift::Risk => snapshot.risk = Some("high".to_owned()),
         Drift::ForbiddenPath => snapshot.forbidden_paths = vec!["repo:src/secret".to_owned()],
         Drift::DescendantReparented => snapshot.parent = None,

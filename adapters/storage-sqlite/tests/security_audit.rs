@@ -164,13 +164,13 @@ fn create_schema_v15(path: &std::path::Path) {
 fn fresh_database_reaches_schema_v10_with_empty_separate_audit() {
     let db = TestDb::new("fresh");
     let store = db.open();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 16);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 17);
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
     assert!(store.list_security_audit_ordered().unwrap().is_empty());
 }
 
 #[test]
-fn schema_v15_security_audit_upgrades_to_v16_without_rewriting_chain_or_capabilities() {
+fn schema_v15_security_audit_upgrades_to_current_without_rewriting_chain_or_capabilities() {
     let db = TestDb::new("v15-preservation");
     create_schema_v15(&db.path);
     let genesis = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
@@ -251,7 +251,7 @@ fn schema_v15_security_audit_upgrades_to_v16_without_rewriting_chain_or_capabili
     };
 
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 16);
+    assert_eq!(store.schema_version().unwrap(), 17);
     drop(store);
 
     let raw = db.raw();

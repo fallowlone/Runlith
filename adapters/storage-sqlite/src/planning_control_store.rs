@@ -749,6 +749,7 @@ fn require_current_task_authority(
         &facts.allowed_paths,
         &facts.forbidden_paths,
         &facts.acceptance,
+        &facts.evidence_requirements,
         facts.risk.as_deref(),
     )
     .map_err(|_| stale())?;

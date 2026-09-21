@@ -76,6 +76,184 @@ fn secure_raw_fixture(path: &std::path::Path) {
 #[cfg(not(unix))]
 fn secure_raw_fixture(_path: &std::path::Path) {}
 
+// -- evidence requirements (TASK-0123 / ADR-0030) ------------------------
+
+#[test]
+fn migration_backfills_explicit_default_requirements_for_legacy_criteria() {
+    let db = TestDb::new("requirement-backfill");
+    {
+        let mut store = db.open();
+        let project = stored_project(&mut store, "P-1");
+        let mut task = draft_task("P-1", "T-legacy");
+        task.define_planning_metadata(
+            vec!["repo:src".to_owned()],
+            vec!["criterion-a".to_owned(), "criterion-b".to_owned()],
+            "low",
+        )
+        .unwrap();
+        store.create_task(&task).unwrap();
+        assert_eq!(project.id().as_str(), "P-1");
+    }
+    let store = db.open();
+    assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
+    let task = store
+        .get_task(&TaskId::new("T-legacy").unwrap())
+        .unwrap()
+        .expect("legacy task");
+    let requirements = task.evidence_requirements();
+    assert_eq!(requirements.len(), 2);
+    for requirement in requirements {
+        assert_eq!(
+            requirement.requirement_kind,
+            task_domain::RequirementKind::TestSuite,
+            "legacy criteria backfill to the explicit TEST_SUITE default"
+        );
+        assert_eq!(
+            requirement.subject_binding,
+            task_domain::RequirementKind::TestSuite.default_subject_binding()
+        );
+        assert!(requirement.required);
+        assert!(
+            requirement.policy_fingerprint.is_none(),
+            "legacy rows are not policy-derived (CV-7 stale input)"
+        );
+    }
+}
+
+#[test]
+fn evidence_requirements_round_trip_with_params_and_restart() {
+    let db = TestDb::new("requirement-round-trip");
+    {
+        let mut store = db.open();
+        stored_project(&mut store, "P-1");
+        let mut task = draft_task("P-1", "T-1");
+        task.define_planning_metadata(
+            vec!["repo:src".to_owned()],
+            vec!["reviewed".to_owned(), "tested".to_owned()],
+            "medium",
+        )
+        .unwrap();
+        task.define_evidence_requirements(vec![
+            task_domain::EvidenceRequirement::new(
+                "reviewed",
+                task_domain::RequirementKind::IndependentReview,
+                task_domain::RequirementKind::IndependentReview.default_subject_binding(),
+                Vec::new(),
+                Some("policy:v1".to_owned()),
+                true,
+            )
+            .unwrap(),
+            task_domain::EvidenceRequirement::new(
+                "tested",
+                task_domain::RequirementKind::TestSuite,
+                task_domain::RequirementKind::TestSuite.default_subject_binding(),
+                vec![
+                    task_domain::RequirementParam::new("selector", "cargo test -p task-domain")
+                        .unwrap(),
+                ],
+                Some("policy:v1".to_owned()),
+                true,
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        store.create_task(&task).unwrap();
+    }
+    // Reopen: the store, not the test, is the authority on what persisted.
+    let store = db.open();
+    let task = store
+        .get_task(&TaskId::new("T-1").unwrap())
+        .unwrap()
+        .expect("task survives restart");
+    let requirements = task.evidence_requirements();
+    let reviewed = requirements
+        .iter()
+        .find(|requirement| requirement.criterion_id == "reviewed")
+        .expect("reviewed criterion requirement");
+    assert_eq!(
+        reviewed.requirement_kind,
+        task_domain::RequirementKind::IndependentReview
+    );
+    let tested = requirements
+        .iter()
+        .find(|requirement| requirement.criterion_id == "tested")
+        .expect("tested criterion requirement");
+    assert_eq!(tested.params.len(), 1);
+    assert_eq!(tested.params[0].key(), "selector");
+    assert_eq!(tested.params[0].value(), "cargo test -p task-domain");
+    assert_eq!(tested.policy_fingerprint.as_deref(), Some("policy:v1"));
+}
+
+#[test]
+fn corrupt_requirement_rows_fail_closed_on_read() {
+    let db = TestDb::new("requirement-corrupt");
+    {
+        let mut store = db.open();
+        stored_project(&mut store, "P-1");
+        let mut task = draft_task("P-1", "T-1");
+        task.define_planning_metadata(
+            vec!["repo:src".to_owned()],
+            vec!["criterion".to_owned()],
+            "low",
+        )
+        .unwrap();
+        store.create_task(&task).unwrap();
+    }
+    {
+        let connection = rusqlite::Connection::open(&db.path).unwrap();
+        // The closed CHECK vocabulary is the write-side fail-closed guard and
+        // refuses this UPDATE as-is. Corruption fixtures bypass it explicitly
+        // (the documented 0001 mechanism) to prove the read side fails closed
+        // too: stored text outside the registry cannot reconstruct.
+        connection
+            .execute_batch(
+                "PRAGMA ignore_check_constraints = ON;
+                 UPDATE task_evidence_requirements SET requirement_kind = 'made-up-kind'
+                 WHERE task_id = 'T-1';
+                 PRAGMA ignore_check_constraints = OFF;",
+            )
+            .unwrap();
+    }
+    secure_raw_fixture(&db.path);
+    let store = db.open();
+    // An unknown stored kind is corruption, never silently repaired.
+    assert!(store.get_task(&TaskId::new("T-1").unwrap()).is_err());
+}
+
+#[test]
+fn unmapped_criterion_at_read_fails_closed() {
+    let db = TestDb::new("requirement-orphan");
+    {
+        let mut store = db.open();
+        stored_project(&mut store, "P-1");
+        let mut task = draft_task("P-1", "T-1");
+        task.define_planning_metadata(
+            vec!["repo:src".to_owned()],
+            vec!["criterion".to_owned()],
+            "low",
+        )
+        .unwrap();
+        store.create_task(&task).unwrap();
+    }
+    {
+        let connection = rusqlite::Connection::open(&db.path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO task_evidence_requirements
+                 (task_id, position, criterion_id, requirement_kind, subject_binding,
+                  required, policy_fingerprint)
+                 VALUES ('T-1', 1, 'phantom', 'test-suite', 'content', 1, NULL)",
+                [],
+            )
+            .unwrap();
+    }
+    secure_raw_fixture(&db.path);
+    let store = db.open();
+    // A requirement for a criterion that is not an acceptance obligation
+    // breaks the coverage invariant; restore refuses the Task.
+    assert!(store.get_task(&TaskId::new("T-1").unwrap()).is_err());
+}
+
 // -- migration ----------------------------------------------------------
 
 #[test]
@@ -83,7 +261,7 @@ fn fresh_database_migrates_to_current() {
     let db = TestDb::new("fresh");
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 16);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 17);
 }
 
 #[test]
@@ -502,6 +680,10 @@ fn invalid_persisted_identifiers_fail_reconstruction() {
              CREATE TABLE IF NOT EXISTS tasks (
                  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, objective TEXT NOT NULL,
                  parent_id TEXT NULL, state TEXT NOT NULL, kind TEXT NULL, risk TEXT NULL);
+             CREATE TABLE IF NOT EXISTS task_strings (
+                 task_id TEXT NOT NULL REFERENCES tasks (id),
+                 slot TEXT NOT NULL, position INTEGER NOT NULL, value TEXT NOT NULL,
+                 PRIMARY KEY (task_id, slot, position));
              INSERT INTO projects (id, name) VALUES ('', 'blank id');
              INSERT INTO tasks (id, project_id, objective, state)
                  VALUES ('T-1', '', 'objective', 'DRAFT');",
