@@ -55,7 +55,7 @@ export default function App() {
   const openDiagnostics = useCallback(() => setDiagOpen(true), []);
 
   return (
-    <div className="flex h-full p-3">
+    <div className="relative flex h-full p-3">
       <Nav density={density} textSize={textSize} onDensity={setDensity} onTextSize={setTextSize} />
 
       <div className="flex min-w-0 flex-1 flex-col">

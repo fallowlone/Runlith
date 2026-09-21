@@ -53,10 +53,10 @@ export function LogsView() {
         <Button size="sm">Jump to newest</Button>
         <span className="text-xs text-ink2">Filter: all sources · Attempt 2</span>
       </div>
-      <div role="log" aria-label="Attempt 2 logs" tabIndex={0} className="min-h-0 flex-1 overflow-auto rounded-[4px] bg-canvas px-3 py-2 font-mono text-xs leading-5">
+      <div role="log" aria-label="Attempt 2 logs" tabIndex={0} className="min-h-0 flex-1 overflow-auto rounded-[4px] bg-surface px-3 py-2 font-mono text-xs leading-5">
         {t.logs.map((l, i) => (
-          <div key={i}>
-            <span className="text-teal">[{l.src}]</span> {l.line}
+          <div key={i} className="whitespace-pre">
+            <span className="font-medium text-teal">[{l.src}]</span> {l.line}
           </div>
         ))}
       </div>

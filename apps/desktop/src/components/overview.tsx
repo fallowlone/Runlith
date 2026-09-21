@@ -17,10 +17,10 @@ function StatCard({
   tone: "accent" | "attention" | "positive";
   onClick?: () => void;
 }) {
-  const tones = {
-    accent: "text-accent",
-    attention: "text-attention",
-    positive: "text-positive",
+  const dots = {
+    accent: "bg-accent",
+    attention: "bg-attention",
+    positive: "bg-positive",
   } as const;
   return (
     <button
@@ -28,9 +28,14 @@ function StatCard({
       onClick={onClick}
       className="card flex flex-col items-start gap-1 px-5 py-4 text-left hover:shadow-[var(--shadow-pop)]"
     >
-      <span className="text-xs font-medium text-ink2">{label}</span>
-      <span className={cn("text-3xl font-bold leading-9", tones[tone])}>{value}</span>
-      <span className="text-xs text-ink2">
+      <span className="flex items-center gap-1.5 text-xs font-medium text-ink2">
+        <span aria-hidden className={cn("size-1.5 rounded-full", dots[tone])} />
+        {label}
+      </span>
+      {/* Numbers stay in ink: color on the dot carries the state, the figure
+          itself must not look decorated (light-theme polish). */}
+      <span className="text-[32px] font-semibold leading-10 tracking-tight text-ink tabular-nums">{value}</span>
+      <span className="truncate text-xs text-ink2">
         {label === "Needs attention"
           ? "HDR-0092 · TASK-0344"
           : label === "Completed"
@@ -47,11 +52,9 @@ export function OverviewHero({ onNeedsAttention }: { onNeedsAttention: () => voi
   const completed = F.tasks.filter((t) => t.state === "COMPLETED").length;
   return (
     <div className="mb-5">
-      <h1 className="mb-1 text-[28px] font-bold leading-9 tracking-tight">Good afternoon</h1>
-      <p className="mb-4 text-sm text-ink2">
-        What changed, what is running, what waits on you — {F.project.name}
-      </p>
-      <div className="grid grid-cols-3 gap-4">
+      <h1 className="mb-1 text-[26px] font-bold leading-8 tracking-tight">Good afternoon</h1>
+      <p className="mb-4 text-sm text-ink2">What changed, what is running, what waits on you — {F.project.name}</p>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         <StatCard label="In work" value={inWork} tone="accent" />
         <StatCard label="Needs attention" value={needsAttention} tone="attention" onClick={onNeedsAttention} />
         <StatCard label="Completed" value={completed} tone="positive" />

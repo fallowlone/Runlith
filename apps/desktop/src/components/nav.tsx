@@ -75,12 +75,14 @@ export function Nav({
       <div className="mt-auto border-t border-edge p-2">
         <div title={F.connection.note} className="flex items-center gap-2 rounded-[8px] px-2 py-1.5">
           <span aria-hidden className="size-2 shrink-0 rounded-full bg-positive" />
+          {/* min-w-0 + truncate: the utility row degrades gracefully at any width */}
           <span className="min-w-0 flex-1 truncate text-xs text-ink2">
             {F.connection.state} · {F.connection.protocol}
           </span>
           <span className="shrink-0 text-xs text-ink2">{F.connection.observed}</span>
         </div>
-        <div className="mt-1.5 flex items-center gap-2 px-2 pb-1">
+        {/* Stacked label/field rows: nothing clips at 240px or below. */}
+        <div className="grid grid-cols-[auto_1fr] items-center gap-x-2 gap-y-1.5 px-2 pb-1.5">
           <label htmlFor="density" className="text-xs text-ink2">
             Density
           </label>
@@ -88,7 +90,7 @@ export function Nav({
             id="density"
             value={density}
             onChange={(e) => onDensity(e.target.value)}
-            className="h-7 rounded-[6px] border border-edge bg-shell px-1.5 text-xs"
+            className="h-7 w-full min-w-0 rounded-[6px] border border-edge bg-shell px-1.5 text-xs"
           >
             <option value="compact">Compact</option>
             <option value="default">Default</option>
@@ -101,7 +103,7 @@ export function Nav({
             id="textsize"
             value={textSize}
             onChange={(e) => onTextSize(e.target.value)}
-            className="h-7 rounded-[6px] border border-edge bg-shell px-1.5 text-xs"
+            className="h-7 w-full min-w-0 rounded-[6px] border border-edge bg-shell px-1.5 text-xs"
           >
             <option value="normal">100%</option>
             <option value="large">150%</option>

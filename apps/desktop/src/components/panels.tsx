@@ -17,9 +17,9 @@ export function OverviewPanel({ onOpenDiagnostics, onOpenDecision }: { onOpenDia
       <Group title="Execution / Attempts">
         <p className="mb-2 text-xs leading-4 text-ink2">{t.execution.observation}</p>
         {t.attempts.map((a) => (
-          <div key={a.n} className="row-h flex items-center gap-3 rounded-[4px] px-3 hover:bg-surface">
+          <div key={a.n} className="row-h flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-[4px] px-1 py-1 hover:bg-surface">
             <Badge state={a.outcome === "SUCCEEDED" ? "COMPLETED" : "FAILED"}>{a.outcome}</Badge>
-            <span className="min-w-0 flex-1 truncate">
+            <span className="min-w-0 flex-1 basis-48 truncate">
               Attempt {a.n} — {a.note}
             </span>
             <span className="shrink-0 text-xs text-ink2">{a.ended}</span>
@@ -111,35 +111,39 @@ export function ChangesPanel() {
 export function EvidencePanel() {
   return (
     <div>
-      <table className="w-full border-collapse text-sm">
-        <thead>
-          <tr className="border-b border-edge text-left text-xs text-ink2">
-            <th className="px-3 py-1.5 font-semibold">Criterion</th>
-            <th className="px-3 py-1.5 font-semibold">Verdict</th>
-            <th className="px-3 py-1.5 font-semibold">Snapshot</th>
-            <th className="px-3 py-1.5 font-semibold">Producer</th>
-            <th className="px-3 py-1.5 font-semibold">When</th>
-            <th className="px-3 py-1.5 font-semibold">Links</th>
-          </tr>
-        </thead>
-        <tbody>
-          {t.criteria.map((c) => (
-            <tr key={c.id} className="border-b border-edge/50 align-top">
-              <td className="px-3 py-2">
-                {c.id} — {c.text}
-              </td>
-              <td className={`px-3 py-2 font-semibold ${c.verdict === "VERIFIED" ? "text-positive" : "text-ink2"}`}>
-                {c.verdict}
-                {c.note ? <div className="mt-0.5 text-xs font-normal leading-4 text-ink2">{c.note}</div> : null}
-              </td>
-              <td className="px-3 py-2 font-mono text-xs">{c.snapshot ?? "—"}</td>
-              <td className="px-3 py-2">{c.producer ?? "—"}</td>
-              <td className="px-3 py-2">{c.when ?? "—"}</td>
-              <td className="px-3 py-2">{c.links.length ? c.links.join(", ") : "none yet"}</td>
+      {/* Tables need a bounded scroll container: columns degrade to horizontal
+          scrolling instead of breaking the card (WCAG reflow, §15). */}
+      <div className="-mx-1 overflow-x-auto px-1">
+        <table className="w-full min-w-[640px] border-collapse text-sm">
+          <thead>
+            <tr className="border-b border-edge text-left text-xs text-ink2">
+              <th className="px-3 py-1.5 font-semibold">Criterion</th>
+              <th className="px-3 py-1.5 font-semibold">Verdict</th>
+              <th className="px-3 py-1.5 font-semibold">Snapshot</th>
+              <th className="px-3 py-1.5 font-semibold">Producer</th>
+              <th className="px-3 py-1.5 font-semibold">When</th>
+              <th className="px-3 py-1.5 font-semibold">Links</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {t.criteria.map((c) => (
+              <tr key={c.id} className="border-b border-edge/50 align-top">
+                <td className="px-3 py-2">
+                  {c.id} — {c.text}
+                </td>
+                <td className={`px-3 py-2 font-medium ${c.verdict === "VERIFIED" ? "text-positive" : "text-ink2"}`}>
+                  {c.verdict}
+                  {c.note ? <div className="mt-0.5 text-xs font-normal leading-4 text-ink2">{c.note}</div> : null}
+                </td>
+                <td className="px-3 py-2 font-mono text-xs">{c.snapshot ?? "—"}</td>
+                <td className="px-3 py-2">{c.producer ?? "—"}</td>
+                <td className="px-3 py-2 whitespace-nowrap">{c.when ?? "—"}</td>
+                <td className="px-3 py-2">{c.links.length ? c.links.join(", ") : "none yet"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
       <Callout tone="attention" title="Staleness note.">
         {t.staleEvidence}
       </Callout>

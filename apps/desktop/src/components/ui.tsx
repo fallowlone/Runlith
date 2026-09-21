@@ -138,7 +138,7 @@ export function Tabs({
   className?: string;
 }) {
   return (
-    <div role="tablist" aria-label={label} className={cn("flex gap-1 border-b border-edge px-4 pt-2", className)}>
+    <div role="tablist" aria-label={label} className={cn("flex gap-1 overflow-x-auto border-b border-edge px-4 pt-2", className)}>
       {tabs.map((t) => (
         <button
           key={t.id}

@@ -13,7 +13,10 @@ export function Inspector({ onClose }: { onClose: (e: React.MouseEvent<HTMLButto
     <aside
       id="inspector"
       aria-label="Agent"
-      className="flex w-[380px] shrink-0 flex-col overflow-hidden rounded-[10px] border border-edge bg-shell shadow-[var(--shadow-card)]"
+      /* Responsive per §11-C: at wide windows (≥xl) the panel is a regular
+         flex column; below xl it becomes a separate detail view overlaying
+         the workspace instead of squeezing it. */
+      className="absolute inset-y-3 right-3 z-20 flex w-[380px] max-w-[calc(100%-1.5rem)] shrink-0 flex-col overflow-hidden rounded-[10px] border border-edge bg-shell shadow-[var(--shadow-pop)] xl:static xl:inset-auto xl:z-auto xl:shadow-[var(--shadow-card)]"
     >
       <div className="flex items-center gap-2 border-b border-edge px-4 py-3">
         <strong className="text-sm">Runlith Agent</strong>
