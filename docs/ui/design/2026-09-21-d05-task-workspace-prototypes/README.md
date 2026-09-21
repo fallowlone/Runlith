@@ -116,6 +116,17 @@ Deviation record: D08 (frontend stack ADR) remains deferred in the roadmap;
 this Tauri/React baseline implements the user's explicit instruction and must
 be ratified (or reverted) by the D08 ADR.
 
+## Light theme / Cursor-Warp direction (2026-09-21, user decision)
+
+The user directed the design toward the light, spacious Cursor/Warp aesthetic:
+white card surfaces on a light-gray canvas, grouped light sidebar, top ⌘K
+command bar, dashboard stat cards on Overview, and a Warp-style agent panel
+with an "Ask a question…" composer. This **supersedes the research doc's dark
+restrained aesthetic**, which was recorded there as an initial user preference
+(§16, medium confidence) — a preference the owner may update without an ADR.
+Durable-roles rule (§14.1) still holds: light values are new candidates for
+the same roles, and a dark variant must remain reachable via the token layer.
+
 ## Verification
 
 Static prototypes (unchanged, still comparable fixtures):

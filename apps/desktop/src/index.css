@@ -1,27 +1,31 @@
 @import "tailwindcss";
 
-/* Design tokens — candidates per research §14.1/§14.2; durable roles, not
-   raw-state colors. Replacing values here must not change semantics. */
+/* Design tokens — light theme, Cursor/Warp-direction (user preference
+   2026-09-21, supersedes the research doc's dark default preference).
+   Durable roles, not raw-state colors; values remain replaceable candidates. */
 @theme {
-  --color-canvas: #101419;
-  --color-shell: #15191f;
-  --color-surface: #1b2129;
-  --color-overlay: #242c36;
-  --color-ink: #e6e9ef;
-  --color-ink2: #a4abb7;
-  --color-accent: #76a9fa;
-  --color-positive: #82c99a;
-  --color-teal: #69bfb8;
-  --color-attention: #e9b86e;
-  --color-danger: #f18a8a;
-  --color-edge: rgba(228, 233, 239, 0.08);
+  --color-canvas: #f7f7f8;
+  --color-shell: #ffffff;
+  --color-surface: #f0f1f3;
+  --color-overlay: #ffffff;
+  --color-ink: #1a1d21;
+  --color-ink2: #6b7280;
+  --color-accent: #2563eb;
+  --color-positive: #16a34a;
+  --color-teal: #0d9488;
+  --color-attention: #d97706;
+  --color-danger: #dc2626;
+  --color-edge: #e5e7eb;
 
   --font-sans: -apple-system, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
   --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 
-  --radius-ctl: 4px;
-  --radius-panel: 6px;
-  --radius-pop: 8px;
+  --radius-ctl: 6px;
+  --radius-panel: 10px;
+  --radius-pop: 12px;
+
+  --shadow-card: 0 1px 2px rgba(16, 20, 25, 0.05), 0 1px 3px rgba(16, 20, 25, 0.04);
+  --shadow-pop: 0 8px 24px rgba(16, 20, 25, 0.12);
 }
 
 :root {
@@ -53,7 +57,7 @@ body {
 }
 
 ::selection {
-  background: rgba(118, 169, 250, 0.28);
+  background: rgba(37, 99, 235, 0.15);
 }
 
 :focus-visible {
@@ -73,10 +77,18 @@ body {
   border-color: var(--color-edge);
 }
 
-/* Diff gutter colors keep additions/deletions distinguishable beyond color
-   alone via their +/- signs (§15: color is never the only carrier). */
-.diff-add { color: var(--color-positive); background: rgba(130, 201, 154, 0.08); }
-.diff-del { color: var(--color-danger); background: rgba(241, 138, 138, 0.08); }
+/* Card elevation: soft shadow + hairline border, per the light direction.
+   Elevation marks overlay/surfaces, not importance (§14.1). */
+.card {
+  background: var(--color-shell);
+  border: 1px solid var(--color-edge);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-card);
+}
+
+/* Diff colors on light ground: darker text, faint tinted gutters. */
+.diff-add { color: #15803d; background: rgba(22, 163, 74, 0.07); }
+.diff-del { color: #b91c1c; background: rgba(220, 38, 38, 0.07); }
 .diff-ctx { color: var(--color-ink2); }
 
 /* Reduced-motion equivalent: nothing in this UI animates by default; if a

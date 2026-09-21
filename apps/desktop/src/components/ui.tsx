@@ -1,6 +1,7 @@
 /* Shadcn-style primitives (ADR-0015: shadcn primitives only). These follow
    the shadcn/ui component API (cva variants + cn() class merging); migrating
-   to generated shadcn/ui components must remain drop-in. */
+   to generated shadcn/ui components must remain drop-in. Light theme,
+   Cursor/Warp direction. */
 import { cva, type VariantProps } from "class-variance-authority";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
@@ -14,12 +15,12 @@ export function cn(...inputs: ClassValue[]) {
 /* ---------- Button ---------- */
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-[4px] border text-sm font-medium transition-colors disabled:pointer-events-none disabled:opacity-45 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-[6px] border text-sm font-medium transition-colors disabled:pointer-events-none disabled:opacity-45 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
   {
     variants: {
       variant: {
-        default: "border-white/15 bg-surface text-ink hover:border-white/30",
-        primary: "border-accent bg-accent font-semibold text-[#0B0E12] hover:border-accent",
+        default: "border-edge bg-shell text-ink shadow-[0_1px_2px_rgba(16,20,25,0.05)] hover:bg-surface",
+        primary: "border-accent bg-accent font-semibold text-white hover:bg-accent/90",
         ghost: "border-transparent bg-transparent text-ink2 hover:bg-surface hover:text-ink",
       },
       size: {
@@ -68,7 +69,7 @@ export function Badge({
     <span
       title={title}
       className={cn(
-        "inline-flex shrink-0 items-center gap-1.5 rounded-full border border-white/15 px-2 py-0.5 text-xs leading-4 text-ink",
+        "inline-flex shrink-0 items-center gap-1.5 rounded-full border border-edge bg-shell px-2 py-0.5 text-xs leading-4 font-medium text-ink",
         !state && "text-ink2",
         className,
       )}
@@ -79,17 +80,17 @@ export function Badge({
   );
 }
 
-/* ---------- Panel & group (surfaces group content; thin dividers) ---------- */
+/* ---------- Panel & group (white cards, soft shadow, thin dividers) ---------- */
 
 export function Panel({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("min-h-0 flex flex-col rounded-[6px] bg-shell", className)} {...props} />;
+  return <div className={cn("bg-shell min-h-0 flex flex-col rounded-[10px] border border-edge shadow-[var(--shadow-card)]", className)} {...props} />;
 }
 
 export function Group({ title, children, className }: { title: ReactNode; children: ReactNode; className?: string }) {
   return (
-    <section className={cn("mb-4 overflow-hidden rounded-[6px] border border-edge", className)}>
-      <h2 className="bg-surface px-3 py-2.5 text-xs font-semibold uppercase tracking-wider text-ink2">{title}</h2>
-      <div className="p-3">{children}</div>
+    <section className={cn("card mb-4 overflow-hidden", className)}>
+      <h2 className="border-b border-edge px-3.5 py-2.5 text-xs font-semibold uppercase tracking-wider text-ink2">{title}</h2>
+      <div className="p-3.5">{children}</div>
     </section>
   );
 }
@@ -104,12 +105,12 @@ export function Callout({
   children: ReactNode;
 }) {
   const tones = {
-    info: "border-accent/35 bg-accent/8",
-    attention: "border-attention/35 bg-attention/8",
-    danger: "border-danger/35 bg-danger/8",
+    info: "border-accent/25 bg-accent/5",
+    attention: "border-attention/30 bg-attention/5",
+    danger: "border-danger/25 bg-danger/5",
   } as const;
   return (
-    <div className={cn("mb-4 rounded-[6px] border p-3 text-sm leading-5", tones[tone])}>
+    <div className={cn("mb-4 rounded-[8px] border p-3 text-sm leading-5", tones[tone])}>
       {title ? <strong className="mr-1">{title}</strong> : null}
       {children}
     </div>
@@ -146,9 +147,9 @@ export function Tabs({
           aria-selected={active === t.id}
           onClick={() => onChange(t.id)}
           className={cn(
-            "-mb-px rounded-t-[4px] border-b-2 px-3 py-2 text-sm",
+            "-mb-px rounded-t-[6px] border-b-2 px-3 py-2 text-sm",
             active === t.id
-              ? "border-accent bg-transparent text-ink"
+              ? "border-accent bg-transparent font-medium text-ink"
               : "border-transparent text-ink2 hover:bg-surface hover:text-ink",
           )}
         >
