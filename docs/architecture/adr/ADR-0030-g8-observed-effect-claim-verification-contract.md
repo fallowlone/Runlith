@@ -12,7 +12,7 @@
 > the verification rules CV-1..CV-9, and the migration path off the
 > criterion-identity-only Task boundary — before any implementation.
 > No domain code, no persistence, no provider calls are authorized here;
-> TASK-0123..TASK-0126 implement against this contract.
+> TASK-0123..TASK-0125 implement against this contract.
 
 ## Context
 
@@ -93,10 +93,12 @@ subject it describes (CV-3). Receipts remain execution provenance
 is.
 
 `ClaimVerification` is the **durable verdict record** binding one
-criterion's `EvidenceRequirement` to the `ObservedEffect` set (or durable
-human approval) that was actually checked, with a typed verdict, the
-evaluator identity, and the policy fingerprint under which the check ran.
-It is the only input completion authority may read (CV-4).
+criterion's `EvidenceRequirement` to the evidence set that was actually
+checked — observed effects, review or security-check results, or a durable
+human approval — with a typed verdict, the evaluator identity, and the
+policy fingerprint under which the check ran.
+It is the only evidence of satisfaction completion authority may read
+(CV-4).
 
 ### 2. Field-level schema (normative names)
 
@@ -139,9 +141,12 @@ ClaimVerification
   requirement_ref       // the exact EvidenceRequirement checked
   claim_refs            // claims this verdict resolves (possibly empty:
                         // verification does not require a claim)
-  effect_refs           // observed effects relied on (empty only for
-                        // HUMAN_APPROVAL, which references the durable
-                        // approval instead, CV-8)
+  evidence_refs         // typed refs to the evidence relied on:
+                        // ObservedEffect ids for capture kinds, review
+                        // verdict / security-check result ids for
+                        // INDEPENDENT_REVIEW / SECURITY_CHECK, and the
+                        // durable approval id for HUMAN_APPROVAL (CV-8);
+                        // never empty for a VERIFIED verdict
   verdict               // VERIFIED | REFUTED | UNVERIFIED | BLOCKED (§4)
   verified_by           // evaluator identity (trusted service/adapter id)
   policy_fingerprint
@@ -162,8 +167,8 @@ requirement kind is BLOCKED, never silently VERIFIED).
   `FS_STATE`, `GIT_STATE`. Non-capture requirement kinds
   (`INDEPENDENT_REVIEW`, `SECURITY_CHECK`, `HUMAN_APPROVAL`) resolve to
   their own durable evidence: review verdict records, G6 security-check
-  results, and TASK-0062-shaped approvals respectively — they do not
-  fabricate `ObservedEffect` rows.
+  results, and durable approvals under CV-8's criterion-level binding
+  respectively — they do not fabricate `ObservedEffect` rows.
 
 The ADR-0027 `VerificationMethod` vocabulary (`automated-test`,
 `independent-review`, `security-check`, `human-approval`) maps onto
@@ -190,7 +195,10 @@ one (ADR-0027 TASK-0093 amendment, carried).
   (INV-131/INV-136): an analytical obligation whose check could not run is
   not a failed check, and neither may be reported as VERIFIED.
 
-Verdicts are durable records, not computed-on-read caches. State changes
+Verdicts are durable records, not computed-on-read caches — with one
+defined exception: VERIFIED, REFUTED and BLOCKED are persisted rows, while
+UNVERIFIED is the defined state of a criterion lacking a current
+conclusive record; no row is minted for the default state. State changes
 are supersessions with provenance (CV-5), so "why was this criterion
 accepted?" is answerable from history, matching the ADR-0027 §4
 explainability requirement for plan revisions.
@@ -217,15 +225,28 @@ are stable and MUST appear verbatim in implementing test names
   (content/config/toolchain per the requirement's `subject_binding`). A
   moved subject makes prior evidence stale: the criterion returns to
   UNVERIFIED. Stale evidence is never silently reused (INV-065 analogue:
-  similarity is not authority).
+  similarity is not authority). Evidence is additionally **in-window** only
+  while within the policy-defined freshness window for its requirement
+  kind; absent a policy-defined window, fingerprint binding alone governs
+  currency. Windows are policy-owned tunables (INV-112), never set by the
+  evaluated party.
 - **CV-4 REQUIREMENT COVERAGE AT COMPLETION** — a Task may reach COMPLETED
   only when every acceptance criterion holds a current VERIFIED
-  `ClaimVerification` against its `EvidenceRequirement` (or the criterion
-  carries no requirement because policy requires none — permitted only
-  where policy says so, never by default for risk-elevated work). Missing
-  coverage is UNVERIFIED, and UNVERIFIED is not a completion state. This
-  binds, and does not replace, ADR-0018: the Evaluation Engine's verdict
-  for completion is constructed from `ClaimVerification` records.
+  `ClaimVerification` against its `EvidenceRequirement`. The one exception
+  is an explicit **policy exemption**: the trusted Policy derivation (the
+  G6 Policy Engine under its policy fingerprint — the same authority class
+  that derives G7 planning requirements) may exempt a criterion from
+  automated requirements only by minting a durable, product-authored
+  exemption record bound to the criterion and the policy fingerprint.
+  Exemptions are forbidden for any Task whose baseline risk is above
+  `Low`, and the exemption record joins the Task's completion evidence, so
+  every COMPLETED Task still carries replayable verdict-or-exemption
+  references (ADR-0018's consequence preserved: no zero-evidence
+  completions). Missing coverage without an exemption record is
+  UNVERIFIED, and UNVERIFIED is not a completion state. This binds, and
+  does not replace, ADR-0018: the Evaluation Engine's verdict for
+  completion is constructed from `ClaimVerification` records and
+  exemption records.
 - **CV-5 CONTRADICTION AND SUPERSESSION** — REFUTED verdicts and
   contradictory effects remain durable and queryable. A later VERIFIED
   supersedes earlier verdicts explicitly (`superseded_by` chain with
@@ -245,11 +266,17 @@ are stable and MUST appear verbatim in implementing test names
   re-validated at the verification boundary; a requirement minted under a
   superseded policy fingerprint is stale input, not authority.
 - **CV-8 HUMAN APPROVAL EXACT BINDING** — `HUMAN_APPROVAL` requirements are
-  satisfied only by a durable approval bound to the exact subject, risk,
-  and validity window, single-use and unexpired (TASK-0062 semantics,
-  INV-150). Human-approval requirements survive any automated evaluation
-  outcome (INV-086): an automated VERIFIED never discharges a
-  `HUMAN_APPROVAL` requirement.
+  discharged only by a durable approval recorded in the TASK-0062 approval
+  store, minted by the trusted evaluation/verification boundary, whose
+  binding fingerprint covers `(criterion_id, subject_fingerprint, risk,
+  validity window)` — a new binding domain this contract owns, layered on
+  the TASK-0062 exact-binding machinery rather than reusing its
+  operation-request domain. The approval is single-use per
+  `(criterion, subject fingerprint)` and unexpired (INV-150); a changed
+  subject fingerprint invalidates the discharge (CV-3) and requires a new
+  approval. Human-approval requirements survive any automated evaluation
+  outcome (ADR-0018's reading of INV-086): an automated VERIFIED never
+  discharges a `HUMAN_APPROVAL` requirement.
 - **CV-9 EVIDENCE INTEGRITY** — if the implementation agent modified the
   tests, checks, or evaluators used to approve its own task beyond what
   the task's `TestMutationPolicy` allows, every `ClaimVerification`
@@ -277,9 +304,20 @@ TASK-0123 replaces the implicit default with explicit data:
   semantics; what changes is that a strengthened obligation can now
   actually travel through materialization instead of being refused.
 - `VerificationMethod` gains no ordering and no new variants here.
-- Legacy rows migrate by materializing the explicit default; the migration
-  must be restart-safe and must fail closed on a criterion it cannot map,
-  never silently drop or weaken one (INV-046).
+- Legacy rows migrate by side. Canonical Task rows carry identities only,
+  so every one of them receives the explicit `TEST_SUITE` default — the
+  fail-closed branch cannot fire there by construction. Durable plan-side
+  rows (`plan_node_criteria`, `planning_input_criteria`) carry real
+  methods: they migrate through the §3 mapping (`automated-test` ->
+  `TEST_SUITE`, `independent-review` -> `INDEPENDENT_REVIEW`,
+  `security-check` -> `SECURITY_CHECK`, `human-approval` ->
+  `HUMAN_APPROVAL`), and the migration must fail closed on any stored
+  method string outside the closed four-method vocabulary. No stored
+  non-`automated-test` method is ever rewritten to `TEST_SUITE` — that
+  silent downgrade is the exact defect the TASK-0096 amendment was written
+  to stop (INV-046). Every method transition the TASK-0096 refusal
+  previously blocked is mapped explicitly by §3. The migration must be
+  restart-safe.
 
 ### 7. Relationship to adjacent contracts
 
@@ -349,8 +387,10 @@ Audit, and reaches the latter only through the existing audit boundary
 ## Migration / replacement impact
 
 TASK-0123 owns the only schema change: criteria gain carried
-`EvidenceRequirement` data. Legacy criterion identities migrate to the
-explicit `TEST_SUITE` default (§6). Historical verdict-free completions
+`EvidenceRequirement` data. Legacy Task criterion identities migrate to
+the explicit `TEST_SUITE` default and durable plan-side method rows
+migrate through the §3 mapping (§6); no stored method is ever downgraded.
+Historical verdict-free completions
 remain valid history; nothing re-adjudicates them. Evaluator and capture
 implementations stay replaceable behind ports without domain rewrites.
 No G6 or G7 artifact is migrated or reinterpreted; no G9+ contract is
