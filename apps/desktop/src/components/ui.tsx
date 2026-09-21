@@ -164,7 +164,7 @@ export function Tabs({
   className?: string;
 }) {
   return (
-    <div role="tablist" aria-label={label} className={cn("flex gap-1 overflow-x-auto border-b border-edge px-4 pt-2", className)}>
+    <div role="tablist" aria-label={label} className={cn("flex gap-1 overflow-x-auto overflow-y-hidden border-b border-edge px-4 pt-2", className)}>
       {tabs.map((t) => (
         <button
           key={t.id}
@@ -173,7 +173,7 @@ export function Tabs({
           aria-selected={active === t.id}
           onClick={() => onChange(t.id)}
           className={cn(
-            "-mb-px rounded-t-[6px] border-b-2 px-3 py-2 text-sm",
+            "-mb-px shrink-0 whitespace-nowrap rounded-t-[6px] border-b-2 px-3 py-2 text-sm",
             active === t.id
               ? "border-accent bg-transparent font-medium text-ink"
               : "border-transparent text-ink2 hover:bg-surface hover:text-ink",
