@@ -35,5 +35,6 @@
 | [ADR-0028](./ADR-0028-g7-planning-input-run-and-execution-fencing.md) | G7 planning input/run separation, stale-writer fencing, durable spend accounting, and mandatory accepted-Plan execution admission | Accepted | planning inputs, planning runs, plan revisions, execution admission, stale fencing, g7 sequencing |
 | [ADR-0029](./ADR-0029-planner-evidence-resolution.md) | Planner evidence resolution: identity-only `evidence_refs` accepted as the v1 semantic | Accepted | planner evidence, evidence refs, cycle identity, provenance, g7 |
 | [ADR-0030](./ADR-0030-g8-observed-effect-claim-verification-contract.md) | G8 observed effect / claim verification contract (`AgentClaim`, `EvidenceRequirement`, `ObservedEffect`, `ClaimVerification`, CV-1..CV-9) | Accepted | verification, claims, evidence requirements, observed effects, claim verification, completion authority, g8 sequencing |
+| [ADR-0031](./ADR-0031-g8-side-effect-execution-protocol.md) | G8 side-effect execution protocol (durable `SideEffectIntent`, AMBIGUOUS/RECONCILE recovery, idempotency identity, SE-1..SE-8) | Accepted | side effects, durable intent, recovery, reconciliation, idempotency, workspace, git, g8 sequencing |
 
 Coverage register (not an ADR): [COVERAGE.md](./COVERAGE.md).
