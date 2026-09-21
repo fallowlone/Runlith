@@ -77,7 +77,7 @@ gates:
 
   - id: G7
     name: Multi-agent DAG + bounded adaptive planning
-    status: in_progress
+    status: completed
     objective: Planner/Worker/Reviewer with typed messages, versioned plan
       revisions, PlannerPort, atomicity proposals, recursion guardrails.
     planned_capabilities:
