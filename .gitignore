@@ -1,1 +1,7 @@
 /target/
+# Local agent-runtime artifacts: dogfood run telemetry, host-specific agent
+# routing config and local Claude Code entrypoint. Never canonical repo state.
+/.agent/
+/.jevrouter/
+/.claude/
+/CLAUDE.md
