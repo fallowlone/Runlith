@@ -1272,6 +1272,88 @@ fn atomicity_assessment_does_not_de_admit_the_accepted_revision() {
     );
 }
 
+/// TASK-0119 non-regression guard for the pre-call gate's claim-mode change.
+///
+/// The gate now claims its generation without publishing and publishes only
+/// with its decision. This test pins the end state that change had to
+/// preserve: the gate's bound snapshot is current, which is the only thing
+/// that makes the decision resumable.
+///
+/// It asserts end state only, so it does NOT detect an un-fused gate — it
+/// passes unchanged against the pre-TASK-0119 sequence, which reached the same
+/// end state through two transactions. Atomicity is covered at the storage
+/// boundary by `a_failed_gate_decision_leaves_the_accepted_revision_admissible`.
+/// The fused writer is the only way to publish outside a run claim, but a gate
+/// that claimed through `ControlRunMode::Proposal` would publish at claim time
+/// and reopen the window, so the claim mode is load-bearing — even though this
+/// test cannot observe it. Flipping the gate back to a `Proposal` claim leaves
+/// every assertion here passing, because that claim publishes the same
+/// snapshot the fused writer then upserts idempotently. What this test does
+/// catch is a partial revert: a `HumanGate` claim with a separate
+/// `create_human_decision_request` publishes nothing and errors out.
+#[test]
+fn the_pre_call_gate_publishes_the_snapshot_its_decision_is_bound_to() {
+    let db = TestDb::new("pre-call-gate-publication");
+    db.seed_tasks(&["TASK-0078"], true);
+    let mut service = db.service();
+    let planner = FakePlanner::for_scenario(FakePlannerScenario::Valid);
+
+    let accepted = match service
+        .propose_decomposition(
+            &planner,
+            &branch(),
+            request("proposal-evidence"),
+            &policy(false),
+        )
+        .expect("proposal")
+    {
+        PlanningProposalOutcome::Accepted(accepted) => accepted,
+        other => panic!("expected an accepted revision, got {other:?}"),
+    };
+
+    let mut exhausted = request("pre-call-gate");
+    exhausted.depth_remaining = 0;
+    let decision = match service
+        .propose_decomposition(&planner, &branch(), exhausted, &policy(false))
+        .expect("depth exhaustion is a bounded outcome")
+    {
+        PlanningProposalOutcome::WaitingForHuman(decision) => *decision,
+        other => panic!("expected a pre-call human gate, got {other:?}"),
+    };
+    assert_eq!(decision.reason, HumanDecisionReason::PlannerBlocked);
+    assert_eq!(
+        planner.call_count(),
+        1,
+        "the pre-call gate must not spend a planner call"
+    );
+
+    assert!(
+        service
+            .store()
+            .current_planning_input_matches(
+                &branch(),
+                &decision.precondition.planning_input_snapshot_id,
+                &decision.precondition.planning_input_fingerprint,
+            )
+            .unwrap(),
+        "the gate must leave its own bound snapshot current, or the decision it \
+         just recorded could never be resumed"
+    );
+    assert!(
+        !service
+            .store()
+            .current_planning_input_matches(
+                &branch(),
+                accepted.planning_input_snapshot_id(),
+                accepted.planning_input_fingerprint(),
+            )
+            .unwrap(),
+        "the gate deliberately takes current input from the accepted revision; \
+         that is the designed cost of a resumable decision, and it is paid only \
+         when the decision is actually recorded"
+    );
+}
+
 #[test]
 fn atomicity_assessment_shares_the_bounded_recorded_call_budget() {
     let db = TestDb::new("assessment-budget");

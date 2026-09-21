@@ -100,14 +100,15 @@ pub struct PlanningPolicyContext {
 #[derive(Clone, Copy, Debug)]
 enum ControlRunMode {
     /// Intends to publish a revision, so its snapshot becomes current input.
-    /// The pre-call human gate also uses this: a durable `HumanDecision` can
-    /// only be created, and later resumed, while its bound snapshot is the
-    /// branch's current planning input.
     Proposal,
     /// V9 approved replay, fenced against its `HumanDecision` plan head.
     ApprovedReplay { approved_plan_head: u64 },
     /// Atomicity assessment; proposes nothing and leaves current input alone.
     Assessment,
+    /// A human gate. It leaves current input alone at claim time and publishes
+    /// its snapshot in the same transaction that records the gate's
+    /// `HumanDecision` (TASK-0119).
+    HumanGate,
 }
 
 /// Durable guardrail view for one plan branch + triggering-evidence event.
@@ -1016,10 +1017,10 @@ impl<C: Clock> PlanningService<C> {
         snapshot: &PlanningInputSnapshot,
         reason: HumanDecisionReason,
     ) -> Result<HumanDecisionRequest, PlanningServiceError> {
-        self.store.publish_planning_input(run, snapshot)?;
-        self.create_planning_human_decision(
+        self.open_human_gate(
             branch,
             policy,
+            run,
             snapshot,
             reason,
             &snapshot.triggering_evidence,
@@ -1094,6 +1095,11 @@ impl<C: Clock> PlanningService<C> {
                     .start_planning_run(&snapshot, trigger_key, self.clock.now_millis())?
             }
             ControlRunMode::Assessment => self.store.start_assessment_planning_run(
+                &snapshot,
+                trigger_key,
+                self.clock.now_millis(),
+            )?,
+            ControlRunMode::HumanGate => self.store.start_human_gate_planning_run(
                 &snapshot,
                 trigger_key,
                 self.clock.now_millis(),
@@ -1181,21 +1187,17 @@ impl<C: Clock> PlanningService<C> {
         }
         let (head, _) = self.load_base(branch)?;
         let trigger_key = trigger_key(triggering_evidence)?;
-        let (snapshot, run) = self.start_control_run(
+        let (snapshot, run) = self.start_control_run_with_mode(
             branch,
             triggering_evidence,
             policy,
             head,
             durable_lineage,
             &trigger_key,
+            ControlRunMode::HumanGate,
         )?;
-        let decision = self.create_planning_human_decision(
-            branch,
-            policy,
-            &snapshot,
-            reason,
-            triggering_evidence,
-        );
+        let decision =
+            self.open_human_gate(branch, policy, &run, &snapshot, reason, triggering_evidence);
         let finished = self.finish_run(&run, PlanningRunState::Refused);
         match (decision, finished) {
             (Ok(decision), Ok(())) => Ok(Some(decision)),
@@ -1204,6 +1206,42 @@ impl<C: Clock> PlanningService<C> {
         }
     }
 
+    /// Opens a planning human gate: publishes the gate's snapshot as the
+    /// branch's current planning input and records its `HumanDecision` in one
+    /// transaction.
+    ///
+    /// A gate's decision can only be created, and later resumed, while its
+    /// bound snapshot is current, so the gate has to publish. Doing that in a
+    /// transaction of its own left a crash window where the branch's current
+    /// input had moved with no gate recorded, which de-admits the previously
+    /// accepted revision and does not heal on restart (TASK-0119).
+    fn open_human_gate(
+        &mut self,
+        branch: &PlanBranchId,
+        policy: &PlanningPolicyContext,
+        run: &PlanningRunRecord,
+        snapshot: &PlanningInputSnapshot,
+        reason: HumanDecisionReason,
+        evidence: &[EvidenceRef],
+    ) -> Result<HumanDecisionRequest, PlanningServiceError> {
+        let request =
+            self.planning_human_decision_request(branch, policy, snapshot, reason, evidence)?;
+        Ok(self
+            .store
+            .publish_planning_input_and_create_human_decision(
+                run,
+                snapshot,
+                request,
+                self.clock.now_millis(),
+            )?)
+    }
+
+    /// Records a `HumanDecision` without touching the branch's current
+    /// planning input.
+    ///
+    /// The proposal path uses this: its run claim already published the
+    /// snapshot when it claimed the generation, so there is nothing further to
+    /// publish here. A human gate must use [`Self::open_human_gate`] instead.
     fn create_planning_human_decision(
         &mut self,
         branch: &PlanBranchId,
@@ -1212,31 +1250,43 @@ impl<C: Clock> PlanningService<C> {
         reason: HumanDecisionReason,
         evidence: &[EvidenceRef],
     ) -> Result<HumanDecisionRequest, PlanningServiceError> {
+        let request =
+            self.planning_human_decision_request(branch, policy, snapshot, reason, evidence)?;
+        Ok(self
+            .store
+            .create_human_decision_request(request, self.clock.now_millis())?)
+    }
+
+    fn planning_human_decision_request(
+        &mut self,
+        branch: &PlanBranchId,
+        policy: &PlanningPolicyContext,
+        snapshot: &PlanningInputSnapshot,
+        reason: HumanDecisionReason,
+        evidence: &[EvidenceRef],
+    ) -> Result<NewHumanDecisionRequest, PlanningServiceError> {
         let task_id = policy_task_id(policy)?;
-        Ok(self.store.create_human_decision_request(
-            NewHumanDecisionRequest {
-                task_id,
-                plan_branch_id: branch.clone(),
-                reason,
-                risk: policy.baseline_risk,
-                affected_scope: policy.scope_bound.clone(),
-                options: vec![HumanContinuation::Replan, HumanContinuation::Abort],
-                recommendation: None,
-                evidence: evidence.to_vec(),
-                proposal_hash: None,
-                approved_proposal: None,
-                plan_head: snapshot.expected_plan_head,
-                planning_input_snapshot_id: snapshot.id.clone(),
-                planning_input_fingerprint: snapshot.input_fingerprint.clone(),
-                policy_fingerprint: policy.policy_fingerprint.clone(),
-                expires_at_ms: Some(
-                    self.clock
-                        .now_millis()
-                        .saturating_add(HUMAN_DECISION_TTL_MS),
-                ),
-            },
-            self.clock.now_millis(),
-        )?)
+        Ok(NewHumanDecisionRequest {
+            task_id,
+            plan_branch_id: branch.clone(),
+            reason,
+            risk: policy.baseline_risk,
+            affected_scope: policy.scope_bound.clone(),
+            options: vec![HumanContinuation::Replan, HumanContinuation::Abort],
+            recommendation: None,
+            evidence: evidence.to_vec(),
+            proposal_hash: None,
+            approved_proposal: None,
+            plan_head: snapshot.expected_plan_head,
+            planning_input_snapshot_id: snapshot.id.clone(),
+            planning_input_fingerprint: snapshot.input_fingerprint.clone(),
+            policy_fingerprint: policy.policy_fingerprint.clone(),
+            expires_at_ms: Some(
+                self.clock
+                    .now_millis()
+                    .saturating_add(HUMAN_DECISION_TTL_MS),
+            ),
+        })
     }
 
     /// Reserves the call durably, invokes the planner, then settles the call
