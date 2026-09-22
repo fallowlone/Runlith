@@ -865,6 +865,31 @@ scheduler consumes `verification_method`. Until G8 models
 requirement-to-evidence, Runlith Task acceptance obligations are criterion
 identities proved by automated test — now by refusal rather than by assumption.
 
+## Amendment — TASK-0123 EvidenceRequirement supersedes the lossy Task boundary (2026-09-22)
+
+> **Supersedes the materialization consequence of TASK-0096.** TASK-0123
+> makes `EvidenceRequirement` explicit on canonical Tasks. A declared
+> `VerificationMethod` is therefore carried through materialization by the
+> §3 mapping; it is no longer refused merely because the old criterion-only
+> Task schema could not represent it. `VerificationMethod` remains a closed
+> vocabulary, not a strength ordering, and V9 still gates method changes.
+
+Capture kinds (`PROCESS_EXIT`, `TEST_SUITE`, `ARTIFACT_HASH`, `FS_STATE`, and
+`GIT_STATE`) are distinct Task-side `RequirementKind`s. The planning vocabulary
+projects them to `AutomatedTest` only for proposal compatibility. Before V9,
+V3 compares the canonical Task requirement with the exact child requirement
+that this projection can materialize; a changed kind, binding, parameters,
+policy derivation, or `required` flag is an escalation, never an equivalence.
+TASK-0123 adds no G5/IPC wire fields or protocol-version bump; the existing wire
+contract remains criterion/method proposal data, with the typed requirement
+carried at the trusted application/storage boundary.
+
+The `policy_fingerprint` on a materialized requirement is the trusted policy
+namespace seam for TASK-0125. Migration-created `NULL` fingerprints are stale
+defaults, never current authority; an exact restart retry may monotonically
+adopt the current non-NULL fingerprint, but TASK-0123 does not grant completion
+authority or implement ClaimVerification.
+
 ## Amendment — TASK-0097 handoff scope reconciled with G9 (2026-09-18)
 
 > Accepted 2026-09-18. Owner decision of 2026-09-18. Origin: two independent

@@ -21,6 +21,7 @@ pub mod scope;
 pub mod task_authority;
 pub mod validation;
 
+pub use control::requirement_identity;
 pub use control::PlanningInputSnapshot;
 pub use error::PlanDomainError;
 pub use guardrails::{

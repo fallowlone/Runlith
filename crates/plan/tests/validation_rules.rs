@@ -17,6 +17,7 @@ use plan_domain::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
+use task_domain::{EvidenceRequirement, RequirementKind, RequirementParam, SubjectBinding};
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -146,7 +147,9 @@ fn ctx() -> ValidationContext {
         affected_parent_criteria: vec![AffectedParentCriterion {
             id: cid("c1"),
             method: VerificationMethod::AutomatedTest,
+            requirement: None,
         }],
+        policy_fingerprint: "policy:test".to_owned(),
         depth_after_merge: 2,
         revisions_accepted_this_cycle: 0,
         parent_task_ref: "task-T1".to_owned(),
@@ -363,6 +366,7 @@ fn v3_reconciled_parent_method_routes_weakening_to_v9() {
     c.affected_parent_criteria = vec![AffectedParentCriterion {
         id: cid("c1"),
         method: VerificationMethod::HumanApproval,
+        requirement: None,
     }];
     assert_eq!(refusal_code(&graph, &cs, &c), "RISK_GATE_OPEN");
     c.risk_grant = Some(RiskEscalationGrant {
@@ -379,6 +383,101 @@ fn v3_reconciled_parent_method_routes_weakening_to_v9() {
         }
         outcome => panic!("expected an accepted escalated proposal, got {outcome:?}"),
     }
+}
+
+#[test]
+fn v3_capture_requirements_route_lossy_method_projection_to_v9() {
+    let graph = base_graph();
+    for kind in [
+        RequirementKind::ProcessExit,
+        RequirementKind::ArtifactHash,
+        RequirementKind::FsState,
+        RequirementKind::GitState,
+    ] {
+        let mut changeset = valid_changeset();
+        changeset.proposal_hash = compute_proposal_hash(&changeset);
+        let mut context = ctx();
+        context.affected_parent_criteria[0].requirement = Some(
+            EvidenceRequirement::new(
+                "c1",
+                kind,
+                kind.default_subject_binding(),
+                vec![RequirementParam::new("selector", "dist/app").unwrap()],
+                Some("policy:test".to_owned()),
+                true,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            refusal_code(&graph, &changeset, &context),
+            "RISK_GATE_OPEN",
+            "{kind:?} cannot be reconstructed from automated-test"
+        );
+        context.risk_grant = Some(RiskEscalationGrant {
+            proposal_hash: changeset.proposal_hash.clone(),
+            expires_at_ms: 5_000,
+            consumed: false,
+        });
+        assert!(matches!(
+            validate_proposal(&graph, &changeset, &context),
+            ValidationOutcome::Accepted {
+                risk_escalated: true
+            }
+        ));
+    }
+}
+
+#[test]
+fn v3_routes_each_non_kind_typed_requirement_mismatch_to_v9() {
+    let graph = base_graph();
+    let requirements = [
+        EvidenceRequirement::new(
+            "c1",
+            RequirementKind::TestSuite,
+            SubjectBinding::Content,
+            vec![],
+            Some("policy:test".to_owned()),
+            true,
+        ),
+        EvidenceRequirement::new(
+            "c1",
+            RequirementKind::TestSuite,
+            RequirementKind::TestSuite.default_subject_binding(),
+            vec![RequirementParam::new("selector", "dist/app").unwrap()],
+            Some("policy:test".to_owned()),
+            true,
+        ),
+        EvidenceRequirement::new(
+            "c1",
+            RequirementKind::TestSuite,
+            RequirementKind::TestSuite.default_subject_binding(),
+            vec![],
+            Some("policy:test".to_owned()),
+            false,
+        ),
+    ]
+    .map(Result::unwrap);
+    for requirement in requirements {
+        let mut changeset = valid_changeset();
+        changeset.proposal_hash = compute_proposal_hash(&changeset);
+        let mut context = ctx();
+        context.affected_parent_criteria[0].requirement = Some(requirement);
+        assert_eq!(refusal_code(&graph, &changeset, &context), "RISK_GATE_OPEN");
+    }
+}
+
+#[test]
+fn v3_authored_default_fingerprint_is_adopted_without_v9_escalation() {
+    let graph = base_graph();
+    let mut context = ctx();
+    context.affected_parent_criteria[0].requirement =
+        Some(EvidenceRequirement::authored_default("c1").unwrap());
+    assert!(matches!(
+        validate_proposal(&graph, &valid_changeset(), &context),
+        ValidationOutcome::Accepted {
+            risk_escalated: false
+        }
+    ));
 }
 
 #[test]

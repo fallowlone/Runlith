@@ -14,10 +14,11 @@
 -- requirements are stale input and must be re-derived or re-validated at the
 -- verification boundary; they are never current policy authority.
 --
--- The backfill doubles as the fail-closed legacy check: the UNIQUE constraint
--- on (task_id, criterion_id) rejects a stored Task whose acceptance list
--- already carries a duplicate, and the migration then aborts instead of
--- silently dropping or merging an obligation.
+-- Duplicate legacy acceptance rows are ambiguous persisted evidence. The
+-- UNIQUE (task_id, criterion_id) constraint therefore intentionally rejects
+-- them; the surrounding migration transaction rolls back, preserving every
+-- legacy row at schema v16 for explicit remediation. No evidence is grouped,
+-- renumbered, or silently discarded (ADR-0030 §6 / CV-7).
 
 CREATE TABLE task_evidence_requirements (
     task_id            TEXT NOT NULL REFERENCES tasks (id),

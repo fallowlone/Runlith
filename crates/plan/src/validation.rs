@@ -31,6 +31,10 @@ pub struct AffectedParentCriterion {
     pub id: CriterionId,
     /// Proof method the parent criterion demands.
     pub method: VerificationMethod,
+    /// Canonical Task requirement, when this criterion originates from a
+    /// Task. Durable plan-only criteria predate the typed Task boundary and
+    /// therefore carry no comparable obligation shape.
+    pub requirement: Option<task_domain::EvidenceRequirement>,
 }
 
 /// Minimal bound-grant view consumed by V9: a bound, unexpired, single-use
@@ -58,6 +62,8 @@ pub struct ValidationContext {
     pub baseline_risk: RiskClass,
     /// Parent criteria the decomposition must preserve (V3).
     pub affected_parent_criteria: Vec<AffectedParentCriterion>,
+    /// Trusted policy derivation identity stamped on a materialized child.
+    pub policy_fingerprint: String,
     /// Depth the merged branch would reach, in edges (V6).
     pub depth_after_merge: u32,
     /// Revisions already accepted this reconcile cycle on this branch (V6).
@@ -468,7 +474,7 @@ fn check_referential_integrity(
     None
 }
 
-/// Returns `Ok(method_changed)` where the flag routes to V9.
+/// Returns `Ok(requirement_changed)` where the flag routes to V9.
 fn check_criteria_preservation(
     changeset: &PlanChangeSet,
     ctx: &ValidationContext,
@@ -479,7 +485,7 @@ fn check_criteria_preservation(
             declared.insert(criterion.id.as_str(), criterion.method);
         }
     }
-    let mut method_changed = false;
+    let mut requirement_changed = false;
     for parent in &ctx.affected_parent_criteria {
         let children = changeset.coverage_map.get(&parent.id);
         let Some(children) = children else {
@@ -505,14 +511,32 @@ fn check_criteria_preservation(
                         ),
                     });
                 }
-                Some(method) if *method != parent.method => {
-                    method_changed = true;
+                Some(method) => {
+                    if *method != parent.method
+                        || parent.requirement.as_ref().is_some_and(|requirement| {
+                            let kind = crate::risk::requirement_kind_for_method(*method);
+                            requirement.requirement_kind != kind
+                                || requirement.subject_binding != kind.default_subject_binding()
+                                || !requirement.params.is_empty()
+                                // An authored/migrated default has no policy fingerprint. Its
+                                // unchanged shape may be stamped by this trusted planning pass;
+                                // `None -> current` is not an obligation escalation.
+                                || requirement
+                                    .policy_fingerprint
+                                    .as_deref()
+                                    .is_some_and(|fingerprint| {
+                                        fingerprint != ctx.policy_fingerprint
+                                    })
+                                || !requirement.required
+                        })
+                    {
+                        requirement_changed = true;
+                    }
                 }
-                Some(_) => {}
             }
         }
     }
-    Ok(method_changed)
+    Ok(requirement_changed)
 }
 
 fn check_scope_containment(
