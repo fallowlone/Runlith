@@ -139,6 +139,7 @@ impl<C: Clock> TaskService<C> {
             &facts.allowed_paths,
             &facts.forbidden_paths,
             &facts.acceptance,
+            &facts.evidence_requirements,
             facts.risk.as_deref(),
         )
         .map_err(|PlanDomainError::InvalidInput(detail)| {

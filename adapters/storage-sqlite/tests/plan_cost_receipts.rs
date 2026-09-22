@@ -71,7 +71,9 @@ fn schema_12_database_upgrades_to_current_without_plan_cost_data() {
         let connection = rusqlite::Connection::open(&db.path).expect("raw sqlite");
         connection
             .execute_batch(
-                "DROP TABLE planning_input_candidate_tasks;
+                "DROP TABLE task_evidence_requirement_params;
+                 DROP TABLE task_evidence_requirements;
+                 DROP TABLE planning_input_candidate_tasks;
                  DROP TABLE human_decision_evidence;
                  DROP TABLE human_decision_options;
                  DROP TABLE human_decision_scope_roots;
@@ -81,6 +83,7 @@ fn schema_12_database_upgrades_to_current_without_plan_cost_data() {
                  DROP TABLE planning_input_heads;
                  DROP TABLE planning_input_lineage;
                  DROP TABLE planning_input_evidence;
+                 DROP TABLE planning_input_criterion_requirement_params;
                  DROP TABLE planning_input_criteria;
                  DROP TABLE planning_input_scope_roots;
                  DROP TABLE planning_input_snapshots;
@@ -93,7 +96,7 @@ fn schema_12_database_upgrades_to_current_without_plan_cost_data() {
     }
 
     let mut store = SqliteStore::open(&db.path).expect("migrate v12 to current");
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 16);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 18);
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
     let receipt_ref = PlanningCostReceiptRef::new("planning-receipt:after-upgrade").unwrap();
     let evidence = receipt(1);

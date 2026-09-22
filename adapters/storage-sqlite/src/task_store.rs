@@ -13,7 +13,10 @@
 use std::path::Path;
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
-use task_domain::{validate_acyclic, Project, ProjectId, Task, TaskId, TaskSnapshot, TaskState};
+use task_domain::{
+    validate_acyclic, EvidenceRequirement, Project, ProjectId, RequirementKind, RequirementParam,
+    SubjectBinding, Task, TaskId, TaskSnapshot, TaskState,
+};
 
 use crate::error::{map_constraint, StorageError, StorageResult};
 use crate::event::{decode_state, EventId, EventType, JournalEvent, NewJournalEvent};
@@ -198,6 +201,7 @@ impl SqliteStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         insert_task_row(&transaction, &snapshot)?;
         insert_task_strings(&transaction, &snapshot)?;
+        insert_task_evidence_requirements(&transaction, &snapshot)?;
         insert_task_edges(&transaction, &snapshot)?;
         transaction.commit()?;
         Ok(())
@@ -226,6 +230,7 @@ impl SqliteStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         insert_task_row(&transaction, &snapshot)?;
         insert_task_strings(&transaction, &snapshot)?;
+        insert_task_evidence_requirements(&transaction, &snapshot)?;
         insert_task_edges(&transaction, &snapshot)?;
         let committed = insert_journal_event(&transaction, event)?;
         transaction.commit()?;
@@ -266,7 +271,17 @@ impl SqliteStore {
             "DELETE FROM task_dependencies WHERE task_id = ?1",
             params![snapshot.id.as_str()],
         )?;
+        // Parameters reference requirements (FK), so they go first.
+        transaction.execute(
+            "DELETE FROM task_evidence_requirement_params WHERE task_id = ?1",
+            params![snapshot.id.as_str()],
+        )?;
+        transaction.execute(
+            "DELETE FROM task_evidence_requirements WHERE task_id = ?1",
+            params![snapshot.id.as_str()],
+        )?;
         insert_task_strings(&transaction, &snapshot)?;
+        insert_task_evidence_requirements(&transaction, &snapshot)?;
         insert_task_edges(&transaction, &snapshot)?;
         transaction.commit()?;
         Ok(())
@@ -677,12 +692,13 @@ fn load_task_snapshot(connection: &Connection, id: &str) -> StorageResult<Option
         }
     }
     Ok(Some(TaskSnapshot {
-        id,
+        id: id.clone(),
         project_id,
         objective: row.objective,
         parent,
         depends_on,
         acceptance: ordered_values(&strings, "acceptance"),
+        evidence_requirements: load_evidence_requirements(connection, id.as_str())?,
         allowed_paths: ordered_values(&strings, "allowed_path"),
         forbidden_paths: ordered_values(&strings, "forbidden_path"),
         verification: ordered_values(&strings, "verification"),
@@ -692,6 +708,129 @@ fn load_task_snapshot(connection: &Connection, id: &str) -> StorageResult<Option
         kind: row.kind,
         state,
     }))
+}
+
+/// Loads one Task's explicit evidence requirements in stored order. Stored
+/// values that cannot reconstruct a valid domain requirement (unknown kind,
+/// unknown binding, non-contiguous order, orphaned parameters) fail closed as
+/// corruption — never silently repaired (ADR-0030 §2).
+fn load_evidence_requirements(
+    connection: &Connection,
+    task_id: &str,
+) -> StorageResult<Vec<EvidenceRequirement>> {
+    let mut params_by_criterion: std::collections::BTreeMap<String, Vec<(i64, String, String)>> =
+        std::collections::BTreeMap::new();
+    {
+        let mut statement = connection.prepare(
+            "SELECT criterion_id, position, param_key, param_value
+             FROM task_evidence_requirement_params WHERE task_id = ?1
+             ORDER BY criterion_id, position",
+        )?;
+        let rows = statement.query_map(params![task_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (criterion, position, key, value) = row?;
+            params_by_criterion
+                .entry(criterion)
+                .or_default()
+                .push((position, key, value));
+        }
+    }
+    let mut statement = connection.prepare(
+        "SELECT position, criterion_id, requirement_kind, subject_binding, required,
+                policy_fingerprint
+         FROM task_evidence_requirements WHERE task_id = ?1 ORDER BY position",
+    )?;
+    let rows = statement.query_map(params![task_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, Option<String>>(5)?,
+        ))
+    })?;
+    let mut requirements = Vec::new();
+    let mut seen_criteria: Vec<String> = Vec::new();
+    for (expected, row) in (0_i64..).zip(rows) {
+        let (position, criterion_id, raw_kind, raw_binding, required, policy_fingerprint) = row?;
+        if position != expected {
+            return Err(StorageError::Corrupt(format!(
+                "task {task_id} stores non-contiguous evidence requirement order"
+            )));
+        }
+        let requirement_kind = RequirementKind::parse(&raw_kind).map_err(|_| {
+            StorageError::Corrupt(format!(
+                "task {task_id} stores unknown evidence requirement kind {raw_kind:?}"
+            ))
+        })?;
+        let subject_binding = SubjectBinding::parse(&raw_binding).map_err(|_| {
+            StorageError::Corrupt(format!(
+                "task {task_id} stores unknown subject binding {raw_binding:?}"
+            ))
+        })?;
+        let required = match required {
+            0 => false,
+            1 => true,
+            other => {
+                return Err(StorageError::Corrupt(format!(
+                    "task {task_id} stores invalid required flag {other}"
+                )))
+            }
+        };
+        let params = params_by_criterion
+            .remove(&criterion_id)
+            .unwrap_or_default();
+        let mut parameters = Vec::new();
+        for (expected, (position, key, value)) in (0_i64..).zip(params) {
+            if position != expected {
+                return Err(StorageError::Corrupt(format!(
+                    "task {task_id} criterion {criterion_id:?} stores non-contiguous parameter order"
+                )));
+            }
+            parameters.push(
+                RequirementParam::new(key, value).map_err(|error| {
+                    StorageError::Corrupt(format!(
+                        "task {task_id} criterion {criterion_id:?} stores an invalid parameter: {error}"
+                    ))
+                })?,
+            );
+        }
+        let requirement = EvidenceRequirement::new(
+            criterion_id.clone(),
+            requirement_kind,
+            subject_binding,
+            parameters,
+            policy_fingerprint,
+            required,
+        )
+        .map_err(|error| {
+            StorageError::Corrupt(format!(
+                "task {task_id} stores an invalid evidence requirement: {error}"
+            ))
+        })?;
+        seen_criteria.push(criterion_id);
+        requirements.push(requirement);
+    }
+    if !params_by_criterion.is_empty() {
+        return Err(StorageError::Corrupt(format!(
+            "task {task_id} stores parameters for unknown evidence requirements"
+        )));
+    }
+    let unique: std::collections::BTreeSet<&String> = seen_criteria.iter().collect();
+    if unique.len() != seen_criteria.len() {
+        return Err(StorageError::Corrupt(format!(
+            "task {task_id} stores duplicate evidence requirements for one criterion"
+        )));
+    }
+    Ok(requirements)
 }
 
 struct TaskRow {
@@ -836,6 +975,48 @@ pub(crate) fn insert_task_strings(
                  VALUES (?1, ?2, ?3, ?4)",
                 params![snapshot.id.as_str(), slot, position as i64, value,],
             )?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn insert_task_evidence_requirements(
+    connection: &Connection,
+    snapshot: &TaskSnapshot,
+) -> StorageResult<()> {
+    for (position, requirement) in snapshot.evidence_requirements.iter().enumerate() {
+        connection
+            .execute(
+                "INSERT INTO task_evidence_requirements
+                 (task_id, position, criterion_id, requirement_kind, subject_binding,
+                  required, policy_fingerprint)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    snapshot.id.as_str(),
+                    position as i64,
+                    requirement.criterion_id,
+                    requirement.requirement_kind.as_str(),
+                    requirement.subject_binding.as_str(),
+                    if requirement.required { 1_i64 } else { 0_i64 },
+                    requirement.policy_fingerprint,
+                ],
+            )
+            .map_err(|error| map_constraint(error, "insert evidence requirement"))?;
+        for (param_position, param) in requirement.params.iter().enumerate() {
+            connection
+                .execute(
+                    "INSERT INTO task_evidence_requirement_params
+                     (task_id, criterion_id, position, param_key, param_value)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        snapshot.id.as_str(),
+                        requirement.criterion_id,
+                        param_position as i64,
+                        param.key(),
+                        param.value(),
+                    ],
+                )
+                .map_err(|error| map_constraint(error, "insert evidence requirement parameter"))?;
         }
     }
     Ok(())

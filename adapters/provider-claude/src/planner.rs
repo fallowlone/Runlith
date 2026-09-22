@@ -735,10 +735,10 @@ const PLANNER_ROLE: &str = concat!(
     // "workspace:repo:src" after copying a `[workspace:path]` placeholder.
     "node_additions entries: {id,scope,criteria:[{id,method}],risk_class,required_gate}, ",
     "where scope is a non-empty array of roots copied from scope_bound or nested inside one. ",
-    // G7 v1 materializes automated-test obligations only; a child declaring
-    // another method is refused at materialization (ADR-0027 TASK-0096),
-    // so the prompt must not offer what the system will reject.
-    "method is automated-test; ",
+    // TASK-0123 carries every declared method into the child Task's explicit
+    // EvidenceRequirement; keep the prompt aligned with the accepted G8
+    // vocabulary instead of describing the superseded TASK-0096 refusal.
+    "method is automated-test|independent-review|security-check|human-approval; ",
     "risk_class is low|medium|high|critical; required_gate is string|null. ",
     "A node whose risk_class exceeds baseline_risk MUST name a required_gate; ",
     "without one it is refused. Order: low < medium < high < critical. ",

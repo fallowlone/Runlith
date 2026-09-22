@@ -165,6 +165,7 @@ fn policy(parent: &str, fingerprint: &str) -> PlanningPolicyContext {
         affected_parent_criteria: vec![AffectedParentCriterion {
             id: CriterionId::new("criterion-root").expect("criterion"),
             method: VerificationMethod::AutomatedTest,
+            requirement: None,
         }],
         parent_task_ref: parent.to_owned(),
         canonical_task_authority: false,

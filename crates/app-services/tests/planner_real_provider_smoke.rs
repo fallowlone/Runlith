@@ -146,6 +146,7 @@ fn policy() -> PlanningPolicyContext {
         affected_parent_criteria: vec![AffectedParentCriterion {
             id: CriterionId::new(PARENT_CRITERION).expect("criterion id"),
             method: VerificationMethod::AutomatedTest,
+            requirement: None,
         }],
         parent_task_ref: PARENT_TASK.to_owned(),
         canonical_task_authority: false,

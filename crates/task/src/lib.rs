@@ -24,6 +24,7 @@ mod dependency;
 mod error;
 mod id;
 mod project;
+mod requirement;
 mod state;
 mod task;
 
@@ -31,6 +32,9 @@ pub use dependency::validate_acyclic;
 pub use error::DomainError;
 pub use id::{ProjectId, TaskId};
 pub use project::Project;
+pub use requirement::{
+    EvidenceRequirement, RequirementKind, RequirementParam, SubjectBinding, MAX_EVIDENCE_PARAMETERS,
+};
 pub use state::{can_transition, TaskState, ACCEPTED_TRANSITIONS};
 pub use task::{
     Task, TaskSnapshot, TransitionCommand, MAX_TASK_ACCEPTANCE, MAX_TASK_ALLOWED_PATHS,
