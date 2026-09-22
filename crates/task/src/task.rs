@@ -89,6 +89,10 @@ pub struct Task {
     parent: Option<TaskId>,
     depends_on: Vec<TaskId>,
     acceptance: Vec<String>,
+    /// Explicit G8 evidence requirements (ADR-0030 §2): exactly one per
+    /// acceptance criterion, stamped at authoring or migration time. Never
+    /// empty while `acceptance` is non-empty.
+    evidence_requirements: Vec<crate::requirement::EvidenceRequirement>,
     allowed_paths: Vec<String>,
     forbidden_paths: Vec<String>,
     /// Reserved for the G8 typed requirement-to-evidence model
@@ -126,6 +130,7 @@ impl Task {
             parent: None,
             depends_on: Vec::new(),
             acceptance: Vec::new(),
+            evidence_requirements: Vec::new(),
             allowed_paths: Vec::new(),
             forbidden_paths: Vec::new(),
             verification: Vec::new(),
@@ -261,6 +266,12 @@ impl Task {
     /// `DRAFT`; once work is declared READY this intent is frozen. Values are
     /// trimmed, bounded and de-duplicated; any prior values are replaced
     /// atomically, so a refused call leaves the Task unchanged.
+    ///
+    /// Evidence requirements (ADR-0030 §2) survive the replacement: an
+    /// existing requirement whose criterion remains in the new acceptance
+    /// list is preserved (never silently downgraded back to the authoring
+    /// default), a criterion that is new receives the explicit default, and a
+    /// requirement for a removed criterion is dropped with it.
     pub fn define_planning_metadata(
         &mut self,
         allowed_paths: Vec<String>,
@@ -280,18 +291,68 @@ impl Task {
         let risk = bounded_metadata_item("risk", risk.into())?;
         self.allowed_paths = allowed_paths;
         self.acceptance = acceptance;
+        // ADR-0030 §6: the TASK-0093 implicit `AutomatedTest` default becomes
+        // explicit data at authoring time. Requirements already authored for a
+        // surviving criterion are preserved so a repeated metadata write can
+        // never weaken an obligation (INV-046, CV-7); new criteria get the
+        // explicit default. A caller that needs stronger obligations replaces
+        // them through `define_evidence_requirements` (still DRAFT-only).
+        let mut requirements = Vec::with_capacity(self.acceptance.len());
+        for criterion in &self.acceptance {
+            match self
+                .evidence_requirements
+                .iter()
+                .find(|requirement| requirement.criterion_id == *criterion)
+            {
+                Some(existing) => requirements.push(existing.clone()),
+                None => requirements.push(
+                    crate::requirement::EvidenceRequirement::authored_default(criterion)?,
+                ),
+            }
+        }
+        self.evidence_requirements = requirements;
         self.risk = Some(risk);
         Ok(())
     }
 
+    /// Replaces the Task's evidence requirements (ADR-0030 §2). `DRAFT`-only
+    /// like all authoring; must cover exactly the current acceptance criteria,
+    /// one requirement each. Any prior values are replaced atomically, so a
+    /// refused call leaves the Task unchanged.
+    pub fn define_evidence_requirements(
+        &mut self,
+        requirements: Vec<crate::requirement::EvidenceRequirement>,
+    ) -> DomainResult<()> {
+        if self.state != TaskState::Draft {
+            return Err(DomainError::transition(format!(
+                "evidence requirements can only be authored while DRAFT; task {} is {}",
+                self.id, self.state
+            )));
+        }
+        crate::requirement::validate_requirement_coverage(&self.acceptance, &requirements)?;
+        self.evidence_requirements = requirements;
+        Ok(())
+    }
+
     /// Appends one acceptance criterion (durable intent; tests are evidence,
-    /// never the criteria themselves).
+    /// never the criteria themselves). The criterion receives its explicit
+    /// default evidence requirement in the same call, so acceptance and
+    /// requirements can never drift apart. A repeated criterion id is a
+    /// duplicate obligation, not a silent no-op.
     pub fn add_acceptance(&mut self, criterion: impl Into<String>) -> DomainResult<()> {
         let criterion = criterion.into();
         if criterion.trim().is_empty() {
             return Err(DomainError::input("acceptance criterion must not be blank"));
         }
-        self.acceptance.push(criterion.trim().to_owned());
+        let criterion = criterion.trim().to_owned();
+        if self.acceptance.contains(&criterion) {
+            return Err(DomainError::input(format!(
+                "acceptance criterion {criterion:?} is already declared"
+            )));
+        }
+        let requirement = crate::requirement::EvidenceRequirement::authored_default(&criterion)?;
+        self.acceptance.push(criterion);
+        self.evidence_requirements.push(requirement);
         Ok(())
     }
 
@@ -331,6 +392,13 @@ impl Task {
         &self.acceptance
     }
 
+    /// Explicit evidence requirements (ADR-0030 §2), one per acceptance
+    /// criterion.
+    #[must_use]
+    pub fn evidence_requirements(&self) -> &[crate::requirement::EvidenceRequirement] {
+        &self.evidence_requirements
+    }
+
     /// Current lifecycle state.
     #[must_use]
     pub fn state(&self) -> TaskState {
@@ -349,6 +417,7 @@ impl Task {
             parent: self.parent.clone(),
             depends_on: self.depends_on.clone(),
             acceptance: self.acceptance.clone(),
+            evidence_requirements: self.evidence_requirements.clone(),
             allowed_paths: self.allowed_paths.clone(),
             forbidden_paths: self.forbidden_paths.clone(),
             verification: self.verification.clone(),
@@ -406,6 +475,13 @@ impl Task {
                 }
             }
         }
+        // ADR-0030 §2: a restored Task must carry exactly one explicit
+        // evidence requirement per acceptance criterion. Persisted content
+        // that cannot satisfy that invariant fails closed here.
+        crate::requirement::validate_requirement_coverage(
+            &snapshot.acceptance,
+            &snapshot.evidence_requirements,
+        )?;
         Ok(Self {
             id: snapshot.id,
             project_id: snapshot.project_id,
@@ -413,6 +489,7 @@ impl Task {
             parent: snapshot.parent,
             depends_on: snapshot.depends_on,
             acceptance: snapshot.acceptance,
+            evidence_requirements: snapshot.evidence_requirements,
             allowed_paths: snapshot.allowed_paths,
             forbidden_paths: snapshot.forbidden_paths,
             verification: snapshot.verification,
@@ -446,6 +523,10 @@ pub struct TaskSnapshot {
     pub depends_on: Vec<TaskId>,
     /// Acceptance criteria.
     pub acceptance: Vec<String>,
+    /// Explicit evidence requirements (ADR-0030 §2): exactly one per
+    /// acceptance criterion. Restore re-validates the coverage, so persisted
+    /// content can never bypass the invariant.
+    pub evidence_requirements: Vec<crate::requirement::EvidenceRequirement>,
     /// Scope contract: allowed paths.
     pub allowed_paths: Vec<String>,
     /// Scope contract: forbidden paths.
@@ -773,6 +854,90 @@ mod tests {
         task.add_acceptance("tests pass").unwrap();
         assert_eq!(task.acceptance(), ["compiles", "tests pass"]);
         assert!(task.add_acceptance("  ").is_err());
+        // Repeats are duplicate obligations, not idempotent appends.
+        assert!(task.add_acceptance("compiles").is_err());
+        assert_eq!(task.acceptance(), ["compiles", "tests pass"]);
+    }
+
+    #[test]
+    fn appended_criteria_carry_explicit_default_requirements() {
+        let mut task = draft_task("T-1");
+        task.add_acceptance("compiles").unwrap();
+        let requirements = task.evidence_requirements();
+        assert_eq!(requirements.len(), 1);
+        assert_eq!(requirements[0].criterion_id, "compiles");
+        assert_eq!(
+            requirements[0].requirement_kind,
+            crate::RequirementKind::TestSuite
+        );
+        assert!(requirements[0].policy_fingerprint.is_none());
+    }
+
+    #[test]
+    fn evidence_requirements_are_draft_only_and_must_cover_acceptance() {
+        let mut task = draft_task("T-1");
+        task.define_planning_metadata(
+            vec!["repo:src".to_owned()],
+            vec!["criterion".to_owned()],
+            "low",
+        )
+        .unwrap();
+        assert!(task
+            .define_evidence_requirements(vec![crate::EvidenceRequirement::authored_default(
+                "other"
+            )
+            .unwrap()])
+            .is_err());
+        task.define_evidence_requirements(vec![crate::EvidenceRequirement::new(
+            "criterion",
+            crate::RequirementKind::HumanApproval,
+            crate::RequirementKind::HumanApproval.default_subject_binding(),
+            Vec::new(),
+            Some("policy:v1".to_owned()),
+            true,
+        )
+        .unwrap()])
+            .unwrap();
+        assert_eq!(
+            task.evidence_requirements()[0].requirement_kind,
+            crate::RequirementKind::HumanApproval
+        );
+        task.mark_ready().unwrap();
+        assert!(task
+            .define_evidence_requirements(vec![crate::EvidenceRequirement::authored_default(
+                "criterion"
+            )
+            .unwrap()])
+            .is_err());
+    }
+
+    #[test]
+    fn repeated_planning_metadata_never_weakens_a_capture_requirement() {
+        let mut task = draft_task("T-1");
+        task.define_planning_metadata(
+            vec!["repo:src".to_owned()],
+            vec!["criterion".to_owned()],
+            "low",
+        )
+        .unwrap();
+        let requirement = crate::EvidenceRequirement::new(
+            "criterion",
+            crate::RequirementKind::ArtifactHash,
+            crate::RequirementKind::ArtifactHash.default_subject_binding(),
+            vec![crate::RequirementParam::new("path", "dist/app").unwrap()],
+            Some("policy:v1".to_owned()),
+            true,
+        )
+        .unwrap();
+        task.define_evidence_requirements(vec![requirement.clone()])
+            .unwrap();
+        task.define_planning_metadata(
+            vec!["repo:src".to_owned()],
+            vec!["criterion".to_owned()],
+            "low",
+        )
+        .unwrap();
+        assert_eq!(task.evidence_requirements(), [requirement]);
     }
 
     #[test]
@@ -886,6 +1051,7 @@ mod tests {
                 parent: None,
                 depends_on: Vec::new(),
                 acceptance: Vec::new(),
+                evidence_requirements: Vec::new(),
                 allowed_paths: Vec::new(),
                 forbidden_paths: Vec::new(),
                 verification: Vec::new(),

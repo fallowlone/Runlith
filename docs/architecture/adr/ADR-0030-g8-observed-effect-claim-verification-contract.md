@@ -337,6 +337,22 @@ TASK-0123 replaces the implicit default with explicit data:
   previously blocked is mapped explicitly by §3. The migration must be
   restart-safe.
 
+### TASK-0123 implementation clarification (2026-09-22)
+
+TASK-0123 is the accepted materialization of §6. It preserves the full typed
+`RequirementKind` on canonical Task rows and maps the four planner methods
+without silently substituting `TEST_SUITE`. Capture kinds remain distinct
+requirements even though the proposal-side planning vocabulary projects them
+to the `AutomatedTest` coverage family; V3 compares the typed parent shape
+with the projected child shape and routes a mismatch through V9. The migration
+refuses duplicate legacy acceptance evidence transactionally and never groups
+or discards rows.
+Its `NULL` migration fingerprint is stale input; an exact retry may adopt the
+current policy fingerprint monotonically. No G5 wire/protocol change is part of
+TASK-0123. The fingerprint namespace is owned by trusted policy derivation and
+is the freshness seam TASK-0125 must bind when it implements completion
+verification; TASK-0123 does not implement that authority.
+
 ### 7. Relationship to adjacent contracts
 
 - **ADR-0018** owns the completion authority split; this ADR owns the
@@ -440,4 +456,3 @@ preempted.
   INV-113, INV-114, INV-131, INV-136, INV-146..153.
 - `planning/roadmap.yaml` G8; `planning/tasks/queue.yaml`
   TASK-0121..TASK-0127.
-

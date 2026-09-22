@@ -29,7 +29,10 @@ use crate::journal_store::{
 use crate::plan_cost_store::load_plan_cost_receipt;
 use crate::plan_guardrail_store::{require_evidence_key, reset_rejections};
 use crate::planning_control_store::{enforce_publication_fence, mark_publication_succeeded};
-use crate::task_store::{insert_task_edges, insert_task_row, insert_task_strings, load_task};
+use crate::task_store::{
+    insert_task_edges, insert_task_evidence_requirements, insert_task_row, insert_task_strings,
+    load_task,
+};
 
 /// Trusted application-service envelope for the Event Journal metadata that
 /// surrounds one committed Plan revision. It contains no planner transcript,
@@ -383,6 +386,7 @@ impl crate::task_store::SqliteStore {
             let snapshot = child.task.snapshot();
             insert_task_row(&transaction, &snapshot)?;
             insert_task_strings(&transaction, &snapshot)?;
+            insert_task_evidence_requirements(&transaction, &snapshot)?;
             insert_task_edges(&transaction, &snapshot)?;
             insert_journal_event(&transaction, &child.created_event)?;
             insert_journal_event(&transaction, &child.ready_event)?;
@@ -1192,20 +1196,51 @@ fn require_parent_admission(
 }
 
 /// Recognizes an exact idempotent retry of an already-materialized child:
-/// the proposed Task snapshot is byte-identical to the stored one and the
-/// journal holds exactly the complete lifecycle pair minted by the same
+/// the proposed Task snapshot is identical to the stored one, except that a
+/// migration-era NULL policy fingerprint may be monotonically adopted, and
+/// the journal holds exactly the complete lifecycle pair minted by the same
 /// materialization and nothing besides it. Both `task.created` and `task.marked_ready` are checked
 /// for their type, Task/project scope, states, provenance, causation, journal
 /// order (creation before readiness), and envelope. A foreign pre-existing Task, incomplete or contradictory
 /// evidence, a task whose content drifted (different snapshot), or a
 /// competing proposal all return false so the caller fails closed.
 fn is_idempotent_child_retry(
-    connection: &Connection,
+    connection: &rusqlite::Transaction<'_>,
     existing: &Task,
     child: &ChildTaskMaterialization,
 ) -> StorageResult<bool> {
-    if existing.snapshot() != child.task.snapshot() {
+    let mut existing_snapshot = existing.snapshot();
+    let proposed_snapshot = child.task.snapshot();
+    let mut upgraded = false;
+    for requirement in &mut existing_snapshot.evidence_requirements {
+        let Some(proposed) = proposed_snapshot
+            .evidence_requirements
+            .iter()
+            .find(|candidate| candidate.criterion_id == requirement.criterion_id)
+        else {
+            continue;
+        };
+        if requirement.policy_fingerprint.is_none() && proposed.policy_fingerprint.is_some() {
+            requirement.policy_fingerprint = proposed.policy_fingerprint.clone();
+            upgraded = true;
+        }
+    }
+    if existing_snapshot != proposed_snapshot {
         return Ok(false);
+    }
+    if upgraded {
+        for requirement in &proposed_snapshot.evidence_requirements {
+            connection.execute(
+                "UPDATE task_evidence_requirements
+                 SET policy_fingerprint = ?3
+                 WHERE task_id = ?1 AND criterion_id = ?2 AND policy_fingerprint IS NULL",
+                rusqlite::params![
+                    existing.id().as_str(),
+                    requirement.criterion_id,
+                    requirement.policy_fingerprint,
+                ],
+            )?;
+        }
     }
     let events = list_events_for_task(connection, child.task.id())?;
 

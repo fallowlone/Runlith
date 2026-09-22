@@ -21,6 +21,7 @@ pub mod scope;
 pub mod task_authority;
 pub mod validation;
 
+pub use control::requirement_identity;
 pub use control::PlanningInputSnapshot;
 pub use error::PlanDomainError;
 pub use guardrails::{
@@ -48,7 +49,10 @@ pub use model::{
     PlannerIdentity, PlannerPort, PlanningBudget, PlanningCostReceipt, ReplanRequest,
     RevisionProposedBy, ValidatedBy,
 };
-pub use risk::{CriterionDecl, GateRef, RiskClass, RiskDelta, VerificationMethod};
+pub use risk::{
+    method_for_requirement_kind, requirement_kind_for_method, CriterionDecl, GateRef, RiskClass,
+    RiskDelta, VerificationMethod,
+};
 pub use scope::{PlanScope, ScopeBound};
 pub use task_authority::{trusted_candidate_task_refs, TaskPlanningAuthority};
 pub use validation::{

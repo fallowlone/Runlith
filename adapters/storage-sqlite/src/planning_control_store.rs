@@ -1,9 +1,9 @@
 //! Durable planning-input and planning-run control state (ADR-0028).
 
 use plan_domain::{
-    trusted_candidate_task_refs, AffectedParentCriterion, HumanDecisionRequest, PlanBranchId,
-    PlanningInputSnapshot, PlanningInputSnapshotId, PlanningRunId, RiskClass, RiskEscalationGrant,
-    ScopeBound, TaskPlanningAuthority,
+    requirement_identity, trusted_candidate_task_refs, AffectedParentCriterion,
+    HumanDecisionRequest, PlanBranchId, PlanningInputSnapshot, PlanningInputSnapshotId,
+    PlanningRunId, RiskClass, RiskEscalationGrant, ScopeBound, TaskPlanningAuthority,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use task_domain::TaskId;
@@ -197,23 +197,10 @@ impl SqliteStore {
             return Ok(false);
         }
 
-        let mut criteria_statement = self.connection().prepare(
-            "SELECT criterion_id, verification_method FROM planning_input_criteria
-             WHERE snapshot_id = ?1 ORDER BY position",
-        )?;
-        let stored_criteria = criteria_statement
-            .query_map(params![snapshot_id.as_str()], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        let stored_criteria = snapshot_criteria(self.connection(), snapshot_id.as_str())?;
         let mut expected_criteria = affected_parent_criteria
             .iter()
-            .map(|criterion| {
-                (
-                    criterion.id.as_str().to_owned(),
-                    criterion.method.as_str().to_owned(),
-                )
-            })
+            .map(criterion_identity_for)
             .collect::<Vec<_>>();
         expected_criteria.sort();
         expected_criteria.dedup();
@@ -749,18 +736,14 @@ fn require_current_task_authority(
         &facts.allowed_paths,
         &facts.forbidden_paths,
         &facts.acceptance,
+        &facts.evidence_requirements,
         facts.risk.as_deref(),
     )
     .map_err(|_| stale())?;
-    let current_criteria: Vec<(String, String)> = current
+    let current_criteria: Vec<String> = current
         .affected_parent_criteria
         .iter()
-        .map(|criterion| {
-            (
-                criterion.id.as_str().to_owned(),
-                criterion.method.as_str().to_owned(),
-            )
-        })
+        .map(criterion_identity_for)
         .collect();
     let project_tasks = list_project_tasks(connection, root.project_id())?;
     let current_candidates = trusted_candidate_task_refs(
@@ -805,20 +788,57 @@ fn snapshot_values(
     Ok(values)
 }
 
-fn snapshot_criteria(
+pub(crate) fn snapshot_criteria(
     connection: &Connection,
     snapshot_id: &str,
-) -> StorageResult<Vec<(String, String)>> {
+) -> StorageResult<Vec<String>> {
     let mut statement = connection.prepare(
-        "SELECT criterion_id, verification_method FROM planning_input_criteria
+        "SELECT position, criterion_id, verification_method, requirement_kind,
+                subject_binding, requirement_required, requirement_policy_fingerprint
+         FROM planning_input_criteria
          WHERE snapshot_id = ?1 ORDER BY position",
     )?;
     let criteria = statement
         .query_map(params![snapshot_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(criteria)
+    criteria
+        .into_iter()
+        .map(|row| {
+            let params = if row.3.is_some() {
+                let mut statement = connection.prepare(
+                    "SELECT param_key, param_value FROM planning_input_criterion_requirement_params
+                 WHERE snapshot_id = ?1 AND criterion_position = ?2 ORDER BY position",
+                )?;
+                let values = statement
+                    .query_map(params![snapshot_id, row.0], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                values
+            } else {
+                Vec::new()
+            };
+            Ok(stored_criterion_identity(
+                &row.1,
+                &row.2,
+                row.3.as_deref(),
+                row.4.as_deref(),
+                row.5,
+                row.6.as_deref(),
+                &params,
+            ))
+        })
+        .collect()
 }
 
 pub(crate) fn mark_publication_succeeded(
@@ -940,15 +960,7 @@ fn persist_snapshot(
         snapshot.id.as_str(),
         snapshot.scope_bound.roots(),
     )?;
-    persist_ordered_pairs(
-        tx,
-        snapshot.id.as_str(),
-        &snapshot
-            .affected_parent_criteria
-            .iter()
-            .map(|criterion| (criterion.id.as_str(), criterion.method.as_str()))
-            .collect::<Vec<_>>(),
-    )?;
+    persist_ordered_pairs(tx, snapshot.id.as_str(), &snapshot.affected_parent_criteria)?;
     persist_ordered_values(
         tx,
         "planning_input_evidence",
@@ -1008,29 +1020,48 @@ fn persist_ordered_values(
 fn persist_ordered_pairs(
     tx: &Transaction<'_>,
     snapshot_id: &str,
-    values: &[(&str, &str)],
+    values: &[AffectedParentCriterion],
 ) -> StorageResult<()> {
-    for (position, (id, method)) in values.iter().enumerate() {
+    for (position, criterion) in values.iter().enumerate() {
+        let requirement = criterion.requirement.as_ref();
         tx.execute(
             "INSERT INTO planning_input_criteria
-             (snapshot_id, position, criterion_id, verification_method)
-             VALUES (?1, ?2, ?3, ?4)
+             (snapshot_id, position, criterion_id, verification_method, requirement_kind,
+              subject_binding, requirement_required, requirement_policy_fingerprint)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(snapshot_id, position) DO NOTHING",
-            params![snapshot_id, position as i64, id, method],
+            params![
+                snapshot_id,
+                position as i64,
+                criterion.id.as_str(),
+                criterion.method.as_str(),
+                requirement.map(|value| value.requirement_kind.as_str()),
+                requirement.map(|value| value.subject_binding.as_str()),
+                requirement.map(|value| if value.required { 1_i64 } else { 0_i64 }),
+                requirement.and_then(|value| value.policy_fingerprint.as_deref())
+            ],
         )?;
+        if let Some(requirement) = requirement {
+            for (param_position, param) in requirement.params.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO planning_input_criterion_requirement_params
+                    (snapshot_id, criterion_position, position, param_key, param_value)
+                    VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT DO NOTHING",
+                    params![
+                        snapshot_id,
+                        position as i64,
+                        param_position as i64,
+                        param.key(),
+                        param.value()
+                    ],
+                )?;
+            }
+        }
     }
-    let mut statement = tx.prepare(
-        "SELECT criterion_id, verification_method FROM planning_input_criteria
-         WHERE snapshot_id = ?1 ORDER BY position",
-    )?;
-    let stored = statement
-        .query_map(params![snapshot_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+    let stored = snapshot_criteria(tx, snapshot_id)?;
     let expected = values
         .iter()
-        .map(|(id, method)| ((*id).to_owned(), (*method).to_owned()))
+        .map(criterion_identity_for)
         .collect::<Vec<_>>();
     if stored != expected {
         return Err(StorageError::Corrupt(format!(
@@ -1038,6 +1069,51 @@ fn persist_ordered_pairs(
         )));
     }
     Ok(())
+}
+
+pub(crate) fn criterion_identity_for(criterion: &AffectedParentCriterion) -> String {
+    format!(
+        "{}:{}{}:{}",
+        criterion.id.as_str().len(),
+        criterion.id.as_str(),
+        criterion.method.as_str().len(),
+        criterion.method.as_str()
+    ) + &requirement_identity(criterion.requirement.as_ref())
+}
+
+fn stored_criterion_identity(
+    id: &str,
+    method: &str,
+    kind: Option<&str>,
+    binding: Option<&str>,
+    required: Option<i64>,
+    policy: Option<&str>,
+    params: &[(String, String)],
+) -> String {
+    let requirement = match (kind, binding, required) {
+        (None, None, None) => "4:none".to_owned(),
+        (Some(kind), Some(binding), Some(required)) => {
+            let policy = policy.unwrap_or("");
+            let mut value = format!(
+                "4:some{}:{id}{}:{kind}{}:{binding}1:{}{}:{policy}",
+                id.len(),
+                kind.len(),
+                binding.len(),
+                if required == 1 { 1 } else { 0 },
+                policy.len()
+            );
+            for (key, value_part) in params {
+                value.push_str(&format!(
+                    "{}:{key}{}:{value_part}",
+                    key.len(),
+                    value_part.len()
+                ));
+            }
+            value
+        }
+        _ => "corrupt".to_owned(),
+    };
+    format!("{}:{id}{}:{method}{requirement}", id.len(), method.len())
 }
 
 fn load_current_run(

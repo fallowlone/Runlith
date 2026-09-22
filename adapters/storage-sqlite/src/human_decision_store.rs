@@ -16,6 +16,7 @@ use crate::audit_store::append_security_audit_in_transaction;
 use crate::error::{StorageError, StorageResult};
 use crate::event::decode_state;
 use crate::plan_cost_store::load_plan_cost_receipt;
+use crate::planning_control_store::snapshot_criteria;
 use crate::task_store::SqliteStore;
 
 type ApprovedProposalRow = (Option<Vec<u8>>, Option<String>, Option<String>);
@@ -895,7 +896,7 @@ struct PlanningInputBinding {
     input_fingerprint: String,
     risk_grant: Option<PlanningRiskGrantBinding>,
     scope_roots: Vec<String>,
-    criteria: Vec<(String, String)>,
+    criteria: Vec<String>,
     evidence: Vec<String>,
     lineage: Vec<String>,
     candidate_task_refs: Vec<String>,
@@ -980,7 +981,7 @@ fn load_planning_input_binding(
             "scope_root",
             snapshot_id,
         )?,
-        criteria: load_snapshot_pairs(connection, snapshot_id)?,
+        criteria: snapshot_criteria(connection, snapshot_id)?,
         evidence: load_snapshot_values(
             connection,
             "planning_input_evidence",
@@ -1067,22 +1068,6 @@ fn load_snapshot_values(
     let mut statement = connection.prepare(&sql)?;
     let values = statement
         .query_map(params![snapshot_id], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(values)
-}
-
-fn load_snapshot_pairs(
-    connection: &Connection,
-    snapshot_id: &str,
-) -> StorageResult<Vec<(String, String)>> {
-    let mut statement = connection.prepare(
-        "SELECT criterion_id, verification_method FROM planning_input_criteria
-         WHERE snapshot_id = ?1 ORDER BY position",
-    )?;
-    let values = statement
-        .query_map(params![snapshot_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(values)
 }

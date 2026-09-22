@@ -278,6 +278,7 @@ fn seed_accepted_plan(db: &Path, task: &str, marker: &str) {
         affected_parent_criteria: vec![plan_domain::AffectedParentCriterion {
             id: plan_domain::CriterionId::new(marker).unwrap(),
             method: plan_domain::VerificationMethod::AutomatedTest,
+            requirement: None,
         }],
         parent_task_ref: fixture_parent(task),
         canonical_task_authority: false,

@@ -9,6 +9,8 @@
 
 use std::str::FromStr;
 
+use task_domain::RequirementKind;
+
 use crate::error::{checked_id, PlanDomainError};
 use crate::ids::PlanNodeId;
 
@@ -80,6 +82,38 @@ impl FromStr for VerificationMethod {
                 "unknown verification method {other:?}"
             ))),
         }
+    }
+}
+
+/// ADR-0030 §3: the planning-side proof method a proposal must declare for a
+/// canonical Task requirement kind (materialization direction). One-directional
+/// vocabulary reconciliation — never a strength ranking.
+#[must_use]
+pub const fn requirement_kind_for_method(method: VerificationMethod) -> RequirementKind {
+    match method {
+        VerificationMethod::AutomatedTest => RequirementKind::TestSuite,
+        VerificationMethod::IndependentReview => RequirementKind::IndependentReview,
+        VerificationMethod::SecurityCheck => RequirementKind::SecurityCheck,
+        VerificationMethod::HumanApproval => RequirementKind::HumanApproval,
+    }
+}
+
+/// Inverse reading (derivation direction, V3/V9): the planning-side proof
+/// method a canonical Task's explicit evidence requirement demands. Every
+/// capture kind other than `test-suite` is still an `automated-test`
+/// obligation on the planning side; the kinds stay distinct in the Task
+/// contract.
+#[must_use]
+pub const fn method_for_requirement_kind(kind: RequirementKind) -> VerificationMethod {
+    match kind {
+        RequirementKind::TestSuite
+        | RequirementKind::ProcessExit
+        | RequirementKind::ArtifactHash
+        | RequirementKind::FsState
+        | RequirementKind::GitState => VerificationMethod::AutomatedTest,
+        RequirementKind::IndependentReview => VerificationMethod::IndependentReview,
+        RequirementKind::SecurityCheck => VerificationMethod::SecurityCheck,
+        RequirementKind::HumanApproval => VerificationMethod::HumanApproval,
     }
 }
 
