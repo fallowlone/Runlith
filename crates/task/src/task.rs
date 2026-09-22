@@ -266,6 +266,12 @@ impl Task {
     /// `DRAFT`; once work is declared READY this intent is frozen. Values are
     /// trimmed, bounded and de-duplicated; any prior values are replaced
     /// atomically, so a refused call leaves the Task unchanged.
+    ///
+    /// Evidence requirements (ADR-0030 §2) survive the replacement: an
+    /// existing requirement whose criterion remains in the new acceptance
+    /// list is preserved (never silently downgraded back to the authoring
+    /// default), a criterion that is new receives the explicit default, and a
+    /// requirement for a removed criterion is dropped with it.
     pub fn define_planning_metadata(
         &mut self,
         allowed_paths: Vec<String>,
@@ -286,14 +292,25 @@ impl Task {
         self.allowed_paths = allowed_paths;
         self.acceptance = acceptance;
         // ADR-0030 §6: the TASK-0093 implicit `AutomatedTest` default becomes
-        // explicit data at authoring time. A caller that needs stronger
-        // obligations replaces them through `define_evidence_requirements`
-        // (still DRAFT-only) before the Task leaves DRAFT.
-        self.evidence_requirements = self
-            .acceptance
-            .iter()
-            .map(crate::requirement::EvidenceRequirement::authored_default)
-            .collect::<DomainResult<Vec<_>>>()?;
+        // explicit data at authoring time. Requirements already authored for a
+        // surviving criterion are preserved so a repeated metadata write can
+        // never weaken an obligation (INV-046, CV-7); new criteria get the
+        // explicit default. A caller that needs stronger obligations replaces
+        // them through `define_evidence_requirements` (still DRAFT-only).
+        let mut requirements = Vec::with_capacity(self.acceptance.len());
+        for criterion in &self.acceptance {
+            match self
+                .evidence_requirements
+                .iter()
+                .find(|requirement| requirement.criterion_id == *criterion)
+            {
+                Some(existing) => requirements.push(existing.clone()),
+                None => requirements.push(
+                    crate::requirement::EvidenceRequirement::authored_default(criterion)?,
+                ),
+            }
+        }
+        self.evidence_requirements = requirements;
         self.risk = Some(risk);
         Ok(())
     }
@@ -892,6 +909,35 @@ mod tests {
             )
             .unwrap()])
             .is_err());
+    }
+
+    #[test]
+    fn repeated_planning_metadata_never_weakens_a_capture_requirement() {
+        let mut task = draft_task("T-1");
+        task.define_planning_metadata(
+            vec!["repo:src".to_owned()],
+            vec!["criterion".to_owned()],
+            "low",
+        )
+        .unwrap();
+        let requirement = crate::EvidenceRequirement::new(
+            "criterion",
+            crate::RequirementKind::ArtifactHash,
+            crate::RequirementKind::ArtifactHash.default_subject_binding(),
+            vec![crate::RequirementParam::new("path", "dist/app").unwrap()],
+            Some("policy:v1".to_owned()),
+            true,
+        )
+        .unwrap();
+        task.define_evidence_requirements(vec![requirement.clone()])
+            .unwrap();
+        task.define_planning_metadata(
+            vec!["repo:src".to_owned()],
+            vec!["criterion".to_owned()],
+            "low",
+        )
+        .unwrap();
+        assert_eq!(task.evidence_requirements(), [requirement]);
     }
 
     #[test]

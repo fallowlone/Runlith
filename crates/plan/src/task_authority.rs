@@ -81,6 +81,7 @@ impl TaskPlanningAuthority {
                     id: CriterionId::new(criterion.clone())?,
                     // ADR-0030 §3 mapping, read from explicit Task data.
                     method: crate::risk::method_for_requirement_kind(requirement.requirement_kind),
+                    requirement: Some(requirement.clone()),
                 })
             })
             .collect::<Result<Vec<_>, PlanDomainError>>()?;

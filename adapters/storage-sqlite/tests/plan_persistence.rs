@@ -21,7 +21,10 @@ use storage_sqlite::{
     NewJournalEvent, PlanCommitJournalEvidence, PlanRevisionLineage, SqliteStore, StorageError,
     CHILD_TASK_MATERIALIZATION_PROVENANCE, SUPPORTED_SCHEMA_VERSION,
 };
-use task_domain::{Project, ProjectId, Task, TaskId, TaskState, TransitionCommand};
+use task_domain::{
+    EvidenceRequirement, Project, ProjectId, RequirementKind, RequirementParam, SubjectBinding,
+    Task, TaskId, TaskState, TransitionCommand,
+};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -85,6 +88,85 @@ fn cid(value: &str) -> CriterionId {
 
 fn evidence(value: &str) -> EvidenceRef {
     EvidenceRef::new(value).unwrap()
+}
+
+#[test]
+fn planning_input_policy_match_binds_full_requirement_shape() {
+    let db = TestDb::new("planning-input-typed-requirement");
+    let mut store = db.open();
+    let requirement = EvidenceRequirement::new(
+        "criterion-root",
+        RequirementKind::ArtifactHash,
+        SubjectBinding::Content,
+        vec![RequirementParam::new("path", "dist/app").unwrap()],
+        Some("policy:requirement-a".to_owned()),
+        true,
+    )
+    .unwrap();
+    let criterion = plan_domain::AffectedParentCriterion {
+        id: cid("criterion-root"),
+        method: VerificationMethod::AutomatedTest,
+        requirement: Some(requirement.clone()),
+    };
+    let snapshot = PlanningInputSnapshot::new(
+        PlanBranchId::new("typed-input").unwrap(),
+        "task-root".to_owned(),
+        0,
+        ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+        RiskClass::Low,
+        vec![criterion.clone()],
+        vec![evidence("typed-input")],
+        vec![],
+        None,
+        "policy:outer".to_owned(),
+    )
+    .unwrap();
+    store
+        .start_planning_run(
+            &snapshot,
+            &planning_evidence_key(&snapshot.triggering_evidence),
+            1,
+        )
+        .unwrap();
+    assert!(store
+        .planning_input_policy_matches(
+            &snapshot.id,
+            "task-root",
+            &snapshot.scope_bound,
+            RiskClass::Low,
+            &[criterion],
+            &[],
+            None,
+            "policy:outer"
+        )
+        .unwrap());
+    let changed = plan_domain::AffectedParentCriterion {
+        id: cid("criterion-root"),
+        method: VerificationMethod::AutomatedTest,
+        requirement: Some(
+            EvidenceRequirement::new(
+                "criterion-root",
+                RequirementKind::FsState,
+                SubjectBinding::Content,
+                vec![RequirementParam::new("path", "dist/app").unwrap()],
+                Some("policy:requirement-a".to_owned()),
+                true,
+            )
+            .unwrap(),
+        ),
+    };
+    assert!(!store
+        .planning_input_policy_matches(
+            &snapshot.id,
+            "task-root",
+            &snapshot.scope_bound,
+            RiskClass::Low,
+            &[changed],
+            &[],
+            None,
+            "policy:outer"
+        )
+        .unwrap());
 }
 
 fn identity() -> PlannerIdentity {
@@ -267,7 +349,7 @@ fn journal_evidence(seq: u64) -> PlanCommitJournalEvidence {
 fn fresh_database_reaches_schema_16() {
     let db = TestDb::new("schema");
     let store = db.open();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 17);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 18);
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
 }
 
@@ -1425,6 +1507,7 @@ fn canonical_task_authority_fence_rechecks_task_facts_inside_publication_transac
         "low",
     )
     .unwrap();
+    let root_requirement = root.snapshot().evidence_requirements[0].clone();
     root.mark_ready().unwrap();
     store.create_task(&root).unwrap();
 
@@ -1444,6 +1527,7 @@ fn canonical_task_authority_fence_rechecks_task_facts_inside_publication_transac
             vec![plan_domain::AffectedParentCriterion {
                 id: cid("criterion-root"),
                 method: VerificationMethod::AutomatedTest,
+                requirement: Some(root_requirement.clone()),
             }],
             trigger_evidence.clone(),
             vec![],
@@ -1700,6 +1784,7 @@ fn schema_13_revision_history_without_lineage_fails_closed_after_upgrade() {
              DROP TABLE planning_input_heads;
              DROP TABLE planning_input_lineage;
              DROP TABLE planning_input_evidence;
+             DROP TABLE planning_input_criterion_requirement_params;
              DROP TABLE planning_input_criteria;
              DROP TABLE planning_input_scope_roots;
              DROP TABLE planning_input_snapshots;

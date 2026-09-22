@@ -34,6 +34,26 @@ use storage_sqlite::{
 use task_domain::{Project, ProjectId, Task, TaskId, TaskState};
 
 const FIXED_MILLIS: u64 = 1_704_067_200_000;
+const MIGRATIONS_THROUGH_16: [&str; 16] = [
+    include_str!("../../../adapters/storage-sqlite/migrations/0001_task_core.sql"),
+    include_str!("../../../adapters/storage-sqlite/migrations/0002_event_journal.sql"),
+    include_str!("../../../adapters/storage-sqlite/migrations/0003_event_scope.sql"),
+    include_str!("../../../adapters/storage-sqlite/migrations/0004_runtime_core.sql"),
+    include_str!("../../../adapters/storage-sqlite/migrations/0005_workspace_leases.sql"),
+    include_str!("../../../adapters/storage-sqlite/migrations/0006_attempt_reservations.sql"),
+    include_str!(
+        "../../../adapters/storage-sqlite/migrations/0007_managed_identity_reservations.sql"
+    ),
+    include_str!("../../../adapters/storage-sqlite/migrations/0008_approvals.sql"),
+    include_str!("../../../adapters/storage-sqlite/migrations/0009_secret_refs.sql"),
+    include_str!("../../../adapters/storage-sqlite/migrations/0010_security_audit.sql"),
+    include_str!("../../../adapters/storage-sqlite/migrations/0011_workspace_trusted_anchor.sql"),
+    include_str!("../../../adapters/storage-sqlite/migrations/0012_plan_persistence.sql"),
+    include_str!("../../../adapters/storage-sqlite/migrations/0013_plan_cost_receipts.sql"),
+    include_str!("../../../adapters/storage-sqlite/migrations/0014_plan_guardrails.sql"),
+    include_str!("../../../adapters/storage-sqlite/migrations/0015_human_decisions.sql"),
+    include_str!("../../../adapters/storage-sqlite/migrations/0016_g7_closure_remediation.sql"),
+];
 
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -45,19 +65,23 @@ struct TestDb {
 
 impl TestDb {
     fn new(name: &str) -> Self {
+        let db = Self::new_unseeded(name);
+        db.seed_tasks(&[], true);
+        db
+    }
+
+    fn new_unseeded(name: &str) -> Self {
         let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!(
             "runlith-planning-service-{}-{name}-{id}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).expect("create test directory");
-        let db = Self {
+        Self {
             path: dir.join("runlith.db"),
             dir,
             project_id: ProjectId::new(format!("P-PLANNING-{id}")).expect("project id"),
-        };
-        db.seed_tasks(&[], true);
-        db
+        }
     }
 
     /// A fresh service handle over the same durable database: the restart
@@ -159,6 +183,9 @@ enum ProposalCase {
     BehindPrevious,
     /// The child declares a proof method the canonical Task cannot carry.
     NonAutomatedCriterion,
+    /// The child repeats one criterion id; validation must refuse it before
+    /// the materialization boundary can turn it into an untyped context error.
+    DuplicateCriterion,
 }
 
 struct TestPlanner {
@@ -268,6 +295,10 @@ impl TestPlanner {
                     criterion,
                     VerificationMethod::HumanApproval,
                 )];
+            }
+            ProposalCase::DuplicateCriterion => {
+                let criterion = proposal.node_additions[0].criteria[0].clone();
+                proposal.node_additions[0].criteria.push(criterion);
             }
             ProposalCase::MissingCriteria => {
                 proposal.node_additions[0].criteria.clear();
@@ -560,6 +591,7 @@ fn policy(with_criterion: bool) -> PlanningPolicyContext {
             vec![AffectedParentCriterion {
                 id: CriterionId::new("criterion-root").expect("criterion id"),
                 method: VerificationMethod::AutomatedTest,
+                requirement: None,
             }]
         } else {
             vec![]
@@ -2675,6 +2707,25 @@ fn accepted_decomposition_materializes_planner_child_ready_under_the_parent() {
     );
 }
 
+#[test]
+fn duplicate_criterion_id_is_a_typed_validation_refusal_before_materialization() {
+    let db = TestDb::new("duplicate-criterion-validation");
+    let outcome = db
+        .service()
+        .propose_decomposition(
+            &TestPlanner::new(ProposalCase::DuplicateCriterion),
+            &branch(),
+            request("duplicate-criterion"),
+            &policy(false),
+        )
+        .expect("duplicate criterion is a proposal refusal, not a service error");
+    assert!(matches!(
+        outcome,
+        PlanningProposalOutcome::Refused(ValidationRefusal::Malformed { .. })
+    ));
+    assert_no_plan_persisted(&db);
+}
+
 /// ADR-0030 §6 replaces the ADR-0027 TASK-0096 refusal with real carriage:
 /// a criterion whose proof method the v1 Task contract could not carry
 /// materializes as an explicit evidence requirement on the child Task. The
@@ -2857,16 +2908,231 @@ fn planner_cannot_materialize_the_parent_task_as_a_child() {
 
 #[test]
 fn exact_child_materialization_retry_reuses_the_existing_task() {
-    let db = TestDb::new("child-exact-retry");
+    let db = TestDb::new_unseeded("child-exact-retry");
     let planner = TestPlanner::new(ProposalCase::Valid);
     let child = TaskId::new("node-1").unwrap();
-    let hash = accepted_hash(
-        &db.service()
-            .propose_decomposition(&planner, &branch(), request("child-retry"), &policy(false))
-            .unwrap(),
+    let mut legacy_request = request("child-retry");
+    legacy_request.parent_task_ref = "TASK-0078".to_owned();
+    legacy_request.base_plan_revision = 0;
+    legacy_request.acceptance_criteria_refs.clear();
+    legacy_request.scope_bound = ScopeBound::new(vec!["repo:src".to_owned()]).unwrap();
+    legacy_request.baseline_risk = RiskClass::Low;
+    let hash = planner.proposal(&legacy_request).proposal_hash;
+    let trigger_key = planning_evidence_key(&[evidence("child-retry")]);
+    let input_fingerprint = format!("sha256:{}", "a".repeat(64));
+    let decomposition_fingerprint = format!("sha256:{}", "b".repeat(64));
+
+    // Build an actual schema-v16 database from the checked-in historical
+    // migrations. The existing child, its exact lifecycle pair, the accepted
+    // plan state and its planning-input binding all predate migrations 0017
+    // and 0018; no current-schema rows are authored and then reverse-engineered.
+    {
+        let connection = rusqlite::Connection::open(&db.path).unwrap();
+        for migration in MIGRATIONS_THROUGH_16 {
+            connection.execute_batch(migration).unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO projects (id, name) VALUES (?1, 'planning fixture')",
+                rusqlite::params![db.project_id.as_str()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO tasks (id, project_id, objective, state)
+                 VALUES ('TASK-0078', ?1, 'planning root', 'READY')",
+                rusqlite::params![db.project_id.as_str()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO tasks (id, project_id, objective, parent_id, state, risk)
+                 VALUES ('node-1', ?1, 'planned child task node-1', 'TASK-0078', 'READY', 'low')",
+                rusqlite::params![db.project_id.as_str()],
+            )
+            .unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO task_strings (task_id, slot, position, value) VALUES
+                     ('node-1', 'allowed_path', 0, 'repo:src'),
+                     ('node-1', 'acceptance', 0, 'criterion-child-1');",
+            )
+            .unwrap();
+        for (event_type, to_state, reason) in [
+            ("task.created", "DRAFT", Some("plan child materialization")),
+            ("task.marked_ready", "READY", None),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO event_journal
+                     (event_type, event_version, task_id, project_id, from_state, to_state,
+                      reason, correlation_id, causation_id, occurred_at, provenance)
+                     VALUES (?1, 1, 'node-1', ?2, 'DRAFT', ?3, ?4,
+                             'plan-child:node-1', ?5, '2024-01-01T00:00:00Z', ?6)",
+                    rusqlite::params![
+                        event_type,
+                        db.project_id.as_str(),
+                        to_state,
+                        reason,
+                        hash,
+                        storage_sqlite::CHILD_TASK_MATERIALIZATION_PROVENANCE,
+                    ],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO plan_cost_receipts
+                 (receipt_ref, input_tokens, output_tokens, wall_time_ms, price_class)
+                 VALUES ('legacy-receipt', 1, 1, 1, 'test')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO plan_branches (plan_branch_id, head_revision)
+                 VALUES (?1, 1)",
+                rusqlite::params![branch().as_str()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO plan_revisions
+                 (plan_branch_id, revision_seq, base_revision, changeset_hash, reason,
+                  planner_adapter_id, planner_model_ref, planning_cost_receipt_ref,
+                  validated_service_id, policy_fingerprint, created_at_ms)
+                 VALUES (?1, 1, 0, ?2, 'legacy accepted proposal', 'fixture-planner',
+                         'fixture-model', 'legacy-receipt', 'planning-service', 'policy:test', ?3)",
+                rusqlite::params![branch().as_str(), hash, FIXED_MILLIS as i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO plan_revision_causes
+                 (plan_branch_id, revision_seq, position, evidence_ref)
+                 VALUES (?1, 1, 0, 'child-retry')",
+                rusqlite::params![branch().as_str()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO plan_nodes
+                 (plan_branch_id, revision_seq, position, node_id, risk_class)
+                 VALUES (?1, 1, 0, 'node-1', 'low')",
+                rusqlite::params![branch().as_str()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO plan_node_scopes
+                 (plan_branch_id, revision_seq, node_id, position, scope_root)
+                 VALUES (?1, 1, 'node-1', 0, 'repo:src')",
+                rusqlite::params![branch().as_str()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO plan_node_criteria
+                 (plan_branch_id, revision_seq, node_id, position, criterion_id, verification_method)
+                 VALUES (?1, 1, 'node-1', 0, 'criterion-child-1', 'automated-test')",
+                rusqlite::params![branch().as_str()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO planning_input_snapshots
+                 (snapshot_id, plan_branch_id, task_ref, expected_plan_head, baseline_risk,
+                  policy_fingerprint, input_fingerprint, created_at_ms)
+                 VALUES ('legacy-snapshot', ?1, 'TASK-0078', 0, 'low', 'policy:test', ?2, ?3)",
+                rusqlite::params![branch().as_str(), input_fingerprint, FIXED_MILLIS as i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO planning_input_scope_roots (snapshot_id, position, scope_root)
+                 VALUES ('legacy-snapshot', 0, 'repo:src')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO planning_input_evidence (snapshot_id, position, evidence_ref)
+                 VALUES ('legacy-snapshot', 0, 'child-retry')",
+                [],
+            )
+            .unwrap();
+        for (position, task_ref) in ["TASK-0078", "node-1"].into_iter().enumerate() {
+            connection
+                .execute(
+                    "INSERT INTO planning_input_candidate_tasks (snapshot_id, position, task_ref)
+                     VALUES ('legacy-snapshot', ?1, ?2)",
+                    rusqlite::params![position as i64, task_ref],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO planning_input_heads (plan_branch_id, snapshot_id, input_fingerprint)
+                 VALUES (?1, 'legacy-snapshot', ?2)",
+                rusqlite::params![branch().as_str(), input_fingerprint],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO planning_runs
+                 (planning_run_id, plan_branch_id, generation, snapshot_id, input_fingerprint,
+                  expected_plan_head, trigger_evidence_key, state, created_at_ms, finished_at_ms)
+                 VALUES ('legacy-run', ?1, 1, 'legacy-snapshot', ?2, 0, ?3, 'SUCCEEDED', ?4, ?4)",
+                rusqlite::params![
+                    branch().as_str(),
+                    input_fingerprint,
+                    trigger_key,
+                    FIXED_MILLIS as i64,
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO planning_run_heads (plan_branch_id, planning_run_id, generation)
+                 VALUES (?1, 'legacy-run', 1)",
+                rusqlite::params![branch().as_str()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO plan_revision_lineage
+                 (plan_branch_id, revision_seq, parent_task_ref, decomposition_fingerprint,
+                  trigger_evidence_key, planning_input_snapshot_id, planning_input_fingerprint,
+                  planning_run_id, planning_run_generation)
+                 VALUES (?1, 1, 'TASK-0078', ?2, ?3, 'legacy-snapshot', ?4, 'legacy-run', 1)",
+                rusqlite::params![
+                    branch().as_str(),
+                    decomposition_fingerprint,
+                    trigger_key,
+                    input_fingerprint,
+                ],
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 16).unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&db.path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let migrated = SqliteStore::open(&db.path).expect("migrate legacy child through open");
+    assert_eq!(
+        migrated
+            .get_task(&child)
+            .unwrap()
+            .unwrap()
+            .evidence_requirements()[0]
+            .policy_fingerprint,
+        None
     );
-    let snapshot = db.store().get_task(&child).unwrap().unwrap().snapshot();
     let facts = task_facts(&db, "node-1");
+    drop(migrated);
 
     // Same child id, provenance, causation (proposal hash) and snapshot.
     let retry_branch = PlanBranchId::new("child-retry-branch").unwrap();
@@ -2884,10 +3150,6 @@ fn exact_child_materialization_retry_reuses_the_existing_task() {
     let store = db.store();
     assert_eq!(store.get_plan_head(&retry_branch).unwrap(), Some(1));
     assert_eq!(
-        store.get_task(&child).unwrap().unwrap().snapshot(),
-        snapshot
-    );
-    assert_eq!(
         task_facts(&db, "node-1"),
         facts,
         "reused, never re-journaled"
@@ -2896,6 +3158,16 @@ fn exact_child_materialization_retry_reuses_the_existing_task() {
         store.list_tasks_for_project(&db.project_id).unwrap().len(),
         2,
         "parent plus exactly one child row"
+    );
+    assert_eq!(
+        store
+            .get_task(&child)
+            .unwrap()
+            .unwrap()
+            .evidence_requirements()[0]
+            .policy_fingerprint
+            .as_deref(),
+        Some("policy:test")
     );
 }
 

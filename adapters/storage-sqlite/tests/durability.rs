@@ -11,8 +11,38 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+use plan_domain::{
+    AffectedParentCriterion, CriterionId, PlanningInputSnapshotId, RiskClass, ScopeBound,
+    VerificationMethod,
+};
 use storage_sqlite::{SqliteStore, StorageError, SUPPORTED_SCHEMA_VERSION};
-use task_domain::{Project, ProjectId, Task, TaskId, TaskState};
+use task_domain::{
+    EvidenceRequirement, Project, ProjectId, RequirementKind, Task, TaskId, TaskState,
+};
+
+/// Previous-schema migration fixtures replay the checked-in migration files
+/// exactly as the adapter did at that version (the `security_audit.rs`
+/// `create_schema_v15` precedent), so a legacy database is real DDL rather
+/// than a hand-written approximation.
+const MIGRATIONS_THROUGH_16: [&str; 16] = [
+    include_str!("../migrations/0001_task_core.sql"),
+    include_str!("../migrations/0002_event_journal.sql"),
+    include_str!("../migrations/0003_event_scope.sql"),
+    include_str!("../migrations/0004_runtime_core.sql"),
+    include_str!("../migrations/0005_workspace_leases.sql"),
+    include_str!("../migrations/0006_attempt_reservations.sql"),
+    include_str!("../migrations/0007_managed_identity_reservations.sql"),
+    include_str!("../migrations/0008_approvals.sql"),
+    include_str!("../migrations/0009_secret_refs.sql"),
+    include_str!("../migrations/0010_security_audit.sql"),
+    include_str!("../migrations/0011_workspace_trusted_anchor.sql"),
+    include_str!("../migrations/0012_plan_persistence.sql"),
+    include_str!("../migrations/0013_plan_cost_receipts.sql"),
+    include_str!("../migrations/0014_plan_guardrails.sql"),
+    include_str!("../migrations/0015_human_decisions.sql"),
+    include_str!("../migrations/0016_g7_closure_remediation.sql"),
+];
+const MIGRATION_0017: &str = include_str!("../migrations/0017_evidence_requirements.sql");
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -77,6 +107,326 @@ fn secure_raw_fixture(path: &std::path::Path) {
 fn secure_raw_fixture(_path: &std::path::Path) {}
 
 // -- evidence requirements (TASK-0123 / ADR-0030) ------------------------
+
+/// Migration 0017 refuses ambiguous duplicate legacy evidence, rolls back to
+/// v16 without deleting rows, and opens after explicit remediation.
+#[test]
+fn schema_16_duplicate_acceptance_rows_fail_closed_then_remediate() {
+    let db = TestDb::new("requirement-legacy-backfill");
+    {
+        let connection = rusqlite::Connection::open(&db.path).unwrap();
+        for migration in MIGRATIONS_THROUGH_16 {
+            connection.execute_batch(migration).unwrap();
+        }
+        connection
+            .execute_batch(
+                "INSERT INTO projects (id, name) VALUES ('P-legacy', 'legacy project');
+                 INSERT INTO tasks (id, project_id, objective, state)
+                     VALUES ('T-legacy', 'P-legacy', 'legacy objective', 'DRAFT');
+                 INSERT INTO tasks (id, project_id, objective, state)
+                     VALUES ('T-empty', 'P-legacy', 'no acceptance', 'DRAFT');
+                 INSERT INTO task_strings (task_id, slot, position, value) VALUES
+                     ('T-legacy', 'acceptance', 0, 'criterion-a'),
+                     ('T-legacy', 'acceptance', 1, 'criterion-b'),
+                     ('T-legacy', 'acceptance', 2, 'criterion-b'),
+                     ('T-legacy', 'allowed_path', 0, 'repo:src');
+                 PRAGMA user_version = 16;",
+            )
+            .unwrap();
+    }
+    secure_raw_fixture(&db.path);
+    let error = match SqliteStore::open(&db.path) {
+        Ok(_) => panic!("ambiguous evidence must refuse migration"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, StorageError::Migration(_)));
+    let connection = rusqlite::Connection::open(&db.path).unwrap();
+    assert_eq!(
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+            .unwrap(),
+        16
+    );
+    assert_eq!(connection.query_row("SELECT COUNT(*) FROM task_strings WHERE task_id = 'T-legacy' AND slot = 'acceptance'", [], |row| row.get::<_, u32>(0)).unwrap(), 3);
+    drop(connection);
+    let restart_error = match SqliteStore::open(&db.path) {
+        Ok(_) => panic!("unremediated restart must refuse"),
+        Err(error) => error,
+    };
+    assert!(matches!(restart_error, StorageError::Migration(_)));
+    let connection = rusqlite::Connection::open(&db.path).unwrap();
+    assert_eq!(
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+            .unwrap(),
+        16
+    );
+    assert_eq!(connection.query_row("SELECT COUNT(*) FROM task_strings WHERE task_id = 'T-legacy' AND slot = 'acceptance'", [], |row| row.get::<_, u32>(0)).unwrap(), 3);
+    connection.execute("DELETE FROM task_strings WHERE task_id = 'T-legacy' AND slot = 'acceptance' AND position = 2", []).unwrap();
+    drop(connection);
+    let store = db.open();
+    assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
+
+    let legacy = store
+        .get_task(&TaskId::new("T-legacy").unwrap())
+        .unwrap()
+        .expect("legacy task survives the backfill");
+    assert_eq!(legacy.acceptance(), ["criterion-a", "criterion-b"]);
+    let requirements = legacy.evidence_requirements();
+    assert_eq!(requirements.len(), 2);
+    assert_eq!(requirements[0].criterion_id, "criterion-a");
+    assert_eq!(requirements[1].criterion_id, "criterion-b");
+    for requirement in requirements {
+        assert_eq!(
+            requirement.requirement_kind,
+            task_domain::RequirementKind::TestSuite
+        );
+        // Pins the SQL literal against the Rust-owned default: drift between
+        // migration 0017 and `default_subject_binding` fails here.
+        assert_eq!(
+            requirement.subject_binding,
+            task_domain::RequirementKind::TestSuite.default_subject_binding()
+        );
+        assert!(requirement.required);
+        assert!(requirement.policy_fingerprint.is_none());
+    }
+
+    let empty = store
+        .get_task(&TaskId::new("T-empty").unwrap())
+        .unwrap()
+        .expect("task without acceptance");
+    assert!(empty.acceptance().is_empty());
+    assert!(empty.evidence_requirements().is_empty());
+}
+
+#[test]
+fn schema_17_planning_criteria_backfill_all_requirement_kinds_and_restart() {
+    let db = TestDb::new("planning-requirement-backfill");
+    {
+        let connection = rusqlite::Connection::open(&db.path).unwrap();
+        for migration in MIGRATIONS_THROUGH_16 {
+            connection.execute_batch(migration).unwrap();
+        }
+        connection.execute_batch(MIGRATION_0017).unwrap();
+        let fingerprint = format!("sha256:{}", "a".repeat(64));
+        connection
+            .execute(
+                "INSERT INTO planning_input_snapshots
+                 (snapshot_id, plan_branch_id, task_ref, expected_plan_head, baseline_risk,
+                  policy_fingerprint, input_fingerprint, created_at_ms)
+                 VALUES ('snapshot-legacy', 'branch-legacy', 'task-legacy', 0, 'low',
+                         'policy:legacy', ?1, 1)",
+                rusqlite::params![fingerprint],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO planning_input_scope_roots (snapshot_id, position, scope_root)
+                 VALUES ('snapshot-legacy', 0, 'repo:src')",
+                [],
+            )
+            .unwrap();
+        for (position, (criterion, method)) in [
+            ("criterion-a", "automated-test"),
+            ("criterion-b", "independent-review"),
+            ("criterion-c", "security-check"),
+            ("criterion-d", "human-approval"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            connection
+                .execute(
+                    "INSERT INTO planning_input_criteria
+                     (snapshot_id, position, criterion_id, verification_method)
+                     VALUES ('snapshot-legacy', ?1, ?2, ?3)",
+                    rusqlite::params![position as i64, criterion, method],
+                )
+                .unwrap();
+        }
+        connection.pragma_update(None, "user_version", 17).unwrap();
+    }
+    secure_raw_fixture(&db.path);
+
+    let store = db.open();
+    assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
+    let expected = [
+        (
+            "criterion-a",
+            VerificationMethod::AutomatedTest,
+            RequirementKind::TestSuite,
+        ),
+        (
+            "criterion-b",
+            VerificationMethod::IndependentReview,
+            RequirementKind::IndependentReview,
+        ),
+        (
+            "criterion-c",
+            VerificationMethod::SecurityCheck,
+            RequirementKind::SecurityCheck,
+        ),
+        (
+            "criterion-d",
+            VerificationMethod::HumanApproval,
+            RequirementKind::HumanApproval,
+        ),
+    ]
+    .into_iter()
+    .map(|(criterion, method, kind)| AffectedParentCriterion {
+        id: CriterionId::new(criterion).unwrap(),
+        method,
+        requirement: Some(
+            EvidenceRequirement::new(
+                criterion,
+                kind,
+                kind.default_subject_binding(),
+                Vec::new(),
+                None,
+                true,
+            )
+            .unwrap(),
+        ),
+    })
+    .collect::<Vec<_>>();
+    assert!(store
+        .planning_input_policy_matches(
+            &PlanningInputSnapshotId::new("snapshot-legacy").unwrap(),
+            "task-legacy",
+            &ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+            RiskClass::Low,
+            &expected,
+            &[],
+            None,
+            "policy:legacy",
+        )
+        .unwrap());
+    drop(store);
+
+    let connection = rusqlite::Connection::open(&db.path).unwrap();
+    let mut statement = connection
+        .prepare(
+            "SELECT verification_method, requirement_kind, subject_binding,
+                    requirement_required, requirement_policy_fingerprint
+             FROM planning_input_criteria
+             WHERE snapshot_id = 'snapshot-legacy'
+             ORDER BY position",
+        )
+        .unwrap();
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "automated-test".to_owned(),
+                "test-suite".to_owned(),
+                "content+toolchain+config".to_owned(),
+                1,
+                None,
+            ),
+            (
+                "independent-review".to_owned(),
+                "independent-review".to_owned(),
+                "content+toolchain+config".to_owned(),
+                1,
+                None,
+            ),
+            (
+                "security-check".to_owned(),
+                "security-check".to_owned(),
+                "content+toolchain+config".to_owned(),
+                1,
+                None,
+            ),
+            (
+                "human-approval".to_owned(),
+                "human-approval".to_owned(),
+                "content+toolchain+config".to_owned(),
+                1,
+                None,
+            ),
+        ]
+    );
+    drop(statement);
+    drop(connection);
+
+    let reopened = db.open();
+    assert_eq!(reopened.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
+}
+
+#[test]
+fn schema_17_unknown_planning_method_fails_migration_closed() {
+    let db = TestDb::new("planning-requirement-unknown");
+    {
+        let connection = rusqlite::Connection::open(&db.path).unwrap();
+        for migration in MIGRATIONS_THROUGH_16 {
+            connection.execute_batch(migration).unwrap();
+        }
+        connection.execute_batch(MIGRATION_0017).unwrap();
+        let fingerprint = format!("sha256:{}", "a".repeat(64));
+        connection
+            .execute(
+                "INSERT INTO planning_input_snapshots
+                 (snapshot_id, plan_branch_id, task_ref, expected_plan_head, baseline_risk,
+                  policy_fingerprint, input_fingerprint, created_at_ms)
+                 VALUES ('snapshot-corrupt', 'branch-corrupt', 'task-corrupt', 0, 'low',
+                         'policy:legacy', ?1, 1)",
+                rusqlite::params![fingerprint],
+            )
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints = ON;")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO planning_input_criteria
+                 (snapshot_id, position, criterion_id, verification_method)
+                 VALUES ('snapshot-corrupt', 0, 'criterion-corrupt', 'unknown-method')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints = OFF;")
+            .unwrap();
+        connection.pragma_update(None, "user_version", 17).unwrap();
+    }
+    secure_raw_fixture(&db.path);
+
+    assert!(matches!(
+        SqliteStore::open(&db.path),
+        Err(StorageError::Migration(_))
+    ));
+    let connection = rusqlite::Connection::open(&db.path).unwrap();
+    assert_eq!(
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+            .unwrap(),
+        17
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT verification_method FROM planning_input_criteria
+                 WHERE snapshot_id = 'snapshot-corrupt'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "unknown-method"
+    );
+}
 
 #[test]
 fn migration_backfills_explicit_default_requirements_for_legacy_criteria() {
@@ -261,7 +611,7 @@ fn fresh_database_migrates_to_current() {
     let db = TestDb::new("fresh");
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 17);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 18);
 }
 
 #[test]

@@ -436,3 +436,14 @@ This document does NOT define: SQLite schema; Event schema; IPC commands;
 provider protocol; runner protocol; scheduler algorithm; retry policy;
 planning algorithm; context compilation; worktree implementation;
 verification implementation; UI state model.
+### G8 acceptance evidence boundary (TASK-0123)
+
+Each acceptance criterion on a canonical Task has one explicit,
+policy-derivable `EvidenceRequirement`; the migration default is
+`TEST_SUITE` with a stale `NULL` policy fingerprint. Planner materialization
+binds the full declared requirement into its planning-input snapshot; a
+non-equivalent child requirement change is never silent and requires V9
+escalation rather than claiming unconditional preservation. `policy_fingerprint`
+is the trusted policy namespace/freshness seam reserved for TASK-0125's
+ClaimVerification binding. TASK-0123 makes no G5/IPC protocol-version change
+and does not change completion authority.

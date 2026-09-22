@@ -101,9 +101,18 @@ impl PlanningInputSnapshot {
         }
 
         affected_parent_criteria.sort_by(|a, b| {
-            (a.id.as_str(), a.method.as_str()).cmp(&(b.id.as_str(), b.method.as_str()))
+            (
+                a.id.as_str(),
+                a.method.as_str(),
+                requirement_identity(a.requirement.as_ref()),
+            )
+                .cmp(&(
+                    b.id.as_str(),
+                    b.method.as_str(),
+                    requirement_identity(b.requirement.as_ref()),
+                ))
         });
-        affected_parent_criteria.dedup_by(|a, b| a.id == b.id && a.method == b.method);
+        affected_parent_criteria.dedup();
         triggering_evidence.sort();
         triggering_evidence.dedup();
         lineage_fingerprints.sort();
@@ -197,6 +206,10 @@ fn fingerprint(
     for criterion in criteria {
         push_str(&mut hasher, criterion.id.as_str());
         push_str(&mut hasher, criterion.method.as_str());
+        push_str(
+            &mut hasher,
+            &requirement_identity(criterion.requirement.as_ref()),
+        );
     }
     hasher.update((evidence.len() as u64).to_be_bytes());
     for item in evidence {
@@ -217,6 +230,30 @@ fn fingerprint(
     }
     push_str(&mut hasher, policy_fingerprint);
     format!("sha256:{:x}", hasher.finalize())
+}
+
+/// Stable full-fidelity representation of the optional canonical Task proof
+/// obligation carried by a planning criterion. Values are length-delimited so
+/// planner input identity cannot collide on parameter boundaries.
+pub fn requirement_identity(requirement: Option<&task_domain::EvidenceRequirement>) -> String {
+    let mut identity = String::new();
+    let mut push = |value: &str| identity.push_str(&format!("{}:{value}", value.len()));
+    match requirement {
+        None => push("none"),
+        Some(requirement) => {
+            push("some");
+            push(&requirement.criterion_id);
+            push(requirement.requirement_kind.as_str());
+            push(requirement.subject_binding.as_str());
+            push(if requirement.required { "1" } else { "0" });
+            push(requirement.policy_fingerprint.as_deref().unwrap_or(""));
+            for parameter in &requirement.params {
+                push(parameter.key());
+                push(parameter.value());
+            }
+        }
+    }
+    identity
 }
 
 fn push_field(hasher: &mut Sha256, value: &[u8]) {
@@ -268,6 +305,7 @@ mod tests {
             vec![AffectedParentCriterion {
                 id: CriterionId::new("criterion-a").unwrap(),
                 method: VerificationMethod::AutomatedTest,
+                requirement: None,
             }],
             evidence
                 .into_iter()
@@ -303,5 +341,102 @@ mod tests {
         )
         .unwrap();
         assert_ne!(a.input_fingerprint, c.input_fingerprint);
+    }
+
+    #[test]
+    fn snapshot_identity_binds_the_full_typed_requirement() {
+        let base = snapshot(vec!["attempt:a"]);
+        let requirement = task_domain::EvidenceRequirement::new(
+            "criterion-a",
+            task_domain::RequirementKind::ArtifactHash,
+            task_domain::SubjectBinding::Content,
+            vec![task_domain::RequirementParam::new("path", "dist/app").unwrap()],
+            Some("policy:requirement-a".to_owned()),
+            true,
+        )
+        .unwrap();
+        let typed = PlanningInputSnapshot::new(
+            base.plan_branch_id.clone(),
+            base.task_ref.clone(),
+            base.expected_plan_head,
+            base.scope_bound.clone(),
+            base.baseline_risk,
+            vec![AffectedParentCriterion {
+                id: CriterionId::new("criterion-a").unwrap(),
+                method: VerificationMethod::AutomatedTest,
+                requirement: Some(requirement.clone()),
+            }],
+            base.triggering_evidence.clone(),
+            vec![],
+            None,
+            base.policy_fingerprint.clone(),
+        )
+        .unwrap();
+        for changed in [
+            task_domain::EvidenceRequirement::new(
+                "criterion-a",
+                task_domain::RequirementKind::FsState,
+                task_domain::SubjectBinding::Content,
+                requirement.params.clone(),
+                requirement.policy_fingerprint.clone(),
+                true,
+            )
+            .unwrap(),
+            task_domain::EvidenceRequirement::new(
+                "criterion-a",
+                requirement.requirement_kind,
+                task_domain::SubjectBinding::ContentAndToolchain,
+                requirement.params.clone(),
+                requirement.policy_fingerprint.clone(),
+                true,
+            )
+            .unwrap(),
+            task_domain::EvidenceRequirement::new(
+                "criterion-a",
+                requirement.requirement_kind,
+                requirement.subject_binding,
+                vec![task_domain::RequirementParam::new("path", "dist/other").unwrap()],
+                requirement.policy_fingerprint.clone(),
+                true,
+            )
+            .unwrap(),
+            task_domain::EvidenceRequirement::new(
+                "criterion-a",
+                requirement.requirement_kind,
+                requirement.subject_binding,
+                requirement.params.clone(),
+                requirement.policy_fingerprint.clone(),
+                false,
+            )
+            .unwrap(),
+            task_domain::EvidenceRequirement::new(
+                "criterion-a",
+                requirement.requirement_kind,
+                requirement.subject_binding,
+                requirement.params.clone(),
+                Some("policy:requirement-b".to_owned()),
+                true,
+            )
+            .unwrap(),
+        ] {
+            let candidate = PlanningInputSnapshot::new(
+                base.plan_branch_id.clone(),
+                base.task_ref.clone(),
+                base.expected_plan_head,
+                base.scope_bound.clone(),
+                base.baseline_risk,
+                vec![AffectedParentCriterion {
+                    id: CriterionId::new("criterion-a").unwrap(),
+                    method: VerificationMethod::AutomatedTest,
+                    requirement: Some(changed),
+                }],
+                base.triggering_evidence.clone(),
+                vec![],
+                None,
+                base.policy_fingerprint.clone(),
+            )
+            .unwrap();
+            assert_ne!(typed.input_fingerprint, candidate.input_fingerprint);
+        }
     }
 }

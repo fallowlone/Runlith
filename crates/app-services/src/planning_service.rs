@@ -1526,6 +1526,7 @@ impl<C: Clock> PlanningService<C> {
             scope_bound: policy.scope_bound.clone(),
             baseline_risk: policy.baseline_risk,
             affected_parent_criteria,
+            policy_fingerprint: policy.policy_fingerprint.clone(),
             depth_after_merge,
             revisions_accepted_this_cycle: state.revisions_accepted,
             parent_task_ref: policy.parent_task_ref.clone(),
@@ -2089,6 +2090,7 @@ fn affected_criteria_for_proposal(
             let candidate = AffectedParentCriterion {
                 id: criterion.id.clone(),
                 method: criterion.method,
+                requirement: None,
             };
             if let Some(existing) = affected.get(candidate.id.as_str()) {
                 if existing.method != candidate.method {
