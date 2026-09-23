@@ -178,6 +178,14 @@ impl GitPort for GitCli {
         diff::compute_diff(self.exe(), lease, expected)
     }
 
+    fn git_state_snapshot(
+        &self,
+        worktree_path: &str,
+        expected: &TrustedCommonGit,
+    ) -> Result<workspace::GitStateSnapshot, WorkspaceFailure> {
+        observe::git_state_snapshot(self.exe(), worktree_path, expected)
+    }
+
     /// Safe non-forced worktree removal (no `--force`). Dirty, detached,
     /// or ownership-inconsistent worktrees fail closed with work preserved.
     fn remove_worktree(

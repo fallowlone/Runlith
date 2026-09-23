@@ -23,6 +23,7 @@ mod event;
 mod human_decision_store;
 mod journal_store;
 mod migration;
+mod observed_effect_store;
 mod path_security;
 mod plan_cost_store;
 mod plan_guardrail_store;

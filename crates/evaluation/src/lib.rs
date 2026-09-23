@@ -11,12 +11,23 @@
 //! authoritative lifecycle transition on that verdict. The evaluator never
 //! touches Task persistence, runtime persistence, or the journal.
 
+mod capture;
 mod error;
+mod observed_effect;
 mod port;
 mod request;
 mod verdict;
 
+pub use capture::{
+    CaptureRequest, CapturedObservation, EffectCapturePort, ProcessExitObservation,
+    ProcessExitObservationSink, SubjectMaterial, MAX_CAPTURE_PATH, MAX_CAPTURE_SUBJECT,
+};
 pub use error::{EvaluationError, EvaluationResult};
+pub use observed_effect::{
+    subject_fingerprint, validate_git_oid, CaptureAuthority, EffectError, EffectId, EffectKind,
+    EffectPayload, EffectProvenance, EffectSubjectRef, ObservedEffect, Sha256Digest,
+    SubjectFingerprint, MAX_EFFECT_PAYLOAD, MAX_EFFECT_TEXT,
+};
 pub use port::EvaluationPort;
 pub use request::EvaluationRequest;
 pub use verdict::EvaluationVerdict;

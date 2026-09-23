@@ -1,0 +1,15 @@
+[package]
+name = "effect-capture-local"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "effect_capture_local"
+path = "src/lib.rs"
+
+[dependencies]
+evaluation = { path = "../../crates/evaluation" }
+sha2 = "0.10"
+
+[dev-dependencies]
+effect-capture-contract = { path = "../../crates/effect-capture-contract" }

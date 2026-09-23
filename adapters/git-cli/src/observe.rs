@@ -10,7 +10,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use workspace::{BranchRef, TrustedCommonGit, WorkspaceFailure, WorktreeStatus};
+use workspace::{BranchRef, GitStateSnapshot, TrustedCommonGit, WorkspaceFailure, WorktreeStatus};
 
 use crate::runner::{
     absolutize, backend_failure, bounded_detail, classify_repository, run_git, run_git_text,
@@ -106,6 +106,51 @@ pub fn resolve_revision(
     }
     workspace::Revision::new(oid.clone())
         .map_err(|_| backend_failure(format!("git-cli: unexpected non-OID from rev-parse: {oid}")))
+}
+
+/// Exact bounded Git-only state for G8 observed-effect capture. Every Git
+/// command uses the same hardened runner and trusted common-Git anchor as the
+/// rest of this adapter; repository-local hooks/config cannot replace this
+/// path with an ambient `git` invocation.
+pub fn git_state_snapshot(
+    executable: &OsStr,
+    worktree_path: &str,
+    expected: &TrustedCommonGit,
+) -> Result<GitStateSnapshot, WorkspaceFailure> {
+    let abs = absolutize(worktree_path).map_err(|_| WorkspaceFailure::NotRepository {
+        detail: bounded_detail("git-cli: invalid worktree path".to_owned()),
+    })?;
+    validate_repository_boundary(executable, &abs, expected)?;
+    let head_revision = resolve_revision(executable, worktree_path, "HEAD", expected)?;
+    let (tree_output, head_tree_oid) = run_git_text(
+        executable,
+        &abs,
+        &["rev-parse", "--verify", "--quiet", "HEAD^{tree}"],
+    )?;
+    if !tree_output.status.success() || !valid_oid(&head_tree_oid) {
+        return Err(backend_failure(
+            "git-cli: cannot resolve exact HEAD tree for state capture",
+        ));
+    }
+    let index = run_git(executable, &abs, &["ls-files", "--stage", "-z"])?;
+    if !index.status.success() {
+        return Err(backend_failure(format!(
+            "git-cli: cannot capture index manifest ({})",
+            stderr_excerpt(&index)
+        )));
+    }
+    Ok(GitStateSnapshot {
+        head_revision,
+        head_tree_oid,
+        index_manifest: index.stdout,
+    })
+}
+
+fn valid_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 /// Resolves the repository default branch from metadata.

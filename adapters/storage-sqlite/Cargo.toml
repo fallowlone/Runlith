@@ -14,6 +14,7 @@ workspace = { path = "../../crates/workspace" }
 secrets = { path = "../../crates/secrets" }
 security-audit = { path = "../../crates/security-audit" }
 plan-domain = { path = "../../crates/plan" }
+evaluation = { path = "../../crates/evaluation" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha2 = "0.10"
 

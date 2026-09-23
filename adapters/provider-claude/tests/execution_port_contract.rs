@@ -14,10 +14,15 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use agent_runtime::{AttemptId, ExecutionId};
+use evaluation::{ProcessExitObservation, ProcessExitObservationSink, Sha256Digest};
 use execution_contract::{run_execution_port_contract, ContractExecutors};
 use provider_claude::{ClaudeConfig, ClaudeExecutor};
+use scheduler::{ExecutionPort, WorkItem};
+use task_domain::TaskId;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -114,4 +119,40 @@ fn claude_executor_satisfies_the_shared_execution_port_contract() {
         malformed: &malformed,
         timeout: &hang,
     });
+}
+
+#[derive(Default)]
+struct ExitObserver(Mutex<Option<ProcessExitObservation>>);
+
+impl ProcessExitObservationSink for ExitObserver {
+    fn observe_process_exit(&self, observation: ProcessExitObservation) {
+        *self.0.lock().unwrap() = Some(observation);
+    }
+}
+
+#[test]
+fn cv_2_real_local_child_emits_bounded_process_exit_observation() {
+    const OUTPUT: &str = r#"{"type":"result","subtype":"success","is_error":false,"result":"observed","session_id":"dddddddd-dddd-dddd-dddd-dddddddddddd"}"#;
+
+    let case = Case::named("observed-exit");
+    let workdir = case.workdir();
+    let fixture = case.fixture("observed.sh", &format!("printf '{OUTPUT}'"));
+    let observer = Arc::new(ExitObserver::default());
+    let executor = executor_for(&fixture, &workdir, Duration::from_secs(30))
+        .with_process_exit_observer(observer.clone());
+    let work = WorkItem {
+        task_id: TaskId::new("T-OBSERVED").unwrap(),
+        execution_id: ExecutionId::new("E-OBSERVED").unwrap(),
+        attempt_id: AttemptId::new("A-OBSERVED").unwrap(),
+    };
+
+    executor.execute(&work).expect("fixture succeeds");
+
+    let observed = observer.0.lock().unwrap().clone().expect("exit observed");
+    assert_eq!(observed.execution_id, work.execution_id);
+    assert_eq!(observed.attempt_id, work.attempt_id);
+    assert_eq!(observed.exit_code, Some(0));
+    assert_eq!(observed.stdout_bytes, OUTPUT.len() as u64);
+    assert_eq!(observed.stdout_sha256, Sha256Digest::of(OUTPUT.as_bytes()));
+    assert_eq!(observed.stderr_bytes, 0);
 }

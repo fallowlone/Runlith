@@ -885,6 +885,7 @@ fn run_background_inner(
     let git = composition
         .git_cli()?
         .with_liveness(Arc::new(composition.tracker.clone()) as Arc<dyn workspace::OwnerLiveness>);
+    let effect_git = git.clone();
     let mut workspace =
         WorkspaceService::open(&composition.db_path, git, root, app_services::SystemClock)
             .map_err(|error| format!("open workspace service: {error}"))?;
@@ -892,9 +893,12 @@ fn run_background_inner(
     let executable = composition.resolved_provider_executable()?;
     let db_path = composition.db_path.clone();
     let security_work = work.clone();
+    let capture_work = work.clone();
+    let effect_capture = effect_capture_local::LocalEffectCapture::default();
+    let process_exit_observer = effect_capture.clone();
     let cancel = cancel.clone();
     let environment_base = composition.provider_environment_base()?;
-    orchestration
+    let orchestration_result = orchestration
         .continue_workspace_cycle(
             &mut workspace,
             work,
@@ -918,7 +922,8 @@ fn run_background_inner(
                 )
                 .expect("lease-bound prompt and workdir are non-blank")
                 .with_tracker(tracker)
-                .with_cancel_flag(cancel);
+                .with_cancel_flag(cancel)
+                .with_process_exit_observer(Arc::new(process_exit_observer));
                 secure_provider_executor(
                     &db_path,
                     task,
@@ -930,7 +935,47 @@ fn run_background_inner(
             },
             &PendingEvaluator,
         )
-        .map_err(|error| format!("orchestration cycle: {error}"))
+        .map_err(|error| format!("orchestration cycle: {error}"));
+
+    persist_process_exit_before_return(
+        orchestration_result,
+        &composition.db_path,
+        effect_capture,
+        effect_git,
+        capture_work,
+    )
+}
+
+/// Persists a governed child exit before returning the rest of the cycle.
+/// A later verifier/storage error does not erase runtime evidence already
+/// observed from the supervised provider process.
+fn persist_process_exit_before_return(
+    orchestration_result: Result<OrchestrationOutcome, String>,
+    db_path: &Path,
+    effect_capture: effect_capture_local::LocalEffectCapture,
+    effect_git: git_cli::GitCli,
+    work: scheduler::WorkItem,
+) -> Result<OrchestrationOutcome, String> {
+    if effect_capture.has_process_exit(&work.execution_id, &work.attempt_id) {
+        let store = storage_sqlite::SqliteStore::open(db_path)
+            .map_err(|error| format!("open observed-effect store: {error}"))?;
+        let mut effects = app_services::ObservedEffectService::new(
+            store,
+            app_services::SystemClock,
+            effect_capture,
+            effect_git,
+        );
+        effects
+            .capture(
+                &evaluation::CaptureRequest::ProcessExit {
+                    subject_ref: format!("attempt:{}", work.attempt_id.as_str()),
+                },
+                work.execution_id,
+                work.attempt_id,
+            )
+            .map_err(|error| format!("persist observed process exit: {error}"))?;
+    }
+    orchestration_result
 }
 
 /// Short outcome tag for daemon logs: identities plus the variant only.
@@ -2331,6 +2376,79 @@ mod tests {
             "got {:?}",
             error.detail()
         );
+    }
+
+    #[test]
+    fn cv_2_process_exit_is_persisted_before_later_cycle_error_returns() {
+        let sandbox = Sandbox::named("observed-before-cycle-error");
+        seed_ready(&sandbox.db, "P-1", "T-1");
+        let fixture = fixture_script(&sandbox.dir, "unused.sh", "exit 0\n");
+        let composition = sandbox.composition(Some(fixture));
+        let (response, job) = run_via_dispatch(
+            &composition,
+            custom_run("T-1", "E-OBSERVED", "A-OBSERVED", &sandbox.repo),
+        );
+        assert_eq!(run_payload(&response).execution_id, "E-OBSERVED");
+        assert!(job.is_some());
+
+        let execution_id = ExecutionId::new("E-OBSERVED").unwrap();
+        let attempt_id = agent_runtime::AttemptId::new("A-OBSERVED").unwrap();
+        let mut runtime =
+            app_services::RuntimeService::open(&sandbox.db, app_services::SystemClock)
+                .expect("open runtime service");
+        runtime
+            .create_attempt(
+                &execution_id,
+                attempt_id.clone(),
+                agent_runtime::ProviderRef::new("test-provider").unwrap(),
+            )
+            .expect("create attempt");
+
+        let capture = effect_capture_local::LocalEffectCapture::default();
+        let work = scheduler::WorkItem {
+            task_id: TaskId::new("T-1").unwrap(),
+            execution_id: execution_id.clone(),
+            attempt_id: attempt_id.clone(),
+        };
+        let provider = fixture_script(
+            &sandbox.dir,
+            "observed-provider.sh",
+            r#"printf '{"type":"result","subtype":"success","is_error":false,"result":"observed","session_id":"dddddddd-dddd-dddd-dddd-dddddddddddd"}'"#,
+        );
+        let executor = provider_claude::ClaudeExecutor::bind_trusted_host(
+            provider_claude::ClaudeConfig::default()
+                .with_executable(provider)
+                .unwrap()
+                .with_timeout(Duration::from_secs(5))
+                .unwrap(),
+            "capture a real local process exit",
+            sandbox.repo.clone(),
+            sandbox.dir.join("provider-env-observed"),
+        )
+        .unwrap()
+        .with_process_exit_observer(Arc::new(capture.clone()));
+        scheduler::ExecutionPort::execute(&executor, &work).expect("provider fixture succeeds");
+
+        let error = persist_process_exit_before_return(
+            Err("no verifier verdict".to_owned()),
+            &sandbox.db,
+            capture,
+            git_cli::GitCli::new(),
+            work,
+        )
+        .expect_err("later cycle error must still be returned");
+        assert_eq!(error, "no verifier verdict");
+
+        // The helper's store is already closed here. Re-opening proves the
+        // effect is durable rather than merely retained by the observer.
+        let store = storage_sqlite::SqliteStore::open(&sandbox.db).expect("open store");
+        let effect = store
+            .get_observed_effect(&evaluation::EffectId::new("effect-1").unwrap())
+            .expect("read observed effect")
+            .expect("process exit persisted before returning the cycle error");
+        assert_eq!(effect.effect_kind(), evaluation::EffectKind::ProcessExit);
+        assert_eq!(effect.provenance().execution_id, execution_id);
+        assert_eq!(effect.provenance().attempt_id, attempt_id);
     }
 
     #[test]

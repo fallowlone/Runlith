@@ -28,8 +28,8 @@ pub use ids::{
 pub use lease::{LeaseLifecycle, WorkspaceLease, WorkspaceLeaseSnapshot};
 pub use liveness::OwnerLiveness;
 pub use port::{
-    DiffChangeKind, DiffEntry, DiffEvidence, GitPort, WorktreeDiff, MAX_DIFF_ENTRIES,
-    MAX_DIFF_SUMMARY_CHARS,
+    DiffChangeKind, DiffEntry, DiffEvidence, GitPort, GitStateSnapshot, WorktreeDiff,
+    MAX_DIFF_ENTRIES, MAX_DIFF_SUMMARY_CHARS,
 };
 pub use status::WorktreeStatus;
 pub use store::{WorkspaceEventKind, WorkspaceJournalEvidence, WorkspaceStore};

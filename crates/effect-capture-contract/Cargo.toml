@@ -1,0 +1,11 @@
+[package]
+name = "effect-capture-contract"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "effect_capture_contract"
+path = "src/lib.rs"
+
+[dependencies]
+evaluation = { path = "../evaluation" }

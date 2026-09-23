@@ -15,7 +15,7 @@
 //!
 //! No remote operations exist in this module: the only subcommands spelled
 //! here are `version`, `rev-parse`, `symbolic-ref`, `show-ref`, `worktree`
-//! (`add`, `list`), and `status`. `fetch`/`pull`/`push`/`clone`/`ls-remote`
+//! (`add`, `list`), `status`, and `ls-files`. `fetch`/`pull`/`push`/`clone`/`ls-remote`
 //! appear nowhere as executed commands.
 
 use std::ffi::{OsStr, OsString};
@@ -24,6 +24,7 @@ use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use workspace::{TrustedCommonGit, WorkspaceFailure, WorkspaceLease};
 
@@ -34,6 +35,11 @@ pub const BACKEND_REF: &str = "git-cli";
 /// expected to return identifiers or small metadata; absurdly large output
 /// is rejected instead of becoming an unbounded in-memory payload.
 pub const MAX_GIT_OUTPUT_BYTES: usize = 1024 * 1024;
+
+/// Hard wall-clock bound for every local Git child. Observed-effect capture
+/// must never inherit an indefinitely blocking Git read, and the same bound
+/// keeps the shared hardened runner fail-closed for every caller.
+pub const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Upper bound for single-line metadata (OIDs, refs, toplevel paths).
 const MAX_SMALL_OUTPUT_BYTES: usize = 4096;
@@ -593,6 +599,15 @@ pub fn run_git<A: AsRef<OsStr>>(
     cwd: &Path,
     args: &[A],
 ) -> Result<Output, WorkspaceFailure> {
+    run_git_with_timeout(executable, cwd, args, GIT_COMMAND_TIMEOUT)
+}
+
+fn run_git_with_timeout<A: AsRef<OsStr>>(
+    executable: &OsStr,
+    cwd: &Path,
+    args: &[A],
+    timeout: Duration,
+) -> Result<Output, WorkspaceFailure> {
     let mut command = Command::new(executable);
     // The child process receives a controlled Git environment. Repository
     // configuration, hooks, filters, fsmonitor, helpers, and inherited
@@ -660,16 +675,30 @@ pub fn run_git<A: AsRef<OsStr>>(
     let stdout_handle = thread::spawn(move || read_bounded(stdout, MAX_GIT_OUTPUT_BYTES));
     let stderr_handle = thread::spawn(move || read_bounded(stderr, MAX_GIT_OUTPUT_BYTES));
 
-    let status = match child.wait() {
-        Ok(status) => status,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stdout_handle.join();
-            let _ = stderr_handle.join();
-            return Err(backend_failure(format!(
-                "git-cli: cannot wait for git process: {error}"
-            )));
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return Err(backend_failure(format!(
+                    "git-cli: git command timed out after {} ms",
+                    timeout.as_millis()
+                )));
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(5)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return Err(backend_failure(format!(
+                    "git-cli: cannot wait for git process: {error}"
+                )));
+            }
         }
     };
     let stdout = join_capture(stdout_handle, "stdout")?;
@@ -1011,6 +1040,38 @@ mod tests {
 
         assert!(captured.overflowed);
         assert_eq!(captured.bytes.len(), MAX_GIT_OUTPUT_BYTES);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_child_timeout_kills_a_stuck_process() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "runlith-git-timeout-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("stuck-git.sh");
+        let mut file = std::fs::File::create(&executable).unwrap();
+        file.write_all(b"#!/bin/sh\nwhile :; do :; done\n").unwrap();
+        drop(file);
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let started = Instant::now();
+        let error = run_git_with_timeout(
+            executable.as_os_str(),
+            &dir,
+            &[OsStr::new("version")],
+            Duration::from_millis(50),
+        )
+        .expect_err("stuck Git child must time out");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(format!("{error:?}").contains("timed out"));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

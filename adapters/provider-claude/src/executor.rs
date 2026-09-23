@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent_runtime::ProviderRef;
+use evaluation::{ProcessExitObservation, ProcessExitObservationSink};
 use runner::SandboxedLaunch;
 use scheduler::{ExecutionPort, ExecutionProblem, WorkEvidence, WorkItem};
 
@@ -83,6 +84,7 @@ pub struct ClaudeExecutor {
     workdir: PathBuf,
     environment: Result<ProviderEnvironment, String>,
     tracker: Option<LiveProcessTracker>,
+    process_exit_observer: Option<Arc<dyn ProcessExitObservationSink>>,
     cancel: CancelFlag,
     launch: ProviderLaunch,
 }
@@ -161,6 +163,7 @@ impl ClaudeExecutor {
             workdir,
             environment,
             tracker: None,
+            process_exit_observer: None,
             cancel: CancelFlag::fresh(),
             launch,
         })
@@ -172,6 +175,18 @@ impl ClaudeExecutor {
     #[must_use]
     pub fn with_tracker(mut self, tracker: LiveProcessTracker) -> Self {
         self.tracker = Some(tracker);
+        self
+    }
+
+    /// Attaches the trusted raw process-exit observer used by G8 capture.
+    /// The provider reports only facts from its owned supervised child; it
+    /// does not mint an `ObservedEffect` or touch persistence.
+    #[must_use]
+    pub fn with_process_exit_observer(
+        mut self,
+        observer: Arc<dyn ProcessExitObservationSink>,
+    ) -> Self {
+        self.process_exit_observer = Some(observer);
         self
     }
 
@@ -247,23 +262,15 @@ impl ClaudeExecutor {
         if let Some(tracker) = &self.tracker {
             tracker.mark_live(&work.execution_id);
         }
-        let result = self.run();
+        let result = self.run(work);
         if let Some(tracker) = &self.tracker {
             tracker.mark_finished(&work.execution_id);
         }
         result
     }
 
-    fn run(&self) -> Result<ClaudeOutcome, ClaudeFailure> {
-        self.run_prompt(&self.prompt)
-    }
-
-    /// Executes one bounded provider call through the same attached launch
-    /// path as ordinary execution, but with caller-supplied provider input.
-    /// This is crate-visible so the Claude Planner adapter can reuse the G5/G6
-    /// process seam without inventing a synthetic Task/Execution/Attempt.
-    pub(crate) fn run_prompt(&self, prompt: &str) -> Result<ClaudeOutcome, ClaudeFailure> {
-        match self.run_prompt_observed(prompt) {
+    fn run(&self, work: &WorkItem) -> Result<ClaudeOutcome, ClaudeFailure> {
+        match self.run_prompt_observed_for_work(&self.prompt, Some(work)) {
             ObservedPromptRun::NotStarted(failure) => Err(failure),
             ObservedPromptRun::Started { result, .. } => result.map(|outcome| *outcome),
         }
@@ -274,6 +281,14 @@ impl ClaudeExecutor {
     /// final output, including failed runs. Used by the proposal-only planner
     /// so post-spawn outcomes never become invisible spend (ADR-0027 §6).
     pub(crate) fn run_prompt_observed(&self, prompt: &str) -> ObservedPromptRun {
+        self.run_prompt_observed_for_work(prompt, None)
+    }
+
+    fn run_prompt_observed_for_work(
+        &self,
+        prompt: &str,
+        work: Option<&WorkItem>,
+    ) -> ObservedPromptRun {
         let environment = match self.environment.as_ref() {
             Ok(environment) => environment,
             Err(detail) => {
@@ -331,6 +346,15 @@ impl ClaudeExecutor {
                 stdout,
                 stderr,
             } => {
+                if let (Some(observer), Some(work)) = (&self.process_exit_observer, work) {
+                    observer.observe_process_exit(ProcessExitObservation::from_captured_streams(
+                        work.execution_id.clone(),
+                        work.attempt_id.clone(),
+                        code,
+                        &stdout,
+                        &stderr,
+                    ));
+                }
                 let result = self.interpret_exit(code, &stdout, &stderr).map(Box::new);
                 let usage = match &result {
                     Ok(outcome) => outcome.usage.clone(),
