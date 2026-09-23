@@ -14,6 +14,7 @@ mod clock;
 mod error;
 mod human_decision_service;
 mod managed_identity;
+mod observed_effect_service;
 mod orchestration_service;
 mod plan_graph;
 mod planned_orchestration;
@@ -32,6 +33,7 @@ pub use managed_identity::{
     is_windows_reserved_basename, managed_slug, MANAGED_DIGEST_PREFIX, MANAGED_READABLE_PREFIX,
     WINDOWS_RESERVED_BASENAMES,
 };
+pub use observed_effect_service::{ObservedEffectService, ObservedEffectServiceError};
 pub use orchestration_service::{
     ExecutionEntry, OrchestrationIds, OrchestrationService, PreAttemptResumePlan,
 };

@@ -12,6 +12,7 @@ agent-runtime = { path = "../../crates/agent-runtime" }
 app-services = { path = "../../crates/app-services" }
 bytes = "1"
 evaluation = { path = "../../crates/evaluation" }
+effect-capture-local = { path = "../../adapters/effect-capture-local" }
 git-cli = { path = "../../adapters/git-cli" }
 ipc-contracts = { path = "../../crates/ipc-contracts" }
 ipc-control = { path = "../../crates/ipc-control" }

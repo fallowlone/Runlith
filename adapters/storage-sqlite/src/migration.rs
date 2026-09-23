@@ -21,7 +21,7 @@ use rusqlite::Connection;
 use crate::error::{StorageError, StorageResult};
 
 /// Schema version this adapter understands.
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 18;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 19;
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_task_core.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_event_journal.sql");
@@ -42,6 +42,7 @@ const MIGRATION_0016: &str = include_str!("../migrations/0016_g7_closure_remedia
 const MIGRATION_0017: &str = include_str!("../migrations/0017_evidence_requirements.sql");
 const MIGRATION_0018: &str =
     include_str!("../migrations/0018_planning_input_evidence_requirements.sql");
+const MIGRATION_0019: &str = include_str!("../migrations/0019_observed_effects.sql");
 
 /// Applies pending migrations to `connection`, which must already have
 /// `PRAGMA foreign_keys = ON`. Migrations run in order inside one SQLite
@@ -172,7 +173,12 @@ pub(crate) fn migrate(connection: &mut Connection) -> StorageResult<u32> {
             ))
         })?;
     }
-    transaction.execute_batch("PRAGMA user_version = 18")?;
+    if current < 19 {
+        transaction.execute_batch(MIGRATION_0019).map_err(|error| {
+            StorageError::Migration(format!("0019_observed_effects.sql failed: {error}"))
+        })?;
+    }
+    transaction.execute_batch("PRAGMA user_version = 19")?;
     transaction.commit()?;
     Ok(SUPPORTED_SCHEMA_VERSION)
 }

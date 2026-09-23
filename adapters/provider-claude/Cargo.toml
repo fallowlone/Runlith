@@ -13,6 +13,7 @@ task-domain = { path = "../../crates/task" }
 scheduler = { path = "../../crates/scheduler" }
 workspace = { path = "../../crates/workspace" }
 runner = { path = "../../crates/runner" }
+evaluation = { path = "../../crates/evaluation" }
 plan-domain = { path = "../../crates/plan" }
 
 [dev-dependencies]

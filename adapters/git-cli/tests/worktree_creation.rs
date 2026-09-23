@@ -21,6 +21,34 @@ fn canonical(p: &std::path::Path) -> PathBuf {
 }
 
 #[test]
+fn cv_3_git_state_snapshot_binds_head_tree_and_index() {
+    let adapter = GitCli::new();
+    let fx = Fixture::new("observed git state");
+    let anchor = anchor_for(&adapter, &fx.path_str());
+    fx.write_tracked("state.txt", b"v1");
+    git(&fx.dir, &["add", "state.txt"]);
+    git(&fx.dir, &["commit", "-q", "-m", "state-v1"]);
+
+    let first = adapter
+        .git_state_snapshot(&fx.path_str(), &anchor)
+        .expect("capture git state");
+    assert_eq!(first.head_revision.as_str(), fx.primary_head());
+    assert_eq!(
+        first.head_tree_oid,
+        git(&fx.dir, &["rev-parse", "HEAD^{tree}"])
+    );
+
+    fx.write_tracked("state.txt", b"v2");
+    git(&fx.dir, &["add", "state.txt"]);
+    let second = adapter
+        .git_state_snapshot(&fx.path_str(), &anchor)
+        .expect("capture changed index");
+    assert_eq!(second.head_revision, first.head_revision);
+    assert_eq!(second.head_tree_oid, first.head_tree_oid);
+    assert_ne!(second.index_manifest, first.index_manifest);
+}
+
+#[test]
 fn worktree_creation_success_verifies_identity_and_leaves_primary_untouched() {
     let adapter = GitCli::new();
     // Spaces in the fixture path prove argv handling without shell quoting.

@@ -48,6 +48,7 @@ dependencies = [
  "agent-runtime",
  "app-services",
  "bytes",
+ "effect-capture-local",
  "evaluation",
  "fake-evaluator",
  "fake-planner",
@@ -480,6 +481,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "effect-capture-contract"
+version = "0.1.0"
+dependencies = [
+ "evaluation",
+]
+
+[[package]]
+name = "effect-capture-local"
+version = "0.1.0"
+dependencies = [
+ "effect-capture-contract",
+ "evaluation",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -533,6 +550,7 @@ name = "evaluation"
 version = "0.1.0"
 dependencies = [
  "agent-runtime",
+ "sha2 0.10.9",
  "task-domain",
 ]
 
@@ -1282,6 +1300,7 @@ name = "provider-claude"
 version = "0.1.0"
 dependencies = [
  "agent-runtime",
+ "evaluation",
  "execution-contract",
  "plan-domain",
  "planner-contract",
@@ -1584,6 +1603,7 @@ name = "storage-sqlite"
 version = "0.1.0"
 dependencies = [
  "agent-runtime",
+ "evaluation",
  "plan-domain",
  "policy",
  "rusqlite",

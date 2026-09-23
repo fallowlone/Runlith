@@ -1,4 +1,15 @@
-# ADR-0030 - G8 Observed Effect / Claim Verification Contract
+# ADR-0030 — G8 Observed Effect / Claim Verification Contract
+
+## TASK-0124 implementation clarification
+
+The first observed-effect capture seam is an in-process provider-neutral Rust
+port. Trusted application composition mints effect identity, capture
+authority, timestamps, fingerprints, and provenance after a local adapter
+returns a bounded observation. Durable records use SQLite migration 0019.
+This implementation adds no IPC, transport, or wire-protocol message and
+therefore requires no protocol-version change. Test-suite capture remains
+unsupported unless a trusted structured result source is available; console
+text and execution receipts are not verification evidence.
 
 - Status: **ACCEPTED** (owner decision 2026-09-21, after three independent
   review rounds — round-1 findings F1..F8 and round-2 findings N1..N4

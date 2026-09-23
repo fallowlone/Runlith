@@ -97,6 +97,17 @@ pub struct DiffEvidence {
     pub summary: String,
 }
 
+/// Exact bounded Git metadata needed by G8 `GIT_STATE` capture. Working-tree
+/// file contents are captured separately by the filesystem observer; this
+/// value owns the Git-only facts that filesystem traversal cannot prove:
+/// exact HEAD/tree identity and the index manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitStateSnapshot {
+    pub head_revision: Revision,
+    pub head_tree_oid: String,
+    pub index_manifest: Vec<u8>,
+}
+
 /// Provider-neutral Git backend capabilities behind one narrow port.
 ///
 /// The consumer (later G4 application services) owns orchestration and
@@ -165,6 +176,19 @@ pub trait GitPort {
         lease: &WorkspaceLease,
         expected: &TrustedCommonGit,
     ) -> Result<DiffEvidence, WorkspaceFailure>;
+
+    /// Captures exact read-only Git metadata through the backend's normal
+    /// trusted-anchor and hardened-runner boundary. Backends that cannot
+    /// prove it fail closed.
+    fn git_state_snapshot(
+        &self,
+        _worktree_path: &str,
+        _expected: &TrustedCommonGit,
+    ) -> Result<GitStateSnapshot, WorkspaceFailure> {
+        Err(WorkspaceFailure::GitBackendFailure {
+            detail: "git backend cannot capture exact Git state".to_owned(),
+        })
+    }
 
     /// Removes the worktree registration (and only after the caller has
     /// enforced cleanup safety). Idempotent for already-absent owned
