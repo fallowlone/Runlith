@@ -19,6 +19,7 @@ mod orchestration_service;
 mod plan_graph;
 mod planned_orchestration;
 mod planning_service;
+mod preflight_service;
 mod runtime_service;
 mod security_service;
 mod task_service;
@@ -44,6 +45,9 @@ pub use planning_service::{
     AcceptedPlanRevision, AcceptedTaskPlanResolution, PlanApplicabilityRefusal,
     PlanningAssessmentOutcome, PlanningGuardrailState, PlanningPolicyContext,
     PlanningProposalOutcome, PlanningService, PlanningServiceError,
+};
+pub use preflight_service::{
+    check_prerequisites, PreflightFinding, PreflightReport, PrerequisiteStatus,
 };
 pub use runtime_service::{AppliedExecution, PlannedExecution, RuntimeService};
 pub use security_service::{

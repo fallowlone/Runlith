@@ -108,6 +108,46 @@ pub fn resolve_revision(
         .map_err(|_| backend_failure(format!("git-cli: unexpected non-OID from rev-parse: {oid}")))
 }
 
+/// Read-only ancestry proof via `merge-base --is-ancestor` (TASK-0135).
+///
+/// Exit status is the whole contract: 0 means `ancestor` is an ancestor of
+/// (or equal to) `descendant`, 1 means it is not, anything else is a
+/// backend failure. Both revisions arrive as validated commit OIDs
+/// ([`workspace::Revision`]), so no ref parsing ambiguity reaches Git.
+/// Stderr travels only as bounded diagnostic detail.
+pub fn is_ancestor(
+    executable: &OsStr,
+    repository_path: &str,
+    ancestor: &workspace::Revision,
+    descendant: &workspace::Revision,
+    expected: &TrustedCommonGit,
+) -> Result<bool, WorkspaceFailure> {
+    let abs = absolutize(repository_path).map_err(|_| WorkspaceFailure::NotRepository {
+        detail: bounded_detail("git-cli: invalid repository path".to_owned()),
+    })?;
+    let root = match classify_repository(executable, &abs, expected)? {
+        RepoClass::Normal { root } => root,
+    };
+    let output = run_git(
+        executable,
+        &root,
+        &[
+            OsStr::new("merge-base"),
+            OsStr::new("--is-ancestor"),
+            OsStr::new(ancestor.as_str()),
+            OsStr::new(descendant.as_str()),
+        ],
+    )?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        other => Err(backend_failure(format!(
+            "git-cli: merge-base --is-ancestor exited {other:?}: {}",
+            bounded_detail(String::from_utf8_lossy(&output.stderr).to_string())
+        ))),
+    }
+}
+
 /// Exact bounded Git-only state for G8 observed-effect capture. Every Git
 /// command uses the same hardened runner and trusted common-Git anchor as the
 /// rest of this adapter; repository-local hooks/config cannot replace this

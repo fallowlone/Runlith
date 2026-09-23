@@ -14,7 +14,8 @@
 //! never writes `~/.gitconfig`, system config, or repository config.
 //!
 //! No remote operations exist in this module: the only subcommands spelled
-//! here are `version`, `rev-parse`, `symbolic-ref`, `show-ref`, `worktree`
+//! here are `version`, `rev-parse`, `symbolic-ref`, `show-ref`,
+//! `merge-base` (read-only `--is-ancestor` ancestry proof), `worktree`
 //! (`add`, `list`), `status`, and `ls-files`. `fetch`/`pull`/`push`/`clone`/`ls-remote`
 //! appear nowhere as executed commands.
 

@@ -152,6 +152,22 @@ pub trait GitPort {
         expected: &TrustedCommonGit,
     ) -> Result<Revision, WorkspaceFailure>;
 
+    /// Read-only ancestry proof: whether `ancestor` is an ancestor of (or
+    /// equal to) `descendant` (`merge-base --is-ancestor` semantics).
+    /// Backends that cannot prove ancestry fail closed. Used by the G8
+    /// prerequisite preflight (TASK-0135); it mutates nothing.
+    fn is_ancestor(
+        &self,
+        _repository_path: &str,
+        _ancestor: &Revision,
+        _descendant: &Revision,
+        _expected: &TrustedCommonGit,
+    ) -> Result<bool, WorkspaceFailure> {
+        Err(WorkspaceFailure::GitBackendFailure {
+            detail: "git backend cannot prove commit ancestry".to_owned(),
+        })
+    }
+
     /// Creates an isolated worktree + managed branch for `lease` and
     /// verifies mutual consistency before returning. Records nothing
     /// durable itself — the caller reconciles.
