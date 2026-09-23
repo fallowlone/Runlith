@@ -8,7 +8,7 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0122
+completed_through: TASK-0124
 current_gate: G8
 gate_status: IN_PROGRESS  # G7 closed by the TASK-0120 independent closure re-audit (G7_CLOSED); G8 breakdown materialized (TASK-0121..TASK-0127 queued, contract ADRs first); TASK-0121 and TASK-0122 accepted after independent review
 
@@ -3787,3 +3787,323 @@ items:
       - docs/development/G7_TASK_0120_FINAL_CLOSURE_REAUDIT.md
       - planning/roadmap.yaml
       - docs/architecture/INDEX.md
+
+  - id: TASK-0128
+    gate: G8
+    title: Agent-router capability migration audit
+    objective: >-
+      Systematically audit the agent-router research prototype against
+      Runlith, produce a durable capability matrix, boundary analysis,
+      interface proposal, and prioritized migration roadmap without
+      weakening Runlith architecture.
+    scope: >-
+      Read-only audit of /Users/artemmac/dev/agent-router; durable report at
+      docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md; queue and
+      roadmap entries for approved capabilities; no production code changes.
+    exit_criteria_summary: >-
+      Report exists with all ten required sections; every capability has a
+      status and action; every approved capability maps to a bounded queued
+      task with gate alignment; rejected capabilities record the violated
+      invariant.
+    depends_on: []
+    blocked_by: []
+    references:
+      - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
+      - EXTERNAL_REPOSITORY_ADOPTION_RESEARCH.md
+
+  - id: TASK-0129
+    gate: G14
+    title: Router and provider-capability-catalog contract (ADR)
+    objective: >-
+      Define the RoutingDecision contract, eligibility-first routing
+      semantics (hard requirements as gates, never score penalties), and the
+      provider capability catalog schema (trust level, billing kind, rate
+      limits, capabilities, context size) as policy-consumed data.
+    scope: >-
+      ADR + contract types in crates/agentd-contracts only. No runtime
+      routing, no live decisions. Shadow-mode evaluation is a hard
+      prerequisite for any future live routing.
+    exit_criteria_summary: >-
+      ADR accepted; contract types compile with serde schemas; ownership
+      (orchestrator timing, Policy Engine constraints, Router ranking,
+      Provider Runtime transport) is explicit.
+    depends_on:
+      - TASK-0128
+    blocked_by: []
+    references:
+      - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
+      - docs/architecture/providers.md
+
+  - id: TASK-0130
+    gate: G14
+    title: Provider failure taxonomy and rate-limit header normalization
+    objective: >-
+      Extend the provider error contract with a kind taxonomy
+      (rate_limit/quota/auth/model_not_found/timeout/server/
+      invalid_response) and normalize retry-after semantics across the
+      Retry-After and x-ratelimit-reset-* header family in the
+      OpenAI-compatible adapter.
+    scope: >-
+      crates/agentd-provider-openai error mapping + contract type changes;
+      unit tests for header forms (seconds, milliseconds, epoch, HTTP-date);
+      no behavior change to retry policy authority.
+    exit_criteria_summary: >-
+      ProviderError carries kind and normalized retry_after; adapter tests
+      cover each header form and error classification; existing retry and
+      circuit-breaker behavior unchanged.
+    depends_on: []
+    blocked_by: []
+    references:
+      - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
+      - crates/agentd-provider-openai/src/retry.rs
+
+  - id: TASK-0131
+    gate: G14
+    title: Durable provider health registry
+    objective: >-
+      Persist provider/account/model-scoped health (consecutive failures,
+      cooldown-until, last error kind) in SQLite with validated restore;
+      cooldown expiry demotes to degraded, never silently to healthy.
+    scope: >-
+      New store port + migration in agentd-store-sqlite; adapter records
+      outcomes through the port; no credential material in health rows;
+      in-memory circuit breaker remains as fast path.
+    exit_criteria_summary: >-
+      Health survives restart with validated restore; scope isolation tested;
+      cooldown transition semantics covered by unit tests.
+    depends_on:
+      - TASK-0129
+    blocked_by: []
+    references:
+      - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
+      - crates/agentd-store-sqlite
+
+  - id: TASK-0132
+    gate: G14
+    title: Durable quota ledger and headroom signal
+    objective: >-
+      Record per-account request/token usage in durable sliding windows
+      (per-minute and per-day) and expose quota headroom as an eligibility
+      and scoring input.
+    scope: >-
+      Store port + aggregation queries; recording hooks at provider call
+      sites; read-only headroom API for the Router port. No enforcement
+      beyond eligibility signaling in this task.
+    exit_criteria_summary: >-
+      Windows survive restart; headroom query returns per-limit ratios;
+      unknown limits yield neutral headroom; tests cover window rollover.
+    depends_on:
+      - TASK-0129
+    blocked_by: []
+    references:
+      - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
+
+  - id: TASK-0133
+    gate: G14
+    title: Usage economics rollup
+    objective: >-
+      Aggregate per-attempt usage into per-task, per-role, per-provider and
+      per-model economics: tokens, estimated metered cost, cache-hit rate,
+      zero-marginal share, and per-successful-task efficiency, with unknown
+      cost tracked separately from zero.
+    scope: >-
+      Usage rollup module consuming recorded usage facts; billing-kind and
+      pricing data from the provider catalog; rollup persisted for receipts
+      and Context Engine budget signals. No routing influence in this task.
+    exit_criteria_summary: >-
+      Rollup reproduces agent-router economics metrics on fixture data;
+      unknown-vs-zero discipline enforced; rollups appear on run receipts.
+    depends_on:
+      - TASK-0129
+    blocked_by: []
+    references:
+      - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
+      - crates/agentd-observability
+
+  - id: TASK-0134
+    gate: G8
+    title: Verification-level selection and verification-scope detection
+    objective: >-
+      Select verification depth (V0..V3) from changed paths and observed
+      effects, and derive ecosystem-appropriate verification commands, so
+      G8 verification cost scales with change risk.
+    scope: >-
+      Orchestrator-side selection module: path classification rules
+      (lockfiles/config/schema imply full verification; docs-only implies
+      none), write-observation fallback from TASK-0124 effects, command
+      derivation per ecosystem. Integrates as input to TASK-0125 repair
+      loop; does not change TASK-0125's accepted contract.
+    exit_criteria_summary: >-
+      Level selection unit-tested across path classes; no-op detection
+      proven against observed-effect fixtures; verification runner executes
+      selected level through the existing TASK-0123 path.
+    depends_on:
+      - TASK-0124
+    blocked_by: []
+    references:
+      - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
+      - ADR-0030
+      - ADR-0031
+
+  - id: TASK-0135
+    gate: G8
+    title: Prerequisite preflight checker
+    objective: >-
+      Validate declared task prerequisites before activation: git refs
+      resolve and are ancestors of HEAD, repo-relative files exist, and
+      required commands are on PATH.
+    scope: >-
+      Small orchestrator module with repo-escape protection on paths;
+      read-only checks; failures reported as structured blockers on the
+      task record. No new authority: preflight informs, orchestrator decides.
+    exit_criteria_summary: >-
+      Each check kind covered by tests including path-escape rejection;
+      blocker reports persisted durably.
+    depends_on: []
+    blocked_by: []
+    references:
+      - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
+
+  - id: TASK-0136
+    gate: G8
+    title: Deterministic risk-signal baseline (advisory)
+    objective: >-
+      Provide a deterministic, dependency-free risk classifier (security,
+      database, public API, concurrency, isolation, architecture signals)
+      as an advisory input to review and escalation policy.
+    scope: >-
+      Pure function over task/diff text in the orchestrator or policy
+      surface; output is advisory metadata only and may not become a
+      verification authority or gate verdict by itself.
+    exit_criteria_summary: >-
+      Classifier unit-tested on synthetic samples; output recorded as
+      advisory fields; documentation states non-authority explicitly.
+    depends_on: []
+    blocked_by: []
+    references:
+
+
+  - id: TASK-0137
+    gate: G9
+    title: Context-engine design consolidation from agent-router patterns
+    objective: >-
+      Consolidate agent-router's validated context patterns (bounded
+      planning packets, review-context artifacts, observation handles,
+      compaction receipts, source-attributed telemetry) into the G9 context
+      engine design before implementation begins.
+    scope: >-
+      Design note amending docs/architecture/context-engine.md; no
+      production code; explicit mapping from each pattern to Runlith ports
+      and durability requirements.
+    exit_criteria_summary: >-
+      Design note accepted; every adopted pattern names its owning port and
+      persistence story; rejected patterns record reasons.
+    depends_on:
+      - TASK-0127
+    blocked_by: []
+    references:
+      - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
+      - docs/architecture/context-engine.md
+
+  - id: TASK-0138
+    gate: G14
+    title: Shadow-mode decision receipts and offline routing evaluation
+    objective: >-
+      Emit privacy-safe routing decision receipts (fingerprinted inputs,
+      full option sets with eligibility failures, selection, outcome) and
+      evaluate candidate scoring policies offline, including model-quality
+      aggregation with confidence shrinkage.
+    scope: >-
+      Offline harness only; authority field fixed to
+      offline-evaluation-only; no live routing path; receipts exclude
+      credentials and raw repo content.
+    exit_criteria_summary: >-
+      Harness reproduces recorded runs; evaluation report compares at least
+      two scoring policies on the same receipt set; shadow-mode evidence is
+      durable and reviewable.
+    depends_on:
+      - TASK-0129
+    blocked_by: []
+    references:
+      - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
+
+  - id: TASK-0139
+    gate: G14
+    title: Local-critic offline benchmark
+    objective: >-
+      Benchmark local-model review quality against recorded review tasks to
+      quantify how much reviewer capability is available at zero marginal
+      cost, as research input to review policy.
+    scope: >-
+      Offline benchmark harness on recorded/synthetic diffs; results are
+      advisory research data; no production reviewer path.
+    exit_criteria_summary: >-
+      Benchmark report with methodology, dataset description, and quality
+      deltas; no runtime dependencies added.
+    depends_on:
+      - TASK-0138
+    blocked_by: []
+    references:
+      - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
+
+  - id: TASK-0140
+    gate: G14
+    title: Semantic-risk offline benchmark (privacy-gated)
+    objective: >-
+      Evaluate semantic risk scoring (external API and local-model
+      variants) against the deterministic baseline on sanitized tasks,
+      offline only, pending an explicit privacy review.
+    scope: >-
+      Research benchmark on synthetic/sanitized inputs; blocked until the
+      owner approves external-API usage even for benchmarking; no
+      production dependency may result.
+    exit_criteria_summary: >-
+      Privacy review recorded; benchmark report compares semantic vs
+      deterministic risk signals; findings feed advisory-risk policy only.
+    depends_on:
+      - TASK-0136
+    blocked_by: []
+    references:
+      - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
+
+  - id: TASK-0141
+    gate: G14
+    title: Runtime model discovery and capability probing
+    objective: >-
+      Discover models from provider /models endpoints with TTL caching,
+      mark non-catalog models as provisional/unverified, and optionally
+      probe chat/tool capabilities, feeding the provider catalog.
+    scope: >-
+      Provider Runtime adapter additions; probing is opt-in via policy;
+      provisional models carry explicit unverified trust until cataloged;
+      round-trip conformance checks become adapter tests.
+    exit_criteria_summary: >-
+      Discovery results never override catalog trust silently; probe
+      results recorded durably; TTL and refresh semantics tested.
+    depends_on:
+      - TASK-0129
+    blocked_by: []
+    references:
+      - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
+
+  - id: TASK-0142
+    gate: G14
+    title: Evidence-triggered quality-escalation policy
+    objective: >-
+      Let the Policy Engine escalate capability tiers on evidence
+      (verification failure, review failure, uncertainty, risk, tool-loop
+      exhaustion) using generic policy-defined tiers instead of hardcoded
+      ladders.
+    scope: >-
+      Policy types + orchestrator hook points; escalation decisions logged
+      on receipts; no model-name-based tier inference.
+    exit_criteria_summary: >-
+      Escalation rules are policy data; each trigger kind tested; receipt
+      records show trigger evidence per escalation.
+    depends_on:
+      - TASK-0129
+    blocked_by: []
+    references:
+      - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
+
+      - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md

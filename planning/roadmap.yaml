@@ -144,6 +144,18 @@ gates:
     objective: Account, billing, encrypted sync, teams, org policies.
     scope_ref: AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
 
+  - id: G14
+    name: Router / Usage Economics
+    status: planned
+    objective: >-
+      Eligibility-first, explainable provider/model routing on durable
+      health and quota ledgers, with usage economics rollups and
+      offline-first shadow-mode evaluation. Proposed by the agent-router
+      capability migration audit (TASK-0128); requires owner ratification
+      before any G14 task starts. No live or learned routing until
+      shadow-mode evidence (TASK-0138) is reviewed.
+    scope_ref: docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
+
 future_product_engineering_spikes:
   - id: UI-TECHNOLOGY-SPIKE
     status: deferred
