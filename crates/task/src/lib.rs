@@ -23,6 +23,7 @@
 mod dependency;
 mod error;
 mod id;
+mod prerequisite;
 mod project;
 mod requirement;
 mod state;
@@ -31,6 +32,7 @@ mod task;
 pub use dependency::validate_acyclic;
 pub use error::DomainError;
 pub use id::{ProjectId, TaskId};
+pub use prerequisite::{Prerequisite, PrerequisiteKind};
 pub use project::Project;
 pub use requirement::{
     EvidenceRequirement, RequirementKind, RequirementParam, SubjectBinding, MAX_EVIDENCE_PARAMETERS,

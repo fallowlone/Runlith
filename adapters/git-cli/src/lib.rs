@@ -149,6 +149,16 @@ impl GitPort for GitCli {
         observe::resolve_revision(self.exe(), repository_path, rev, expected)
     }
 
+    fn is_ancestor(
+        &self,
+        repository_path: &str,
+        ancestor: &Revision,
+        descendant: &Revision,
+        expected: &TrustedCommonGit,
+    ) -> Result<bool, WorkspaceFailure> {
+        observe::is_ancestor(self.exe(), repository_path, ancestor, descendant, expected)
+    }
+
     fn create_worktree(
         &self,
         lease: &WorkspaceLease,
