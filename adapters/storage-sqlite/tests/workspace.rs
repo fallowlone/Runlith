@@ -304,6 +304,46 @@ fn test_mutation_policy_and_evaluated_base_are_immutable_and_recoverable() {
 }
 
 #[test]
+fn save_task_creates_forbidden_default_and_preserves_selected_revision() {
+    let db = TestDb::new("save-task-policy-default");
+    let task = {
+        let mut store = db.open();
+        store.create_project(&project("P-SAVE-POLICY")).unwrap();
+        let task = draft_task("P-SAVE-POLICY", "T-SAVE-POLICY");
+
+        store.save_task(&task).unwrap();
+        assert_eq!(
+            store
+                .get_test_mutation_policy(task.id().as_str())
+                .unwrap()
+                .unwrap()
+                .policy(),
+            &TestMutationPolicy::Forbidden
+        );
+        task
+    };
+
+    let selected = TestMutationPolicyRevision::new(
+        2,
+        TestMutationPolicy::scoped_reviewed(
+            vec!["tests/unit.rs".into()],
+            vec!["cargo-test-unit".into()],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut store = db.open();
+    store
+        .append_test_mutation_policy_revision(task.id().as_str(), &selected)
+        .unwrap();
+    store.save_task(&task).unwrap();
+    assert_eq!(
+        store.get_test_mutation_policy(task.id().as_str()).unwrap(),
+        Some(selected)
+    );
+}
+
+#[test]
 fn insert_guards_reject_duplicates_and_missing_owners() {
     let db = TestDb::new("insert-guards");
     let mut store = db.open();

@@ -261,10 +261,19 @@ impl SqliteStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let task_exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)",
+            params![snapshot.id.as_str()],
+            |row| row.get(0),
+        )?;
         // Replace the full image so the stored task always mirrors the
         // validated object (edges included); FK order: row first, then
-        // children. INSERT OR REPLACE keeps the primary key stable.
+        // children. The UPSERT keeps the primary key and dependent policy
+        // revisions stable.
         insert_task_row_replace(&transaction, &snapshot)?;
+        if !task_exists {
+            crate::test_mutation_store::insert_default_policy(&transaction, snapshot.id.as_str())?;
+        }
         transaction.execute(
             "DELETE FROM task_strings WHERE task_id = ?1",
             params![snapshot.id.as_str()],
