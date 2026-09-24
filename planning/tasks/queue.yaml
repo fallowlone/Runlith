@@ -3736,6 +3736,8 @@ items:
     depends_on:
       - TASK-0123
       - TASK-0124
+      - TASK-0143
+      - TASK-0144
     blocked_by: []
     references:
       - docs/architecture/adr/ADR-0018-independent-evaluation.md
@@ -4134,3 +4136,64 @@ items:
       - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
 
       - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
+
+  - id: TASK-0143
+    gate: G8
+    title: CV-9 test-integrity and verification-evidence contract (ADR)
+    objective: >-
+      Resolve the ADR-0018 TestMutationPolicy open contract and specify the
+      trusted evidence-authoring and integrity checks required by ADR-0030
+      CV-1..CV-9 before TASK-0125 completion admission can be accepted.
+    scope: >-
+      Contract-only ADR: policy owner and default when policy or integrity
+      evidence is absent; how changed tests, checks and evaluators are
+      measured against the policy; durable tamper provenance and verdict
+      invalidation; exact requirement/policy/subject and typed evidence-ref
+      binding; claim-free verification; supported TEST_SUITE_RESULT producer
+      and freshness/atomic-admission obligations. Reconcile ADR-0018 and
+      ADR-0030 without relaxing CV-1..CV-9. No production code.
+    exit_criteria_summary: >-
+      Owner-accepted ADR with executable rules, migration and recovery
+      implications, explicit alternatives and security impact; independent
+      architecture/security review resolves any conflict with ADR-0018,
+      ADR-0030, INV-009, INV-092, INV-114 and INV-146..153.
+    depends_on:
+      - TASK-0121
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0018-independent-evaluation.md
+      - docs/architecture/adr/ADR-0030-g8-observed-effect-claim-verification-contract.md
+      - docs/architecture/INVARIANTS.md
+
+  - id: TASK-0144
+    gate: G8
+    title: Trusted verification-evidence production for completion admission
+    objective: >-
+      Produce and persist independently captured evidence for the existing
+      G8 completion path, including a structured TEST_SUITE_RESULT and the
+      integrity attestation specified by TASK-0143, so TASK-0125 can verify
+      criteria without fabricated or empty evidence references.
+    scope: >-
+      Trusted Evaluation/Runner composition and its SQLite evidence path;
+      use the accepted G5/G6 governed execution boundary and TASK-0124
+      capture port. Bind producer output to exact subject, requirement,
+      policy, attempt and evidence kind; record tamper/blocked outcomes.
+      No provider self-verdicts, direct probe process path, new completion
+      authority, G14 routing, or TASK-0125 admission rewrite.
+    exit_criteria_summary: >-
+      A real governed local test run produces a durable structured result
+      retrievable after restart; changed or untrusted approval tests cannot
+      yield VERIFIED evidence; unsupported evidence kinds fail closed;
+      producer contract tests cover G5/G6/G7-shaped test results without
+      requiring unmerged TASK-0125 code; full workspace verification and
+      independent security review green.
+    depends_on:
+      - TASK-0124
+      - TASK-0143
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0018-independent-evaluation.md
+      - docs/architecture/adr/ADR-0030-g8-observed-effect-claim-verification-contract.md
+      - docs/architecture/adr/ADR-0024-g5-provider-execution-seam.md
+      - crates/evaluation
+      - crates/app-services/src/observed_effect_service.rs
