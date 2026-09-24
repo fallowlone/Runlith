@@ -322,12 +322,16 @@ TASK-0144's candidate-input path. The review must establish that:
    criterion scope and not represented as full Rust test proof,
    while ADR-0018, ADR-0026, ADR-0030, and ADR-0032 authority remains intact.
 
-Owner ratification must confirm the candidate-input method's scope, selector,
-structured result contract, and snapshot/isolation premise. The structured
-Rust test-result protocol is a separate decision for compiled candidate
-tests. If a method cannot be supported, mark that method unsupported and
-leave affected requirements blocked/unverified; do not weaken
-TEST_SUITE_RESULT or relabel one method as the other.
+Owner ratification must confirm the candidate-input method, its structured
+result and snapshot/isolation premises, and the exact selector/criterion
+binding contract. Concrete catalogued selector entries and the properties
+they assert are defined during TASK-0144 implementation and independently
+reviewed before they can author trusted evidence. Each result still requires
+fail-closed authorization by the exact `EvidenceRequirement` revision and
+criterion scope. The structured Rust test-result protocol is a separate
+decision for compiled candidate tests. If a method cannot be supported, mark
+that method unsupported and leave affected requirements blocked/unverified;
+do not weaken `TEST_SUITE_RESULT` or relabel one method as the other.
 
 ## References
 
