@@ -8,7 +8,8 @@ Gate: G8
 > evidence must prove that the governed check evaluated the exact
 > product-authored candidate snapshot under current G6 authority. Compiled
 > candidate tests additionally require proof of the exact built artifact. It grants no
-> completion authority and does not amend ADR-0030 or ADR-0032.
+> completion authority. As accepted by TASK-0148, it did not amend ADR-0030
+> or ADR-0032; the narrow initial-method amendment is recorded in ADR-0035.
 
 ## Context
 
@@ -20,14 +21,21 @@ provides product-owned evidence persistence, but its current Git observation
 is HEAD/index state and its local capture adapter explicitly rejects
 TEST_SUITE_RESULT. Neither alone captures a complete runnable candidate.
 
-The candidate is mutable repository state. It includes committed and staged
-content, unstaged tracked edits, deletions, and applicable untracked files.
-Copying a `git diff`, remembering a commit ID, or observing the live worktree
-after a process does not freeze what that process consumed.
+The mutable-worktree candidate method covers committed and staged content,
+unstaged tracked edits, deletions, and applicable untracked files. Copying a
+`git diff`, remembering a commit ID, or observing the live worktree after a
+process does not freeze what that process consumed. ADR-0035 defines the
+narrower initial candidate-input method based on an explicitly selected,
+validated immutable commit/tree and product-owned snapshot.
 
 ## Decision
 
 ### 1. Candidate snapshot
+
+This section's mutable-worktree capture requirements apply to a future
+mutable-worktree method and to compiled candidate tests. The initial
+candidate-input method uses ADR-0035's immutable Git-object source, clean
+linked-worktree restriction, sealed snapshot, and paired freshness checks.
 
 Trusted product composition captures one canonical, deterministic candidate
 manifest relative to the immutable evaluated base. It includes every relevant
@@ -92,7 +100,7 @@ matching alone never proves a runtime, compiled-code, or other behavior
 criterion. Evidence supports only the criterion and scope explicitly covered
 by its requirement.
 
-This is the proposed first implementation target for TASK-0144 because it
+This was the proposed first implementation target for TASK-0144 because it
 can establish real governed, product-authored structured results for the
 precisely declared candidate-input checks without pretending a static harness
 tested candidate-compiled code. TASK-0144 acceptance is limited to explicitly
@@ -182,8 +190,16 @@ The product binds capture to the exact Task, execution, attempt, evaluated
 base, candidate digest, policy revision/fingerprint, invocation, method, and
 requirement revision. The compiled-test method additionally binds its build
 receipt and selected artifact. Immediately before launch, the product verifies
-the sealed snapshot digest and, for compiled tests, the artifact hash. After
-exit it rechecks the live source; a changed subject makes the run stale. The
+the sealed snapshot digest and, for compiled tests, the artifact hash. For
+ADR-0035's initial candidate-input method, freshness uses its paired A+B
+metadata and live-worktree observations, bound to the trusted common-Git
+anchor, at selection, before and after evaluation, before result admission,
+at completion, and before post-restart reuse. Every pair must still identify
+the selected commit and clean linked worktree; any mismatch makes the run
+stale. The evaluator consumes only the sealed snapshot. These sequential
+checks do not make the live-worktree scan a race-free snapshot. A future
+mutable-worktree method retains this ADR's original race-safe capture and
+source-freshness requirements; the ADR-0035 checks do not replace them. The
 snapshot remains immutable through the operation. Any mismatch, race,
 crash, cancellation, timeout, parser error, truncated/invalid result stream,
 or unsupported input becomes a typed blocked/unsupported/tampered capture
@@ -234,19 +250,25 @@ reviewed contract gap proves they cannot represent the required binding.
 - **Build and test every candidate with Cargo immediately:** deferred as a
   larger scope; it requires candidate-build/artifact binding and a structured
   Rust test-result protocol that is not yet accepted.
-- **Chosen proposal:** support exact-byte candidate-input checks first, and
-  require candidate-bound build receipts plus exact artifact execution for
-  any compiled candidate-test claim.
+- **Initial candidate-input method (ADR-0035):** evaluate exact verified
+  commit/tree bytes in a sealed product snapshot; require candidate-bound
+  build receipts plus exact artifact execution for any future compiled
+  candidate-test claim.
 
 ## Consequences
 
 - TASK-0144 may produce initial `TEST_SUITE_RESULT` evidence through the
   governed candidate-input evaluator for explicitly supported selectors; it
   must not call this a generic Rust test suite.
-- Any check that compiles or executes candidate-built code must capture the
-  full candidate and prove the exact test artifact came from that snapshot.
-- A product-owned atomic snapshot/isolation mechanism is a hard prerequisite;
-  hashing alone or reliance on Git's current HEAD/index is insufficient.
+- Any future mutable-worktree check, and any check that compiles or executes
+  candidate-built code, must capture the full candidate and prove the exact
+  test artifact came from that snapshot. The initial candidate-input method
+  follows ADR-0035's verified commit/tree/blob source and paired freshness
+  contract.
+- A product-owned immutable snapshot and isolation mechanism is required for
+  every method. Atomic filesystem capture is required for mutable-worktree
+  capture; hashing alone or reliance on Git's current HEAD/index is
+  insufficient.
 - Candidate-input checks require their own bounded, versioned structured
   result contract and parser. Candidate-compiled Rust test results remain
   unsupported until a stable structured protocol is ratified and implemented.
@@ -264,9 +286,11 @@ reviewed contract gap proves they cannot represent the required binding.
 
 ## Security impact
 
-This proposal applies ADR-0026's current G6 Policy authority and Runner
-enforcement to snapshot materialization, candidate-input evaluation, build,
-and test operations. Policy decides authority; the operation owner enforces
+This accepted contract applies ADR-0026's current G6 Policy authority and
+Runner enforcement to snapshot materialization, candidate-input evaluation,
+build, and test operations. ADR-0035 specifies the initial candidate-input
+source; the broader mutable-worktree and compiled-test operations remain
+deferred. Policy decides authority; the operation owner enforces
 it. Candidate-controlled build scripts and tests are untrusted executable
 inputs. Filesystem, process, network, Git, and secret access must each be
 denied unless current Policy explicitly authorizes the exact capability and
@@ -294,9 +318,11 @@ evidence path is demonstrated.
 An independent architecture/security review of the exact pre-acceptance commit
 `cb02d5182b22428bc0ad4207420b982d4bc7d550` passed and established that the
 candidate-input path is adequately specified and fail-closed. Owner ratification
-followed. Compiled-test clauses below record constraints for a future
-separately ratified implementation; they are not acceptance gates for
-TASK-0144's candidate-input path. The review must establish that:
+followed. ADR-0035 subsequently narrowed and amended the initial candidate-input
+source. The original mutable-worktree criteria below apply only to a future
+mutable-worktree method; compiled-test clauses remain requirements for a future
+separately ratified implementation, not acceptance gates for TASK-0144's
+initial candidate-input path. The original review established that:
 
 1. snapshot scope covers all consumed tracked, staged, dirty, deleted, and
    untracked inputs and fails closed for unrepresented repository features;

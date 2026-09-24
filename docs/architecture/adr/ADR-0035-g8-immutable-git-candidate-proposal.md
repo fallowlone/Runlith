@@ -1,12 +1,13 @@
-# ADR-0035 — G8 Immutable Git Candidate Input (Proposal)
+# ADR-0035 — G8 Immutable Git Candidate Input
 
-Status: **Proposed** (TASK-0149; owner ratification and independent
-architecture/security review required)
+Status: **Accepted** (TASK-0149; owner ratified after independent
+architecture/security review PASS of exact pre-acceptance commit
+`2c63a0946dc7a6aeea719fa3688c7c1e880d6539`)
 Gate: G8
 
-> This proposal defines a narrower initial candidate-input source for
-> TASK-0144. It is not accepted and changes no existing decision. It grants
-> no completion authority.
+> This decision defines the initial candidate-input source for TASK-0144 and
+> narrowly amends ADR-0032 and ADR-0034 as recorded below. It grants no
+> completion authority.
 
 ## Context
 
@@ -26,7 +27,7 @@ object graph and reads each blob itself. A commit identifier or metadata
 alone does not prove which bytes were evaluated. A committed tree also does
 not imply that generated, ignored, or external dependencies are present.
 
-## Proposed decision
+## Decision
 
 For the first `candidate-input` method only, accept an explicitly selected,
 complete Git commit and its root tree as the candidate subject. Support only a
@@ -225,33 +226,39 @@ and expose a read-only view. This may preserve the existing mutable-worktree
 scope, but adds a privileged service, root-mediated IPC, entitlement and
 signing/provisioning requirements, a larger attack surface, installation and
 upgrade burden, and platform/filesystem availability constraints. It is not
-selected by this proposal. It requires its own security design and owner
+selected by this decision. It requires its own security design and owner
 decision.
 
-## Required changes if ratified
+## Accepted amendments
 
-Ratification must explicitly supersede the following portions of accepted
-contracts; this proposal does not edit or silently amend them:
+Owner ratification followed independent architecture/security review PASS of
+the exact pre-acceptance commit `2c63a0946dc7a6aeea719fa3688c7c1e880d6539`.
+This decision explicitly amends the following portions of accepted contracts:
 
-- **ADR-0034 §1 and §5, Consequences and Acceptance/independent review:** replace
-  the initial candidate-input requirement to atomically capture the mutable
-  worktree with the selected-commit/tree method and its verified Git-object
-  source, sealed product snapshot, clean-worktree gate, and stated freshness
-  limits. Remove dirty/staged/untracked inputs from the initial supported
-  method. Keep the stronger full-capture requirement for any later method
-  that evaluates mutable worktree content or builds/runs candidate code.
-- **ADR-0032 §1, §2 and §3:** replace the initial candidate’s dirty-worktree
-  manifest assumption with the exact commit/tree/blob manifest and bind its
-  digest into the integrity assessment and result. Retain the requirement to
-  account for every input actually consumed by the selected check, and retain
-  fail-closed treatment of inputs outside the supported tree/selector scope.
-- **TASK-0144:** revise its implementation envelope, integrity assessment,
-  freshness and acceptance criteria to the ratified candidate-input method.
-  It remains blocked until ratification and must not claim compiled tests,
-  generated/ignored inputs, external dependencies, or live-worktree contents
-  without a separately accepted contract.
+- **ADR-0034 §1, §2, §5, Consequences, Security impact, and Acceptance:** the
+  initial candidate-input method is the explicitly selected immutable Git
+  commit/tree method defined here, with validated object graphs and raw blobs,
+  a canonical digest manifest, a sealed product-owned snapshot, and paired
+  metadata/live-worktree freshness observations at selection, before and after
+  evaluation, before result admission, at completion, and before post-restart
+  reuse. It supports only a clean linked worktree. The mutable-worktree
+  capture and compiled-test requirements remain applicable to those deferred
+  methods; compiled candidate tests remain unsupported pending their separate
+  structured-result and artifact contract.
+- **ADR-0032 §1, §2 and §3:** for the initial candidate-input method, bind the
+  exact selected commit/tree and validated raw-blob manifest digest into the
+  integrity assessment and result. The broader dirty-worktree input rule
+  applies only to a separately accepted mutable-worktree method. Every input
+  actually consumed by the selected check must still be accounted for, and
+  inputs outside the supported tree/selector scope fail closed.
+- **TASK-0144:** proceed after TASK-0149 ratification and local integration,
+  using only this clean linked-worktree commit method for candidate-input
+  evidence. Do not claim compiled tests, generated/ignored inputs, external
+  dependencies, or mutable live-worktree contents without a separately
+  accepted method.
 
-No accepted ADR status changes by this proposal. Any wider support for dirty
+This acceptance changes no completion authority and authorizes no
+implementation, migration, or dependency. Any wider support for mutable dirty
 worktrees, LFS/submodules/filters, generated or external dependencies, or
 candidate-compiled tests requires a separately specified and ratified method.
 
@@ -265,8 +272,8 @@ candidate-compiled tests requires a separately specified and ratified method.
 - **Accept a commit OID or host-built harness result without resolving blobs:**
   rejected because it does not prove which candidate bytes were inspected.
 - **Use selected commit/tree objects, verify all consumed blobs, then evaluate
-  a sealed product snapshot:** proposed as the smallest initial method with an
-  immutable byte source and honest scope.
+  a sealed product snapshot:** selected as the smallest initial method with an
+  immutable byte source and bounded scope.
 - **Install a privileged APFS snapshot helper:** viable future alternative
   when preserving mutable-worktree support justifies its authority and
   operational costs.
