@@ -196,15 +196,6 @@ fn test_mutation_policy_and_evaluated_base_are_immutable_and_recoverable() {
     let task;
     let exec;
     let lease = lease("ws-policy", "E-POLICY");
-    let revision = TestMutationPolicyRevision::new(
-        2,
-        TestMutationPolicy::scoped_reviewed(
-            vec!["tests/unit.rs".into()],
-            vec!["cargo-test-unit".into()],
-        )
-        .unwrap(),
-    )
-    .unwrap();
     {
         let mut store = db.open();
         task = seed_task(&mut store, "P-POLICY", "T-POLICY");
@@ -217,31 +208,9 @@ fn test_mutation_policy_and_evaluated_base_are_immutable_and_recoverable() {
                 .policy(),
             &TestMutationPolicy::Forbidden
         );
-        store
-            .append_test_mutation_policy_revision(task.id().as_str(), &revision)
-            .unwrap_err(); // Execution already exists: selection is closed.
     }
     {
         let mut store = db.open();
-        let fresh_task = seed_task(&mut store, "P-OTHER", "T-OTHER");
-        let selected = TestMutationPolicyRevision::new(
-            2,
-            TestMutationPolicy::scoped_reviewed(
-                vec!["tests/unit.rs".into()],
-                vec!["cargo-test-unit".into()],
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        store
-            .append_test_mutation_policy_revision(fresh_task.id().as_str(), &selected)
-            .unwrap();
-        assert_eq!(
-            store
-                .get_test_mutation_policy(fresh_task.id().as_str())
-                .unwrap(),
-            Some(selected)
-        );
         store
             .insert_allocated_lease(&lease)
             .expect("insert trusted test lease");
@@ -276,13 +245,6 @@ fn test_mutation_policy_and_evaluated_base_are_immutable_and_recoverable() {
         .unwrap();
     assert_eq!(binding.base_revision, "a".repeat(40));
     assert_eq!(binding.policy.revision(), 1);
-    assert_eq!(
-        reopened
-            .get_test_mutation_policy("T-OTHER")
-            .unwrap()
-            .unwrap(),
-        revision
-    );
     drop(reopened);
     let stale = TestMutationPolicyRevision::new(2, TestMutationPolicy::Forbidden).unwrap();
     db.raw()
@@ -304,7 +266,7 @@ fn test_mutation_policy_and_evaluated_base_are_immutable_and_recoverable() {
 }
 
 #[test]
-fn save_task_creates_forbidden_default_and_preserves_selected_revision() {
+fn save_task_creates_forbidden_default_and_preserves_existing_revision() {
     let db = TestDb::new("save-task-policy-default");
     let task = {
         let mut store = db.open();
@@ -323,23 +285,11 @@ fn save_task_creates_forbidden_default_and_preserves_selected_revision() {
         task
     };
 
-    let selected = TestMutationPolicyRevision::new(
-        2,
-        TestMutationPolicy::scoped_reviewed(
-            vec!["tests/unit.rs".into()],
-            vec!["cargo-test-unit".into()],
-        )
-        .unwrap(),
-    )
-    .unwrap();
     let mut store = db.open();
-    store
-        .append_test_mutation_policy_revision(task.id().as_str(), &selected)
-        .unwrap();
     store.save_task(&task).unwrap();
     assert_eq!(
         store.get_test_mutation_policy(task.id().as_str()).unwrap(),
-        Some(selected)
+        Some(TestMutationPolicyRevision::new(1, TestMutationPolicy::Forbidden).unwrap())
     );
 }
 

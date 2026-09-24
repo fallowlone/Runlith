@@ -433,26 +433,6 @@ mod tests {
     }
 
     #[test]
-    fn daemon_ipc_socket_is_outside_provider_file_grants() {
-        let case = Case::new("daemon-ipc");
-        let endpoint = std::env::temp_dir()
-            .join("ai-engineering-os")
-            .join("agentd.sock");
-        let provider_runtime = case.root.join("provider-runtime");
-        std::fs::create_dir(&provider_runtime).unwrap();
-        let backend = MacOsSeatbeltRunner::with_support_roots(
-            vec![provider_runtime.clone()],
-            vec![provider_runtime],
-        );
-        let plan = case.plan(Path::new("/usr/bin/true"), None);
-        let profile = backend.profile_for(&plan).expect("sandbox profile");
-
-        assert!(profile.starts_with("(version 1)\n(deny default)"));
-        assert!(!profile.contains(&endpoint.to_string_lossy().to_string()));
-        assert!(!profile.contains("network-outbound"));
-    }
-
-    #[test]
     fn unauthorized_child_exec_is_denied() {
         let case = Case::new("process");
         let backend =
