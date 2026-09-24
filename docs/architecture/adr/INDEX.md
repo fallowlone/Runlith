@@ -36,5 +36,6 @@
 | [ADR-0029](./ADR-0029-planner-evidence-resolution.md) | Planner evidence resolution: identity-only `evidence_refs` accepted as the v1 semantic | Accepted | planner evidence, evidence refs, cycle identity, provenance, g7 |
 | [ADR-0030](./ADR-0030-g8-observed-effect-claim-verification-contract.md) | G8 observed effect / claim verification contract (`AgentClaim`, `EvidenceRequirement`, `ObservedEffect`, `ClaimVerification`, CV-1..CV-9) | Accepted | verification, claims, evidence requirements, observed effects, claim verification, completion authority, g8 sequencing |
 | [ADR-0031](./ADR-0031-g8-side-effect-execution-protocol.md) | G8 side-effect execution protocol (durable `SideEffectIntent`, AMBIGUOUS/RECONCILE recovery, idempotency identity, SE-1..SE-8) | Accepted | side effects, durable intent, recovery, reconciliation, idempotency, workspace, git, g8 sequencing |
+| [ADR-0032](./ADR-0032-g8-test-integrity-evidence-authoring.md) | G8 test integrity and trusted verification evidence (TASK-0143) | Accepted | test mutation policy, CV-9, evidence producer, completion authority |
 
 Coverage register (not an ADR): [COVERAGE.md](./COVERAGE.md).
