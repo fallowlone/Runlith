@@ -40,5 +40,5 @@ pub use requirement::{
 pub use state::{can_transition, TaskState, ACCEPTED_TRANSITIONS};
 pub use task::{
     Task, TaskSnapshot, TransitionCommand, MAX_TASK_ACCEPTANCE, MAX_TASK_ALLOWED_PATHS,
-    MAX_TASK_METADATA_ITEM_LEN,
+    MAX_TASK_METADATA_ITEM_LEN, MAX_TASK_PREREQUISITES,
 };

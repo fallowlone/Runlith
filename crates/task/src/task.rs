@@ -13,6 +13,7 @@
 
 use crate::error::{DomainError, DomainResult};
 use crate::id::{ProjectId, TaskId};
+use crate::prerequisite::Prerequisite;
 use crate::state::{can_transition, TaskState};
 
 /// Intent to move a task along its lifecycle. Trusted application services
@@ -93,6 +94,11 @@ pub struct Task {
     /// acceptance criterion, stamped at authoring or migration time. Never
     /// empty while `acceptance` is non-empty.
     evidence_requirements: Vec<crate::requirement::EvidenceRequirement>,
+    /// Declared activation prerequisites (ADR-0030 / TASK-0135): checked by
+    /// the preflight service before a workspace attempt runs; a task with
+    /// unsatisfied prerequisites is blocked through the journaled `Block`
+    /// transition. Durable authored content, `DRAFT`-only to define.
+    prerequisites: Vec<Prerequisite>,
     allowed_paths: Vec<String>,
     forbidden_paths: Vec<String>,
     /// Reserved for the G8 typed requirement-to-evidence model
@@ -131,6 +137,7 @@ impl Task {
             depends_on: Vec::new(),
             acceptance: Vec::new(),
             evidence_requirements: Vec::new(),
+            prerequisites: Vec::new(),
             allowed_paths: Vec::new(),
             forbidden_paths: Vec::new(),
             verification: Vec::new(),
@@ -334,6 +341,39 @@ impl Task {
         Ok(())
     }
 
+    /// Replaces the Task's declared activation prerequisites
+    /// (ADR-0030 / TASK-0135). `DRAFT`-only like all authoring; every value
+    /// arrives already validated by [`Prerequisite::new`], so this only
+    /// enforces the collection invariants (bounded count, no duplicate
+    /// kind+value pair). An empty list is a valid declaration of "no
+    /// prerequisites". A refused call leaves the Task unchanged.
+    pub fn define_prerequisites(&mut self, prerequisites: Vec<Prerequisite>) -> DomainResult<()> {
+        if self.state != TaskState::Draft {
+            return Err(DomainError::transition(format!(
+                "prerequisites can only be authored while DRAFT; task {} is {}",
+                self.id, self.state
+            )));
+        }
+        if prerequisites.len() > MAX_TASK_PREREQUISITES {
+            return Err(DomainError::input(format!(
+                "at most {MAX_TASK_PREREQUISITES} prerequisites are allowed"
+            )));
+        }
+        let mut seen: Vec<&Prerequisite> = Vec::with_capacity(prerequisites.len());
+        for prerequisite in &prerequisites {
+            if seen.contains(&prerequisite) {
+                return Err(DomainError::input(format!(
+                    "prerequisite {} {:?} is declared twice",
+                    prerequisite.kind().as_str(),
+                    prerequisite.value()
+                )));
+            }
+            seen.push(prerequisite);
+        }
+        self.prerequisites = prerequisites;
+        Ok(())
+    }
+
     /// Appends one acceptance criterion (durable intent; tests are evidence,
     /// never the criteria themselves). The criterion receives its explicit
     /// default evidence requirement in the same call, so acceptance and
@@ -399,6 +439,14 @@ impl Task {
         &self.evidence_requirements
     }
 
+    /// Declared activation prerequisites (ADR-0030 / TASK-0135), in
+    /// declaration order. Checked by the preflight service before a
+    /// workspace attempt runs; empty means "no declared prerequisites".
+    #[must_use]
+    pub fn prerequisites(&self) -> &[Prerequisite] {
+        &self.prerequisites
+    }
+
     /// Current lifecycle state.
     #[must_use]
     pub fn state(&self) -> TaskState {
@@ -418,6 +466,7 @@ impl Task {
             depends_on: self.depends_on.clone(),
             acceptance: self.acceptance.clone(),
             evidence_requirements: self.evidence_requirements.clone(),
+            prerequisites: self.prerequisites.clone(),
             allowed_paths: self.allowed_paths.clone(),
             forbidden_paths: self.forbidden_paths.clone(),
             verification: self.verification.clone(),
@@ -482,6 +531,29 @@ impl Task {
             &snapshot.acceptance,
             &snapshot.evidence_requirements,
         )?;
+        // TASK-0135: persisted prerequisites re-validate against the same
+        // collection invariants authoring enforces (per-item shape is
+        // guaranteed by the `Prerequisite` type itself).
+        if snapshot.prerequisites.len() > MAX_TASK_PREREQUISITES {
+            return Err(DomainError::input(format!(
+                "task {} stores more than {MAX_TASK_PREREQUISITES} prerequisites",
+                snapshot.id
+            )));
+        }
+        let mut seen_prerequisites: Vec<&Prerequisite> =
+            Vec::with_capacity(snapshot.prerequisites.len());
+        for prerequisite in &snapshot.prerequisites {
+            if seen_prerequisites.contains(&prerequisite) {
+                return Err(DomainError::input(format!(
+                    "task {} stores duplicate prerequisite {} {:?}",
+                    snapshot.id,
+                    prerequisite.kind().as_str(),
+                    prerequisite.value()
+                )));
+            }
+            seen_prerequisites.push(prerequisite);
+        }
+
         Ok(Self {
             id: snapshot.id,
             project_id: snapshot.project_id,
@@ -491,6 +563,8 @@ impl Task {
             acceptance: snapshot.acceptance,
             evidence_requirements: snapshot.evidence_requirements,
             allowed_paths: snapshot.allowed_paths,
+            prerequisites: snapshot.prerequisites,
+
             forbidden_paths: snapshot.forbidden_paths,
             verification: snapshot.verification,
             required_review: snapshot.required_review,
@@ -527,6 +601,11 @@ pub struct TaskSnapshot {
     /// acceptance criterion. Restore re-validates the coverage, so persisted
     /// content can never bypass the invariant.
     pub evidence_requirements: Vec<crate::requirement::EvidenceRequirement>,
+    /// Declared activation prerequisites (ADR-0030 / TASK-0135). Per-item
+    /// shape is guaranteed by the `Prerequisite` type; restore re-validates
+    /// the collection invariants (bounded count, no duplicates).
+    pub prerequisites: Vec<Prerequisite>,
+    /// Scope contract: allowed paths.
     /// Scope contract: allowed paths.
     pub allowed_paths: Vec<String>,
     /// Scope contract: forbidden paths.
@@ -546,6 +625,8 @@ pub struct TaskSnapshot {
     pub state: TaskState,
 }
 
+/// Upper bound on authored activation prerequisites per Task.
+pub const MAX_TASK_PREREQUISITES: usize = 32;
 /// Upper bound on authored allowed scope paths per Task.
 pub const MAX_TASK_ALLOWED_PATHS: usize = 32;
 /// Upper bound on authored acceptance obligations per Task.
@@ -633,6 +714,7 @@ fn command_name(command: &TransitionCommand) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prerequisite::PrerequisiteKind;
 
     fn draft_task(id: &str) -> Task {
         Task::draft(
@@ -1039,6 +1121,74 @@ mod tests {
     }
 
     #[test]
+    fn prerequisites_authoring_is_draft_only_bounded_and_unique() {
+        let mut task = draft_task("T-1");
+        let file =
+            Prerequisite::new(PrerequisiteKind::RepoFileExists, "crates/task/Cargo.toml").unwrap();
+        let tool = Prerequisite::new(PrerequisiteKind::CommandOnPath, "cargo-nextest").unwrap();
+        task.define_prerequisites(vec![file.clone(), tool.clone()])
+            .unwrap();
+        assert_eq!(task.prerequisites(), &[file.clone(), tool]);
+
+        // Duplicate kind+value pair refused; the refused call changes nothing.
+        let duplicate =
+            Prerequisite::new(PrerequisiteKind::RepoFileExists, "crates/task/Cargo.toml").unwrap();
+        assert!(matches!(
+            task.define_prerequisites(vec![file.clone(), duplicate]),
+            Err(DomainError::InvalidInput(_))
+        ));
+        assert_eq!(task.prerequisites().len(), 2);
+
+        // Bounded count.
+        let too_many: Vec<Prerequisite> = (0..=MAX_TASK_PREREQUISITES)
+            .map(|i| {
+                Prerequisite::new(PrerequisiteKind::CommandOnPath, format!("tool-{i}")).unwrap()
+            })
+            .collect();
+        assert!(matches!(
+            task.define_prerequisites(too_many),
+            Err(DomainError::InvalidInput(_))
+        ));
+        assert_eq!(task.prerequisites().len(), 2);
+
+        // DRAFT-only authoring.
+        task.mark_ready().unwrap();
+        assert!(matches!(
+            task.define_prerequisites(vec![file]),
+            Err(DomainError::InvalidTransition(_))
+        ));
+    }
+
+    #[test]
+    fn prerequisites_round_trip_and_restore_revalidation() {
+        let mut task = draft_task("T-1");
+        task.define_prerequisites(vec![
+            Prerequisite::new(PrerequisiteKind::GitAncestorRef, "refs/heads/base").unwrap(),
+            Prerequisite::new(PrerequisiteKind::RepoFileExists, "Cargo.toml").unwrap(),
+        ])
+        .unwrap();
+        let snapshot = task.snapshot();
+        assert_eq!(snapshot.prerequisites.len(), 2);
+        let rebuilt = Task::restore(snapshot).unwrap();
+        assert_eq!(rebuilt, task);
+
+        // Restore fails closed on a persisted duplicate pair.
+        let duplicate = task.prerequisites()[0].clone();
+        let mut drifted = task.snapshot();
+        drifted.prerequisites.push(duplicate);
+        assert!(Task::restore(drifted).is_err());
+
+        // Restore fails closed on a persisted over-bound collection.
+        let mut over = task.snapshot();
+        over.prerequisites = (0..=MAX_TASK_PREREQUISITES)
+            .map(|i| {
+                Prerequisite::new(PrerequisiteKind::CommandOnPath, format!("tool-{i}")).unwrap()
+            })
+            .collect();
+        assert!(Task::restore(over).is_err());
+    }
+
+    #[test]
     fn restore_accepts_any_canonical_state_without_transition() {
         // Reconstruction is not a transition: states unreachable through
         // current public ops (FAILED, CANCELLED) still restore, so storage
@@ -1052,6 +1202,7 @@ mod tests {
                 depends_on: Vec::new(),
                 acceptance: Vec::new(),
                 evidence_requirements: Vec::new(),
+                prerequisites: Vec::new(),
                 allowed_paths: Vec::new(),
                 forbidden_paths: Vec::new(),
                 verification: Vec::new(),

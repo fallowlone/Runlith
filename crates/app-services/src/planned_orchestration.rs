@@ -555,7 +555,8 @@ fn replan_evidence(outcome: &OrchestrationOutcome) -> Option<EvidenceRef> {
         OrchestrationOutcome::NotRunnable { .. }
         | OrchestrationOutcome::WaitingOnDependency { .. }
         | OrchestrationOutcome::ExecutionSucceededAndVerified { .. }
-        | OrchestrationOutcome::Cancelled { .. } => return None,
+        | OrchestrationOutcome::Cancelled { .. }
+        | OrchestrationOutcome::BlockedByPrerequisite { .. } => return None,
     };
     EvidenceRef::new(format!("attempt:{}", attempt.as_str())).ok()
 }

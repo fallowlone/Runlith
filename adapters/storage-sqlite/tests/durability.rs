@@ -535,6 +535,62 @@ fn evidence_requirements_round_trip_with_params_and_restart() {
 }
 
 #[test]
+fn prerequisites_round_trip_with_restart_and_save_task_replacement() {
+    let db = TestDb::new("prerequisite-round-trip");
+    {
+        let mut store = db.open();
+        stored_project(&mut store, "P-1");
+        let mut task = draft_task("P-1", "T-1");
+        task.define_prerequisites(vec![
+            task_domain::Prerequisite::new(
+                task_domain::PrerequisiteKind::GitAncestorRef,
+                "refs/heads/base",
+            )
+            .unwrap(),
+            task_domain::Prerequisite::new(
+                task_domain::PrerequisiteKind::RepoFileExists,
+                "crates/task/Cargo.toml",
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        store.create_task(&task).unwrap();
+    }
+    // Reopen: the store, not the test, is the authority on what persisted.
+    {
+        let store = db.open();
+        let task = store
+            .get_task(&TaskId::new("T-1").unwrap())
+            .unwrap()
+            .expect("task survives restart");
+        let prerequisites = task.prerequisites();
+        assert_eq!(prerequisites.len(), 2);
+        assert_eq!(
+            prerequisites[0].kind(),
+            task_domain::PrerequisiteKind::GitAncestorRef
+        );
+        assert_eq!(prerequisites[0].value(), "refs/heads/base");
+        assert_eq!(
+            prerequisites[1].kind(),
+            task_domain::PrerequisiteKind::RepoFileExists
+        );
+        assert_eq!(prerequisites[1].value(), "crates/task/Cargo.toml");
+    }
+    // Legacy tasks (no rows) read back as an empty declaration — never a
+    // fabricated obligation.
+    {
+        let mut store = db.open();
+        let legacy = draft_task("P-1", "T-legacy");
+        store.create_task(&legacy).unwrap();
+        let loaded = store
+            .get_task(&TaskId::new("T-legacy").unwrap())
+            .unwrap()
+            .expect("legacy task");
+        assert!(loaded.prerequisites().is_empty());
+    }
+}
+
+#[test]
 fn corrupt_requirement_rows_fail_closed_on_read() {
     let db = TestDb::new("requirement-corrupt");
     {
@@ -611,7 +667,7 @@ fn fresh_database_migrates_to_current() {
     let db = TestDb::new("fresh");
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 19);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 20);
 }
 
 #[test]
