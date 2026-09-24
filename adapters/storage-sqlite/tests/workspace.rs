@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::os::unix::fs::PermissionsExt;
 
 use agent_runtime::{Execution, ExecutionId};
+use policy::{TestMutationPolicy, TestMutationPolicyRevision};
 use storage_sqlite::{
     EventType, NewJournalEvent, SqliteStore, StorageError, EVENT_SCHEMA_VERSION,
     SUPPORTED_SCHEMA_VERSION,
@@ -187,6 +188,119 @@ fn lease_crud_round_trips_through_the_port() {
         .unwrap()
         .unwrap();
     assert_eq!(by_owner.id().as_str(), "ws-1");
+}
+
+#[test]
+fn test_mutation_policy_and_evaluated_base_are_immutable_and_recoverable() {
+    let db = TestDb::new("test-mutation-policy");
+    let task;
+    let exec;
+    let lease = lease("ws-policy", "E-POLICY");
+    let revision = TestMutationPolicyRevision::new(
+        2,
+        TestMutationPolicy::scoped_reviewed(
+            vec!["tests/unit.rs".into()],
+            vec!["cargo-test-unit".into()],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    {
+        let mut store = db.open();
+        task = seed_task(&mut store, "P-POLICY", "T-POLICY");
+        exec = seed_execution(&mut store, &task, "E-POLICY");
+        assert_eq!(
+            store
+                .get_test_mutation_policy(task.id().as_str())
+                .unwrap()
+                .unwrap()
+                .policy(),
+            &TestMutationPolicy::Forbidden
+        );
+        store
+            .append_test_mutation_policy_revision(task.id().as_str(), &revision)
+            .unwrap_err(); // Execution already exists: selection is closed.
+    }
+    {
+        let mut store = db.open();
+        let fresh_task = seed_task(&mut store, "P-OTHER", "T-OTHER");
+        let selected = TestMutationPolicyRevision::new(
+            2,
+            TestMutationPolicy::scoped_reviewed(
+                vec!["tests/unit.rs".into()],
+                vec!["cargo-test-unit".into()],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        store
+            .append_test_mutation_policy_revision(fresh_task.id().as_str(), &selected)
+            .unwrap();
+        assert_eq!(
+            store
+                .get_test_mutation_policy(fresh_task.id().as_str())
+                .unwrap(),
+            Some(selected)
+        );
+        store
+            .insert_allocated_lease(&lease)
+            .expect("insert trusted test lease");
+        store
+            .mark_lease_ready(
+                lease.id(),
+                &evidence(WorkspaceEventKind::Created, &task, &exec, "ws-policy"),
+            )
+            .unwrap();
+        let binding = store
+            .bind_evaluated_policy_base(
+                exec.id().as_str(),
+                task.id().as_str(),
+                lease.id().as_str(),
+                lease.base_revision().as_str(),
+            )
+            .unwrap();
+        assert_eq!(binding.base_revision, "a".repeat(40));
+        assert!(store
+            .bind_evaluated_policy_base(
+                exec.id().as_str(),
+                task.id().as_str(),
+                lease.id().as_str(),
+                &"b".repeat(40),
+            )
+            .is_err());
+    }
+    let reopened = db.open();
+    let binding = reopened
+        .get_evaluated_policy_base(exec.id().as_str())
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.base_revision, "a".repeat(40));
+    assert_eq!(binding.policy.revision(), 1);
+    assert_eq!(
+        reopened
+            .get_test_mutation_policy("T-OTHER")
+            .unwrap()
+            .unwrap(),
+        revision
+    );
+    drop(reopened);
+    let stale = TestMutationPolicyRevision::new(2, TestMutationPolicy::Forbidden).unwrap();
+    db.raw()
+        .execute(
+            "INSERT INTO test_mutation_policy_revisions(task_id, revision, serialized, fingerprint)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                task.id().as_str(),
+                stale.revision() as i64,
+                stale.serialize(),
+                stale.fingerprint()
+            ],
+        )
+        .unwrap();
+    assert!(db
+        .open()
+        .get_evaluated_policy_base(exec.id().as_str())
+        .is_err());
 }
 
 #[test]

@@ -969,14 +969,18 @@ pub(crate) fn insert_task_row(
             ],
         )
         .map_err(|error| map_constraint(error, "insert task"))?;
+    crate::test_mutation_store::insert_default_policy(connection, snapshot.id.as_str())?;
     Ok(())
 }
 
 fn insert_task_row_replace(connection: &Connection, snapshot: &TaskSnapshot) -> StorageResult<()> {
     connection
         .execute(
-            "INSERT OR REPLACE INTO tasks (id, project_id, objective, parent_id, state, kind, risk)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO tasks (id, project_id, objective, parent_id, state, kind, risk)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,
+                objective=excluded.objective, parent_id=excluded.parent_id,
+                state=excluded.state, kind=excluded.kind, risk=excluded.risk",
             params![
                 snapshot.id.as_str(),
                 snapshot.project_id.as_str(),

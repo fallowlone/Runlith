@@ -20,9 +20,11 @@ use ipc_contracts::proto::{
     task_core_response, AddDependencyResponse, BusinessError, BusinessErrorCode,
     CreatePlanningTaskResponse, CreateProjectResponse, CreateTaskResponse, GetProjectResponse,
     GetTaskResponse, LifecycleResponse, ListDependenciesResponse, ListProjectsResponse,
-    ListTasksResponse, PlanningTaskDto, ProjectDto, TaskAuthoringCoreRequest,
-    TaskAuthoringCoreResponse, TaskCoreRequest, TaskCoreResponse, TaskDto, TaskLifecycleOp,
+    ListTasksResponse, PlanningTaskDto, ProjectDto, SelectTestMutationPolicyResponse,
+    TaskAuthoringCoreRequest, TaskAuthoringCoreResponse, TaskCoreRequest, TaskCoreResponse,
+    TaskDto, TaskLifecycleOp, TestMutationPolicyKind,
 };
+use policy::TestMutationPolicy;
 use storage_sqlite::StorageError;
 use task_domain::{DomainError, Project, ProjectId, Task, TaskId};
 
@@ -228,46 +230,105 @@ pub fn dispatch_task_authoring<C: app_services::Clock>(
             )),
         }
     };
-    let Some(task_authoring_core_request::Payload::CreatePlanningTask(req)) = request.payload
-    else {
-        return TaskAuthoringCoreResponse {
+    match request.payload {
+        Some(task_authoring_core_request::Payload::CreatePlanningTask(req)) => {
+            let ids = TaskId::new(req.id).and_then(|id| Ok((id, ProjectId::new(req.project_id)?)));
+            let (id, project_id) = match ids {
+                Ok(ids) => ids,
+                Err(error) => return authoring_error(ServiceError::Domain(error)),
+            };
+            match service.create_planning_task(
+                id,
+                project_id,
+                req.objective,
+                req.allowed_paths,
+                req.acceptance_criteria,
+                req.baseline_risk,
+            ) {
+                Ok((task, _)) => {
+                    let facts = task.snapshot();
+                    TaskAuthoringCoreResponse {
+                        payload: Some(task_authoring_core_response::Payload::CreatePlanningTask(
+                            CreatePlanningTaskResponse {
+                                task: Some(PlanningTaskDto {
+                                    task: Some(task_dto(&task)),
+                                    allowed_paths: facts.allowed_paths,
+                                    acceptance_criteria: facts.acceptance,
+                                    baseline_risk: facts.risk.unwrap_or_default(),
+                                }),
+                            },
+                        )),
+                    }
+                }
+                Err(error) => authoring_error(error),
+            }
+        }
+        Some(task_authoring_core_request::Payload::SelectTestMutationPolicy(req)) => {
+            // This is an owner control-plane operation, not a provider output
+            // channel. Same-UID IPC does not identify the caller as a
+            // provider; provider/planner children are instead kept from this
+            // endpoint by the mandatory G6 Runner boundary. The Seatbelt
+            // profile regression test covers the daemon socket exclusion;
+            // platforms without all required isolation axes refuse launch.
+            let task_id = match TaskId::new(req.task_id) {
+                Ok(id) => id,
+                Err(error) => return authoring_error(ServiceError::Domain(error)),
+            };
+            let policy = match TestMutationPolicyKind::try_from(req.kind) {
+                Ok(TestMutationPolicyKind::Forbidden)
+                    if req.exact_paths.is_empty() && req.exact_checks.is_empty() =>
+                {
+                    TestMutationPolicy::Forbidden
+                }
+                Ok(TestMutationPolicyKind::ScopedReviewed) => {
+                    match TestMutationPolicy::scoped_reviewed(req.exact_paths, req.exact_checks) {
+                        Ok(policy) => policy,
+                        Err(_) => {
+                            return authoring_invalid_argument(
+                                "test mutation policy scope is invalid",
+                            )
+                        }
+                    }
+                }
+                _ => {
+                    return authoring_invalid_argument(
+                        "test mutation policy selection is malformed",
+                    )
+                }
+            };
+            match service.select_test_mutation_policy(&task_id, policy) {
+                Ok(selected) => TaskAuthoringCoreResponse {
+                    payload: Some(
+                        task_authoring_core_response::Payload::SelectTestMutationPolicy(
+                            SelectTestMutationPolicyResponse {
+                                revision: selected.revision(),
+                                fingerprint: selected.fingerprint().to_owned(),
+                            },
+                        ),
+                    ),
+                },
+                Err(error) => authoring_error(error),
+            }
+        }
+        None => TaskAuthoringCoreResponse {
             payload: Some(task_authoring_core_response::Payload::Error(
                 BusinessError {
                     code: BusinessErrorCode::InvalidArgument as i32,
                     message: "empty task authoring request".to_owned(),
                 },
             )),
-        };
-    };
-    let ids = TaskId::new(req.id).and_then(|id| Ok((id, ProjectId::new(req.project_id)?)));
-    let (id, project_id) = match ids {
-        Ok(ids) => ids,
-        Err(error) => return authoring_error(ServiceError::Domain(error)),
-    };
-    match service.create_planning_task(
-        id,
-        project_id,
-        req.objective,
-        req.allowed_paths,
-        req.acceptance_criteria,
-        req.baseline_risk,
-    ) {
-        Ok((task, _)) => {
-            let facts = task.snapshot();
-            TaskAuthoringCoreResponse {
-                payload: Some(task_authoring_core_response::Payload::CreatePlanningTask(
-                    CreatePlanningTaskResponse {
-                        task: Some(PlanningTaskDto {
-                            task: Some(task_dto(&task)),
-                            allowed_paths: facts.allowed_paths,
-                            acceptance_criteria: facts.acceptance,
-                            baseline_risk: facts.risk.unwrap_or_default(),
-                        }),
-                    },
-                )),
-            }
-        }
-        Err(error) => authoring_error(error),
+        },
+    }
+}
+
+fn authoring_invalid_argument(message: &str) -> TaskAuthoringCoreResponse {
+    TaskAuthoringCoreResponse {
+        payload: Some(task_authoring_core_response::Payload::Error(
+            BusinessError {
+                code: BusinessErrorCode::InvalidArgument as i32,
+                message: message.to_owned(),
+            },
+        )),
     }
 }
 
@@ -940,6 +1001,90 @@ mod tests {
             TaskAuthoringCoreRequest { payload: None },
         ));
         assert_eq!(empty.code, BusinessErrorCode::InvalidArgument as i32);
+    }
+
+    #[test]
+    fn task_authoring_policy_command_selects_only_valid_exact_scope() {
+        use ipc_contracts::proto::{
+            CreateTaskRequest, SelectTestMutationPolicyRequest, TestMutationPolicyKind,
+        };
+
+        let mut service = service();
+        dispatch(&mut service, create_project_request("P-1", "Runlith"));
+        dispatch(
+            &mut service,
+            TaskCoreRequest {
+                payload: Some(task_core_request::Payload::CreateTask(CreateTaskRequest {
+                    id: "T-POLICY".into(),
+                    project_id: "P-1".into(),
+                    objective: "policy selection".into(),
+                })),
+            },
+        );
+        let selected = dispatch_task_authoring(
+            &mut service,
+            TaskAuthoringCoreRequest {
+                payload: Some(
+                    task_authoring_core_request::Payload::SelectTestMutationPolicy(
+                        SelectTestMutationPolicyRequest {
+                            task_id: "T-POLICY".into(),
+                            kind: TestMutationPolicyKind::ScopedReviewed as i32,
+                            exact_paths: vec!["tests/unit.rs".into()],
+                            exact_checks: vec!["cargo-test-unit".into()],
+                        },
+                    ),
+                ),
+            },
+        );
+        let fingerprint = match selected.payload {
+            Some(task_authoring_core_response::Payload::SelectTestMutationPolicy(response)) => {
+                assert_eq!(response.revision, 2);
+                response.fingerprint
+            }
+            other => panic!("expected selected policy response, got {other:?}"),
+        };
+        let task_id = TaskId::new("T-POLICY").unwrap();
+        let selected = service
+            .store()
+            .get_test_mutation_policy(task_id.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.fingerprint(), fingerprint);
+        assert!(selected.policy().allows("tests/unit.rs", "cargo-test-unit"));
+        assert!(!selected
+            .policy()
+            .allows("tests/unit.rs/child", "cargo-test-unit"));
+
+        let malformed = dispatch_task_authoring(
+            &mut service,
+            TaskAuthoringCoreRequest {
+                payload: Some(
+                    task_authoring_core_request::Payload::SelectTestMutationPolicy(
+                        SelectTestMutationPolicyRequest {
+                            task_id: "T-POLICY".into(),
+                            kind: TestMutationPolicyKind::Forbidden as i32,
+                            exact_paths: vec!["tests/other.rs".into()],
+                            exact_checks: vec![],
+                        },
+                    ),
+                ),
+            },
+        );
+        assert!(matches!(
+            malformed.payload,
+            Some(task_authoring_core_response::Payload::Error(BusinessError {
+                code,
+                ..
+            })) if code == BusinessErrorCode::InvalidArgument as i32
+        ));
+        assert_eq!(
+            service
+                .store()
+                .get_test_mutation_policy(task_id.as_str())
+                .unwrap()
+                .unwrap(),
+            selected
+        );
     }
 
     #[test]
