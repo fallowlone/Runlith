@@ -167,6 +167,14 @@ fn schema_16_duplicate_acceptance_rows_fail_closed_then_remediate() {
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
 
+    assert_eq!(
+        store
+            .get_test_mutation_policy("T-legacy")
+            .unwrap()
+            .unwrap()
+            .policy(),
+        &policy::TestMutationPolicy::Forbidden
+    );
     let legacy = store
         .get_task(&TaskId::new("T-legacy").unwrap())
         .unwrap()
@@ -667,7 +675,7 @@ fn fresh_database_migrates_to_current() {
     let db = TestDb::new("fresh");
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 20);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 21);
 }
 
 #[test]

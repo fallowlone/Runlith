@@ -9,8 +9,10 @@ use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
 mod engine;
+mod test_mutation;
 
 pub use engine::{CompiledPolicy, PolicyEngine, PolicyLayer, PolicyRule, PolicyRuleEvidence};
+pub use test_mutation::{TestMutationPolicy, TestMutationPolicyError, TestMutationPolicyRevision};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CapabilityKind {
@@ -603,6 +605,7 @@ pub enum PolicyContractError {
     ApprovalDenied,
     ApprovalNotRequired,
     HardDenied,
+    InvalidTestMutationPolicy(String),
 }
 
 impl fmt::Display for PolicyContractError {
