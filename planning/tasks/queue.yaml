@@ -4042,16 +4042,26 @@ items:
     objective: >-
       Emit privacy-safe routing decision receipts (fingerprinted inputs,
       full option sets with eligibility failures, selection, outcome) and
-      evaluate candidate scoring policies offline, including model-quality
-      aggregation with confidence shrinkage.
+      evaluate candidate policies offline. First determine current hard
+      eligibility from policy/privacy, required tools and context, account
+      authorization, provider/model health, and quota. Then compare verified
+      outcome quality and confidence, latency, and cost per verified success
+      using fresh outcome receipts. Preserve stale and unknown signal status
+      explicitly; do not infer capabilities from provider/model names. Keep
+      the evaluation explainable without defining a global scoring formula.
     scope: >-
       Offline harness only; authority field fixed to
-      offline-evaluation-only; no live routing path; receipts exclude
-      credentials and raw repo content.
+      offline-evaluation-only; no live or learned routing path. Receipts
+      exclude credentials and raw repo content. Shadow evidence requires
+      owner ratification before any live routing proposal or implementation.
     exit_criteria_summary: >-
       Harness reproduces recorded runs; evaluation report compares at least
-      two scoring policies on the same receipt set; shadow-mode evidence is
-      durable and reviewable.
+      two candidate policies on the same receipt set, showing eligibility
+      exclusions and outcome-quality confidence, latency, and cost per
+      verified success from fresh receipts; stale/unknown signals are
+      visible and cannot silently qualify as current evidence. Shadow-mode
+      evidence is durable and reviewable; owner ratification remains a
+      barrier to live routing.
     depends_on:
       - TASK-0129
     blocked_by: []
@@ -4251,3 +4261,44 @@ items:
       - docs/architecture/task-engine.md
       - crates/policy
       - crates/app-services
+
+  - id: TASK-0147
+    gate: G9
+    title: Dogfoodable repository information finder
+    objective: >-
+      Make the Context Engine's retrieval quality directly usable and
+      measurable through a bounded Runlith information-finder surface,
+      enabling agents and developers to locate repository evidence with
+      less search and context overhead.
+    scope: >-
+      Plan a Context Engine or agentctl surface for semantic navigation and
+      progressive disclosure, with source-revision provenance, bounded
+      output, freshness checks, security filtering, and reproducible
+      selection. Before implementation, define a representative repository
+      question set, comparable runs across the finder, rg, and an RTK-style
+      baseline, and evidence-quality and token-cost measures. Record the
+      repository revision, build/configuration, hardware/backend provenance,
+      and repeat/run protocol. Use the same question set and comparable
+      conditions for each method. Record elapsed time as well. Reuse existing
+      Context Engine and Resource contracts; no
+      new vector database by default. No G8 implementation or parallel
+      retrieval subsystem. Execute only after G8 closure and G9 activation
+      under the existing gate workflow.
+    exit_criteria_summary: >-
+      A dogfoodable finder returns bounded, reopenable evidence tied to its
+      source revision; stale or inaccessible sources are handled explicitly;
+      selection can be reproduced and explained. Before implementation, the
+      benchmark defines a representative repository question set and measures
+      evidence quality using relevance and source support, plus token cost
+      using a consistently reported input/output token count for comparable
+      runs of the finder, rg, and an RTK-style baseline using the same
+      representative question set and comparable conditions. The protocol
+      records repository revision, build/configuration, hardware/backend
+      provenance, and repeat/run procedure. Elapsed time is recorded. Security
+      filtering and provenance behavior are documented and reviewable.
+    depends_on:
+      - TASK-0137
+    blocked_by: []
+    references:
+      - docs/architecture/context-engine.md
+      - docs/architecture/adr/ADR-0010-context-derived-state.md
