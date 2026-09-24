@@ -4277,12 +4277,20 @@ items:
       Runlith settings, Policy admission-time selection, fixed product-managed reviewer
       profile/key or minimal mapping, and binding of setting value/revision,
       profile/mapping revision, Policy revision, and selected path to review
-      records and integrity assessments. Owner setting changes must not be
-      authorized by implementation-agent authority or same-user IPC alone.
-      Implement B1 through independently authenticated human and implementation
-      principals, enforced inequality, assignment outside implementation
-      control, exact G6 authorization, and scoped read-only control-plane
-      review. Support B2 through independently authenticated service and
+      records and integrity assessments. Owner setting changes require fresh
+      interactive platform user-presence authentication through the trusted
+      Runlith desktop/control host, bound in a product-owned process to the
+      exact operation; same-user IPC alone and implementation-agent authority
+      are insufficient. Implement B1 with HumanPrincipal sourced from OS-account
+      identity plus that fresh authentication, and ImplementationPrincipal
+      product-minted per governed G5/G6 Attempt and bound to Runner process and
+      admission provenance. Compare and enforce reviewer != implementer from
+      trusted records; keep principal namespaces typed and reject caller/provider
+      identity claims. Assignment is outside implementation control. If fresh
+      presence or required isolation is unavailable, fail closed without an
+      unsandboxed fallback. Implement exact G6 authorization and scoped
+      read-only control-plane review. Support B2 through independently
+      authenticated service and
       implementation principals and governed G5/G6 Runner execution when that
       path is available. Settings must permit B2 selection while its execution
       remains blocked until PREREQUISITE-G5-G6-AUTHENTICATED-GOVERNED-REVIEWER-SERVICE
@@ -4301,13 +4309,19 @@ items:
       B1 or B2 inside Runlith settings; Policy resolves it at admission and binds
       its value/revision,
       profile/mapping revision, Policy revision, selected path, and exact review
-      inputs to the record and integrity assessment. Owner updates require a
-      trusted owner control path beyond same-user IPC and implementation-agent
-      authority. B1 is executable through independently authenticated human
-      and implementation principals, enforces reviewer != implementer and
-      assignment outside implementation control, and denies absent or
-      unprovable identity. B1 requires G6-authorized human control-plane review
-      with scoped read-only candidate access. B2 is selectable in settings and
+      inputs to the record and integrity assessment. Owner updates and B1
+      review require fresh interactive platform user-presence authentication
+      obtained by the trusted Runlith desktop/control host and bound by a
+      product-owned process to the exact operation; same-user IPC/client_kind
+      alone is insufficient. B1 uses typed HumanPrincipal (OS-account identity
+      plus fresh authentication) and ImplementationPrincipal (product-minted
+      per governed G5/G6 Attempt, bound to Runner process/admission provenance),
+      compares trusted records to enforce reviewer != implementer, keeps
+      assignment outside implementation control, and denies unavailable or
+      unprovable identity/presence. Provider text cannot establish identity,
+      owner proof or assignment. Required isolation has no unsandboxed fallback.
+      B1 requires G6-authorized human control-plane review with scoped read-only
+      candidate access. B2 is selectable in settings and
       visibly blocked; it cannot author a review until
       PREREQUISITE-G5-G6-AUTHENTICATED-GOVERNED-REVIEWER-SERVICE is separately
       satisfied and an end-to-end authenticated governed B2 path is demonstrated

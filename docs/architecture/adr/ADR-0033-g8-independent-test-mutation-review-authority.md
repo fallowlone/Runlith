@@ -34,6 +34,34 @@ same-user IPC. Assignment is outside implementation control. Missing or
 unprovable implementation identity, reviewer identity, owner authority, or
 selected-path controls denies review. There is no fallback between paths.
 
+### B1 principal sources and comparison
+
+B1 uses two distinct typed principal namespaces, populated only from trusted
+product records:
+
+- `HumanPrincipal`: the operating-system account identity plus fresh
+  interactive platform user-presence authentication, obtained by the trusted
+  Runlith desktop/control host for this exact review or owner-setting
+  operation. The product-owned process binds the authentication to a fresh
+  operation nonce and the exact input digest. Same-user IPC authentication,
+  `client_kind`, caller/provider text, and prior authentication alone do not
+  establish this principal. If the trusted host cannot obtain or bind fresh
+  user presence, the operation fails closed.
+- `ImplementationPrincipal`: a product-minted principal for the governed G5/G6
+  execution `Attempt`, bound to its Runner process and admission provenance.
+  It is derived from trusted execution records, never caller/provider text,
+  model labels, or an asserted identity.
+
+The product compares these typed principals using trusted provenance that
+resolves whether the authenticated human is the actor responsible for the
+implementation Attempt, and rejects a match before assignment and review
+admission. The principal namespaces remain distinct; the comparison is based
+on trusted attribution records, never string or caller-asserted identity
+equality. Provider output cannot acquire owner proof, choose the reviewer or
+assignment, or supply either principal. Required G5/G6 isolation cannot use an
+unsandboxed fallback. This contract selects no particular OS API, vendor, or
+cryptographic design.
+
 Both paths review the exact captured base, candidate, changed-input manifest
 and affected checks read-only. They cannot write the candidate, mutate Git,
 access implementation sessions or secrets, or grant capabilities. Any process,
@@ -98,8 +126,10 @@ profile IDs, reviewer text and output claims are not identity proof.
 - `Forbidden` remains effective by default; unavailable or invalid selected
   review authority leaves `ScopedReviewed` ineligible.
 - B1 and B2 require independent principal proof, exact review binding, G6
-  authorization and read-only scope. B2 additionally requires governed G5
-  execution; selection alone grants no authority.
+  authorization and read-only scope. B1 obtains fresh human presence through
+  the trusted host and derives the implementation principal from governed
+  Attempt records. B2 additionally requires governed G5 execution; selection
+  alone grants no authority.
 - Review evidence, test results and optional human approvals remain distinct.
   Review cannot satisfy a separate approval requirement.
 - Evaluation authors trusted records; Runner enforces already-authorized
