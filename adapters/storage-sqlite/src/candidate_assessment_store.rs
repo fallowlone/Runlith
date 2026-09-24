@@ -1,0 +1,557 @@
+use evaluation::{
+    candidate_sha256, subject_fingerprint, CandidateCheckpointPhase, CandidateFreshnessCheckpoint,
+    CandidateIntegrityAssessment, CandidateIntegrityOutcome, CaptureAuthority, EffectId,
+    EffectKind, EffectPayload, EffectProvenance, EffectSubjectRef, ObservedEffect,
+    SubjectFingerprint,
+};
+use rusqlite::{params, OptionalExtension, TransactionBehavior};
+
+use crate::{StorageError, StorageResult};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CandidateEvidence {
+    pub effect: ObservedEffect,
+    pub integrity: CandidateIntegrityAssessment,
+}
+
+impl crate::SqliteStore {
+    pub fn get_candidate_evidence(
+        &self,
+        execution_id: &str,
+        attempt_id: &str,
+    ) -> StorageResult<Option<CandidateEvidence>> {
+        let row: Option<String> = self
+            .connection()
+            .query_row(
+                "SELECT effect_id FROM candidate_input_assessments
+                 WHERE execution_id = ?1 AND attempt_id = ?2
+                 ORDER BY completed_at_ms DESC, assessment_id DESC LIMIT 1",
+                params![execution_id, attempt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(effect_id) = row else {
+            return Ok(None);
+        };
+        let effect_id =
+            EffectId::new(effect_id).map_err(|error| StorageError::Corrupt(error.to_string()))?;
+        let effect = self
+            .get_observed_effect(&effect_id)?
+            .ok_or_else(|| StorageError::Corrupt("candidate result effect is missing".into()))?;
+        let integrity = self
+            .get_candidate_integrity_assessment(execution_id, attempt_id)?
+            .ok_or_else(|| {
+                StorageError::Corrupt("candidate integrity assessment is missing".into())
+            })?;
+        if !integrity.checkpoints.iter().any(|checkpoint| {
+            checkpoint.phase == CandidateCheckpointPhase::Completion && checkpoint.matched
+        }) {
+            return Err(StorageError::Corrupt(
+                "candidate evidence has no durable completion checkpoint".to_owned(),
+            ));
+        }
+        let lineage_task: Option<String> = self
+            .connection()
+            .query_row(
+                "SELECT e.task_id FROM executions e
+                 JOIN execution_attempts a ON a.execution_id = e.id
+                 WHERE e.id = ?1 AND a.attempt_id = ?2",
+                params![execution_id, attempt_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if lineage_task.as_deref() != Some(integrity.task_id.as_str()) {
+            return Err(StorageError::Corrupt(
+                "candidate assessment task lineage is invalid".to_owned(),
+            ));
+        }
+        let expected_fingerprint = candidate_result_fingerprint(&integrity)
+            .map_err(|error| StorageError::Corrupt(error.to_string()))?;
+        if effect.effect_kind() != EffectKind::TestSuiteResult
+            || effect.provenance().execution_id.as_str() != execution_id
+            || effect.provenance().attempt_id.as_str() != attempt_id
+            || effect.subject_ref().as_str() != integrity.subject_ref
+            || effect.subject_fingerprint() != &expected_fingerprint
+            || effect.provenance().runtime_ref != integrity.runtime_ref
+            || effect.provenance().evaluator_ref.as_deref()
+                != Some(integrity.evaluator_ref.as_str())
+            || effect.provenance().receipt_ref.as_deref() != Some(integrity.invocation_id.as_str())
+        {
+            return Err(StorageError::Corrupt(
+                "candidate effect and integrity assessment disagree".to_owned(),
+            ));
+        }
+        Ok(Some(CandidateEvidence { effect, integrity }))
+    }
+
+    pub fn append_candidate_result(
+        &mut self,
+        subject_ref: EffectSubjectRef,
+        subject_fingerprint: SubjectFingerprint,
+        payload: EffectPayload,
+        captured_at: impl Into<String>,
+        provenance: EffectProvenance,
+        assessment: &CandidateIntegrityAssessment,
+    ) -> StorageResult<ObservedEffect> {
+        assessment
+            .validate()
+            .map_err(|error| StorageError::ConstraintViolation(error.to_string()))?;
+        if subject_fingerprint
+            != candidate_result_fingerprint(assessment)
+                .map_err(|error| StorageError::ConstraintViolation(error.to_string()))?
+        {
+            return Err(StorageError::ConstraintViolation(
+                "candidate result fingerprint does not bind its assessment".to_owned(),
+            ));
+        }
+        if payload.kind() != EffectKind::TestSuiteResult
+            || assessment.execution_id != provenance.execution_id.as_str()
+            || assessment.attempt_id != provenance.attempt_id.as_str()
+            || assessment.subject_ref != subject_ref.as_str()
+            || assessment.runtime_ref != provenance.runtime_ref
+            || provenance.evaluator_ref.as_deref() != Some(assessment.evaluator_ref.as_str())
+            || provenance.receipt_ref.as_deref() != Some(assessment.invocation_id.as_str())
+        {
+            return Err(StorageError::ConstraintViolation(
+                "candidate assessment does not bind its captured result".to_owned(),
+            ));
+        }
+        let captured_at = captured_at.into();
+        let transaction = self
+            .connection_mut()
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let lineage: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT e.task_id, a.execution_id FROM executions e
+             JOIN execution_attempts a ON a.execution_id = e.id
+             WHERE e.id = ?1 AND a.attempt_id = ?2",
+                params![
+                    provenance.execution_id.as_str(),
+                    provenance.attempt_id.as_str()
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if lineage.as_ref().is_none_or(|(task, execution)| {
+            task != &assessment.task_id || execution != assessment.execution_id.as_str()
+        }) {
+            return Err(StorageError::Corrupt(
+                "candidate result task/execution/attempt lineage mismatch".to_owned(),
+            ));
+        }
+        let next: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(CAST(substr(effect_id, 8) AS INTEGER)), 0) + 1
+             FROM observed_effects WHERE effect_id GLOB 'effect-[0-9]*'",
+            [],
+            |row| row.get(0),
+        )?;
+        let effect = ObservedEffect::restore(
+            EffectId::new(format!("effect-{}", next.max(1)))
+                .map_err(|error| StorageError::Corrupt(error.to_string()))?,
+            subject_ref,
+            subject_fingerprint,
+            EffectKind::TestSuiteResult,
+            CaptureAuthority::LocalHarness,
+            captured_at,
+            payload,
+            provenance,
+        )
+        .map_err(|error| StorageError::ConstraintViolation(error.to_string()))?;
+        insert_effect(&transaction, &effect)?;
+        insert_assessment(&transaction, effect.effect_id(), assessment)?;
+        transaction.commit()?;
+        Ok(effect)
+    }
+
+    pub fn get_candidate_integrity_assessment(
+        &self,
+        execution_id: &str,
+        attempt_id: &str,
+    ) -> StorageResult<Option<CandidateIntegrityAssessment>> {
+        type Row = (
+            String,
+            String,
+            String,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+        );
+        let row: Option<Row> = self
+            .connection()
+            .query_row(
+                "SELECT task_id, subject_ref, requirement_revision, policy_revision,
+                    policy_fingerprint, criterion_id, selector, selector_path,
+                    selector_literal, invocation_id,
+                    evaluator_ref, runtime_ref, enforcement_ref, base_commit_oid,
+                    base_tree_oid, base_manifest_sha256, candidate_commit_oid,
+                    candidate_tree_oid, candidate_manifest_sha256, checkpoints,
+                    integrity_outcome, started_at_ms, completed_at_ms
+             FROM candidate_input_assessments WHERE execution_id = ?1 AND attempt_id = ?2
+             ORDER BY completed_at_ms DESC, assessment_id DESC LIMIT 1",
+                params![execution_id, attempt_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                        row.get(12)?,
+                        row.get(13)?,
+                        row.get(14)?,
+                        row.get(15)?,
+                        row.get(16)?,
+                        row.get(17)?,
+                        row.get(18)?,
+                        row.get(19)?,
+                        row.get(20)?,
+                        row.get(21)?,
+                        row.get(22)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            task_id,
+            subject_ref,
+            requirement_revision,
+            policy_revision,
+            policy_fingerprint,
+            criterion_id,
+            selector,
+            selector_path,
+            selector_literal,
+            invocation_id,
+            evaluator_ref,
+            runtime_ref,
+            enforcement_ref,
+            base_commit_oid,
+            base_tree_oid,
+            base_manifest_sha256,
+            candidate_commit_oid,
+            candidate_tree_oid,
+            candidate_manifest_sha256,
+            checkpoints,
+            outcome,
+            started_at_ms,
+            completed_at_ms,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        let policy_revision = u64::try_from(policy_revision)
+            .map_err(|_| StorageError::Corrupt("invalid candidate policy revision".into()))?;
+        let started_at_ms = u64::try_from(started_at_ms)
+            .map_err(|_| StorageError::Corrupt("invalid candidate start time".into()))?;
+        let completed_at_ms = u64::try_from(completed_at_ms)
+            .map_err(|_| StorageError::Corrupt("invalid candidate completion time".into()))?;
+        let outcome = match outcome.as_str() {
+            "INTACT" => CandidateIntegrityOutcome::Intact,
+            "MISMATCH" => CandidateIntegrityOutcome::Mismatch,
+            _ => return Err(StorageError::Corrupt("invalid candidate outcome".into())),
+        };
+        let assessment = CandidateIntegrityAssessment {
+            task_id,
+            execution_id: execution_id.to_owned(),
+            attempt_id: attempt_id.to_owned(),
+            subject_ref,
+            requirement_revision,
+            policy_revision,
+            policy_fingerprint,
+            criterion_id,
+            selector,
+            selector_path,
+            selector_literal,
+            invocation_id,
+            evaluator_ref,
+            runtime_ref,
+            enforcement_ref,
+            base_commit_oid,
+            base_tree_oid,
+            base_manifest_sha256,
+            candidate_commit_oid,
+            candidate_tree_oid,
+            candidate_manifest_sha256,
+            checkpoints: decode_checkpoints(&checkpoints)?,
+            outcome,
+            started_at_ms,
+            completed_at_ms,
+        };
+        assessment
+            .validate()
+            .map_err(|error| StorageError::Corrupt(error.to_string()))?;
+        Ok(Some(assessment))
+    }
+
+    /// Appends a matching completion or post-restart reuse checkpoint.
+    pub fn append_candidate_checkpoint(
+        &mut self,
+        execution_id: &str,
+        attempt_id: &str,
+        checkpoint: &CandidateFreshnessCheckpoint,
+    ) -> StorageResult<()> {
+        if !matches!(
+            checkpoint.phase,
+            CandidateCheckpointPhase::Completion | CandidateCheckpointPhase::RestartReuse
+        ) || !checkpoint.matched
+        {
+            return Err(StorageError::ConstraintViolation(
+                "candidate admission requires a matching completion or restart checkpoint"
+                    .to_owned(),
+            ));
+        }
+        self.connection_mut().execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let mut assessment = self
+                .get_candidate_integrity_assessment(execution_id, attempt_id)?
+                .ok_or_else(|| StorageError::Corrupt("candidate assessment is missing".into()))?;
+            let duplicate_phase = assessment
+                .checkpoints
+                .iter()
+                .any(|item| item.phase == checkpoint.phase);
+            let invalid_phase_order = match checkpoint.phase {
+                CandidateCheckpointPhase::Completion => duplicate_phase,
+                CandidateCheckpointPhase::RestartReuse => !assessment
+                    .checkpoints
+                    .iter()
+                    .any(|item| item.phase == CandidateCheckpointPhase::Completion && item.matched),
+                _ => true,
+            };
+            if assessment.outcome != CandidateIntegrityOutcome::Intact || invalid_phase_order {
+                return Err(StorageError::ConstraintViolation(
+                    "candidate assessment phase transition is invalid".to_owned(),
+                ));
+            }
+            assessment.checkpoints.push(checkpoint.clone());
+            assessment
+                .validate()
+                .map_err(|error| StorageError::ConstraintViolation(error.to_string()))?;
+            let encoded = encode_checkpoints(&assessment.checkpoints);
+            let changed = self.connection().execute(
+                "UPDATE candidate_input_assessments SET checkpoints = ?1
+                 WHERE execution_id = ?2 AND attempt_id = ?3 AND effect_id = (
+                     SELECT effect_id FROM candidate_input_assessments
+                     WHERE execution_id = ?2 AND attempt_id = ?3
+                     ORDER BY completed_at_ms DESC, assessment_id DESC LIMIT 1
+                 )",
+                params![encoded, execution_id, attempt_id],
+            )?;
+            if changed != 1 {
+                return Err(StorageError::Corrupt(
+                    "candidate assessment disappeared during checkpoint append".to_owned(),
+                ));
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self.connection_mut().execute_batch("COMMIT")?,
+            Err(error) => {
+                let _ = self.connection_mut().execute_batch("ROLLBACK");
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn candidate_result_fingerprint(
+    assessment: &CandidateIntegrityAssessment,
+) -> Result<SubjectFingerprint, evaluation::EffectError> {
+    let config = candidate_sha256(
+        format!(
+            "{}\0{}\0{}\0{}\0{}",
+            assessment.requirement_revision,
+            assessment.policy_fingerprint,
+            assessment.selector,
+            assessment.selector_path,
+            assessment.selector_literal,
+        )
+        .as_bytes(),
+    );
+    subject_fingerprint(
+        EffectKind::TestSuiteResult,
+        &assessment.subject_ref,
+        &[
+            ("content", &assessment.candidate_manifest_sha256),
+            ("toolchain", &assessment.runtime_ref),
+            ("config", &config),
+        ],
+    )
+}
+
+fn insert_effect(
+    transaction: &rusqlite::Transaction<'_>,
+    effect: &ObservedEffect,
+) -> StorageResult<()> {
+    let provenance = effect.provenance();
+    transaction
+        .execute(
+            "INSERT INTO observed_effects (
+            effect_id, subject_ref, subject_fingerprint, effect_kind, captured_by,
+            captured_at, payload_ref, execution_id, attempt_id, runtime_ref,
+            evaluator_ref, receipt_ref
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                effect.effect_id().as_str(),
+                effect.subject_ref().as_str(),
+                effect.subject_fingerprint().as_str(),
+                effect.effect_kind().as_str(),
+                effect.captured_by().as_str(),
+                effect.captured_at(),
+                effect.payload().encode(),
+                provenance.execution_id.as_str(),
+                provenance.attempt_id.as_str(),
+                provenance.runtime_ref,
+                provenance.evaluator_ref,
+                provenance.receipt_ref,
+            ],
+        )
+        .map_err(|error| crate::error::map_constraint(error, "store candidate result"))?;
+    Ok(())
+}
+
+fn insert_assessment(
+    transaction: &rusqlite::Transaction<'_>,
+    effect_id: &EffectId,
+    assessment: &CandidateIntegrityAssessment,
+) -> StorageResult<()> {
+    let checkpoints = encode_checkpoints(&assessment.checkpoints);
+    let outcome = match assessment.outcome {
+        CandidateIntegrityOutcome::Intact => "INTACT",
+        CandidateIntegrityOutcome::Mismatch => "MISMATCH",
+    };
+    transaction
+        .execute(
+            "INSERT INTO candidate_input_assessments (
+            assessment_id, effect_id, task_id, execution_id, attempt_id,
+            subject_ref, requirement_revision, policy_revision, policy_fingerprint,
+            criterion_id, selector, selector_path, selector_literal, invocation_id, evaluator_ref, runtime_ref,
+            enforcement_ref, base_commit_oid, base_tree_oid, base_manifest_sha256,
+            candidate_commit_oid, candidate_tree_oid, candidate_manifest_sha256,
+            checkpoints, integrity_outcome, started_at_ms, completed_at_ms
+         ) VALUES (
+            'candidate-assessment-' || lower(hex(randomblob(16))), ?1, ?2, ?3, ?4,
+            ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+            ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26
+         )",
+            params![
+                effect_id.as_str(),
+                assessment.task_id,
+                assessment.execution_id,
+                assessment.attempt_id,
+                assessment.subject_ref,
+                assessment.requirement_revision,
+                assessment.policy_revision as i64,
+                assessment.policy_fingerprint,
+            assessment.criterion_id,
+            assessment.selector,
+            assessment.selector_path,
+            assessment.selector_literal,
+            assessment.invocation_id,
+                assessment.evaluator_ref,
+                assessment.runtime_ref,
+                assessment.enforcement_ref,
+                assessment.base_commit_oid,
+                assessment.base_tree_oid,
+                assessment.base_manifest_sha256,
+                assessment.candidate_commit_oid,
+                assessment.candidate_tree_oid,
+                assessment.candidate_manifest_sha256,
+                checkpoints,
+                outcome,
+                assessment.started_at_ms as i64,
+                assessment.completed_at_ms as i64,
+            ],
+        )
+        .map_err(|error| crate::error::map_constraint(error, "store candidate assessment"))?;
+    Ok(())
+}
+
+fn encode_checkpoints(checkpoints: &[CandidateFreshnessCheckpoint]) -> String {
+    let mut encoded = String::new();
+    for checkpoint in checkpoints {
+        use std::fmt::Write;
+        let _ = writeln!(
+            encoded,
+            "{}|{}|{}|{}|{}",
+            checkpoint.phase.as_str(),
+            checkpoint.observed_at_ms,
+            checkpoint.git_metadata_fingerprint,
+            checkpoint.live_worktree_manifest_sha256,
+            u8::from(checkpoint.matched),
+        );
+    }
+    encoded
+}
+
+fn decode_checkpoints(value: &str) -> StorageResult<Vec<CandidateFreshnessCheckpoint>> {
+    let mut result = Vec::new();
+    for line in value.lines() {
+        let mut fields = line.split('|');
+        let phase = match fields.next() {
+            Some("selection") => CandidateCheckpointPhase::Selection,
+            Some("before-evaluation") => CandidateCheckpointPhase::BeforeEvaluation,
+            Some("after-evaluation") => CandidateCheckpointPhase::AfterEvaluation,
+            Some("result-admission") => CandidateCheckpointPhase::ResultAdmission,
+            Some("completion") => CandidateCheckpointPhase::Completion,
+            Some("restart-reuse") => CandidateCheckpointPhase::RestartReuse,
+            _ => {
+                return Err(StorageError::Corrupt(
+                    "invalid candidate checkpoint phase".into(),
+                ))
+            }
+        };
+        let observed_at_ms = fields
+            .next()
+            .and_then(|field| field.parse().ok())
+            .ok_or_else(|| StorageError::Corrupt("invalid candidate checkpoint time".into()))?;
+        let git_metadata_fingerprint = fields.next().unwrap_or_default().to_owned();
+        let live_worktree_manifest_sha256 = fields.next().unwrap_or_default().to_owned();
+        let matched = match fields.next() {
+            Some("0") => false,
+            Some("1") => true,
+            _ => {
+                return Err(StorageError::Corrupt(
+                    "invalid candidate checkpoint outcome".into(),
+                ))
+            }
+        };
+        if fields.next().is_some() {
+            return Err(StorageError::Corrupt(
+                "ambiguous candidate checkpoint".into(),
+            ));
+        }
+        result.push(CandidateFreshnessCheckpoint {
+            phase,
+            observed_at_ms,
+            git_metadata_fingerprint,
+            live_worktree_manifest_sha256,
+            matched,
+        });
+    }
+    Ok(result)
+}

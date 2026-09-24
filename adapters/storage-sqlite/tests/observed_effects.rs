@@ -4,8 +4,9 @@ use std::sync::{Arc, Barrier};
 
 use agent_runtime::{AttemptId, Execution, ExecutionId, ProviderRef};
 use evaluation::{
-    subject_fingerprint, EffectId, EffectKind, EffectPayload, EffectProvenance, EffectSubjectRef,
-    Sha256Digest,
+    candidate_sha256, subject_fingerprint, CandidateCheckpointPhase, CandidateFreshnessCheckpoint,
+    CandidateIntegrityAssessment, CandidateIntegrityOutcome, EffectId, EffectKind, EffectPayload,
+    EffectProvenance, EffectSubjectRef, Sha256Digest,
 };
 use storage_sqlite::{
     EventType, NewJournalEvent, SqliteStore, StorageError, SUPPORTED_SCHEMA_VERSION,
@@ -171,6 +172,157 @@ fn observed_effect_survives_close_and_reopen() {
 }
 
 #[test]
+fn candidate_result_and_typed_assessment_survive_restart_as_one_commit() {
+    let db = TestDb::new("candidate-assessment-restart");
+    let (execution, attempt, effect_id) = {
+        let mut store = db.open();
+        let (execution, attempt) = seed_runtime(&mut store);
+        let subject = EffectSubjectRef::new(format!("attempt:{}", attempt.as_str())).unwrap();
+        let candidate_manifest = format!("sha256:{}", "d".repeat(64));
+        let config = candidate_sha256(
+            format!(
+                "sha256:{}\0sha256:{}\0candidate.file-contains.v1\0src/main.rs\0accepted",
+                "b".repeat(64),
+                "c".repeat(64),
+            )
+            .as_bytes(),
+        );
+        let fingerprint = subject_fingerprint(
+            EffectKind::TestSuiteResult,
+            subject.as_str(),
+            &[
+                ("content", &candidate_manifest),
+                ("toolchain", "agentd/1"),
+                ("config", &config),
+            ],
+        )
+        .unwrap();
+        let assessment = CandidateIntegrityAssessment {
+            task_id: "T-EFFECT".to_owned(),
+            execution_id: execution.as_str().to_owned(),
+            attempt_id: attempt.as_str().to_owned(),
+            subject_ref: subject.as_str().to_owned(),
+            requirement_revision: format!("sha256:{}", "b".repeat(64)),
+            policy_revision: 1,
+            policy_fingerprint: format!("sha256:{}", "c".repeat(64)),
+            criterion_id: "criterion-1".to_owned(),
+            selector: "candidate.file-contains.v1".to_owned(),
+            selector_path: "src/main.rs".to_owned(),
+            selector_literal: "accepted".to_owned(),
+            invocation_id: "candidate-invocation-1".to_owned(),
+            evaluator_ref: "runlith.agentd.candidate-evaluator.v1".to_owned(),
+            runtime_ref: "agentd/1".to_owned(),
+            enforcement_ref: "G6+Runner".to_owned(),
+            base_commit_oid: "1".repeat(40),
+            base_tree_oid: "2".repeat(40),
+            base_manifest_sha256: format!("sha256:{}", "a".repeat(64)),
+            candidate_commit_oid: "3".repeat(40),
+            candidate_tree_oid: "4".repeat(40),
+            candidate_manifest_sha256: format!("sha256:{}", "d".repeat(64)),
+            checkpoints: [
+                CandidateCheckpointPhase::Selection,
+                CandidateCheckpointPhase::BeforeEvaluation,
+                CandidateCheckpointPhase::AfterEvaluation,
+                CandidateCheckpointPhase::ResultAdmission,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, phase)| CandidateFreshnessCheckpoint {
+                phase,
+                observed_at_ms: 11 + index as u64,
+                git_metadata_fingerprint: format!("sha256:{}", "e".repeat(64)),
+                live_worktree_manifest_sha256: format!("sha256:{}", "f".repeat(64)),
+                matched: true,
+            })
+            .collect(),
+            outcome: CandidateIntegrityOutcome::Intact,
+            started_at_ms: 10,
+            completed_at_ms: 20,
+        };
+        let effect = store
+            .append_candidate_result(
+                subject,
+                fingerprint,
+                EffectPayload::TestSuiteResult {
+                    passed: 1,
+                    failed: 0,
+                    skipped: 0,
+                    result_sha256: Sha256Digest::new(format!("sha256:{}", "9".repeat(64))).unwrap(),
+                },
+                "2026-09-23T12:00:00Z",
+                EffectProvenance::new(execution.clone(), attempt.clone(), "agentd/1")
+                    .unwrap()
+                    .with_lineage(
+                        Some("runlith.agentd.candidate-evaluator.v1".to_owned()),
+                        Some("candidate-invocation-1".to_owned()),
+                    )
+                    .unwrap(),
+                &assessment,
+            )
+            .unwrap();
+        assert!(store
+            .get_candidate_evidence(execution.as_str(), attempt.as_str())
+            .is_err());
+        store
+            .append_candidate_checkpoint(
+                execution.as_str(),
+                attempt.as_str(),
+                &CandidateFreshnessCheckpoint {
+                    phase: CandidateCheckpointPhase::Completion,
+                    observed_at_ms: 21,
+                    git_metadata_fingerprint: format!("sha256:{}", "e".repeat(64)),
+                    live_worktree_manifest_sha256: format!("sha256:{}", "f".repeat(64)),
+                    matched: true,
+                },
+            )
+            .unwrap();
+        (execution, attempt, effect.effect_id().clone())
+    };
+    let mut store = db.open();
+    assert_eq!(
+        store
+            .get_observed_effect(&effect_id)
+            .unwrap()
+            .unwrap()
+            .effect_kind(),
+        EffectKind::TestSuiteResult
+    );
+    let evidence = store
+        .get_candidate_evidence(execution.as_str(), attempt.as_str())
+        .unwrap()
+        .unwrap();
+    assert_eq!(evidence.effect.effect_kind(), EffectKind::TestSuiteResult);
+    assert_eq!(
+        evidence.integrity.candidate_manifest_sha256,
+        format!("sha256:{}", "d".repeat(64))
+    );
+    assert_eq!(evidence.integrity.checkpoints.len(), 5);
+    store
+        .append_candidate_checkpoint(
+            execution.as_str(),
+            attempt.as_str(),
+            &CandidateFreshnessCheckpoint {
+                phase: CandidateCheckpointPhase::RestartReuse,
+                observed_at_ms: 22,
+                git_metadata_fingerprint: format!("sha256:{}", "7".repeat(64)),
+                live_worktree_manifest_sha256: format!("sha256:{}", "8".repeat(64)),
+                matched: true,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .get_candidate_evidence(execution.as_str(), attempt.as_str())
+            .unwrap()
+            .unwrap()
+            .integrity
+            .checkpoints
+            .len(),
+        6
+    );
+}
+
+#[test]
 fn concurrent_writers_allocate_distinct_effect_ids_atomically() {
     let db = TestDb::new("atomic-id");
     let (execution, attempt) = {
@@ -295,7 +447,7 @@ fn cv_2_schema_18_migrates_to_19_with_closed_capture_authority() {
     }
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 21);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 22);
     let connection = rusqlite::Connection::open(&db.path).unwrap();
     let sql: String = connection
         .query_row(

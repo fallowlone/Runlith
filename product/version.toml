@@ -5,6 +5,6 @@
 # task: canonical task responsible for the current repository state.
 # gate: current development gate.
 semver = "0.1.0"
-development = "0.1.0-dev.task0149"
-task = "TASK-0149"
+development = "0.1.0-dev.task0144"
+task = "TASK-0144"
 gate = "G8"

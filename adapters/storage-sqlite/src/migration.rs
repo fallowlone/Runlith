@@ -13,7 +13,7 @@
 //! `0017_evidence_requirements.sql`, then
 //! `0018_planning_input_evidence_requirements.sql`, then
 //! `0019_observed_effects.sql`, then `0020_task_prerequisites.sql`, then
-//! `0021_test_mutation_policy.sql`). Newer
+//! `0021_test_mutation_policy.sql`, then `0022_candidate_input_assessments.sql`). Newer
 //! versions fail closed; re-opening the current version is a no-op (never
 //! destructively re-applied). Executing migrations inside one SQLite
 //! transaction is storage consistency only — not TASK-0024 event atomicity.
@@ -23,7 +23,7 @@ use rusqlite::Connection;
 use crate::error::{StorageError, StorageResult};
 
 /// Schema version this adapter understands.
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 21;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 22;
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_task_core.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_event_journal.sql");
@@ -47,6 +47,7 @@ const MIGRATION_0018: &str =
 const MIGRATION_0019: &str = include_str!("../migrations/0019_observed_effects.sql");
 const MIGRATION_0020: &str = include_str!("../migrations/0020_task_prerequisites.sql");
 const MIGRATION_0021: &str = include_str!("../migrations/0021_test_mutation_policy.sql");
+const MIGRATION_0022: &str = include_str!("../migrations/0022_candidate_input_assessments.sql");
 
 /// Applies pending migrations to `connection`, which must already have
 /// `PRAGMA foreign_keys = ON`. Migrations run in order inside one SQLite
@@ -192,7 +193,14 @@ pub(crate) fn migrate(connection: &mut Connection) -> StorageResult<u32> {
             StorageError::Migration(format!("0021_test_mutation_policy.sql failed: {error}"))
         })?;
     }
-    transaction.execute_batch("PRAGMA user_version = 21")?;
+    if current < 22 {
+        transaction.execute_batch(MIGRATION_0022).map_err(|error| {
+            StorageError::Migration(format!(
+                "0022_candidate_input_assessments.sql failed: {error}"
+            ))
+        })?;
+    }
+    transaction.execute_batch("PRAGMA user_version = 22")?;
     transaction.commit()?;
     Ok(SUPPORTED_SCHEMA_VERSION)
 }
