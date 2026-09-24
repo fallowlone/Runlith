@@ -53,9 +53,11 @@ never silently widens the scope.
    refuses. Historical completed Tasks are not re-adjudicated.
 2. **Integrity decision.** The evaluator records a durable assessment
    naming the base/candidate revisions, relevant changed paths or content
-   digests, policy fingerprint, affected evidence/check identities, and
-   any exact independent review or human approval that the chosen policy
-   requires. Unauthorized changes produce a durable tamper result; every
+   digests, policy fingerprint, affected evidence/check identities, and a
+   canonical digest of the candidate input manifest plus governed invocation
+   descriptor (check identity, selector, resolved executable, configuration,
+   toolchain and relevant evaluator inputs), plus any exact independent
+   review or human approval required by the chosen policy. Unauthorized changes produce a durable tamper result; every
    dependent `ClaimVerification` is ineligible and the affected criterion
    returns to `UNVERIFIED` (CV-9). A later authorized assessment supersedes
    the old one; it does not delete it.
@@ -65,9 +67,12 @@ never silently widens the scope.
    `TEST_SUITE_RESULT` through a trusted test adapter at the governed
    Runner boundary, with executed selector, pass/fail/skip counts,
    result digest, subject/config/toolchain fingerprint, attempt lineage,
-   capture authority and time. The adapter validates a structured harness
-   result against the governed invocation and Runner outcome before it
-   authors a durable effect; neither child nor provider writes an
+   capture authority and time. The result also carries the canonical digest
+   of the exact candidate input manifest and governed invocation descriptor
+   recorded by its integrity assessment, including dirty and untracked
+   inputs. The adapter validates a structured harness result against the
+   governed invocation and Runner outcome before it authors a durable
+   effect; neither child nor provider writes an
    authoritative effect directly. Console prose, provider self-report and
    runtime receipts are provenance, not a test result. Missing or
    unsupported capture emits no trusted test-result effect; the later
@@ -77,9 +82,12 @@ never silently widens the scope.
    requirement revision, policy fingerprint and subject fingerprint to
    typed durable evidence references of the required kind. `VERIFIED`
    requires a nonempty, resolvable, in-window basis and a current integrity
-   assessment where CV-9 applies. Claims may be absent; `claim_refs` can
-   be empty. A receipt or session reference cannot by itself satisfy a
-   requirement. Review and security requirements reference their own
+   assessment where CV-9 applies. The assessment and each relied-on test
+   result must have the same candidate-manifest and invocation-descriptor
+   digest; a missing or mismatched binding is `UNVERIFIED` (or `BLOCKED`
+   when trusted capture could not run), never `VERIFIED`. Claims may be
+   absent; `claim_refs` can be empty. A receipt or session reference cannot
+   by itself satisfy a requirement. Review and security requirements reference their own
    durable verdicts, while human approval uses its exact CV-8 discharge.
 5. **Completion snapshot.** The trusted completion transaction rechecks
    the Task state, current subject, requirement/policy version, selected

@@ -3732,8 +3732,9 @@ items:
       A Task cannot reach COMPLETED on agent claim alone through any
       shipped control-plane path; each criterion's verification outcome is
       typed, durable and auditable; regression evidence that G5/G6/G7
-      completion paths still pass; tampered or stale evidence cannot
-      support VERIFIED or completion; full workspace verification green.
+      completion paths still pass; tampered, stale or invocation-mismatched
+      evidence cannot support VERIFIED or completion; full workspace
+      verification green.
     depends_on:
       - TASK-0123
       - TASK-0124
@@ -4187,7 +4188,8 @@ items:
     exit_criteria_summary: >-
       A real governed local test run produces a durable structured result
       retrievable after restart; a durable integrity assessment binds the
-      exact changed inputs and reports tamper or blocked capture; missing
+      exact changed inputs and governed invocation descriptor and reports
+      tamper or blocked capture; missing
       or unsupported capture emits no trusted result; producer contract
       tests cover G5/G6/G7-shaped test results without
       requiring unmerged TASK-0125 code; full workspace verification and
