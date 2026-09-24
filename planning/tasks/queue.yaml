@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0146
+completed_through: TASK-0148
 current_gate: G8
-gate_status: IN_PROGRESS  # G7 closed by TASK-0120; G8 work integrated through TASK-0146, independent gate closure remains pending
+gate_status: IN_PROGRESS  # G7 closed by TASK-0120; G8 task bookkeeping through TASK-0148, independent gate closure remains pending
 
 items:
   - id: TASK-0012
@@ -4251,23 +4251,24 @@ items:
       counts, selector, and digest separately for each method; specify freshness,
       restart, authorship, tamper, race, unsupported, and recovery semantics.
       Record stable libtest result output and immutable launch-time artifact
-      binding as explicit compiled-test requirements/blockers. During this
-      proposal phase, no production code, dependencies, migration, product
-      version or roadmap/gate status changes. If TASK-0148 is later completed,
-      apply normal product/version completion bookkeeping under AGENT.md §26.
+      binding as explicit compiled-test requirements/blockers. No production
+      code, dependencies, or migration are in scope. Normal product/version
+      completion bookkeeping applies under AGENT.md §26.
     exit_criteria_summary: >-
       Owner-Accepted ADR-0034, ratified after independent architecture/security
-      review, is internally complete, linked and consistent with ADR-0018,
+      review PASS on exact pre-acceptance commit
+      cb02d5182b22428bc0ad4207420b982d4bc7d550, is internally complete,
+      linked and consistent with ADR-0018,
       ADR-0026, ADR-0030, ADR-0032/0033, G5 Runner, and TASK-0124;
       it selects the narrow exact-byte candidate-input evaluator as the first
       supported check, distinguishes it from candidate-compiled Rust tests,
       records the stable structured-result blocker for compiled tests, and
       states fail-closed requirements and resolves review findings. Owner
-      ratification and independent architecture/security review are required
-      before TASK-0148 is complete and TASK-0144 may start. Queue dependency
-      is added to TASK-0144. YAML, task/dependency uniqueness, links, and diff
-      checks pass. Until then this branch's draft remains Proposed and no
-      TASK-0148 completion is claimed.
+      ratification is recorded. Candidate-input evidence is limited to the
+      authorized selector and criterion scope; compiled Rust test execution
+      remains deferred pending a stable structured result protocol. TASK-0144
+      depends on TASK-0148. YAML, task/dependency uniqueness, links, and diff
+      checks pass.
     depends_on:
       - TASK-0124
       - TASK-0143
@@ -4281,6 +4282,15 @@ items:
       - docs/architecture/runners.md
       - crates/evaluation/src/capture.rs
       - crates/runner/src/lib.rs
+    outcome: >-
+      ADR-0034 accepted after owner ratification and independent
+      architecture/security review PASS of exact pre-acceptance commit
+      cb02d5182b22428bc0ad4207420b982d4bc7d550. Decision supports only
+      governed candidate-input checks bound to the authorized selector and
+      criterion; it does not establish compiled Rust test execution. A stable
+      structured result protocol and exact compiled-artifact execution remain
+      deferred. TASK-0144 may proceed within the candidate-input evidence
+      limit. This bookkeeping commit is not integrated: merge NOT done.
 
   - id: TASK-0146
     gate: G8

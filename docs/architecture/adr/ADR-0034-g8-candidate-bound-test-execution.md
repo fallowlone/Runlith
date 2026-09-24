@@ -1,10 +1,10 @@
 # ADR-0034 — G8 Candidate-Bound Governed Test Execution
 
-Status: **Proposed** (TASK-0148; owner ratification and independent review
-pending)
+Status: **Accepted** (TASK-0148; owner ratified after independent
+architecture/security review)
 Gate: G8
 
-> This proposal narrows the missing TASK-0144 prerequisite: trusted test
+> This decision narrows the missing TASK-0144 prerequisite: trusted test
 > evidence must prove that the governed check evaluated the exact
 > product-authored candidate snapshot under current G6 authority. Compiled
 > candidate tests additionally require proof of the exact built artifact. It grants no
@@ -25,7 +25,7 @@ content, unstaged tracked edits, deletions, and applicable untracked files.
 Copying a `git diff`, remembering a commit ID, or observing the live worktree
 after a process does not freeze what that process consumed.
 
-## Proposed decision
+## Decision
 
 ### 1. Candidate snapshot
 
@@ -257,10 +257,10 @@ reviewed contract gap proves they cannot represent the required binding.
 - Durable observed effects remain product-authored evidence, separate from
   model-visible receipts and the G6 Security Audit. They grant no completion
   authority.
-- This proposal authorizes no production code, schema, dependency, or product
-  version change. If TASK-0148 is later completed, normal completion
-  bookkeeping must update `product/version.toml` under AGENT.md §26; public
-  SemVer remains unchanged absent an explicit release decision.
+- This ADR authorizes no production code, schema, or dependency change.
+  TASK-0148 completion bookkeeping advances the development identity in
+  `product/version.toml` under AGENT.md §26; public SemVer remains unchanged
+  absent an explicit release decision.
 
 ## Security impact
 
@@ -291,9 +291,10 @@ evidence path is demonstrated.
 
 ## Acceptance and independent review
 
-Before this proposal is accepted, an independent architecture/security review
-must establish that the candidate-input path is adequately specified and
-fail-closed. Compiled-test clauses below record constraints for a future
+An independent architecture/security review of the exact pre-acceptance commit
+`cb02d5182b22428bc0ad4207420b982d4bc7d550` passed and established that the
+candidate-input path is adequately specified and fail-closed. Owner ratification
+followed. Compiled-test clauses below record constraints for a future
 separately ratified implementation; they are not acceptance gates for
 TASK-0144's candidate-input path. The review must establish that:
 
@@ -322,7 +323,7 @@ TASK-0144's candidate-input path. The review must establish that:
    criterion scope and not represented as full Rust test proof,
    while ADR-0018, ADR-0026, ADR-0030, and ADR-0032 authority remains intact.
 
-Owner ratification must confirm the candidate-input method, its structured
+Owner ratification confirmed the candidate-input method, its structured
 result and snapshot/isolation premises, and the exact selector/criterion
 binding contract. Concrete catalogued selector entries and the properties
 they assert are defined during TASK-0144 implementation and independently
