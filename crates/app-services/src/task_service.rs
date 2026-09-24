@@ -11,9 +11,12 @@
 
 use std::path::Path;
 
+use agent_runtime::ExecutionId;
 use plan_domain::{PlanDomainError, TaskPlanningAuthority};
+use policy::{PolicyContractError, TestMutationPolicy, TestMutationPolicyRevision};
 use storage_sqlite::{EventType, JournalEvent, NewJournalEvent, SqliteStore, StorageError};
 use task_domain::{DomainError, Project, ProjectId, Task, TaskId, TransitionCommand};
+use workspace::{LeaseLifecycle, WorkspaceStore};
 
 use crate::clock::{format_rfc3339, Clock, SystemClock};
 use crate::error::{ServiceError, ServiceResult};
@@ -115,6 +118,74 @@ impl<C: Clock> TaskService<C> {
             "create_task",
         );
         Ok(self.store.create_task_with_event(task, &event)?)
+    }
+
+    /// Selects an owner-managed policy for a DRAFT Task. The control-plane
+    /// dispatcher invokes this only after local OS peer authentication; the
+    /// protocol carries a separate selection command, never Task metadata.
+    pub fn select_test_mutation_policy(
+        &mut self,
+        task_id: &TaskId,
+        policy: TestMutationPolicy,
+    ) -> ServiceResult<TestMutationPolicyRevision> {
+        let task = self.store.get_task(task_id)?.ok_or_else(|| {
+            ServiceError::Storage(StorageError::NotFound(format!(
+                "task {task_id} does not exist"
+            )))
+        })?;
+        if task.state() != task_domain::TaskState::Draft {
+            return Err(ServiceError::Storage(StorageError::ConstraintViolation(
+                "test mutation policy selection requires a DRAFT task".into(),
+            )));
+        }
+        let current = self
+            .store
+            .get_test_mutation_policy(task_id.as_str())?
+            .ok_or_else(|| {
+                ServiceError::Storage(StorageError::Corrupt(format!(
+                    "task {task_id} has no default policy"
+                )))
+            })?;
+        let selected = TestMutationPolicyRevision::new(current.revision() + 1, policy)
+            .map_err(PolicyContractError::from)?;
+        self.store
+            .append_test_mutation_policy_revision(task_id.as_str(), &selected)?;
+        Ok(selected)
+    }
+
+    /// Binds the current policy to the base OID in the durable lease owned by
+    /// this Task's Execution. No base revision is accepted from the caller.
+    pub fn bind_evaluated_policy_base(
+        &mut self,
+        execution_id: &ExecutionId,
+    ) -> ServiceResult<storage_sqlite::EvaluatedPolicyBase> {
+        let execution = self.store.get_execution(execution_id)?.ok_or_else(|| {
+            ServiceError::Storage(StorageError::NotFound(format!(
+                "execution {execution_id} does not exist"
+            )))
+        })?;
+        let lease = self
+            .store
+            .get_workspace_for_execution(execution_id)
+            .map_err(|error| {
+                ServiceError::Storage(StorageError::ConstraintViolation(error.to_string()))
+            })?
+            .ok_or_else(|| {
+                ServiceError::Storage(StorageError::NotFound(format!(
+                    "execution {execution_id} has no workspace lease"
+                )))
+            })?;
+        if lease.lifecycle() != LeaseLifecycle::Ready {
+            return Err(ServiceError::Storage(StorageError::ConstraintViolation(
+                "evaluated policy base requires a READY workspace lease".into(),
+            )));
+        }
+        Ok(self.store.bind_evaluated_policy_base(
+            execution_id.as_str(),
+            execution.task_id().as_str(),
+            lease.id().as_str(),
+            lease.base_revision().as_str(),
+        )?)
     }
 
     /// Creates a DRAFT Task whose canonical planning metadata — allowed
@@ -442,6 +513,54 @@ impl<C: Clock> TaskService<C> {
             to_workspace_state: None,
             plan_revision: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod test_mutation_policy_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn internal_owner_selection_is_scoped_to_draft_and_revisioned() {
+        let dir = std::env::temp_dir().join(format!(
+            "runlith-policy-selection-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut service = TaskService::open(dir.join("task.db"), SystemClock).unwrap();
+        let project_id = ProjectId::new("P-POLICY-UNIT").unwrap();
+        let task_id = TaskId::new("T-POLICY-UNIT").unwrap();
+        service
+            .create_project(&Project::new(project_id.clone(), "policy unit").unwrap())
+            .unwrap();
+        service
+            .create_task(&Task::draft(task_id.clone(), project_id, "policy selection").unwrap())
+            .unwrap();
+        let selected = service
+            .select_test_mutation_policy(
+                &task_id,
+                TestMutationPolicy::scoped_reviewed(
+                    vec!["tests/unit.rs".into()],
+                    vec!["cargo-test-unit".into()],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(selected.revision(), 2);
+        assert!(selected.policy().allows("tests/unit.rs", "cargo-test-unit"));
+        assert!(!selected
+            .policy()
+            .allows("tests/unit.rs/child", "cargo-test-unit"));
+        service.mark_ready(&task_id).unwrap();
+        assert!(service
+            .select_test_mutation_policy(&task_id, TestMutationPolicy::Forbidden)
+            .is_err());
+        drop(service);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 

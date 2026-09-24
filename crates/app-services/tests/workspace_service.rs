@@ -235,6 +235,44 @@ fn ensure_workspace_ready_creates_then_is_idempotent() {
     let _ = worktree;
 }
 
+#[test]
+fn policy_base_binding_uses_trusted_task_and_workspace_state() {
+    let env = TestEnv::new("policy-base-binding");
+    let task_id = TaskId::new("T-POLICY").unwrap();
+    let project_id = ProjectId::new("P-POLICY").unwrap();
+    let mut tasks = env.task_service();
+    tasks
+        .create_project(&Project::new(project_id.clone(), "policy test").unwrap())
+        .unwrap();
+    tasks
+        .create_task(&Task::draft(task_id.clone(), project_id, "policy binding").unwrap())
+        .unwrap();
+    drop(tasks);
+
+    let exec = ExecutionId::new("E-POLICY").unwrap();
+    env.runtime_service()
+        .create_execution(exec.clone(), task_id.clone())
+        .unwrap();
+    let base = resolved_base(&env);
+    env.workspace_service()
+        .ensure_workspace_ready(&request(&env, &exec, "repo-local:policy"))
+        .unwrap();
+
+    let binding = env
+        .task_service()
+        .bind_evaluated_policy_base(&exec)
+        .unwrap();
+    assert_eq!(binding.task_id, task_id.as_str());
+    assert_eq!(binding.policy.revision(), 1);
+    assert_eq!(binding.base_revision, base);
+
+    let recovered = env
+        .task_service()
+        .bind_evaluated_policy_base(&exec)
+        .unwrap();
+    assert_eq!(recovered, binding);
+}
+
 // -- crash recovery ----------------------------------------------------------
 
 #[test]

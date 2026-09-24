@@ -2,21 +2,20 @@ syntax = "proto3";
 
 package ai_engineering_os.ipc;
 
-// G7 Task authoring (protocol v6, TASK-0084).
+// Task authoring and explicit owner policy selection (protocol v6).
 //
-// Creates a DRAFT Task together with the Task-owned planning metadata that
-// trusted G7 planning derives authority from: allowed scope paths,
-// acceptance obligations and baseline risk. The trusted TaskService validates
-// every value (bounds, DRAFT creation, planning derivability) and commits the
-// Task with its server-minted `task.created` journal evidence atomically.
+// Creates a DRAFT Task with trusted planning metadata, or selects the
+// append-only TestMutationPolicy revision for an existing DRAFT Task. Policy
+// selection is a separate owner command and never a Task DTO field.
 //
 // Authority rules:
-// - The historical protocol-v1 `CreateTaskRequest` is unchanged; this is a
-//   separate v6-only operation, so a v0-v5 session can never author metadata.
+// - The historical protocol-v1 `CreateTaskRequest` is unchanged; these are
+//   separate v6-only operations, so a v0-v5 session cannot author metadata or
+//   select an exception to the trusted Forbidden policy.
 // - The client never supplies event ids, timestamps, provenance, lifecycle
 //   state, Policy fingerprints, planning snapshots, Plan branches or graphs.
-// - There is no later edit operation: authored planning intent is fixed for
-//   the Task's lifetime on the supported control plane.
+// - Planning intent has no later edit operation. Policy selection can append
+//   revisions only while the Task remains DRAFT and before execution begins.
 import "task_core.proto";
 
 message CreatePlanningTaskRequest {
@@ -44,9 +43,30 @@ message CreatePlanningTaskResponse {
   PlanningTaskDto task = 1;
 }
 
+enum TestMutationPolicyKind {
+  TEST_MUTATION_POLICY_KIND_UNSPECIFIED = 0;
+  FORBIDDEN = 1;
+  SCOPED_REVIEWED = 2;
+}
+
+// Separate owner-authored policy command. It is never a Task DTO field and
+// is accepted only on authenticated local control-plane sessions (protocol v6).
+message SelectTestMutationPolicyRequest {
+  string task_id = 1;
+  TestMutationPolicyKind kind = 2;
+  repeated string exact_paths = 3;
+  repeated string exact_checks = 4;
+}
+
+message SelectTestMutationPolicyResponse {
+  uint64 revision = 1;
+  string fingerprint = 2;
+}
+
 message TaskAuthoringCoreRequest {
   oneof payload {
     CreatePlanningTaskRequest create_planning_task = 1;
+    SelectTestMutationPolicyRequest select_test_mutation_policy = 2;
   }
 }
 
@@ -54,5 +74,6 @@ message TaskAuthoringCoreResponse {
   oneof payload {
     CreatePlanningTaskResponse create_planning_task = 1;
     BusinessError error = 2;
+    SelectTestMutationPolicyResponse select_test_mutation_policy = 3;
   }
 }

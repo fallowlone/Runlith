@@ -32,6 +32,7 @@ mod planning_control_store;
 mod runtime_store;
 mod secret_store;
 mod task_store;
+mod test_mutation_store;
 mod workspace_store;
 
 pub use approval_store::{
@@ -60,3 +61,4 @@ pub use security_audit::{
     SecurityAuditSubjectKind, SECURITY_AUDIT_RECORD_VERSION,
 };
 pub use task_store::SqliteStore;
+pub use test_mutation_store::EvaluatedPolicyBase;
