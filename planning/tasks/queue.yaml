@@ -3732,7 +3732,8 @@ items:
       A Task cannot reach COMPLETED on agent claim alone through any
       shipped control-plane path; each criterion's verification outcome is
       typed, durable and auditable; regression evidence that G5/G6/G7
-      completion paths still pass; full workspace verification green.
+      completion paths still pass; tampered or stale evidence cannot
+      support VERIFIED or completion; full workspace verification green.
     depends_on:
       - TASK-0123
       - TASK-0124
@@ -4177,16 +4178,18 @@ items:
       Trusted Evaluation/Runner composition and its SQLite evidence path;
       use the accepted G5/G6 governed execution boundary and TASK-0124
       capture port. Bind producer output to exact subject, requirement,
-      policy, attempt and evidence kind; record tamper/blocked outcomes.
-      No provider self-verdicts, direct probe process path, new completion
+      policy, attempt and evidence kind; record typed integrity and capture
+      statuses, not completion verdicts. No provider self-verdicts, direct
+      probe process path, new completion
       authority, G14 routing, or TASK-0125 admission rewrite. Allocate the
       next migration number from accepted main; TASK-0125 must reconcile its
       unmerged 0021 migration afterward.
     exit_criteria_summary: >-
       A real governed local test run produces a durable structured result
-      retrievable after restart; changed or untrusted approval tests cannot
-      yield VERIFIED evidence; unsupported evidence kinds fail closed;
-      producer contract tests cover G5/G6/G7-shaped test results without
+      retrievable after restart; a durable integrity assessment binds the
+      exact changed inputs and reports tamper or blocked capture; missing
+      or unsupported capture emits no trusted result; producer contract
+      tests cover G5/G6/G7-shaped test results without
       requiring unmerged TASK-0125 code; full workspace verification and
       independent security review green.
     depends_on:

@@ -24,10 +24,12 @@ path satisfies CV-1..CV-9.
 
 ## Recommended decision for owner review
 
-1. **Canonical policy and baseline.** A trusted Task/application authority
-   owns a versioned `TestMutationPolicy` bound to the Task and its evaluated
-   base revision. Provider output, repository instructions and a review
-   fixture cannot create or weaken it. A trusted evaluator compares the
+1. **Canonical policy and baseline.** The Policy Engine owns the
+   `TestMutationPolicy` definition, revision and authorization rules. The
+   trusted Task/application layer persists the selected immutable policy
+   revision/fingerprint and evaluated-base binding; Evaluation applies it.
+   Provider output, repository instructions and a review fixture cannot
+   create or weaken it. A trusted evaluator compares the
    candidate revision with that base to identify changed test, check and
    evaluator inputs. If the policy or required comparison cannot be
    established, affected criteria remain `UNVERIFIED` and completion
@@ -47,7 +49,9 @@ path satisfies CV-1..CV-9.
    result digest, subject/config/toolchain fingerprint, attempt lineage,
    capture authority and time. Console prose, provider self-report and
    runtime receipts are provenance, not a test result. Missing or
-   unsupported producers yield `BLOCKED` or `UNVERIFIED`, never `VERIFIED`.
+   unsupported capture emits no trusted test-result effect; the later
+   verification boundary maps that condition to `BLOCKED` or `UNVERIFIED`,
+   never `VERIFIED`.
 4. **Verdict binding.** A `ClaimVerification` binds one exact criterion
    requirement revision, policy fingerprint and subject fingerprint to
    typed durable evidence references of the required kind. `VERIFIED`
