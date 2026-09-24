@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0124
+completed_through: TASK-0135
 current_gate: G8
-gate_status: IN_PROGRESS  # G7 closed by the TASK-0120 independent closure re-audit (G7_CLOSED); G8 breakdown materialized (TASK-0121..TASK-0127 queued, contract ADRs first); TASK-0121 and TASK-0122 accepted after independent review
+gate_status: IN_PROGRESS  # G7 closed by the TASK-0120 independent closure re-audit (G7_CLOSED); G8 breakdown materialized (TASK-0121..TASK-0127 queued, contract ADRs first); TASK-0121 and TASK-0122 accepted after independent review; TASK-0123/0124/0128/0135 integrated on main, G8 IN_PROGRESS
 
 items:
   - id: TASK-0012
@@ -3663,6 +3663,12 @@ items:
       criteria; the TASK-0093 default-to-AutomatedTest assumption is gone
       from every path the ADR names; migration is restart-safe and fails
       closed on legacy rows; full workspace verification green.
+    outcome: >-
+      Integrated on main via merge 26e13bd (parents 8e0e81b +
+      9d94f31). Materializes the TASK-0121 contract as domain types
+      (EvidenceRequirement on Task and Plan criteria) with SQLite
+      schema migrations 0017/0018; product identity advanced to
+      0.1.0-dev.task0123 at that merge.
     depends_on:
       - TASK-0121
     blocked_by: []
@@ -3691,6 +3697,12 @@ items:
       fingerprinted and retrievable after restart; provider or model text
       cannot author one; contract suite pattern follows the ADR-0024
       shared-suite precedent; full workspace verification green.
+    outcome: >-
+      Implemented on main as d0d3001 (child of merge 26e13bd).
+      Provider-neutral ObservedEffect capture seam with migration
+      0019, durable fingerprinted observed effects with provenance,
+      local adapters; product identity advanced to
+      0.1.0-dev.task0124 at that commit.
     depends_on:
       - TASK-0121
     blocked_by: []
@@ -3805,6 +3817,13 @@ items:
       status and action; every approved capability maps to a bounded queued
       task with gate alignment; rejected capabilities record the violated
       invariant.
+    outcome: >-
+      Audit accepted on main as 3d0d0f3: durable 10-section report
+      (44-capability matrix, boundary analysis, Ports and Adapters
+      interface proposal, prioritized roadmap) at
+      docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md;
+      TASK-0129..TASK-0142 queued; gate G14 proposed as planned,
+      pending owner ratification.
     depends_on: []
     blocked_by: []
     references:
@@ -3959,6 +3978,14 @@ items:
     exit_criteria_summary: >-
       Each check kind covered by tests including path-escape rejection;
       blocker reports persisted durably.
+    outcome: >-
+      Implemented on main via ec23259 (preflight checker: git
+      ancestry, repo-relative file, PATH checks with escape
+      protection and structured blockers) + 4435ec7 (activation
+      wiring, schema migration 0020, BlockedByPrerequisite).
+      ScopeNote: queue scope covered only the checker; 4435ec7
+      wiring was included after evidence check confirmed it on
+      main.
     depends_on: []
     blocked_by: []
     references:
