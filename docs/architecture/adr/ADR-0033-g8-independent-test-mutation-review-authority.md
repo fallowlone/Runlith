@@ -1,6 +1,6 @@
 # ADR-0033 — G8 Independent Test-Mutation Review Authority
 
-Status: Proposed
+Status: Accepted
 Gate: G8
 Scope: trusted review records required by ADR-0032 CV-9
 
@@ -146,7 +146,7 @@ scope, exit criteria and TASK-0146 dependency. It may implement the governed
 test producer and integrity assessment with `Forbidden` effective and
 `ScopedReviewed` failing closed until a valid review exists.
 
-After ADR-0033 acceptance, TASK-0145 implements the canonical setting, the
+With ADR-0033 accepted, TASK-0145 implements the canonical setting, the
 secure B1 path, B2 selection and blocked state, durable review evidence,
 validation, replay/invalidation behavior and focused checks. It depends on
 TASK-0144's candidate-manifest, invocation and integrity-assessment contract,
@@ -158,11 +158,10 @@ or use review to discharge distinct approval requirements.
 
 ## Relationship to accepted decisions
 
-This proposal specifies authorship and identity for ADR-0032's independent
-review requirement without changing CV-9, the `Forbidden` default, the
-`ScopedReviewed` policy state, or G6 approval rules. ADR-0018's separation of
-Evaluation and Policy and ADR-0026's authority contracts remain in force. This
-proposal is not owner acceptance; its status remains Proposed.
+This accepted decision specifies authorship and identity for ADR-0032's
+independent review requirement without changing CV-9, the `Forbidden` default,
+the `ScopedReviewed` policy state, or G6 approval rules. ADR-0018's separation
+of Evaluation and Policy and ADR-0026's authority contracts remain in force.
 
 ## References
 
