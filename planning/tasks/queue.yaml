@@ -4226,8 +4226,9 @@ items:
       and ScopedReviewed exact path/check authorization; trusted Task/application
       selection and persistence of the selected immutable policy revision,
       fingerprint and evaluated-base binding, including SQLite durability and
-      restart recovery. Selection must be trusted and provider, repository,
-      workspace and caller supplied overrides must be denied. No integrity
+      restart recovery. Selection must be trusted; provider, repository,
+      workspace and caller-supplied inputs may apply restrictions that only
+      narrow the selected policy, but may not create, widen or replace it. No integrity
       assessment or test-harness evidence producer, reviewer identity record,
       TASK-0125 completion rewrite, or general policy language. Allocate the
       next migration from accepted main (expected 0021); TASK-0144 must allocate
@@ -4245,7 +4246,8 @@ items:
     references:
       - docs/architecture/adr/ADR-0032-g8-test-integrity-evidence-authoring.md
       - docs/architecture/adr/ADR-0018-independent-evaluation.md
+      - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
       - docs/architecture/INVARIANTS.md
       - docs/architecture/task-engine.md
-      - crates/policy-engine
+      - crates/policy
       - crates/app-services
