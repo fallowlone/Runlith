@@ -4242,9 +4242,9 @@ items:
       trusted selection is Forbidden, with evaluated-base binding, SQLite
       durability/backfill and restart recovery. ScopedReviewed may be represented
       by the model but its selection and authorization are deferred to TASK-0145
-      and must not be exposed through same-user IPC in this task. Provider,
-      repository, workspace and caller-supplied inputs cannot create, widen,
-      replace or select policy. No integrity assessment or test-harness evidence
+      and are not implemented in this task. Provider, repository, workspace and
+      caller-supplied inputs cannot create, widen, replace or select policy. No
+      integrity assessment or test-harness evidence
       producer, reviewer identity record, TASK-0125 completion rewrite, or
       general policy language. Allocate the next migration from accepted main
       (expected 0021); TASK-0144 must allocate its migration after this task
@@ -4253,8 +4253,10 @@ items:
     exit_criteria_summary: >-
       Focused tests establish the two-state canonical model and fingerprint,
       trusted default Forbidden behavior, rejection of invalid policy values,
-      inability of untrusted inputs or same-user IPC to select policy,
-      invalidation of changed/stale revisions, and Forbidden policy/evaluated-
+      inability of untrusted inputs to select policy; same-user IPC/client_kind
+      alone cannot authorize selection, and any IPC path requires independently
+      verified fresh owner proof. Tests also establish invalidation of
+      changed/stale revisions and Forbidden policy/evaluated-
       base binding durability across SQLite backfill and restart recovery.
       ScopedReviewed authorization/selection is not implemented here.
       Relevant workspace checks and independent security review pass.
@@ -4274,8 +4276,8 @@ items:
     gate: G8
     title: Independent test-mutation review authority and record
     objective: >-
-      After acceptance of ADR-0033, implement trusted owner-authorized
-      ScopedReviewed policy selection and one canonical owner-managed setting
+      Implement trusted owner-authorized ScopedReviewed policy selection and
+      one canonical owner-managed setting
       inside Runlith settings that lets Policy select either B1 human-present,
       personally authored review or B2 authenticated reviewer-service review
       at admission, with exact durable review and integrity-assessment
@@ -4289,7 +4291,8 @@ items:
       the immutable policy revision and fingerprint plus its exact authorized
       test/check/evaluator path and check identities. Provider, repository,
       workspace and caller inputs cannot create, widen, replace or select this
-      policy; same-user IPC cannot expose or select ScopedReviewed. Include
+      policy; same-user IPC/client_kind alone cannot authorize selection, and
+      any IPC path requires independently verified fresh owner proof. Include
       focused tests for spoofed selection, scope widening, exact path/check
       binding, policy revision/fingerprint mismatch, and stale or missing
       presence proof. Also implement the fixed product-managed reviewer
@@ -4331,8 +4334,10 @@ items:
       user-presence proof bound to the exact operation; its exact test/check/
       evaluator paths and check identities, immutable policy revision and
       fingerprint are validated and bound at admission. Caller, provider,
-      repository, workspace and same-user IPC inputs cannot create, widen,
-      replace or select it. Focused tests reject spoofing, scope widening,
+      repository and workspace inputs cannot create, widen, replace or select
+      it; same-user IPC/client_kind alone cannot authorize selection, and any
+      IPC path requires independently verified fresh owner proof. Focused tests
+      reject spoofing, scope widening,
       mismatched paths/checks or fingerprints, and missing/stale presence proof.
       One canonical trusted owner-managed setting selects B1 or B2 inside
       Runlith settings; Policy resolves it at admission and binds its value/revision,
