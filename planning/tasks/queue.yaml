@@ -4159,7 +4159,8 @@ items:
       implications, explicit alternatives and security impact; independent
       architecture/security review resolves any conflict with ADR-0018,
       ADR-0030, INV-009, INV-092, INV-114 and INV-146..153.
-      Outcome: accepted ADR-0032 after independent architecture/security review;
+    outcome: >-
+      Accepted ADR-0032 after independent architecture/security review;
       reviewed contract commit bc638c3d3524f8ea163771664ca90084935cab13
       merged as the second parent of 97def2d4106124b6213fb1cb267569ebd077dd8a.
       Post-merge checks observed: Ruby queue parse with 133 unique IDs,
