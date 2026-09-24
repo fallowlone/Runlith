@@ -344,6 +344,41 @@ fn save_task_creates_forbidden_default_and_preserves_selected_revision() {
 }
 
 #[test]
+fn evaluated_policy_base_refuses_a_lease_that_left_ready_state() {
+    let db = TestDb::new("policy-base-not-ready");
+    let mut store = db.open();
+    let task = seed_task(&mut store, "P-NOT-READY", "T-NOT-READY");
+    let execution = seed_execution(&mut store, &task, "E-NOT-READY");
+    let lease = lease("ws-not-ready", execution.id().as_str());
+    store.insert_allocated_lease(&lease).unwrap();
+    store
+        .mark_lease_ready(
+            lease.id(),
+            &evidence(
+                WorkspaceEventKind::Created,
+                &task,
+                &execution,
+                "ws-not-ready",
+            ),
+        )
+        .unwrap();
+    store.mark_lease_cleanup_pending(lease.id()).unwrap();
+
+    assert!(store
+        .bind_evaluated_policy_base(
+            execution.id().as_str(),
+            task.id().as_str(),
+            lease.id().as_str(),
+            lease.base_revision().as_str(),
+        )
+        .is_err());
+    assert!(store
+        .get_evaluated_policy_base(execution.id().as_str())
+        .unwrap()
+        .is_none());
+}
+
+#[test]
 fn insert_guards_reject_duplicates_and_missing_owners() {
     let db = TestDb::new("insert-guards");
     let mut store = db.open();

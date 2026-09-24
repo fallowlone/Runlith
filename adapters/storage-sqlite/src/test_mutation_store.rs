@@ -127,9 +127,32 @@ impl SqliteStore {
                 "evaluated base must be a lowercase immutable commit OID".into(),
             ));
         }
+        // Serialize the lease-state check and immutable binding insert against
+        // workspace lifecycle transitions on other connections.
         let transaction = self
             .connection_mut()
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let lease: Option<(String, String, String)> = transaction
+            .query_row(
+                "SELECT e.task_id, w.lifecycle, w.base_revision
+                 FROM executions e
+                 JOIN workspace_leases w ON w.execution_id = e.id
+                 WHERE e.id = ?1 AND w.workspace_id = ?2",
+                params![execution_id, workspace_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        match lease {
+            Some((persisted_task_id, lifecycle, persisted_base))
+                if persisted_task_id == task_id
+                    && lifecycle == "READY"
+                    && persisted_base == base_revision => {}
+            _ => {
+                return Err(StorageError::ConstraintViolation(
+                    "evaluated policy base requires the execution's READY workspace lease and persisted base".into(),
+                ));
+            }
+        }
         let policy = load_current_policy(&transaction, task_id)?;
         transaction.execute(
             "INSERT INTO evaluated_policy_bases(execution_id, task_id, workspace_id,
