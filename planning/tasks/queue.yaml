@@ -4290,7 +4290,7 @@ items:
       criterion; it does not establish compiled Rust test execution. A stable
       structured result protocol and exact compiled-artifact execution remain
       deferred. TASK-0144 may proceed within the candidate-input evidence
-      limit. This bookkeeping commit is not integrated: merge NOT done.
+      limit after this contract is integrated.
 
   - id: TASK-0146
     gate: G8
