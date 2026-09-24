@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0143
+completed_through: TASK-0146
 current_gate: G8
-gate_status: IN_PROGRESS  # G7 closed by the TASK-0120 independent closure re-audit (G7_CLOSED); G8 breakdown materialized (TASK-0121..TASK-0127 queued, contract ADRs first); TASK-0121 and TASK-0122 accepted after independent review; TASK-0123/0124/0128/0135/0143 integrated on main, G8 IN_PROGRESS
+gate_status: IN_PROGRESS  # G7 closed by TASK-0120; G8 work integrated through TASK-0146, independent gate closure remains pending
 
 items:
   - id: TASK-0012
@@ -4271,6 +4271,16 @@ items:
       - docs/architecture/task-engine.md
       - crates/policy
       - crates/app-services
+    outcome: >-
+      Accepted immutable implementation d37e36b, merged by b31e13b. Establishes
+      the two-state TestMutationPolicy model, trusted Forbidden default and
+      backfill; ScopedReviewed selection remains unimplemented for TASK-0145.
+      Independent Luna security/architecture review: PASS. Policy tests (46),
+      storage workspace (17), and app-services workspace (13, serial) passed
+      after merge; git diff --check passed. An initial concurrent
+      app-services run hit a transient Git postcondition failure; isolated
+      serial reruns passed. G8 remains IN_PROGRESS; TASK-0144 and TASK-0145
+      remain pending.
 
   - id: TASK-0145
     gate: G8
