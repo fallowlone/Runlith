@@ -4262,6 +4262,77 @@ items:
       - crates/policy
       - crates/app-services
 
+  - id: TASK-0145
+    gate: G8
+    title: Independent test-mutation review authority and record
+    objective: >-
+      After acceptance of ADR-0033, implement one canonical trusted owner-managed
+      setting inside Runlith settings that lets Policy select either B1
+      authenticated human review or B2 authenticated reviewer-service review
+      at admission, with exact durable
+      review and integrity-assessment bindings. Keep each selected path
+      fail-closed until its identity and G6/G5 controls are available.
+    scope: >-
+      Implement the trusted owner control path and canonical B1/B2 setting inside
+      Runlith settings, Policy admission-time selection, fixed product-managed reviewer
+      profile/key or minimal mapping, and binding of setting value/revision,
+      profile/mapping revision, Policy revision, and selected path to review
+      records and integrity assessments. Owner setting changes must not be
+      authorized by implementation-agent authority or same-user IPC alone.
+      Implement B1 through independently authenticated human and implementation
+      principals, enforced inequality, assignment outside implementation
+      control, exact G6 authorization, and scoped read-only control-plane
+      review. Support B2 through independently authenticated service and
+      implementation principals and governed G5/G6 Runner execution when that
+      path is available. Current macOS provider authentication is unavailable:
+      settings must still permit B2 selection, but B2 execution must remain
+      blocked pending its distinct bounded prerequisite and must never fall
+      back to B1, host auth, or unconfined execution. Its
+      stable blocker is PREREQUISITE-G5-G6-AUTHENTICATED-GOVERNED-REVIEWER-SERVICE:
+      establish an authenticated service principal and credential path usable
+      by a supported confined Runner, with G5 provenance and G6 authorization;
+      this names a missing contract, not a provider or new task. A missing,
+      invalid, changed, or unavailable selected path fails closed;
+      switching B1/B2 invalidates prior review and integrity assessment.
+      Bind verdicts to exact review inputs and use product-authored durable
+      records with atomic current-record replacement. Preserve ADR-0032 policy
+      states and CV-9. No TASK-0144 producer/assessment rewrite; no TASK-0125
+      completion admission rewrite; no provider-specific core semantics.
+    exit_criteria_summary: >-
+      ADR-0033 is accepted. One canonical trusted owner-managed setting selects
+      B1 or B2 inside Runlith settings; Policy resolves it at admission and binds
+      its value/revision,
+      profile/mapping revision, Policy revision, selected path, and exact review
+      inputs to the record and integrity assessment. Owner updates require a
+      trusted owner control path beyond same-user IPC and implementation-agent
+      authority. Each path independently authenticates reviewer and
+      implementation principals, enforces reviewer != implementer and
+      assignment outside implementation control, and denies absent or
+      unprovable identity. B1 requires G6-authorized human control-plane review
+      with scoped read-only candidate access. B2 requires governed G5/G6 Runner
+      execution. B2 remains selectable in settings, but its selection is
+      blocked until PREREQUISITE-G5-G6-AUTHENTICATED-GOVERNED-REVIEWER-SERVICE
+      is satisfied and an end-to-end authenticated governed B2 path is
+      demonstrated under G5/G6. If unavailable, TASK-0145 remains blocked and
+      cannot complete; no fallback is allowed. Missing, invalid, mismatched,
+      or unavailable selection fails
+      closed; switching path invalidates old review and assessment. Atomic
+      replacement preserves history and repeat reads do not consume evidence;
+      ScopedReviewed remains blocked on missing/rejected review while Forbidden
+      remains unchanged. Focused checks cover spoofing, exact bindings,
+      invalidation, replay, restart durability and rejection; independent
+      security review green.
+    depends_on:
+      - TASK-0143
+      - TASK-0144
+    blocked_by:
+      - PREREQUISITE-G5-G6-AUTHENTICATED-GOVERNED-REVIEWER-SERVICE
+    references:
+      - docs/architecture/adr/ADR-0033-g8-independent-test-mutation-review-authority.md
+      - docs/architecture/adr/ADR-0032-g8-test-integrity-evidence-authoring.md
+      - docs/architecture/adr/ADR-0024-g5-provider-execution-seam.md
+      - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
+      - docs/architecture/INVARIANTS.md
   - id: TASK-0147
     gate: G9
     title: Dogfoodable repository information finder
