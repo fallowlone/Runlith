@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0146
+completed_through: TASK-0148
 current_gate: G8
-gate_status: IN_PROGRESS  # G7 closed by TASK-0120; G8 work integrated through TASK-0146, independent gate closure remains pending
+gate_status: IN_PROGRESS  # G7 closed by TASK-0120; G8 task bookkeeping through TASK-0148, independent gate closure remains pending
 
 items:
   - id: TASK-0012
@@ -4210,14 +4210,21 @@ items:
       retrievable after restart; a durable integrity assessment binds the
       exact changed inputs and governed invocation descriptor and reports
       tamper or blocked capture; missing
-      or unsupported capture emits no trusted result; producer contract
-      tests cover G5/G6/G7-shaped test results without
-      requiring unmerged TASK-0125 code; full workspace verification and
-      independent security review green.
+      or unsupported capture emits no trusted result; TASK-0144 acceptance is
+      limited to candidate-input selectors explicitly authorized by the exact
+      EvidenceRequirement revision and sufficient for the criterion scope; it
+      does not claim a full Rust test suite, compilation, runtime behavior, or
+      arbitrary repository tests. Compiled-test protocol, artifact execution,
+      and recovery validation require separate ratification/implementation and
+      do not block this candidate-input path. Producer contract tests cover
+      only the supported candidate-input result contract without requiring
+      unmerged TASK-0125 code; full workspace verification and independent
+      security review green.
     depends_on:
       - TASK-0124
       - TASK-0143
       - TASK-0146
+      - TASK-0148
     blocked_by: []
     references:
       - docs/architecture/adr/ADR-0018-independent-evaluation.md
@@ -4225,6 +4232,65 @@ items:
       - docs/architecture/adr/ADR-0024-g5-provider-execution-seam.md
       - crates/evaluation
       - crates/app-services/src/observed_effect_service.rs
+
+  - id: TASK-0148
+    gate: G8
+    title: Candidate-bound governed test execution contract (ADR)
+    objective: >-
+      Resolve the candidate snapshot, governed build, exact artifact, and
+      structured test-result contract required for TASK-0144 to author trusted
+      evidence for the evaluated candidate.
+    scope: >-
+      ADR-only prerequisite. Specify product-authored capture of tracked,
+      staged, dirty, deleted, and untracked candidate inputs; immutable/race-safe
+      snapshot or fail-closed behavior; exact G6 Policy and Runner authority
+      with no NativeRunner fallback; candidate/invocation/toolchain/config and
+      artifact-bound build receipt for compiled candidate tests; and a narrow
+      product-owned evaluator that consumes and evaluates exact candidate bytes
+      without claiming to run candidate Rust tests. Bind structured results,
+      counts, selector, and digest separately for each method; specify freshness,
+      restart, authorship, tamper, race, unsupported, and recovery semantics.
+      Record stable libtest result output and immutable launch-time artifact
+      binding as explicit compiled-test requirements/blockers. No production
+      code, dependencies, or migration are in scope. Normal product/version
+      completion bookkeeping applies under AGENT.md §26.
+    exit_criteria_summary: >-
+      Owner-Accepted ADR-0034, ratified after independent architecture/security
+      review PASS on exact pre-acceptance commit
+      cb02d5182b22428bc0ad4207420b982d4bc7d550, is internally complete,
+      linked and consistent with ADR-0018,
+      ADR-0026, ADR-0030, ADR-0032/0033, G5 Runner, and TASK-0124;
+      it selects the narrow exact-byte candidate-input evaluator as the first
+      supported check, distinguishes it from candidate-compiled Rust tests,
+      records the stable structured-result blocker for compiled tests, and
+      states fail-closed requirements and resolves review findings. Owner
+      ratification is recorded. Candidate-input evidence is limited to the
+      authorized selector and criterion scope; compiled Rust test execution
+      remains deferred pending a stable structured result protocol. TASK-0144
+      depends on TASK-0148. YAML, task/dependency uniqueness, links, and diff
+      checks pass.
+    depends_on:
+      - TASK-0124
+      - TASK-0143
+      - TASK-0146
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0034-g8-candidate-bound-test-execution.md
+      - docs/architecture/adr/ADR-0032-g8-test-integrity-evidence-authoring.md
+      - docs/architecture/adr/ADR-0030-g8-observed-effect-claim-verification-contract.md
+      - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
+      - docs/architecture/runners.md
+      - crates/evaluation/src/capture.rs
+      - crates/runner/src/lib.rs
+    outcome: >-
+      ADR-0034 accepted after owner ratification and independent
+      architecture/security review PASS of exact pre-acceptance commit
+      cb02d5182b22428bc0ad4207420b982d4bc7d550. Decision supports only
+      governed candidate-input checks bound to the authorized selector and
+      criterion; it does not establish compiled Rust test execution. A stable
+      structured result protocol and exact compiled-artifact execution remain
+      deferred. TASK-0144 may proceed within the candidate-input evidence
+      limit after this contract is integrated.
 
   - id: TASK-0146
     gate: G8
