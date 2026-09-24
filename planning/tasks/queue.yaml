@@ -4303,16 +4303,16 @@ items:
       profile/mapping revision, Policy revision, selected path, and exact review
       inputs to the record and integrity assessment. Owner updates require a
       trusted owner control path beyond same-user IPC and implementation-agent
-      authority. Each path independently authenticates reviewer and
-      implementation principals, enforces reviewer != implementer and
+      authority. B1 is executable through independently authenticated human
+      and implementation principals, enforces reviewer != implementer and
       assignment outside implementation control, and denies absent or
       unprovable identity. B1 requires G6-authorized human control-plane review
-      with scoped read-only candidate access. B2 requires governed G5/G6 Runner
-      execution. B2 remains selectable in settings and its execution remains
-      blocked until PREREQUISITE-G5-G6-AUTHENTICATED-GOVERNED-REVIEWER-SERVICE
-      is separately satisfied and an end-to-end authenticated governed B2 path
-      is demonstrated under G5/G6. That prerequisite does not block TASK-0145
-      completion; no fallback is allowed. Missing, invalid, mismatched,
+      with scoped read-only candidate access. B2 is selectable in settings and
+      visibly blocked; it cannot author a review until
+      PREREQUISITE-G5-G6-AUTHENTICATED-GOVERNED-REVIEWER-SERVICE is separately
+      satisfied and an end-to-end authenticated governed B2 path is demonstrated
+      under G5/G6. B2 activation does not block TASK-0145 completion; no
+      fallback is allowed. Missing, invalid, mismatched,
       or unavailable selection fails
       closed; switching path invalidates old review and assessment. Durable
       history, freshness, replay and invalidation are preserved and repeat reads do not consume evidence;
@@ -4323,6 +4323,7 @@ items:
     depends_on:
       - TASK-0143
       - TASK-0144
+    blocked_by: []
     references:
       - docs/architecture/adr/ADR-0033-g8-independent-test-mutation-review-authority.md
       - docs/architecture/adr/ADR-0032-g8-test-integrity-evidence-authoring.md
