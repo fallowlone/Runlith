@@ -4225,7 +4225,9 @@ items:
       - TASK-0143
       - TASK-0146
       - TASK-0148
-    blocked_by: []
+      - TASK-0149
+    blocked_by:
+      - TASK-0149
     references:
       - docs/architecture/adr/ADR-0018-independent-evaluation.md
       - docs/architecture/adr/ADR-0030-g8-observed-effect-claim-verification-contract.md
@@ -4291,6 +4293,42 @@ items:
       structured result protocol and exact compiled-artifact execution remain
       deferred. TASK-0144 may proceed within the candidate-input evidence
       limit after this contract is integrated.
+
+  - id: TASK-0149
+    gate: G8
+    title: Immutable Git candidate-input capture proposal (ADR)
+    objective: >-
+      Resolve the unprivileged macOS candidate-capture blocker for TASK-0144
+      with a bounded proposed contract based on an explicitly selected Git
+      commit/tree, product-resolved blob bytes, and a sealed product snapshot.
+    scope: >-
+      ADR-only prerequisite. Specify the exact commit/tree/blob subject and
+      canonical SHA-256 path/mode/byte manifest; product-owned object
+      resolution, materialization, verification, G5/G6 Runner invocation,
+      requirement/selector/scope and Policy binding, freshness, workspace
+      drift, durable recovery, and fail-closed repository-feature limits.
+      Initial support excludes dirty, staged, and untracked worktrees. State
+      the exact ADR-0034 and ADR-0032 contract changes required on ratification
+      and the privileged APFS snapshot-helper alternative and costs. ADR-0035
+      remains Proposed until independent architecture/security review and
+      owner ratification. No accepted ADR edits, implementation, tests,
+      migration, version, roadmap, or completion bookkeeping changes.
+    exit_criteria_summary: >-
+      ADR-0035 is Proposed, linked, bounded to this method, and explicit about
+      unsupported inputs, freshness limits, security authority, alternatives,
+      and required ratification changes. TASK-0149 completes only after
+      independent architecture/security review and owner ratification of
+      ADR-0035. This proposal branch does not satisfy that criterion, mark
+      TASK-0144 done, or advance completed_through.
+    depends_on:
+      - TASK-0148
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0035-g8-immutable-git-candidate-proposal.md
+      - docs/architecture/adr/ADR-0034-g8-candidate-bound-test-execution.md
+      - docs/architecture/adr/ADR-0032-g8-test-integrity-evidence-authoring.md
+      - docs/architecture/adr/ADR-0030-g8-observed-effect-claim-verification-contract.md
+      - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
 
   - id: TASK-0146
     gate: G8
