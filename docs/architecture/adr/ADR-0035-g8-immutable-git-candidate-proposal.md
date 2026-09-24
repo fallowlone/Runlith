@@ -30,12 +30,14 @@ not imply that generated, ignored, or external dependencies are present.
 
 For the first `candidate-input` method only, accept an explicitly selected,
 complete Git commit and its root tree as the candidate subject. Support only a
-clean worktree whose `HEAD` is that commit at selection time. Staged changes,
-unstaged changes, uncommitted tracked-file deletions, and untracked files make
-this method unsupported. Committed deletions relative to the evaluated base
-remain supported: the base/candidate diff records the deleted path, its base
-mode and blob digest, and its absence from the candidate tree. Do not silently
-include worktree changes or fall back to reading live paths.
+linked worktree with a root `.git` pointer and a clean worktree whose `HEAD`
+is that commit at selection time. Standalone clones with a root `.git`
+directory are unsupported by this initial method. Staged changes, unstaged
+changes, uncommitted tracked-file deletions, and untracked files make the
+method unsupported. Committed deletions relative to the evaluated base remain
+supported: the base/candidate diff records the deleted path, its base mode and
+blob digest, and its absence from the candidate tree. Do not silently include
+worktree changes or fall back to reading live paths.
 
 The trusted product must:
 
@@ -154,39 +156,67 @@ cloning from the live worktree is not capture and cannot substitute for it.
 The evidence subject is the immutable tuple `(Task, evaluated base commit,
 selected candidate commit, resolved root tree, canonical manifest digest,
 requirement revision, policy fingerprint, selector/scope, invocation)`. It
-never means “whatever bytes happen to be in the worktree.” The trusted product
-requires `HEAD == selected commit`, the index tree to equal the selected root
-tree, no tracked worktree differences, and no untracked paths when the
-selection is made. It rechecks these conditions and the requirement/policy
-before evaluation, after evaluation, before admitting the result, and at
-completion. A detected change makes the attempt stale/blocked and cannot
-produce or reuse successful `TEST_SUITE_RESULT`. Ignored files are not
-candidate inputs and cannot be read by the evaluator, which receives only the
-sealed snapshot. They are point-in-time freshness checks, not a lock on
-external writers or a substitute for immutable capture.
+never means “whatever bytes happen to be in the worktree.” Establish freshness
+with a paired metadata observation (A) and live-filesystem observation (B),
+bound to the same trusted common-Git anchor:
 
-These workspace checks are freshness gates, not capture evidence: a live
-edit can be restored between checks, and there is no transaction spanning
-worktree state and SQLite. Such an unobserved transient edit cannot alter the
-Git-object-derived snapshot, so it does not change which commit bytes the
-result describes. The product must describe and admit evidence only for that
-selected commit subject; it must not claim continuous worktree cleanliness
-or that the result describes an uncommitted/live candidate. If a criterion
-requires those claims, this method is unsupported for it.
+**A — linked HEAD and index.** Use the read-only Git plumbing Runner plan
+above, with CWD inside the canonical common Git directory and pinned
+`--git-dir=<validated linked metadata dir>`. The linked metadata path must be
+authenticated through the trusted `TrustedCommonGit` anchor and bidirectional
+linked-worktree back-reference validation. The product may receive a path
+candidate from B's authorized root-pointer read, but must prove it resolves to
+the linked metadata under the trusted common dir, its `gitdir` back-reference
+names that exact root `.git` file, and its `commondir` resolves to the trusted
+anchor. The mutable pointer alone is never authority. For each pair, B reads
+the pointer under its worktree scope, A authenticates the corresponding
+metadata/back-reference under its common-dir scope and makes its observations,
+then B rereads the pointer immediately before and after scanning and requires
+the same bytes and authenticated target. Any mismatch fails the pair. Run only
+bounded object reads and linked-HEAD/index observations. Compare linked
+`HEAD` with the selected commit, then compare every stage-zero index entry,
+path, mode, and object ID with the selected tree; reject unmerged stages or any
+mismatch. Do not use `write-tree`. This plan must not run `status`, worktree
+diff, checkout, filter, hook, or any command that reads live worktree files.
+
+**B — live worktree.** A product-owned in-process scanner requests current G6
+`FilesystemRead(FileScope(workspace=<canonical managed worktree>, root='.'))`
+and re-presents the narrowed authority for each directory open, `read_dir`,
+metadata lookup, file open, and file read. It uses descriptor-based
+beneath/no-follow traversal and launches no Git process. Compare every
+expected regular-file path, mode, length, and SHA-256 with the selected
+manifest, and compare the complete expected directory set. Missing or extra
+paths—including ignored files—symlinks, special files, or mismatches stale the
+observation. The only exception is the root `.git` pointer file: it is not a
+manifest entry and must be structurally revalidated against A's authenticated
+linked metadata path and common anchor before each pair. Reject a `.git`
+directory or symlink and any missing, malformed, or changed pointer.
+
+Bind each A+B pair to the same anchor, Task, execution, attempt, base and
+selected commit/tree, manifest version/digest, exact requirement revision,
+policy revision/fingerprint, selector/scope, operation identity, observation
+times, and both outcomes.
+Recheck the pair and bindings at selection, before and after evaluation,
+before result admission, at completion, and before post-restart reuse. A
+detected mismatch makes evidence stale/blocked and cannot produce or reuse a
+successful `TEST_SUITE_RESULT`. These sequential checks are freshness gates,
+not capture: changes can occur between observations, so the contract claims
+neither continuous worktree cleanliness nor a race-free snapshot of live
+files. The evaluator receives only the sealed Git-object-derived snapshot.
+Evidence describes only the selected commit subject; criteria requiring a
+claim about uninterrupted or uncommitted worktree state are unsupported.
 
 Before object resolution/evaluation, persist enough operation identity and
 selection provenance to distinguish a retry from a new subject. Persist the
 verified manifest and result bindings before making the effect usable. After
 restart, revalidate object identities if re-materializing, the sealed
-snapshot manifest if retained, result integrity, current requirement/policy,
-and the selected subject. Before reuse after restart, repeat the point-in-time
-HEAD/index/worktree cleanliness checks as well as requirement/policy checks.
-Missing objects, lost or mutable snapshots, ambiguous operation state,
-partial persistence, parser errors, duplicate replay, or any mismatch remain
-blocked/stale/tampered; they never become success. Re-execution is permitted
-only as a new or explicitly reconciled attempt and must bind the same exact
-immutable subject. Retain durable bounded provenance even if temporary
-snapshot bytes are later removed.
+snapshot manifest if retained, result integrity, and the complete A+B pair
+with current requirement/policy. Missing objects, lost or mutable snapshots,
+ambiguous operation state, partial persistence, parser errors, duplicate
+replay, or any mismatch remain blocked/stale/tampered; they never become
+success. Re-execution is permitted only as a new or explicitly reconciled
+attempt and must bind the same exact immutable subject. Retain durable bounded
+provenance even if temporary snapshot bytes are later removed.
 
 ### Alternative: privileged APFS snapshot service
 
@@ -243,9 +273,11 @@ candidate-compiled tests requires a separately specified and ratified method.
 
 ## Consequences and security impact
 
-- Initial candidate-input evaluation becomes available only for clean,
-  explicitly selected commits and supported tree contents. Ordinary dirty,
-  staged, and untracked worktrees are unsupported by this method.
+- Initial candidate-input evaluation becomes available only for explicitly
+  selected commits in supported linked worktrees, supported tree contents,
+  and a matching live worktree. Standalone clones with a `.git` directory are
+  unsupported. Dirty, staged, untracked, or ignored extra paths make freshness
+  fail.
 - The product owns object resolution, manifest creation, snapshot
   materialization, verification, invocation binding, result validation, and
   durable recovery. Candidate code, provider, caller, and host harness do not
