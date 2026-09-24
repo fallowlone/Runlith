@@ -78,6 +78,33 @@ blocked/unverified unless separately captured and authorized. Exact selector,
 criterion scope, requirement revision, and Policy authorization are mandatory;
 matching source text or a commit name alone is insufficient.
 
+### Scoped G6 operation plans
+
+For Git object reads, the product obtains the canonical absolute common-dir
+path only from the authenticated `TrustedCommonGit` adapter anchor. It
+revalidates that anchor against the repository before launch. The product then
+requests a distinct, current `PolicyRequest` for
+`ProcessExecute(<exact Git executable>)` and
+`FilesystemRead(FileScope(workspace=<canonical common-dir path>, root='.'))`,
+then narrows current `EffectiveCapabilities` to those exact capabilities for
+one governed, read-only Git plumbing Runner plan. The anchor and scope are
+never derived from provider data, a selector, repository config, or a
+caller-supplied path. Anchor mismatch, denied/stale policy, unavailable
+enforcement, or inability to narrow the authority blocks capture.
+
+Snapshot materialization has a separate current G6 authorization and
+filesystem scope. A product-owned in-process writer must enforce that scoped
+authority at each filesystem boundary; a process-based writer gets its own
+Runner plan and `EffectiveCapabilities`. Neither authority is combined with
+the Git-read plan. The evaluator also gets a separate Runner plan, limited to
+read access to the sealed snapshot and its required product runtime inputs;
+it receives no common-Git, live-source, or snapshot-write authority. Plans do
+not union or leak roots or capabilities across these operations. Existing
+`PolicyRequest`, `FileScope`, `EffectiveCapabilities::narrow`, and Runner
+contracts express this separation; no new capability model is proposed.
+Denial, stale authority, scope mismatch, or missing enforcement at any plan
+blocks that operation and the evidence capture.
+
 ### Git object source constraints
 
 The product uses a pinned, trusted Git plumbing path that reads raw objects
@@ -92,6 +119,29 @@ the tree; it is not evidence for the external LFS object. No trust is placed
 in repository-local configuration to select executable plumbing, filters, or
 external object sources. Inability to prove these conditions yields typed
 unsupported/blocked capture and no successful result.
+
+### Hostile tree validation and materialization
+
+Treat tree entries and path bytes as hostile. Reject empty, `.` or `..`
+components; absolute/rooted paths or platform prefixes; NULs or path
+separators inside components; duplicate entries; file/tree prefix conflicts;
+unsupported Git modes; and distinct paths that collide after the destination
+filesystem's normalization or case rules. Treat any component equal to `.git`
+under those same normalization/case rules as forbidden. Allow only
+regular-file modes `100644` and `100755` plus tree entries; reject symlinks,
+gitlinks, and every other mode. If the destination filesystem's path
+comparison/normalization behavior cannot be established, fail closed.
+
+Before materialization, enforce product-owned versioned limits for tree depth,
+entry count, component and full-path length, and aggregate blob bytes. Reject
+an over-limit or malformed tree without creating a candidate snapshot or
+emitting an observed effect. Exclusively create a new product-owned snapshot
+root for each capture; an existing root fails closed. Materialize with
+directory handles and no-follow/beneath resolution
+so a path cannot escape that root or redirect writes through a symlink.
+Recompute and compare the complete path/mode/length/per-blob-digest manifest
+after materialization. Any traversal, collision, bound, write, or verification
+failure blocks capture and emits no `TEST_SUITE_RESULT` or successful effect.
 
 Git objects are the race-safe capture source only after the product has
 verified their object identities and complete tree traversal. The sealed
@@ -112,8 +162,8 @@ before evaluation, after evaluation, before admitting the result, and at
 completion. A detected change makes the attempt stale/blocked and cannot
 produce or reuse successful `TEST_SUITE_RESULT`. Ignored files are not
 candidate inputs and cannot be read by the evaluator, which receives only the
-sealed snapshot. These checks are observations at their stated points, not a
-lock on external writers.
+sealed snapshot. They are point-in-time freshness checks, not a lock on
+external writers or a substitute for immutable capture.
 
 These workspace checks are freshness gates, not capture evidence: a live
 edit can be restored between checks, and there is no transaction spanning
@@ -219,8 +269,13 @@ candidate-compiled tests requires a separately specified and ratified method.
 - ADR-0034 — accepted candidate-bound execution contract.
 - `adapters/git-cli/src/observe.rs` — current Git observation covers HEAD
   and index only.
+- `adapters/git-cli/src/runner.rs` and `crates/workspace/src/trusted.rs` —
+  trusted common-Git anchor derivation, canonical-path validation, and
+  per-operation anchor revalidation.
 - `crates/evaluation/src/capture.rs` — current capture request/effect seam.
 - `crates/runner/src/lib.rs` — G6 Runner enforcement contract.
+- `crates/policy/src/lib.rs` — `PolicyRequest`, `FileScope`, and narrowed
+  `EffectiveCapabilities` contracts.
 - [Apple `fs_snapshot_create(2)`](https://github.com/apple/darwin-xnu/blob/main/bsd/man/man2/fs_snapshot_create.2)
   documents the superuser and additional-entitlement requirements.
 - [Apple `clonefile(2)`](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/clonefile.2)
