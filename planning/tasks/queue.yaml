@@ -4276,8 +4276,11 @@ items:
       output, freshness checks, security filtering, and reproducible
       selection. Before implementation, define a representative repository
       question set, comparable runs across the finder, rg, and an RTK-style
-      baseline, and evidence-quality and token-cost measures. Record elapsed
-      time as well. Reuse existing Context Engine and Resource contracts; no
+      baseline, and evidence-quality and token-cost measures. Record the
+      repository revision, build/configuration, hardware/backend provenance,
+      and repeat/run protocol. Use the same question set and comparable
+      conditions for each method. Record elapsed time as well. Reuse existing
+      Context Engine and Resource contracts; no
       new vector database by default. No G8 implementation or parallel
       retrieval subsystem. Execute only after G8 closure and G9 activation
       under the existing gate workflow.
@@ -4288,9 +4291,11 @@ items:
       benchmark defines a representative repository question set and measures
       evidence quality using relevance and source support, plus token cost
       using a consistently reported input/output token count for comparable
-      runs of the finder, rg, and an RTK-style baseline. Elapsed time is
-      recorded. Security filtering and provenance behavior are documented and
-      reviewable.
+      runs of the finder, rg, and an RTK-style baseline using the same
+      representative question set and comparable conditions. The protocol
+      records repository revision, build/configuration, hardware/backend
+      provenance, and repeat/run procedure. Elapsed time is recorded. Security
+      filtering and provenance behavior are documented and reviewable.
     depends_on:
       - TASK-0137
     blocked_by: []
