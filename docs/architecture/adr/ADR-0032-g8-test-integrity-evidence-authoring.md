@@ -1,6 +1,6 @@
 # ADR-0032 — G8 Test Integrity and Trusted Verification Evidence
 
-Status: Proposed (TASK-0143; owner decision and independent review pending)
+Status: Proposed (TASK-0143; final independent review pending)
 Gate: G8
 
 > This proposal has no completion authority. ADR-0018 and ADR-0030 remain
@@ -22,7 +22,19 @@ These are contract and authority questions. A green test suite containing
 synthetic `VERIFIED` rows is not evidence that the production completion
 path satisfies CV-1..CV-9.
 
-## Recommended decision for owner review
+## Recommended v1 decision
+
+Use two policy states: `Forbidden` (the trusted default when no exception is
+selected) and `ScopedReviewed` (an explicit Task authorization for exact
+test/check/evaluator paths and check identities). A changed input outside
+that scope is tampering. A change inside it is eligible only after an
+independent review record binds the Task, immutable base, candidate and
+changed-input manifest, affected checks, and policy fingerprint. The
+reviewer cannot be the implementing agent. Human approval is additionally
+required when the Policy Engine's risk/requirement decision calls for it;
+changing an ordinary test does not create a universal human-approval gate.
+A missing or changed selected policy invalidates the old assessment; it
+never silently widens the scope.
 
 1. **Canonical policy and baseline.** The Policy Engine owns the
    `TestMutationPolicy` definition, revision and authorization rules. The
@@ -31,7 +43,12 @@ path satisfies CV-1..CV-9.
    Provider output, repository instructions and a review fixture cannot
    create or weaken it. A trusted evaluator compares the
    candidate revision with that base to identify changed test, check and
-   evaluator inputs. If the policy or required comparison cannot be
+   evaluator inputs, including newly added and untracked inputs used by
+   candidate checks. The base is an immutable Git commit plus content
+   digests; the candidate is a captured path/type/content manifest bound
+   to the evaluated subject, including dirty-worktree inputs when present.
+   A bare `git diff` or commit name cannot establish candidate contents.
+   If the selected policy or required comparison cannot be
    established, affected criteria remain `UNVERIFIED` and completion
    refuses. Historical completed Tasks are not re-adjudicated.
 2. **Integrity decision.** The evaluator records a durable assessment
@@ -45,9 +62,13 @@ path satisfies CV-1..CV-9.
 3. **Evidence producer.** The trusted Evaluation/Runner composition may
    author an `ObservedEffect` only from a structured result returned by an
    accepted governed execution path. `TEST_SUITE` requires
-   `TEST_SUITE_RESULT` with executed selector, pass/fail/skip counts,
+   `TEST_SUITE_RESULT` through a trusted test adapter at the governed
+   Runner boundary, with executed selector, pass/fail/skip counts,
    result digest, subject/config/toolchain fingerprint, attempt lineage,
-   capture authority and time. Console prose, provider self-report and
+   capture authority and time. The adapter validates a structured harness
+   result against the governed invocation and Runner outcome before it
+   authors a durable effect; neither child nor provider writes an
+   authoritative effect directly. Console prose, provider self-report and
    runtime receipts are provenance, not a test result. Missing or
    unsupported capture emits no trusted test-result effect; the later
    verification boundary maps that condition to `BLOCKED` or `UNVERIFIED`,
@@ -67,10 +88,10 @@ path satisfies CV-1..CV-9.
    consumptions. A concurrent change fails closed; no stale admission
    report is committed.
 
-These rules describe the proposed minimum contract. The exact v1
-`TestMutationPolicy` modes and the structured test-result adapter remain
-subject to the owner decisions below; TASK-0144 implements the accepted
-contract, and TASK-0125 consumes its durable evidence.
+These rules describe the v1 contract. TASK-0144 selects the first
+concrete structured harness format and implements the accepted contract;
+TASK-0125 consumes its durable evidence. If no harness satisfies the
+contract, capture stays unsupported and completion stays blocked.
 
 ## Alternatives
 
@@ -82,8 +103,9 @@ contract, and TASK-0125 consumes its durable evidence.
 - **Rely only on an independent model review.** Rejected as a universal
   substitute: review can be required by policy, but it cannot replace
   structured test execution or deterministic changed-input measurement.
-- **Recommended:** a small trusted policy with a fail-closed default and
-  exact independent-review/human-approval references for permitted edits.
+- **Chosen v1:** two trusted policy states with a fail-closed default and
+  exact independent-review references for permitted edits; add human
+  approval only when the Policy Engine requires it.
   Avoid a general policy language until a concrete task needs it.
 
 ## Consequences and security impact
@@ -110,16 +132,12 @@ workspace checks. No hidden cherry-pick/rebase or reuse of a numbered
 migration with different contents. Historical verdict-free completions
 remain valid history under ADR-0030.
 
-## Open owner decisions before acceptance
+## Acceptance boundary
 
-1. Select the minimal v1 `TestMutationPolicy` modes and the exact
-   authorization for changed approval tests: strict forbid, scoped allow
-   with independent review, and/or human approval. Define the absence
-   default and how policy updates invalidate prior assessments.
-2. Confirm whether the trusted changed-input baseline is a Git commit
-   plus content digests, or another already-durable workspace revision.
-3. Select the first structured `TEST_SUITE_RESULT` source supported by
-   the current governed Runner. Do not infer a test result from stdout.
+This contract must pass independent review before TASK-0143 is accepted.
+TASK-0144 must show a concrete structured harness adapter satisfying the
+Runner boundary and fail closed if no such source is available. Acceptance
+of this ADR does not make the unmerged TASK-0125 implementation acceptable.
 
 ## References
 
