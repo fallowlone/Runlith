@@ -37,5 +37,6 @@
 | [ADR-0030](./ADR-0030-g8-observed-effect-claim-verification-contract.md) | G8 observed effect / claim verification contract (`AgentClaim`, `EvidenceRequirement`, `ObservedEffect`, `ClaimVerification`, CV-1..CV-9) | Accepted | verification, claims, evidence requirements, observed effects, claim verification, completion authority, g8 sequencing |
 | [ADR-0031](./ADR-0031-g8-side-effect-execution-protocol.md) | G8 side-effect execution protocol (durable `SideEffectIntent`, AMBIGUOUS/RECONCILE recovery, idempotency identity, SE-1..SE-8) | Accepted | side effects, durable intent, recovery, reconciliation, idempotency, workspace, git, g8 sequencing |
 | [ADR-0032](./ADR-0032-g8-test-integrity-evidence-authoring.md) | G8 test integrity and trusted verification evidence (TASK-0143) | Accepted | test mutation policy, CV-9, evidence producer, completion authority |
+| [ADR-0033](./ADR-0033-g8-independent-test-mutation-review-authority.md) | G8 independent test-mutation review authority | Proposed | CV-9, reviewer identity, scoped test/check mutation |
 
 Coverage register (not an ADR): [COVERAGE.md](./COVERAGE.md).
