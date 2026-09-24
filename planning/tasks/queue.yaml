@@ -4262,6 +4262,94 @@ items:
       - crates/policy
       - crates/app-services
 
+  - id: TASK-0145
+    gate: G8
+    title: Independent test-mutation review authority and record
+    objective: >-
+      After acceptance of ADR-0033, implement one canonical trusted owner-managed
+      setting inside Runlith settings that lets Policy select either B1
+      human-present, personally authored review or B2 authenticated reviewer-service review
+      at admission, with exact durable
+      review and integrity-assessment bindings. Keep each selected path
+      fail-closed until its identity and G6/G5 controls are available.
+    scope: >-
+      Implement the trusted owner control path and canonical B1/B2 setting inside
+      Runlith settings, Policy admission-time selection, fixed product-managed reviewer
+      profile/key or minimal mapping, and binding of setting value/revision,
+      profile/mapping revision, Policy revision, and selected path to review
+      records and integrity assessments. Owner setting changes require fresh
+      interactive platform user-presence authentication through the trusted
+      Runlith desktop/control host, bound in a product-owned process to the
+      exact operation and captured review input; same-user IPC and provider
+      process submission cannot establish or impersonate the human verdict.
+      Implement B1 with HumanPrincipal established by fresh interactive presence
+      and personal explicit verdict submission in the trusted UI, and
+      ImplementationPrincipal as a product-minted, Runner-admitted governed AI
+      Attempt principal bound to Runner process and admission provenance.
+      Establish reviewer != implementing AI Attempt from independently proven
+      typed actors and actions; same OS account alone is neither proof nor
+      disqualification. Reject caller/provider identity claims. Assignment is
+      outside implementation control. If fresh
+      presence or required isolation is unavailable, fail closed without an
+      unsandboxed fallback. Implement exact G6 authorization and scoped
+      read-only control-plane review. Support B2 through independently
+      authenticated service and
+      implementation principals and governed G5/G6 Runner execution when that
+      path is available. Settings must permit B2 selection while its execution
+      remains blocked until PREREQUISITE-G5-G6-AUTHENTICATED-GOVERNED-REVIEWER-SERVICE
+      is separately demonstrated: an authenticated service principal and
+      credential path usable by a supported confined Runner, with G5 provenance
+      and G6 authorization. B2 never falls back to B1, host auth, or unconfined
+      execution. This prerequisite does not block TASK-0145 completion. A missing,
+      invalid, changed, or unavailable selected path fails closed;
+      switching B1/B2 invalidates prior review and integrity assessment.
+      Bind verdicts to exact review inputs and use product-authored durable
+      records with durable history, freshness and replay/invalidation controls. Preserve ADR-0032 policy
+      states and CV-9. No TASK-0144 producer/assessment rewrite; no TASK-0125
+      completion admission rewrite; no provider-specific core semantics.
+    exit_criteria_summary: >-
+      ADR-0033 is accepted. One canonical trusted owner-managed setting selects
+      B1 or B2 inside Runlith settings; Policy resolves it at admission and binds
+      its value/revision,
+      profile/mapping revision, Policy revision, selected path, and exact review
+      inputs to the record and integrity assessment. Owner updates and B1
+      review require fresh interactive platform user-presence authentication
+      obtained by the trusted Runlith UI and bound by a product-owned process
+      to the exact operation and captured input; same-user IPC/client_kind or
+      provider-process submission cannot establish or impersonate the verdict.
+      B1 uses typed HumanPrincipal (fresh presence and personally submitted
+      explicit verdict in trusted UI, bound to the captured exact input) and
+      ImplementationPrincipal (product-minted, Runner-admitted governed AI
+      Attempt, bound to Runner process/admission provenance). Independently
+      proven actors/actions establish reviewer != implementing AI Attempt;
+      same OS account alone is neither proof nor disqualification. Assignment
+      stays outside implementation control, and unavailable or unprovable
+      identity/presence fails closed. Provider text cannot establish identity,
+      owner proof or assignment. Required isolation has no unsandboxed fallback.
+      B1 requires G6-authorized human control-plane review with scoped read-only
+      candidate access. B2 is selectable in settings and
+      visibly blocked; it cannot author a review until
+      PREREQUISITE-G5-G6-AUTHENTICATED-GOVERNED-REVIEWER-SERVICE is separately
+      satisfied and an end-to-end authenticated governed B2 path is demonstrated
+      under G5/G6. B2 activation does not block TASK-0145 completion; no
+      fallback is allowed. Missing, invalid, mismatched,
+      or unavailable selection fails
+      closed; switching path invalidates old review and assessment. Durable
+      history, freshness, replay and invalidation are preserved and repeat reads do not consume evidence;
+      ScopedReviewed remains blocked on missing/rejected review while Forbidden
+      remains unchanged. Focused checks cover spoofing, exact bindings,
+      invalidation, replay, restart durability and rejection; independent
+      security review green.
+    depends_on:
+      - TASK-0143
+      - TASK-0144
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0033-g8-independent-test-mutation-review-authority.md
+      - docs/architecture/adr/ADR-0032-g8-test-integrity-evidence-authoring.md
+      - docs/architecture/adr/ADR-0024-g5-provider-execution-seam.md
+      - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
+      - docs/architecture/INVARIANTS.md
   - id: TASK-0147
     gate: G9
     title: Dogfoodable repository information finder
