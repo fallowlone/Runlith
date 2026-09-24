@@ -38,6 +38,6 @@
 | [ADR-0031](./ADR-0031-g8-side-effect-execution-protocol.md) | G8 side-effect execution protocol (durable `SideEffectIntent`, AMBIGUOUS/RECONCILE recovery, idempotency identity, SE-1..SE-8) | Accepted | side effects, durable intent, recovery, reconciliation, idempotency, workspace, git, g8 sequencing |
 | [ADR-0032](./ADR-0032-g8-test-integrity-evidence-authoring.md) | G8 test integrity and trusted verification evidence (TASK-0143) | Accepted | test mutation policy, CV-9, evidence producer, completion authority |
 | [ADR-0033](./ADR-0033-g8-independent-test-mutation-review-authority.md) | G8 independent test-mutation review authority | Accepted | CV-9, reviewer identity, scoped test/check mutation |
-| [ADR-0034](./ADR-0034-g8-candidate-bound-test-execution.md) | G8 candidate-bound governed test execution | Proposed | candidate snapshot, exact test artifact, governed test evidence |
+| [ADR-0034](./ADR-0034-g8-candidate-bound-test-execution.md) | G8 candidate-bound governed test execution | Accepted | candidate snapshot, exact test artifact, governed test evidence |
 
 Coverage register (not an ADR): [COVERAGE.md](./COVERAGE.md).
