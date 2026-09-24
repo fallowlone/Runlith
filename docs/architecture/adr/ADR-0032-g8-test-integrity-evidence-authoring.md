@@ -1,10 +1,10 @@
 # ADR-0032 — G8 Test Integrity and Trusted Verification Evidence
 
-Status: Proposed (TASK-0143; final independent review pending)
+Status: Accepted (TASK-0143; owner v1 decision, independent review complete)
 Gate: G8
 
-> This proposal has no completion authority. ADR-0018 and ADR-0030 remain
-> binding until an owner accepts a reviewed decision.
+> This ADR defines the CV-9 integrity and evidence-production contract.
+> It grants no completion authority and does not weaken ADR-0018 or ADR-0030.
 
 ## Context
 
@@ -22,7 +22,7 @@ These are contract and authority questions. A green test suite containing
 synthetic `VERIFIED` rows is not evidence that the production completion
 path satisfies CV-1..CV-9.
 
-## Recommended v1 decision
+## v1 decision
 
 Use two policy states: `Forbidden` (the trusted default when no exception is
 selected) and `ScopedReviewed` (an explicit Task authorization for exact
@@ -140,9 +140,8 @@ workspace checks. No hidden cherry-pick/rebase or reuse of a numbered
 migration with different contents. Historical verdict-free completions
 remain valid history under ADR-0030.
 
-## Acceptance boundary
+## Implementation boundary
 
-This contract must pass independent review before TASK-0143 is accepted.
 TASK-0144 must show a concrete structured harness adapter satisfying the
 Runner boundary and fail closed if no such source is available. Acceptance
 of this ADR does not make the unmerged TASK-0125 implementation acceptable.
