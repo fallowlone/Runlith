@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0135
+completed_through: TASK-0143
 current_gate: G8
-gate_status: IN_PROGRESS  # G7 closed by the TASK-0120 independent closure re-audit (G7_CLOSED); G8 breakdown materialized (TASK-0121..TASK-0127 queued, contract ADRs first); TASK-0121 and TASK-0122 accepted after independent review; TASK-0123/0124/0128/0135 integrated on main, G8 IN_PROGRESS
+gate_status: IN_PROGRESS  # G7 closed by the TASK-0120 independent closure re-audit (G7_CLOSED); G8 breakdown materialized (TASK-0121..TASK-0127 queued, contract ADRs first); TASK-0121 and TASK-0122 accepted after independent review; TASK-0123/0124/0128/0135/0143 integrated on main, G8 IN_PROGRESS
 
 items:
   - id: TASK-0012
@@ -4159,6 +4159,12 @@ items:
       implications, explicit alternatives and security impact; independent
       architecture/security review resolves any conflict with ADR-0018,
       ADR-0030, INV-009, INV-092, INV-114 and INV-146..153.
+      Outcome: accepted ADR-0032 after independent architecture/security review;
+      reviewed contract commit bc638c3d3524f8ea163771664ca90084935cab13
+      merged as the second parent of 97def2d4106124b6213fb1cb267569ebd077dd8a.
+      Post-merge checks observed: Ruby queue parse with 133 unique IDs,
+      cargo test -p product-version (6 passed), and git diff --check clean.
+      No full workspace verification is claimed. G8 remains IN_PROGRESS.
     depends_on:
       - TASK-0121
     blocked_by: []
