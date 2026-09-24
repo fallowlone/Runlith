@@ -1488,23 +1488,22 @@ mod tests {
 
     fn task_authoring_core_frame() -> Bytes {
         use ipc_contracts::proto::{
-            task_authoring_core_request, SelectTestMutationPolicyRequest, TaskAuthoringCoreRequest,
-            TestMutationPolicyKind,
+            task_authoring_core_request, CreatePlanningTaskRequest, TaskAuthoringCoreRequest,
         };
         Bytes::from(
             ControlRequest {
                 payload: Some(control_request::Payload::TaskAuthoringCore(
                     TaskAuthoringCoreRequest {
-                        payload: Some(
-                            task_authoring_core_request::Payload::SelectTestMutationPolicy(
-                                SelectTestMutationPolicyRequest {
-                                    task_id: "T-1".to_owned(),
-                                    kind: TestMutationPolicyKind::ScopedReviewed as i32,
-                                    exact_paths: vec!["tests/unit.rs".to_owned()],
-                                    exact_checks: vec!["cargo-test-unit".to_owned()],
-                                },
-                            ),
-                        ),
+                        payload: Some(task_authoring_core_request::Payload::CreatePlanningTask(
+                            CreatePlanningTaskRequest {
+                                id: "T-1".to_owned(),
+                                project_id: "P-1".to_owned(),
+                                objective: "author".to_owned(),
+                                allowed_paths: vec!["repo:src".to_owned()],
+                                acceptance_criteria: vec!["criterion".to_owned()],
+                                baseline_risk: "low".to_owned(),
+                            },
+                        )),
                     },
                 )),
             }

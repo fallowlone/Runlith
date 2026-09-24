@@ -29,66 +29,6 @@ pub(crate) fn insert_default_policy(connection: &Connection, task_id: &str) -> S
 }
 
 impl SqliteStore {
-    pub fn append_test_mutation_policy_revision(
-        &mut self,
-        task_id: &str,
-        revision: &TestMutationPolicyRevision,
-    ) -> StorageResult<()> {
-        let revision_number = i64::try_from(revision.revision()).map_err(|_| {
-            StorageError::ConstraintViolation("policy revision exceeds SQLite integer range".into())
-        })?;
-        let transaction = self
-            .connection_mut()
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let state: Option<String> = transaction
-            .query_row(
-                "SELECT state FROM tasks WHERE id = ?1",
-                params![task_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if state.as_deref() != Some("DRAFT") {
-            return Err(StorageError::ConstraintViolation(
-                "policy selection requires an existing DRAFT task".into(),
-            ));
-        }
-        let has_execution: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM executions WHERE task_id = ?1)",
-            params![task_id],
-            |row| row.get(0),
-        )?;
-        if has_execution {
-            return Err(StorageError::ConstraintViolation(
-                "policy selection is immutable after execution begins".into(),
-            ));
-        }
-        let current: i64 = transaction.query_row(
-            "SELECT COALESCE(MAX(revision), 0) FROM test_mutation_policy_revisions WHERE task_id = ?1",
-            params![task_id], |row| row.get(0),
-        )?;
-        let expected = current
-            .checked_add(1)
-            .ok_or_else(|| StorageError::ConstraintViolation("policy revision exhausted".into()))?;
-        if revision_number != expected {
-            return Err(StorageError::ConstraintViolation(format!(
-                "policy revision must be {}, got {}",
-                expected, revision_number
-            )));
-        }
-        transaction.execute(
-            "INSERT INTO test_mutation_policy_revisions(task_id, revision, serialized, fingerprint)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                task_id,
-                revision_number,
-                revision.serialize(),
-                revision.fingerprint()
-            ],
-        )?;
-        transaction.commit()?;
-        Ok(())
-    }
-
     pub fn get_test_mutation_policy(
         &self,
         task_id: &str,
