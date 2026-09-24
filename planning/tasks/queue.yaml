@@ -4197,7 +4197,10 @@ items:
       use the accepted G5/G6 governed execution boundary and TASK-0124
       capture port. Bind producer output to exact subject, requirement,
       policy, attempt and evidence kind; record typed integrity and capture
-      statuses, not completion verdicts. No provider self-verdicts, direct
+      statuses, not completion verdicts. Must work with the trusted default
+      Forbidden policy after TASK-0146; ScopedReviewed remains unavailable
+      until trusted owner selection and authorization are implemented by
+      TASK-0145. No provider self-verdicts, direct
       probe process path, new completion
       authority, G14 routing, or TASK-0125 admission rewrite. Allocate the
       next migration number from accepted main; TASK-0125 must reconcile its
@@ -4225,30 +4228,37 @@ items:
 
   - id: TASK-0146
     gate: G8
-    title: Canonical TestMutationPolicy selection and persistence
+    title: TestMutationPolicy model and durable base binding
     objective: >-
-      Implement the ADR-0032 prerequisite contract for defining, authorizing,
-      selecting and durably binding the TestMutationPolicy used by TASK-0144
-      integrity assessment.
+      Implement the ADR-0032 Policy Engine model and durable persistence
+      prerequisite used by TASK-0144 integrity assessment, with trusted
+      Forbidden defaults and evaluated-base binding/recovery. Defer
+      ScopedReviewed selection and authorization to TASK-0145.
     scope: >-
       Policy Engine-owned policy model, serialization, immutable revision and
-      fingerprint, and authorization rules for Forbidden (trusted default)
-      and ScopedReviewed exact path/check authorization; trusted Task/application
-      selection and persistence of the selected immutable policy revision,
-      fingerprint and evaluated-base binding, including SQLite durability and
-      restart recovery. Selection must be trusted; provider, repository,
-      workspace and caller-supplied inputs may apply restrictions that only
-      narrow the selected policy, but may not create, widen or replace it. No integrity
-      assessment or test-harness evidence producer, reviewer identity record,
-      TASK-0125 completion rewrite, or general policy language. Allocate the
-      next migration from accepted main (expected 0021); TASK-0144 must allocate
-      its migration after this task lands, and TASK-0125 must then reconcile its
-      unmerged migration after TASK-0144.
+      canonical serialization, immutable revision and fingerprint for ADR-0032's
+      two states, Forbidden and ScopedReviewed; Forbidden is the trusted default.
+      Persist the selected immutable policy revision and fingerprint when the
+      trusted selection is Forbidden, with evaluated-base binding, SQLite
+      durability/backfill and restart recovery. ScopedReviewed may be represented
+      by the model but its selection and authorization are deferred to TASK-0145
+      and are not implemented in this task. Provider, repository, workspace and
+      caller-supplied inputs cannot create, widen, replace or select policy. No
+      integrity assessment or test-harness evidence
+      producer, reviewer identity record, TASK-0125 completion rewrite, or
+      general policy language. Allocate the next migration from accepted main
+      (expected 0021); TASK-0144 must allocate its migration after this task
+      lands, and TASK-0125 must then reconcile its unmerged migration after
+      TASK-0144.
     exit_criteria_summary: >-
-      Focused tests establish trusted default Forbidden behavior, exact
-      ScopedReviewed path/check limits, rejection of invalid policies and
-      unauthorized or spoofed selection, invalidation of changed/stale policy
-      revisions, and selected-policy/base binding durability after restart.
+      Focused tests establish the two-state canonical model and fingerprint,
+      trusted default Forbidden behavior, rejection of invalid policy values,
+      inability of untrusted inputs to select policy; same-user IPC/client_kind
+      alone cannot authorize selection, and any IPC path requires independently
+      verified fresh owner proof. Tests also establish invalidation of
+      changed/stale revisions and Forbidden policy/evaluated-
+      base binding durability across SQLite backfill and restart recovery.
+      ScopedReviewed authorization/selection is not implemented here.
       Relevant workspace checks and independent security review pass.
     depends_on:
       - TASK-0143
@@ -4266,15 +4276,26 @@ items:
     gate: G8
     title: Independent test-mutation review authority and record
     objective: >-
-      After acceptance of ADR-0033, implement one canonical trusted owner-managed
-      setting inside Runlith settings that lets Policy select either B1
-      human-present, personally authored review or B2 authenticated reviewer-service review
-      at admission, with exact durable
-      review and integrity-assessment bindings. Keep each selected path
-      fail-closed until its identity and G6/G5 controls are available.
+      Implement trusted owner-authorized ScopedReviewed policy selection and
+      one canonical owner-managed setting
+      inside Runlith settings that lets Policy select either B1 human-present,
+      personally authored review or B2 authenticated reviewer-service review
+      at admission, with exact durable review and integrity-assessment
+      bindings. Keep each selected path fail-closed until its identity and
+      G6/G5 controls are available.
     scope: >-
-      Implement the trusted owner control path and canonical B1/B2 setting inside
-      Runlith settings, Policy admission-time selection, fixed product-managed reviewer
+      Implement the trusted owner control path and canonical B1/B2 setting and
+      ScopedReviewed TestMutationPolicy selection inside Runlith settings/control
+      host, with Policy admission-time selection. ScopedReviewed selection
+      requires fresh user-presence proof for the exact owner operation and binds
+      the immutable policy revision and fingerprint plus its exact authorized
+      test/check/evaluator path and check identities. Provider, repository,
+      workspace and caller inputs cannot create, widen, replace or select this
+      policy; same-user IPC/client_kind alone cannot authorize selection, and
+      any IPC path requires independently verified fresh owner proof. Include
+      focused tests for spoofed selection, scope widening, exact path/check
+      binding, policy revision/fingerprint mismatch, and stale or missing
+      presence proof. Also implement the fixed product-managed reviewer
       profile/key or minimal mapping, and binding of setting value/revision,
       profile/mapping revision, Policy revision, and selected path to review
       records and integrity assessments. Owner setting changes require fresh
@@ -4308,9 +4329,18 @@ items:
       states and CV-9. No TASK-0144 producer/assessment rewrite; no TASK-0125
       completion admission rewrite; no provider-specific core semantics.
     exit_criteria_summary: >-
-      ADR-0033 is accepted. One canonical trusted owner-managed setting selects
-      B1 or B2 inside Runlith settings; Policy resolves it at admission and binds
-      its value/revision,
+      ADR-0033 is accepted. A trusted owner-authorized ScopedReviewed selection
+      is available only through Runlith settings/control host after fresh
+      user-presence proof bound to the exact operation; its exact test/check/
+      evaluator paths and check identities, immutable policy revision and
+      fingerprint are validated and bound at admission. Caller, provider,
+      repository and workspace inputs cannot create, widen, replace or select
+      it; same-user IPC/client_kind alone cannot authorize selection, and any
+      IPC path requires independently verified fresh owner proof. Focused tests
+      reject spoofing, scope widening,
+      mismatched paths/checks or fingerprints, and missing/stale presence proof.
+      One canonical trusted owner-managed setting selects B1 or B2 inside
+      Runlith settings; Policy resolves it at admission and binds its value/revision,
       profile/mapping revision, Policy revision, selected path, and exact review
       inputs to the record and integrity assessment. Owner updates and B1
       review require fresh interactive platform user-presence authentication
