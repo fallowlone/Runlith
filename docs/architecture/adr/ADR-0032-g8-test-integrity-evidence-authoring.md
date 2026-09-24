@@ -43,11 +43,13 @@ never silently widens the scope.
    Provider output, repository instructions and a review fixture cannot
    create or weaken it. A trusted evaluator compares the
    candidate revision with that base to identify changed test, check and
-   evaluator inputs, including newly added and untracked inputs used by
-   candidate checks. The base is an immutable Git commit plus content
-   digests; the candidate is a captured path/type/content manifest bound
-   to the evaluated subject, including dirty-worktree inputs when present.
-   A bare `git diff` or commit name cannot establish candidate contents.
+   evaluator inputs, including every input consumed by the selected check.
+   For the initial `candidate-input` method, the base and candidate are
+   explicitly selected Git commits with validated trees and raw blobs; the
+   candidate is the canonical manifest and digest defined by ADR-0035. The
+   broader captured path/type/content manifest including dirty-worktree
+   inputs applies only to a separately accepted mutable-worktree method. A
+   bare `git diff` or commit name cannot establish candidate contents.
    If the selected policy or required comparison cannot be
    established, affected criteria remain `UNVERIFIED` and completion
    refuses. Historical completed Tasks are not re-adjudicated.
@@ -69,8 +71,10 @@ never silently widens the scope.
    result digest, subject/config/toolchain fingerprint, attempt lineage,
    capture authority and time. The result also carries the canonical digest
    of the exact candidate input manifest and governed invocation descriptor
-   recorded by its integrity assessment, including dirty and untracked
-   inputs. The adapter validates a structured harness result against the
+   recorded by its integrity assessment. For the initial `candidate-input`
+   method, this is the exact ADR-0035 commit/tree/raw-blob manifest; a future
+   mutable-worktree method must include every consumed dirty or untracked
+   input. The adapter validates a structured harness result against the
    governed invocation and Runner outcome before it authors a durable
    effect; neither child nor provider writes an
    authoritative effect directly. Console prose, provider self-report and
@@ -100,6 +104,20 @@ These rules describe the v1 contract. TASK-0144 selects the first
 concrete structured harness format and implements the accepted contract;
 TASK-0125 consumes its durable evidence. If no harness satisfies the
 contract, capture stays unsupported and completion stays blocked.
+
+## TASK-0149 accepted amendment (2026-09-24)
+
+Owner ratification followed independent architecture/security review PASS of
+the exact pre-acceptance commit `2c63a0946dc7a6aeea719fa3688c7c1e880d6539`.
+For ADR-0035's initial candidate-input method, the exact selected commit/tree,
+validated raw-blob graph, canonical digest manifest, and sealed product-owned
+snapshot are the candidate inputs bound by the integrity assessment and
+result. The linked worktree must be clean, and paired metadata and live
+worktree freshness checks apply as defined by ADR-0035. This narrow method
+does not accept dirty-worktree, standalone-clone, generated/ignored, external,
+or compiled-test inputs. Broader mutable-worktree capture remains subject to
+the existing full-input and fail-closed requirements under a separately
+accepted method.
 
 ## Alternatives
 
