@@ -55,7 +55,9 @@ use app_services::{
     PlanningServiceError, PrivilegedOperation, ProcessSecuritySpec, ServiceError, WorkspaceRequest,
     WorkspaceService,
 };
-use evaluation::{EvaluationPort, EvaluationRequest, EvaluationResult, EvaluationVerdict};
+use evaluation::{
+    EffectCapturePort, EvaluationPort, EvaluationRequest, EvaluationResult, EvaluationVerdict,
+};
 use ipc_contracts::proto::{
     execution_core_request, execution_core_response, AttemptView, BusinessError, BusinessErrorCode,
     CancelExecutionRequest, CancelExecutionResponse, ExecutionCoreRequest, ExecutionCoreResponse,
@@ -81,6 +83,7 @@ pub const PROVIDER_TIMEOUT: Duration = Duration::from_secs(300);
 pub const CAPTURE_GRACE: Duration = Duration::from_secs(5);
 
 const PROVIDER_LAUNCH_REQUESTER: &str = "agent-runtime";
+static NEXT_CANDIDATE_OPERATION: AtomicU64 = AtomicU64::new(1);
 const PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED: &str =
     "provider_authentication_unsupported_in_mandatory_confinement";
 
@@ -435,6 +438,127 @@ pub(crate) struct ProviderLaunchSecurity {
     executable: ScopeId,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CandidateG6Operation {
+    GitRead,
+    SnapshotWrite,
+    EvaluatorReadOnly,
+}
+
+struct CandidateProcessRequest {
+    operation: CandidateG6Operation,
+    task_id: String,
+    execution_id: String,
+    attempt_id: String,
+    invocation_id: String,
+    workspace: PathBuf,
+    filesystem_roots: Vec<PathBuf>,
+    executable: PathBuf,
+    args: Vec<std::ffi::OsString>,
+    input: Vec<u8>,
+    support_read: Vec<PathBuf>,
+    support_write: Vec<PathBuf>,
+    max_stdout: u64,
+}
+
+impl CandidateG6Operation {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::GitRead => "git-read",
+            Self::SnapshotWrite => "snapshot-write",
+            Self::EvaluatorReadOnly => "evaluator-read-only",
+        }
+    }
+
+    fn file_capability(self, scope: FileScope) -> Capability {
+        match self {
+            Self::SnapshotWrite => Capability::FilesystemWrite(scope),
+            Self::GitRead | Self::EvaluatorReadOnly => Capability::FilesystemRead(scope),
+        }
+    }
+}
+
+fn build_candidate_launch_security(
+    request: &CandidateProcessRequest,
+) -> Result<ProviderLaunchSecurity, String> {
+    let mut capabilities = Vec::new();
+    for root in &request.filesystem_roots {
+        let root = root
+            .canonicalize()
+            .map_err(|_| "candidate process filesystem root is unavailable".to_owned())?;
+        let root = root
+            .to_str()
+            .ok_or_else(|| "candidate process filesystem root is not UTF-8".to_owned())?;
+        capabilities.push(
+            request.operation.file_capability(
+                FileScope::new(root, ".")
+                    .map_err(|error| format!("candidate filesystem scope: {error}"))?,
+            ),
+        );
+    }
+    if capabilities.is_empty() {
+        return Err("candidate operation has no filesystem scope".to_owned());
+    }
+    let executable = request
+        .executable
+        .canonicalize()
+        .map_err(|_| "candidate process executable is unavailable".to_owned())?;
+    let executable = executable
+        .to_str()
+        .ok_or_else(|| "candidate process executable is not UTF-8".to_owned())?;
+    let executable = ScopeId::new(executable.to_owned())
+        .map_err(|error| format!("candidate executable scope: {error}"))?;
+    capabilities.push(Capability::ProcessExecute(executable.clone()));
+    let workspace = request
+        .workspace
+        .canonicalize()
+        .map_err(|_| "candidate process workspace unavailable".to_owned())?
+        .to_str()
+        .ok_or_else(|| "candidate process workspace is not UTF-8".to_owned())?
+        .to_owned();
+    let policy_request = PolicyRequest::new(
+        format!(
+            "candidate.{}:{}:{}:{}",
+            request.operation.as_str(),
+            request.execution_id,
+            request.attempt_id,
+            request.invocation_id
+        ),
+        "candidate-input-evaluator",
+        RequestOrigin::new(
+            request.task_id.clone(),
+            Some(request.execution_id.clone()),
+            Some(request.attempt_id.clone()),
+        )
+        .map_err(|error| format!("candidate request origin: {error}"))?,
+        RequestedCapabilities::new(capabilities.clone()),
+    )
+    .map_err(|error| format!("candidate policy request: {error}"))?;
+    let rules = capabilities
+        .iter()
+        .enumerate()
+        .map(|(index, capability)| {
+            PolicyRule::new(
+                format!("builtin.candidate.{}.{}", request.operation.as_str(), index),
+                "trusted_candidate_input_operation",
+                PolicyLayer::BuiltInHard,
+                PolicyOutcome::Allow,
+                capability.clone(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("candidate built-in policy: {error}"))?;
+    let policy = CompiledPolicy::compile(rules)
+        .map_err(|error| format!("candidate compiled policy: {error}"))?;
+    Ok(ProviderLaunchSecurity {
+        request: policy_request,
+        parent: EffectiveCapabilities::new(capabilities),
+        policy,
+        workspace,
+        executable,
+    })
+}
+
 impl ProviderLaunchSecurity {
     pub(crate) fn policy_fingerprint(&self) -> &str {
         self.policy.fingerprint()
@@ -557,6 +681,1091 @@ pub(crate) fn prepare_provider_launch(
         spec,
         launch: Arc::new(prepared_launch),
     })
+}
+
+fn prepare_candidate_process(
+    db_path: &Path,
+    request: &CandidateProcessRequest,
+) -> Result<PreparedProviderLaunch, String> {
+    let executable_scope = request
+        .executable
+        .canonicalize()
+        .map_err(|_| "candidate process executable cannot be canonicalized".to_owned())?;
+    let executable_scope = executable_scope
+        .to_str()
+        .ok_or_else(|| "candidate process executable is not UTF-8".to_owned())?;
+    let executable_scope = ScopeId::new(executable_scope.to_owned())
+        .map_err(|error| format!("candidate executable scope: {error}"))?;
+    let workspace = request
+        .workspace
+        .canonicalize()
+        .map_err(|_| "candidate process workspace cannot be canonicalized".to_owned())?;
+    let workspace = workspace
+        .to_str()
+        .ok_or_else(|| "candidate process workspace is not UTF-8".to_owned())?
+        .to_owned();
+    let launch = build_candidate_launch_security(request)?;
+    let mut security = G6SecurityService::open(db_path, app_services::SystemClock)
+        .map_err(|error| format!("G6 candidate authorization unavailable: {error}"))?;
+    let authorization = security
+        .authorize(&launch.request, &launch.parent, &launch.policy, u64::MAX)
+        .map_err(|error| format!("G6 candidate authorization failed: {error}"))?;
+    let effective = match authorization {
+        G6Authorization::Authorized { effective, .. } => effective,
+        G6Authorization::ApprovalRequired { .. } => {
+            return Err("G6 approval required for candidate input operation".to_owned());
+        }
+        G6Authorization::Denied { .. } => {
+            return Err("G6 denied candidate input operation".to_owned());
+        }
+    };
+    let operation_record = PrivilegedOperation::from_policy_request(&launch.request);
+    let requirements = IsolationRequirements::new(true, true, false);
+    let environment = ChildEnvironment::empty();
+    let backend =
+        production_runner_backend(request.support_read.clone(), request.support_write.clone())?;
+    let spec = ProcessSecuritySpec::new(
+        workspace.clone(),
+        executable_scope.clone(),
+        requirements,
+        environment.clone(),
+        "runlith.candidate-input-evaluator.v1",
+    );
+    let prepared = runner::prepare_process_launch(
+        Arc::clone(&backend),
+        &effective,
+        workspace,
+        executable_scope,
+        requirements,
+        environment,
+    )
+    .map_err(|error| format!("Runner refused candidate input operation: {error}"))?;
+    Ok(PreparedProviderLaunch {
+        security,
+        operation: operation_record,
+        backend,
+        effective,
+        spec,
+        launch: Arc::new(prepared),
+    })
+}
+
+struct CandidateProcessOutput {
+    stdout: Vec<u8>,
+}
+
+#[derive(Clone)]
+struct CandidateInputEvaluator {
+    db_path: PathBuf,
+    git_executable: PathBuf,
+    snapshot_parent: PathBuf,
+    capture: effect_capture_local::LocalEffectCapture,
+}
+
+enum ProductionEvaluator {
+    Candidate(CandidateInputEvaluator),
+    Pending(PendingEvaluator),
+}
+
+impl EvaluationPort for ProductionEvaluator {
+    fn evaluate(&self, request: &EvaluationRequest) -> EvaluationResult<EvaluationVerdict> {
+        match self {
+            Self::Candidate(evaluator) => evaluator.evaluate(request),
+            Self::Pending(evaluator) => evaluator.evaluate(request),
+        }
+    }
+}
+
+struct CandidateFreshnessRequest<'a> {
+    request: &'a EvaluationRequest,
+    invocation_id: &'a str,
+    root: &'a Path,
+    anchor: &'a workspace::TrustedCommonGit,
+    candidate: &'a evaluation::VerifiedCandidate,
+    format: evaluation::GitObjectFormat,
+    phase: evaluation::CandidateCheckpointPhase,
+    started_at_ms: u64,
+}
+
+impl EvaluationPort for CandidateInputEvaluator {
+    fn evaluate(&self, request: &EvaluationRequest) -> EvaluationResult<EvaluationVerdict> {
+        self.evaluate_candidate(request)
+            .map_err(evaluation::EvaluationError::new)
+    }
+}
+
+impl CandidateInputEvaluator {
+    fn supports_task(task: &task_domain::Task) -> bool {
+        let requirements = task.evidence_requirements();
+        if task.acceptance().len() != 1 || requirements.len() != 1 {
+            return false;
+        }
+        evaluation::CandidateSelector::from_requirement(&requirements[0])
+            .is_ok_and(|selector| selector.criterion_id == task.acceptance()[0])
+    }
+
+    fn evaluate_candidate(&self, request: &EvaluationRequest) -> Result<EvaluationVerdict, String> {
+        let invocation_id = format!(
+            "candidate-{}-{}-{}",
+            request.execution_id.as_str(),
+            request.attempt_id.as_str(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let mut store = storage_sqlite::SqliteStore::open(&self.db_path)
+            .map_err(|error| format!("open candidate evidence store: {error}"))?;
+        let task = store
+            .get_task(&request.task_id)
+            .map_err(|error| format!("load candidate task: {error}"))?
+            .ok_or_else(|| "candidate task does not exist".to_owned())?;
+        let execution = store
+            .get_execution(&request.execution_id)
+            .map_err(|error| format!("load candidate execution: {error}"))?
+            .ok_or_else(|| "candidate execution does not exist".to_owned())?;
+        if execution.task_id() != &request.task_id {
+            return Err("candidate task/execution binding mismatch".to_owned());
+        }
+        let attempt = execution
+            .get_attempt(&request.attempt_id)
+            .ok_or_else(|| "candidate attempt does not belong to execution".to_owned())?;
+        if attempt.outcome() != Some(AttemptOutcome::Succeeded)
+            || task.state() != TaskState::Verifying
+        {
+            return Err("candidate task or attempt is not in the evaluatable state".to_owned());
+        }
+        let requirements = task
+            .evidence_requirements()
+            .iter()
+            .filter(|requirement| requirement.required)
+            .map(evaluation::CandidateSelector::from_requirement)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("candidate requirement is unsupported or stale: {error}"))?;
+        if requirements.len() != 1 || task.acceptance().len() != 1 {
+            return Err(
+                "candidate evaluator supports exactly one explicitly authorized criterion"
+                    .to_owned(),
+            );
+        }
+        if task.acceptance()[0] != requirements[0].criterion_id {
+            return Err("candidate selector criterion does not match task acceptance".to_owned());
+        }
+        let base = store
+            .get_evaluated_policy_base(request.execution_id.as_str())
+            .map_err(|error| format!("load evaluated policy base: {error}"))?
+            .ok_or_else(|| "candidate execution has no evaluated base binding".to_owned())?;
+        if base.task_id != request.task_id.as_str()
+            || base.policy.policy() != &policy::TestMutationPolicy::Forbidden
+        {
+            return Err("candidate base or test-mutation policy binding is stale".to_owned());
+        }
+        let lease = store
+            .get_workspace_for_execution(&request.execution_id)
+            .map_err(|error| format!("load candidate workspace: {error}"))?
+            .ok_or_else(|| "candidate execution has no workspace lease".to_owned())?;
+        if lease.lifecycle() != workspace::LeaseLifecycle::Ready
+            || base.execution_id != request.execution_id.as_str()
+            || base.workspace_id != lease.id().as_str()
+            || base.base_revision != lease.base_revision().as_str()
+        {
+            return Err("candidate workspace lease is not READY".to_owned());
+        }
+        let anchor = store
+            .get_trusted_anchor(lease.id())
+            .map_err(|error| format!("load trusted Git anchor: {error}"))?
+            .ok_or_else(|| "candidate workspace has no trusted Git anchor".to_owned())?;
+        let root = PathBuf::from(lease.worktree_ref());
+        let object_format = self.git_output(
+            request,
+            &invocation_id,
+            &root,
+            &["rev-parse", "--show-object-format"],
+            vec![root.clone(), anchor.canonical_commondir().to_path_buf()],
+            64,
+        )?;
+        let object_format = std::str::from_utf8(&object_format)
+            .map_err(|_| "Git object format output is unsupported".to_owned())?
+            .strip_suffix('\n')
+            .ok_or_else(|| "Git object format output is incomplete".to_owned())?;
+        let object_format = evaluation::GitObjectFormat::from_repository_format(object_format)
+            .map_err(|error| format!("unsupported Git object format: {error}"))?;
+        let head = self.git_output(
+            request,
+            &invocation_id,
+            &root,
+            &["rev-parse", "--verify", "HEAD^{commit}"],
+            vec![root.clone(), anchor.canonical_commondir().to_path_buf()],
+            128,
+        )?;
+        let candidate_oid = std::str::from_utf8(&head)
+            .map_err(|_| "candidate HEAD is not UTF-8".to_owned())?
+            .strip_suffix('\n')
+            .ok_or_else(|| "candidate HEAD output is incomplete".to_owned())?;
+        let candidate = self.verify_commit(
+            request,
+            &invocation_id,
+            &root,
+            &anchor,
+            candidate_oid,
+            object_format,
+        )?;
+        let base_candidate = self.verify_commit(
+            request,
+            &invocation_id,
+            &root,
+            &anchor,
+            &base.base_revision,
+            object_format,
+        )?;
+        if let Some(evidence) = store
+            .get_candidate_evidence(request.execution_id.as_str(), request.attempt_id.as_str())
+            .map_err(|error| format!("load prior candidate evidence: {error}"))?
+        {
+            let stored = &evidence.integrity;
+            if stored.task_id != request.task_id.as_str()
+                || stored.execution_id != request.execution_id.as_str()
+                || stored.attempt_id != request.attempt_id.as_str()
+                || stored.subject_ref != format!("attempt:{}", request.attempt_id.as_str())
+                || stored.requirement_revision != requirements[0].requirement_revision
+                || stored.policy_revision != base.policy.revision()
+                || stored.policy_fingerprint != base.policy.fingerprint()
+                || stored.criterion_id != requirements[0].criterion_id
+                || stored.selector != requirements[0].selector
+                || stored.selector_path != requirements[0].path
+                || stored.selector_literal != requirements[0].literal
+                || stored.base_commit_oid != base_candidate.commit_oid
+                || stored.base_tree_oid != base_candidate.tree_oid
+                || stored.base_manifest_sha256 != base_candidate.manifest.sha256
+                || stored.candidate_commit_oid != candidate.commit_oid
+                || stored.candidate_tree_oid != candidate.tree_oid
+                || stored.candidate_manifest_sha256 != candidate.manifest.sha256
+            {
+                return Err("durable candidate evidence binding changed; reuse refused".to_owned());
+            }
+            let checkpoint = self.freshness_checkpoint(CandidateFreshnessRequest {
+                request,
+                invocation_id: &invocation_id,
+                root: &root,
+                anchor: &anchor,
+                candidate: &candidate,
+                format: object_format,
+                phase: evaluation::CandidateCheckpointPhase::RestartReuse,
+                started_at_ms: now_millis().min(stored.completed_at_ms),
+            })?;
+            if !checkpoint.matched {
+                return Err("candidate inputs changed; durable evidence reuse refused".to_owned());
+            }
+            store
+                .append_candidate_checkpoint(
+                    request.execution_id.as_str(),
+                    request.attempt_id.as_str(),
+                    &checkpoint,
+                )
+                .map_err(|error| format!("persist candidate reuse checkpoint: {error}"))?;
+            return match evidence.effect.payload() {
+                evaluation::EffectPayload::TestSuiteResult {
+                    passed: _, failed, ..
+                } => Ok(if *failed == 0 {
+                    EvaluationVerdict::Verified
+                } else {
+                    EvaluationVerdict::Rejected
+                }),
+                _ => Err("durable candidate result payload is unsupported".to_owned()),
+            };
+        }
+        let started_at_ms = now_millis();
+        let mut checkpoints = Vec::new();
+        for phase in [
+            evaluation::CandidateCheckpointPhase::Selection,
+            evaluation::CandidateCheckpointPhase::BeforeEvaluation,
+        ] {
+            checkpoints.push(self.freshness_checkpoint(CandidateFreshnessRequest {
+                request,
+                invocation_id: &invocation_id,
+                root: &root,
+                anchor: &anchor,
+                candidate: &candidate,
+                format: object_format,
+                phase,
+                started_at_ms,
+            })?);
+        }
+        if checkpoints.iter().any(|checkpoint| !checkpoint.matched) {
+            return Err("candidate inputs changed before evaluation".to_owned());
+        }
+        let snapshot_name = format!(
+            "candidate-snapshot-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let snapshot_input = encode_snapshot_files(&candidate.files)?;
+        let snapshot_writer = std::env::current_exe()
+            .map_err(|_| "agentd evaluator executable unavailable".to_owned())?;
+        let snapshot_path = self
+            .snapshot_parent
+            .join("candidate-snapshots")
+            .join(&snapshot_name);
+        run_candidate_process(
+            &self.db_path,
+            CandidateProcessRequest {
+                operation: CandidateG6Operation::SnapshotWrite,
+                task_id: request.task_id.as_str().to_owned(),
+                execution_id: request.execution_id.as_str().to_owned(),
+                attempt_id: request.attempt_id.as_str().to_owned(),
+                invocation_id: invocation_id.clone(),
+                workspace: self.snapshot_parent.clone(),
+                filesystem_roots: vec![self.snapshot_parent.clone()],
+                executable: snapshot_writer,
+                args: vec![
+                    "__candidate-snapshot-write".into(),
+                    self.snapshot_parent.as_os_str().into(),
+                    snapshot_name.into(),
+                ],
+                input: snapshot_input,
+                support_read: vec![self.snapshot_parent.clone()],
+                support_write: vec![self.snapshot_parent.clone()],
+                max_stdout: 0,
+            },
+        )?;
+        let selector = requirements
+            .first()
+            .ok_or_else(|| "candidate selector missing".to_owned())?;
+        let evaluator_executable = std::env::current_exe()
+            .map_err(|_| "agentd evaluator executable unavailable".to_owned())?;
+        let output = run_candidate_process(
+            &self.db_path,
+            CandidateProcessRequest {
+                operation: CandidateG6Operation::EvaluatorReadOnly,
+                task_id: request.task_id.as_str().to_owned(),
+                execution_id: request.execution_id.as_str().to_owned(),
+                attempt_id: request.attempt_id.as_str().to_owned(),
+                invocation_id: invocation_id.clone(),
+                workspace: self.snapshot_parent.clone(),
+                filesystem_roots: vec![snapshot_path.clone()],
+                executable: evaluator_executable,
+                args: vec![
+                    "__candidate-evaluate".into(),
+                    snapshot_path.as_os_str().into(),
+                    selector.selector.clone().into(),
+                    candidate.manifest.sha256.clone().into(),
+                    selector.path.clone().into(),
+                    selector.literal.clone().into(),
+                ],
+                input: Vec::new(),
+                support_read: vec![snapshot_path.clone()],
+                support_write: Vec::new(),
+                max_stdout: 4096,
+            },
+        )?;
+        let result = parse_candidate_result(&output.stdout, &candidate.manifest.sha256)?;
+        for phase in [
+            evaluation::CandidateCheckpointPhase::AfterEvaluation,
+            evaluation::CandidateCheckpointPhase::ResultAdmission,
+        ] {
+            checkpoints.push(self.freshness_checkpoint(CandidateFreshnessRequest {
+                request,
+                invocation_id: &invocation_id,
+                root: &root,
+                anchor: &anchor,
+                candidate: &candidate,
+                format: object_format,
+                phase,
+                started_at_ms,
+            })?);
+        }
+        let completed_at_ms = now_millis();
+        if checkpoints.iter().any(|checkpoint| !checkpoint.matched) {
+            return Err("candidate inputs changed during evaluation".to_owned());
+        }
+        let assessment = evaluation::CandidateIntegrityAssessment {
+            task_id: request.task_id.as_str().to_owned(),
+            execution_id: request.execution_id.as_str().to_owned(),
+            attempt_id: request.attempt_id.as_str().to_owned(),
+            subject_ref: format!("attempt:{}", request.attempt_id.as_str()),
+            requirement_revision: selector.requirement_revision.clone(),
+            policy_revision: base.policy.revision(),
+            policy_fingerprint: base.policy.fingerprint().to_owned(),
+            criterion_id: selector.criterion_id.clone(),
+            selector: selector.selector.clone(),
+            selector_path: selector.path.clone(),
+            selector_literal: selector.literal.clone(),
+            invocation_id: invocation_id.clone(),
+            evaluator_ref: "runlith.agentd.candidate-evaluator.v1".to_owned(),
+            runtime_ref: format!("agentd:{}", env!("CARGO_PKG_VERSION")),
+            enforcement_ref: "G6+Runner:filesystem.process.execute.no-network.v1".to_owned(),
+            base_commit_oid: base_candidate.commit_oid,
+            base_tree_oid: base_candidate.tree_oid,
+            base_manifest_sha256: base_candidate.manifest.sha256,
+            candidate_commit_oid: candidate.commit_oid.clone(),
+            candidate_tree_oid: candidate.tree_oid.clone(),
+            candidate_manifest_sha256: candidate.manifest.sha256.clone(),
+            checkpoints,
+            outcome: evaluation::CandidateIntegrityOutcome::Intact,
+            started_at_ms,
+            completed_at_ms,
+        };
+        assessment
+            .validate()
+            .map_err(|error| format!("candidate assessment invalid: {error}"))?;
+        self.capture
+            .observe_candidate_result(
+                request.execution_id.clone(),
+                request.attempt_id.clone(),
+                result.clone(),
+                assessment.clone(),
+            )
+            .map_err(|error| format!("candidate result capture refused: {error}"))?;
+        let capture_store = storage_sqlite::SqliteStore::open(&self.db_path)
+            .map_err(|error| format!("open candidate capture store: {error}"))?;
+        let capture_git = git_cli::GitCli::with_executable(self.git_executable.clone());
+        let mut capture_service = app_services::ObservedEffectService::new(
+            capture_store,
+            app_services::SystemClock,
+            self.capture.clone(),
+            capture_git,
+        );
+        capture_service
+            .capture(
+                &evaluation::CaptureRequest::TestSuiteResult {
+                    subject_ref: assessment.subject_ref.clone(),
+                },
+                request.execution_id.clone(),
+                request.attempt_id.clone(),
+            )
+            .map_err(|error| format!("persist trusted candidate result before verdict: {error}"))?;
+        let completion_checkpoint = self.freshness_checkpoint(CandidateFreshnessRequest {
+            request,
+            invocation_id: &invocation_id,
+            root: &root,
+            anchor: &anchor,
+            candidate: &candidate,
+            format: object_format,
+            phase: evaluation::CandidateCheckpointPhase::Completion,
+            started_at_ms,
+        })?;
+        if !completion_checkpoint.matched {
+            return Err("candidate inputs changed after durable result admission".to_owned());
+        }
+        let mut completion_store = storage_sqlite::SqliteStore::open(&self.db_path)
+            .map_err(|error| format!("open candidate completion store: {error}"))?;
+        completion_store
+            .append_candidate_checkpoint(
+                request.execution_id.as_str(),
+                request.attempt_id.as_str(),
+                &completion_checkpoint,
+            )
+            .map_err(|error| format!("persist candidate completion checkpoint: {error}"))?;
+        Ok(if result.failed == 0 {
+            EvaluationVerdict::Verified
+        } else {
+            EvaluationVerdict::Rejected
+        })
+    }
+
+    fn git_output(
+        &self,
+        request: &EvaluationRequest,
+        invocation_id: &str,
+        workspace: &Path,
+        args: &[&str],
+        roots: Vec<PathBuf>,
+        max_stdout: u64,
+    ) -> Result<Vec<u8>, String> {
+        let mut process_args = vec!["-C".into(), workspace.as_os_str().into()];
+        process_args.extend(args.iter().map(std::ffi::OsString::from));
+        Ok(run_candidate_process(
+            &self.db_path,
+            CandidateProcessRequest {
+                operation: CandidateG6Operation::GitRead,
+                task_id: request.task_id.as_str().to_owned(),
+                execution_id: request.execution_id.as_str().to_owned(),
+                attempt_id: request.attempt_id.as_str().to_owned(),
+                invocation_id: format!(
+                    "{invocation_id}.git.{}",
+                    NEXT_CANDIDATE_OPERATION.fetch_add(1, Ordering::Relaxed)
+                ),
+                workspace: workspace.to_path_buf(),
+                filesystem_roots: roots.clone(),
+                executable: self.git_executable.clone(),
+                args: process_args,
+                input: Vec::new(),
+                support_read: roots,
+                support_write: Vec::new(),
+                max_stdout,
+            },
+        )?
+        .stdout)
+    }
+
+    fn verify_commit(
+        &self,
+        request: &EvaluationRequest,
+        invocation_id: &str,
+        root: &Path,
+        anchor: &workspace::TrustedCommonGit,
+        commit_oid: &str,
+        format: evaluation::GitObjectFormat,
+    ) -> Result<evaluation::VerifiedCandidate, String> {
+        evaluation::VerifiedCandidate::from_commit_with_batch(commit_oid, format, |oids| {
+            let mut input = Vec::new();
+            for oid in oids {
+                input.extend_from_slice(oid.as_bytes());
+                input.push(b'\n');
+            }
+            let output = self
+                .git_output(
+                    request,
+                    invocation_id,
+                    root,
+                    &[
+                        "--no-replace-objects",
+                        "--no-lazy-fetch",
+                        "cat-file",
+                        "--batch",
+                    ],
+                    vec![
+                        root.to_path_buf(),
+                        anchor.canonical_commondir().to_path_buf(),
+                    ],
+                    evaluation::MAX_CANDIDATE_BLOB_BYTES + 64 * 1024 * 1024,
+                )
+                .map_err(|_| evaluation::CandidateError::MissingObject)?;
+            parse_git_batch(&output, oids)
+        })
+        .map_err(|error| format!("candidate Git object graph rejected: {error}"))
+    }
+
+    fn freshness_checkpoint(
+        &self,
+        freshness: CandidateFreshnessRequest<'_>,
+    ) -> Result<evaluation::CandidateFreshnessCheckpoint, String> {
+        let CandidateFreshnessRequest {
+            request,
+            invocation_id,
+            root,
+            anchor,
+            candidate,
+            format,
+            phase,
+            started_at_ms,
+        } = freshness;
+        let canonical_root = root
+            .canonicalize()
+            .map_err(|_| "leased candidate worktree is unavailable".to_owned())?;
+        if canonical_root != root {
+            return Err("leased candidate worktree path is no longer canonical".to_owned());
+        }
+        let roots = vec![
+            root.to_path_buf(),
+            anchor.canonical_commondir().to_path_buf(),
+        ];
+        let head = self.git_output(
+            request,
+            invocation_id,
+            root,
+            &["rev-parse", "--verify", "HEAD^{commit}"],
+            roots.clone(),
+            128,
+        )?;
+        let index = self.git_output(
+            request,
+            invocation_id,
+            root,
+            &["ls-files", "--stage", "-z"],
+            roots.clone(),
+            16 * 1024 * 1024,
+        )?;
+        let common = self.git_output(
+            request,
+            invocation_id,
+            root,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            roots,
+            4096,
+        )?;
+        let common_path = std::str::from_utf8(&common)
+            .map_err(|_| "Git common directory is invalid".to_owned())?
+            .trim_end_matches('\n');
+        let common_path = PathBuf::from(common_path)
+            .canonicalize()
+            .map_err(|_| "Git common directory unavailable".to_owned())?;
+        let mut descriptor_authority =
+            G6SecurityService::open(&self.db_path, app_services::SystemClock)
+                .map_err(|error| format!("G6 descriptor read authority unavailable: {error}"))?;
+        let workspace_root = root
+            .to_str()
+            .ok_or_else(|| "candidate worktree root is not UTF-8".to_owned())?
+            .to_owned();
+        let root_read = Capability::FilesystemRead(
+            FileScope::new(&workspace_root, ".")
+                .map_err(|error| format!("candidate descriptor root scope: {error}"))?,
+        );
+        let root_request = PolicyRequest::new(
+            format!("{invocation_id}.git-read.fs-root"),
+            "candidate-live-worktree-descriptor-scan",
+            RequestOrigin::new(
+                request.task_id.as_str(),
+                Some(request.execution_id.as_str().to_owned()),
+                Some(request.attempt_id.as_str().to_owned()),
+            )
+            .map_err(|error| format!("candidate descriptor origin: {error}"))?,
+            RequestedCapabilities::new(vec![root_read.clone()]),
+        )
+        .map_err(|error| format!("candidate descriptor request: {error}"))?;
+        let root_policy = CompiledPolicy::compile(vec![PolicyRule::new(
+            "builtin.candidate.git-read.exact-worktree-root",
+            "accepted_candidate_git_read_scope",
+            PolicyLayer::BuiltInHard,
+            PolicyOutcome::Allow,
+            root_read.clone(),
+        )
+        .map_err(|error| format!("candidate descriptor policy rule: {error}"))?])
+        .map_err(|error| format!("candidate descriptor policy: {error}"))?;
+        let root_parent = EffectiveCapabilities::new(vec![root_read]);
+        let filesystem_authority = match descriptor_authority
+            .authorize(&root_request, &root_parent, &root_policy, u64::MAX)
+            .map_err(|error| format!("candidate descriptor root authority failed: {error}"))?
+        {
+            G6Authorization::Authorized { effective, .. } => effective,
+            G6Authorization::ApprovalRequired { .. } | G6Authorization::Denied { .. } => {
+                return Err("G6 denied candidate worktree root read".to_owned());
+            }
+        };
+        let mut authorize_descriptor = |relative_path: &[u8], operation| {
+            let relative_path = std::str::from_utf8(relative_path).map_err(|_| {
+                evaluation::EffectError::CaptureFailed(
+                    "candidate descriptor scope path is not supported",
+                )
+            })?;
+            let operation_kind = match operation {
+                effect_capture_local::DescriptorReadOperation::OpenDirectory => "open-directory",
+                effect_capture_local::DescriptorReadOperation::ReadDirectory => "read-directory",
+                effect_capture_local::DescriptorReadOperation::Metadata => "metadata",
+                effect_capture_local::DescriptorReadOperation::OpenFile => "open-file",
+                effect_capture_local::DescriptorReadOperation::ReadFile => "read-file",
+            };
+            let sequence = NEXT_CANDIDATE_OPERATION.fetch_add(1, Ordering::Relaxed);
+            let capability = Capability::FilesystemRead(
+                FileScope::new(&workspace_root, relative_path).map_err(|_| {
+                    evaluation::EffectError::CaptureFailed("candidate descriptor scope is invalid")
+                })?,
+            );
+            let descriptor_request = PolicyRequest::new(
+                format!("{invocation_id}.git-read.fs.{sequence}.{operation_kind}"),
+                "candidate-live-worktree-descriptor-scan",
+                RequestOrigin::new(
+                    request.task_id.as_str(),
+                    Some(request.execution_id.as_str().to_owned()),
+                    Some(request.attempt_id.as_str().to_owned()),
+                )
+                .map_err(|_| {
+                    evaluation::EffectError::CaptureFailed(
+                        "candidate descriptor request origin is invalid",
+                    )
+                })?,
+                RequestedCapabilities::new(vec![capability]),
+            )
+            .map_err(|_| {
+                evaluation::EffectError::CaptureFailed("candidate descriptor request is invalid")
+            })?;
+            let authorization = descriptor_authority
+                .authorize_filesystem_read(
+                    &descriptor_request,
+                    &filesystem_authority,
+                    workspace_root.clone(),
+                    relative_path,
+                )
+                .map_err(|_| {
+                    evaluation::EffectError::CaptureFailed(
+                        "G6 denied candidate descriptor filesystem read",
+                    )
+                })?;
+            match authorization {
+                G6Authorization::Authorized { .. } => Ok(()),
+                G6Authorization::ApprovalRequired { .. } | G6Authorization::Denied { .. } => {
+                    Err(evaluation::EffectError::CaptureFailed(
+                        "G6 denied candidate descriptor filesystem read",
+                    ))
+                }
+            }
+        };
+        let scan = effect_capture_local::scan_live_worktree(root, &mut authorize_descriptor)
+            .map_err(|error| format!("live worktree scan failed: {error}"))?;
+        let live_manifest = evaluation::CandidateManifest::from_files(&scan.files)
+            .map_err(|error| error.to_string())?;
+        let dirs_match = scan.directories == manifest_directories(&candidate.manifest.entries);
+        let head_matches =
+            std::str::from_utf8(&head).is_ok_and(|value| value.trim_end() == candidate.commit_oid);
+        let index_matches = index_matches_candidate(&index, candidate);
+        let pointer_matches = scan
+            .git_pointer
+            .as_deref()
+            .is_some_and(|pointer| validate_worktree_pointer(root, pointer, anchor));
+        let metadata = [
+            head.as_slice(),
+            index.as_slice(),
+            common.as_slice(),
+            scan.git_pointer.as_deref().unwrap_or_default(),
+        ]
+        .concat();
+        let git_metadata_fingerprint = evaluation::candidate_sha256(&metadata);
+        let matched = format
+            == evaluation::GitObjectFormat::from_oid(&candidate.commit_oid)
+                .map_err(|error| error.to_string())?
+            && common_path == anchor.canonical_commondir()
+            && head_matches
+            && index_matches
+            && dirs_match
+            && pointer_matches
+            && live_manifest.sha256 == candidate.manifest.sha256;
+        let observed_at_ms = now_millis().max(started_at_ms);
+        Ok(evaluation::CandidateFreshnessCheckpoint {
+            phase,
+            observed_at_ms,
+            git_metadata_fingerprint,
+            live_worktree_manifest_sha256: live_manifest.sha256,
+            matched,
+        })
+    }
+}
+
+fn run_candidate_process(
+    db_path: &Path,
+    request: CandidateProcessRequest,
+) -> Result<CandidateProcessOutput, String> {
+    const MAX_STDERR: u64 = 64 * 1024;
+    const TIMEOUT: Duration = Duration::from_secs(30);
+    let prepared = prepare_candidate_process(db_path, &request)?;
+    let program = request.executable.as_os_str().to_owned();
+    let workspace = request.workspace.clone();
+    let args = request.args;
+    let input = request.input;
+    let max_stdout = request.max_stdout;
+    let output = prepared.invoke(|launch| {
+        let command = launch
+            .bind(runner::CommandSpec::new(program, args))
+            .map_err(|error| format!("Runner refused candidate command: {error}"))?;
+        let mut child = command
+            .spawn(|wire| {
+                wire.current_dir(&workspace)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped());
+            })
+            .map_err(|_| "candidate process spawn failed".to_owned())?;
+        let mut child_stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "candidate process stdin unavailable".to_owned())?;
+        let child_stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "candidate process stdout unavailable".to_owned())?;
+        let child_stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "candidate process stderr unavailable".to_owned())?;
+        let stdin_writer = std::thread::spawn(move || {
+            use std::io::Write;
+            child_stdin.write_all(&input)
+        });
+        let stdout_reader = std::thread::spawn(move || {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            child_stdout.take(max_stdout + 1).read_to_end(&mut bytes)?;
+            Ok::<_, std::io::Error>(bytes)
+        });
+        let stderr_reader = std::thread::spawn(move || {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            child_stderr.take(MAX_STDERR + 1).read_to_end(&mut bytes)?;
+            Ok::<_, std::io::Error>(bytes)
+        });
+        let deadline = std::time::Instant::now() + TIMEOUT;
+        let status = loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|_| "candidate process wait failed".to_owned())?
+            {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("candidate process timed out".to_owned());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        stdin_writer
+            .join()
+            .map_err(|_| "candidate process stdin task failed".to_owned())?
+            .map_err(|_| "candidate process input write failed".to_owned())?;
+        let stdout = stdout_reader
+            .join()
+            .map_err(|_| "candidate process stdout task failed".to_owned())?
+            .map_err(|_| "candidate process stdout read failed".to_owned())?;
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_| "candidate process stderr task failed".to_owned())?
+            .map_err(|_| "candidate process stderr read failed".to_owned())?;
+        if !status.success() || stdout.len() as u64 > max_stdout || stderr.len() as u64 > MAX_STDERR
+        {
+            return Err("candidate process returned unsupported output or status".to_owned());
+        }
+        Ok(CandidateProcessOutput { stdout })
+    })?;
+    output
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn encode_snapshot_files(files: &[evaluation::CandidateFile]) -> Result<Vec<u8>, String> {
+    let mut bytes = b"runlith-candidate-snapshot/v1\n".to_vec();
+    bytes.extend_from_slice(
+        &u32::try_from(files.len())
+            .map_err(|_| "candidate snapshot entry count exceeded".to_owned())?
+            .to_be_bytes(),
+    );
+    for file in files {
+        bytes.extend_from_slice(
+            &u32::try_from(file.path.len())
+                .map_err(|_| "candidate path exceeded bound".to_owned())?
+                .to_be_bytes(),
+        );
+        bytes.extend_from_slice(&file.mode.to_be_bytes());
+        bytes.extend_from_slice(
+            &u64::try_from(file.bytes.len())
+                .map_err(|_| "candidate blob exceeded bound".to_owned())?
+                .to_be_bytes(),
+        );
+        bytes.extend_from_slice(&file.path);
+        bytes.extend_from_slice(&file.bytes);
+    }
+    Ok(bytes)
+}
+
+fn parse_candidate_result(
+    bytes: &[u8],
+    expected_manifest: &str,
+) -> Result<evaluation::CandidateTestResult, String> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| "candidate evaluator output is not UTF-8".to_owned())?;
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.len() != 7
+        || lines[0] != "candidate-test-result/v1"
+        || lines[1] != "selector=candidate.file-contains.v1"
+        || lines[2] != format!("manifest={expected_manifest}")
+        || !lines[6].starts_with("result=sha256:")
+    {
+        return Err("candidate evaluator output is malformed or unbound".to_owned());
+    }
+    let parse = |line: &str, key: &str| -> Result<u32, String> {
+        line.strip_prefix(key)
+            .ok_or_else(|| "candidate evaluator output field mismatch".to_owned())?
+            .parse()
+            .map_err(|_| "candidate evaluator count invalid".to_owned())
+    };
+    let result_sha256 = lines[6]["result=".len()..].to_owned();
+    if result_sha256.strip_prefix("sha256:").is_none_or(|hex| {
+        hex.len() != 64
+            || !hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    }) {
+        return Err("candidate evaluator result digest invalid".to_owned());
+    }
+    let result = evaluation::CandidateTestResult {
+        selector: "candidate.file-contains.v1".to_owned(),
+        passed: parse(lines[3], "passed=")?,
+        failed: parse(lines[4], "failed=")?,
+        skipped: parse(lines[5], "skipped=")?,
+        result_sha256,
+    };
+    if result
+        .passed
+        .checked_add(result.failed)
+        .and_then(|total| total.checked_add(result.skipped))
+        != Some(1)
+    {
+        return Err("candidate evaluator result counts are inconsistent".to_owned());
+    }
+    Ok(result)
+}
+
+fn parse_git_batch(
+    bytes: &[u8],
+    requested: &[String],
+) -> Result<Vec<(String, String, Vec<u8>)>, evaluation::CandidateError> {
+    let mut cursor = 0usize;
+    let mut objects = Vec::with_capacity(requested.len());
+    for expected_oid in requested {
+        let header_end = bytes[cursor..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|index| cursor + index)
+            .ok_or(evaluation::CandidateError::MissingObject)?;
+        let header = std::str::from_utf8(&bytes[cursor..header_end])
+            .map_err(|_| evaluation::CandidateError::UnsupportedObject)?;
+        cursor = header_end + 1;
+        let mut fields = header.split(' ');
+        let oid = fields
+            .next()
+            .ok_or(evaluation::CandidateError::MissingObject)?;
+        let kind = fields
+            .next()
+            .ok_or(evaluation::CandidateError::MissingObject)?;
+        let size = fields
+            .next()
+            .and_then(|value| value.parse::<usize>().ok())
+            .ok_or(evaluation::CandidateError::MissingObject)?;
+        if fields.next().is_some() || oid != expected_oid {
+            return Err(evaluation::CandidateError::MissingObject);
+        }
+        let end = cursor
+            .checked_add(size)
+            .ok_or(evaluation::CandidateError::LimitExceeded)?;
+        let body = bytes
+            .get(cursor..end)
+            .ok_or(evaluation::CandidateError::MissingObject)?
+            .to_vec();
+        if bytes.get(end) != Some(&b'\n') {
+            return Err(evaluation::CandidateError::MissingObject);
+        }
+        cursor = end + 1;
+        objects.push((oid.to_owned(), kind.to_owned(), body));
+    }
+    if cursor != bytes.len() {
+        return Err(evaluation::CandidateError::UnsupportedObject);
+    }
+    Ok(objects)
+}
+
+fn index_matches_candidate(bytes: &[u8], candidate: &evaluation::VerifiedCandidate) -> bool {
+    let mut entries = Vec::new();
+    for record in bytes
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+            return false;
+        };
+        let Ok(header) = std::str::from_utf8(&record[..tab]) else {
+            return false;
+        };
+        let mut fields = header.split(' ');
+        let (Some(mode), Some(oid), Some(stage), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return false;
+        };
+        if stage != "0" {
+            return false;
+        }
+        let Ok(mode) = u32::from_str_radix(mode, 8) else {
+            return false;
+        };
+        entries.push((record[tab + 1..].to_vec(), mode, oid.to_owned()));
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries.len() == candidate.files.len()
+        && entries.iter().zip(&candidate.files).all(|(entry, file)| {
+            entry.0 == file.path
+                && entry.1 == file.mode
+                && file.git_oid.as_deref() == Some(entry.2.as_str())
+        })
+}
+
+fn manifest_directories(entries: &[evaluation::CandidateManifestEntry]) -> Vec<Vec<u8>> {
+    let mut directories = std::collections::BTreeSet::new();
+    for entry in entries {
+        let mut path = entry.path.as_slice();
+        while let Some(index) = path.iter().rposition(|byte| *byte == b'/') {
+            directories.insert(path[..index].to_vec());
+            path = &path[..index];
+        }
+    }
+    directories.into_iter().collect()
+}
+
+fn validate_worktree_pointer(
+    root: &Path,
+    pointer: &[u8],
+    anchor: &workspace::TrustedCommonGit,
+) -> bool {
+    let Ok(text) = std::str::from_utf8(pointer) else {
+        return false;
+    };
+    let Some(raw_gitdir) = text
+        .strip_prefix("gitdir: ")
+        .and_then(|text| text.strip_suffix('\n'))
+    else {
+        return false;
+    };
+    let raw_gitdir = PathBuf::from(raw_gitdir);
+    let gitdir = if raw_gitdir.is_absolute() {
+        raw_gitdir
+    } else {
+        root.join(raw_gitdir)
+    };
+    let Ok(gitdir) = gitdir.canonicalize() else {
+        return false;
+    };
+    let gitdir_file = gitdir.join("gitdir");
+    let commondir_file = gitdir.join("commondir");
+    let Ok(gitdir_meta) = std::fs::symlink_metadata(&gitdir_file) else {
+        return false;
+    };
+    let Ok(common_meta) = std::fs::symlink_metadata(&commondir_file) else {
+        return false;
+    };
+    if !gitdir_meta.is_file()
+        || gitdir_meta.file_type().is_symlink()
+        || !common_meta.is_file()
+        || common_meta.file_type().is_symlink()
+    {
+        return false;
+    }
+    let Ok(backref) = std::fs::read_to_string(gitdir_file) else {
+        return false;
+    };
+    let Ok(common) = std::fs::read_to_string(commondir_file) else {
+        return false;
+    };
+    let backref = PathBuf::from(backref.trim());
+    let backref = if backref.is_absolute() {
+        backref
+    } else {
+        gitdir.join(backref)
+    };
+    let Ok(backref) = backref.canonicalize() else {
+        return false;
+    };
+    let dot_git = root.join(".git");
+    let Ok(dot_git) = dot_git.canonicalize() else {
+        return false;
+    };
+    let common = PathBuf::from(common.trim());
+    let common = if common.is_absolute() {
+        common
+    } else {
+        gitdir.join(common)
+    };
+    let Ok(common) = common.canonicalize() else {
+        return false;
+    };
+    backref == dot_git
+        && common == anchor.canonical_commondir()
+        && gitdir.starts_with(anchor.canonical_commondir().join("worktrees"))
 }
 
 impl scheduler::ExecutionPort for SecuredClaudeExecutor {
@@ -896,8 +2105,50 @@ fn run_background_inner(
     let capture_work = work.clone();
     let effect_capture = effect_capture_local::LocalEffectCapture::default();
     let process_exit_observer = effect_capture.clone();
+    let candidate_capture = effect_capture.clone();
     let cancel = cancel.clone();
     let environment_base = composition.provider_environment_base()?;
+    let snapshot_parent = db_path
+        .parent()
+        .ok_or_else(|| "candidate snapshot parent unavailable".to_owned())?
+        .join("candidate-input-snapshots");
+    std::fs::create_dir_all(&snapshot_parent)
+        .map_err(|_| "candidate snapshot authority root unavailable".to_owned())?;
+    let snapshot_metadata = std::fs::symlink_metadata(&snapshot_parent)
+        .map_err(|_| "candidate snapshot authority root unavailable".to_owned())?;
+    if snapshot_metadata.file_type().is_symlink() || !snapshot_metadata.is_dir() {
+        return Err("candidate snapshot authority root is not a real directory".to_owned());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if snapshot_metadata.permissions().mode() & 0o777 != 0o700 {
+            std::fs::set_permissions(&snapshot_parent, std::fs::Permissions::from_mode(0o700))
+                .map_err(|_| "candidate snapshot authority root cannot be secured".to_owned())?;
+        }
+    }
+    let snapshot_parent = snapshot_parent
+        .canonicalize()
+        .map_err(|_| "candidate snapshot authority root cannot be resolved".to_owned())?;
+    let candidate_evaluator = CandidateInputEvaluator {
+        db_path: db_path.clone(),
+        git_executable: composition
+            .git_executable
+            .as_ref()
+            .map_err(Clone::clone)?
+            .clone(),
+        snapshot_parent,
+        capture: candidate_capture,
+    };
+    let supports_candidate_input = storage_sqlite::SqliteStore::open(&db_path)
+        .ok()
+        .and_then(|store| store.get_task(&work.task_id).ok().flatten())
+        .is_some_and(|task| CandidateInputEvaluator::supports_task(&task));
+    let selected_evaluator = if supports_candidate_input {
+        ProductionEvaluator::Candidate(candidate_evaluator)
+    } else {
+        ProductionEvaluator::Pending(PendingEvaluator)
+    };
     let orchestration_result = orchestration
         .continue_workspace_cycle(
             &mut workspace,
@@ -933,7 +2184,7 @@ fn run_background_inner(
                     &launch_executable,
                 )
             },
-            &PendingEvaluator,
+            &selected_evaluator,
         )
         .map_err(|error| format!("orchestration cycle: {error}"));
 
@@ -3198,5 +4449,48 @@ mod tests {
             );
         }
         assert_eq!(truncate_id("E-short"), "E-short");
+    }
+
+    #[test]
+    fn candidate_git_batch_parser_uses_exact_framed_lengths_and_oid_order() {
+        let oid = "a".repeat(40);
+        let body = b"tree\0body with newline\ninside";
+        let mut output = format!("{oid} blob {}\n", body.len()).into_bytes();
+        output.extend_from_slice(body);
+        output.push(b'\n');
+        assert_eq!(
+            parse_git_batch(&output, std::slice::from_ref(&oid)).unwrap(),
+            vec![(oid.clone(), "blob".to_owned(), body.to_vec())]
+        );
+        assert_eq!(
+            parse_git_batch(&output, &["b".repeat(40)]),
+            Err(evaluation::CandidateError::MissingObject)
+        );
+        output.push(b'!');
+        assert_eq!(
+            parse_git_batch(&output, &[oid]),
+            Err(evaluation::CandidateError::UnsupportedObject)
+        );
+    }
+
+    #[test]
+    fn candidate_result_parser_requires_exact_manifest_and_one_outcome() {
+        let manifest = format!("sha256:{}", "a".repeat(64));
+        let result = format!(
+            "candidate-test-result/v1\nselector=candidate.file-contains.v1\nmanifest={manifest}\npassed=1\nfailed=0\nskipped=0\nresult=sha256:{}\n",
+            "b".repeat(64)
+        );
+        assert_eq!(
+            parse_candidate_result(result.as_bytes(), &manifest)
+                .unwrap()
+                .passed,
+            1
+        );
+        assert!(
+            parse_candidate_result(result.as_bytes(), &format!("sha256:{}", "c".repeat(64)))
+                .is_err()
+        );
+        let inconsistent = result.replace("passed=1\nfailed=0", "passed=1\nfailed=1");
+        assert!(parse_candidate_result(inconsistent.as_bytes(), &manifest).is_err());
     }
 }

@@ -146,6 +146,45 @@ fn policy_runner_and_audit_form_one_trusted_launch_boundary() {
 }
 
 #[test]
+fn candidate_descriptor_reads_are_reauthorized_at_the_exact_relative_path() {
+    let db = TestDb::new("candidate-descriptor-read");
+    let mut security = G6SecurityService::open(&db.0, FixedClock(10)).unwrap();
+    let parent = EffectiveCapabilities::new(vec![Capability::FilesystemRead(
+        FileScope::new("/worktree/exact", ".").unwrap(),
+    )]);
+    let descriptor_request = request(
+        "candidate.git-read.fs.1.open-file",
+        vec![Capability::FilesystemRead(
+            FileScope::new("/worktree/exact", "src/lib.rs").unwrap(),
+        )],
+    );
+    let authorization = security
+        .authorize_filesystem_read(
+            &descriptor_request,
+            &parent,
+            "/worktree/exact",
+            "src/lib.rs",
+        )
+        .unwrap();
+    let effective = authorization.effective().unwrap();
+    assert!(effective.permits(&Capability::FilesystemRead(
+        FileScope::new("/worktree/exact", "src/lib.rs").unwrap()
+    )));
+    assert!(!effective.permits(&Capability::FilesystemRead(
+        FileScope::new("/worktree/exact", "src/other.rs").unwrap()
+    )));
+    assert!(matches!(
+        security.authorize_filesystem_read(
+            &descriptor_request,
+            &parent,
+            "/worktree/exact",
+            "../outside",
+        ),
+        Err(G6SecurityError::Policy(_))
+    ));
+}
+
+#[test]
 fn unsupported_isolation_fails_closed_before_privileged_operation() {
     let db = TestDb::new("isolation");
     let capabilities = launch_caps("ws-1");

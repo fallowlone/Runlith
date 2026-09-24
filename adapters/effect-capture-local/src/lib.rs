@@ -1,10 +1,17 @@
 //! Bounded local observers. They return raw observations only; durable
 //! authority is minted by the trusted application/storage boundary.
 
+mod candidate_snapshot;
+
+pub use candidate_snapshot::{
+    materialize_candidate_snapshot, read_candidate_snapshot, scan_live_worktree, CandidateSnapshot,
+    DescriptorReadOperation,
+};
+
 use evaluation::{
-    AttemptId, CaptureRequest, CapturedObservation, EffectCapturePort, EffectError, EffectKind,
-    EffectPayload, ExecutionId, ProcessExitObservation, ProcessExitObservationSink, Sha256Digest,
-    SubjectMaterial,
+    AttemptId, CandidateIntegrityAssessment, CandidateTestResult, CaptureRequest,
+    CapturedObservation, EffectCapturePort, EffectError, EffectKind, EffectPayload, ExecutionId,
+    ProcessExitObservation, ProcessExitObservationSink, Sha256Digest, SubjectMaterial,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -26,6 +33,15 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Clone, Debug, Default)]
 pub struct LocalEffectCapture {
     process_exits: Arc<Mutex<VecDeque<ProcessExitObservation>>>,
+    candidate_results: Arc<Mutex<VecDeque<StoredCandidateResult>>>,
+}
+
+#[derive(Clone, Debug)]
+struct StoredCandidateResult {
+    execution_id: ExecutionId,
+    attempt_id: AttemptId,
+    result: CandidateTestResult,
+    assessment: CandidateIntegrityAssessment,
 }
 
 impl ProcessExitObservationSink for LocalEffectCapture {
@@ -61,10 +77,116 @@ impl EffectCapturePort for LocalEffectCapture {
             CaptureRequest::GitState { .. } => Err(EffectError::Unsupported(
                 "git state requires trusted GitPort snapshot",
             )),
-            CaptureRequest::TestSuiteResult { .. } => Err(EffectError::Unsupported(
-                "trusted structured source unavailable",
-            )),
+            CaptureRequest::TestSuiteResult { subject_ref } => {
+                let results = self.candidate_results.lock().map_err(|_| {
+                    EffectError::CaptureFailed("candidate result store unavailable")
+                })?;
+                let result = results
+                    .iter()
+                    .rev()
+                    .find(|result| {
+                        result.execution_id == *execution_id && result.attempt_id == *attempt_id
+                    })
+                    .ok_or(EffectError::CaptureFailed(
+                        "trusted structured source unavailable",
+                    ))?;
+                result.assessment.validate().map_err(|_| {
+                    EffectError::CaptureFailed("candidate integrity assessment is invalid")
+                })?;
+                if result.assessment.execution_id != execution_id.as_str()
+                    || result.assessment.attempt_id != attempt_id.as_str()
+                    || result.result.selector != result.assessment.selector
+                {
+                    return Err(EffectError::CaptureFailed(
+                        "candidate result lineage mismatch",
+                    ));
+                }
+                Ok(CapturedObservation {
+                    kind: EffectKind::TestSuiteResult,
+                    subject_ref: subject_ref.clone(),
+                    subject_material: SubjectMaterial::ContentToolchainAndConfig {
+                        digest: result.assessment.candidate_manifest_sha256.clone(),
+                        toolchain: result.assessment.runtime_ref.clone(),
+                        config: evaluation::candidate_sha256(
+                            format!(
+                                "{}\0{}\0{}\0{}\0{}",
+                                result.assessment.requirement_revision,
+                                result.assessment.policy_fingerprint,
+                                result.assessment.selector,
+                                result.assessment.selector_path,
+                                result.assessment.selector_literal,
+                            )
+                            .as_bytes(),
+                        ),
+                    },
+                    payload: EffectPayload::TestSuiteResult {
+                        passed: result.result.passed,
+                        failed: result.result.failed,
+                        skipped: result.result.skipped,
+                        result_sha256: Sha256Digest::new(result.result.result_sha256.clone())?,
+                    },
+                })
+            }
         }
+    }
+
+    fn candidate_assessment(
+        &self,
+        execution_id: &ExecutionId,
+        attempt_id: &AttemptId,
+    ) -> Result<Option<CandidateIntegrityAssessment>, EffectError> {
+        let results = self
+            .candidate_results
+            .lock()
+            .map_err(|_| EffectError::CaptureFailed("candidate result store unavailable"))?;
+        Ok(results
+            .iter()
+            .rev()
+            .find(|result| result.execution_id == *execution_id && result.attempt_id == *attempt_id)
+            .map(|result| result.assessment.clone()))
+    }
+
+    fn observe_candidate_result(
+        &self,
+        execution_id: ExecutionId,
+        attempt_id: AttemptId,
+        result: CandidateTestResult,
+        assessment: CandidateIntegrityAssessment,
+    ) -> Result<(), EffectError> {
+        assessment
+            .validate()
+            .map_err(|_| EffectError::CaptureFailed("candidate integrity assessment is invalid"))?;
+        if assessment.execution_id != execution_id.as_str()
+            || assessment.attempt_id != attempt_id.as_str()
+            || result.selector != assessment.selector
+        {
+            return Err(EffectError::CaptureFailed(
+                "candidate result lineage mismatch",
+            ));
+        }
+        let mut results = self
+            .candidate_results
+            .lock()
+            .map_err(|_| EffectError::CaptureFailed("candidate result store unavailable"))?;
+        if results.iter().any(|previous| {
+            previous.execution_id == execution_id && previous.attempt_id == attempt_id
+        }) {
+            return Err(EffectError::CaptureFailed(
+                "candidate result already exists for this attempt",
+            ));
+        }
+        if results.len() >= MAX_PENDING_PROCESS_OBSERVATIONS {
+            return Err(EffectError::CaptureFailed(
+                "candidate result store exceeded its bound",
+            ));
+        }
+        results.push_back(StoredCandidateResult {
+            execution_id,
+            attempt_id,
+            result,
+            assessment,
+        });
+        Ok(())
     }
 }
 
@@ -410,5 +532,103 @@ mod tests {
         let second = filesystem(root.to_str().unwrap(), "fs").unwrap();
         assert_ne!(first.subject_material, second.subject_material);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn candidate_result_capture_requires_one_product_minted_bound_assessment() {
+        let capture = LocalEffectCapture::default();
+        let (execution, attempt) = ids();
+        let request = CaptureRequest::TestSuiteResult {
+            subject_ref: format!("attempt:{}", attempt.as_str()),
+        };
+        assert!(capture.capture(&request, &execution, &attempt).is_err());
+        let phases = [
+            evaluation::CandidateCheckpointPhase::Selection,
+            evaluation::CandidateCheckpointPhase::BeforeEvaluation,
+            evaluation::CandidateCheckpointPhase::AfterEvaluation,
+            evaluation::CandidateCheckpointPhase::ResultAdmission,
+        ];
+        let assessment = CandidateIntegrityAssessment {
+            task_id: "task-1".to_owned(),
+            execution_id: execution.as_str().to_owned(),
+            attempt_id: attempt.as_str().to_owned(),
+            subject_ref: request.subject_ref().to_owned(),
+            requirement_revision: format!("sha256:{}", "a".repeat(64)),
+            policy_revision: 1,
+            policy_fingerprint: format!("sha256:{}", "b".repeat(64)),
+            criterion_id: "criterion-1".to_owned(),
+            selector: "candidate.file-contains.v1".to_owned(),
+            selector_path: "src/main.rs".to_owned(),
+            selector_literal: "accepted".to_owned(),
+            invocation_id: "invocation-1".to_owned(),
+            evaluator_ref: "runlith.agentd.candidate-evaluator.v1".to_owned(),
+            runtime_ref: "agentd/1".to_owned(),
+            enforcement_ref: "G6+Runner".to_owned(),
+            base_commit_oid: "1".repeat(40),
+            base_tree_oid: "2".repeat(40),
+            base_manifest_sha256: format!("sha256:{}", "c".repeat(64)),
+            candidate_commit_oid: "3".repeat(40),
+            candidate_tree_oid: "4".repeat(40),
+            candidate_manifest_sha256: format!("sha256:{}", "d".repeat(64)),
+            checkpoints: phases
+                .into_iter()
+                .enumerate()
+                .map(|(index, phase)| evaluation::CandidateFreshnessCheckpoint {
+                    phase,
+                    observed_at_ms: 11 + index as u64,
+                    git_metadata_fingerprint: format!("sha256:{}", "e".repeat(64)),
+                    live_worktree_manifest_sha256: format!("sha256:{}", "f".repeat(64)),
+                    matched: true,
+                })
+                .collect(),
+            outcome: evaluation::CandidateIntegrityOutcome::Intact,
+            started_at_ms: 10,
+            completed_at_ms: 20,
+        };
+        let result = CandidateTestResult {
+            selector: assessment.selector.clone(),
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            result_sha256: format!("sha256:{}", "9".repeat(64)),
+        };
+        capture
+            .observe_candidate_result(
+                execution.clone(),
+                attempt.clone(),
+                result,
+                assessment.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            capture.candidate_assessment(&execution, &attempt).unwrap(),
+            Some(assessment.clone())
+        );
+        assert!(matches!(
+            capture
+                .capture(&request, &execution, &attempt)
+                .unwrap()
+                .payload,
+            EffectPayload::TestSuiteResult {
+                passed: 1,
+                failed: 0,
+                skipped: 0,
+                ..
+            }
+        ));
+        assert!(capture
+            .observe_candidate_result(
+                execution,
+                attempt,
+                CandidateTestResult {
+                    selector: "candidate.file-contains.v1".to_owned(),
+                    passed: 1,
+                    failed: 0,
+                    skipped: 0,
+                    result_sha256: format!("sha256:{}", "8".repeat(64)),
+                },
+                assessment,
+            )
+            .is_err());
     }
 }
