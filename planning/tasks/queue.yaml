@@ -4179,7 +4179,9 @@ items:
       capture port. Bind producer output to exact subject, requirement,
       policy, attempt and evidence kind; record tamper/blocked outcomes.
       No provider self-verdicts, direct probe process path, new completion
-      authority, G14 routing, or TASK-0125 admission rewrite.
+      authority, G14 routing, or TASK-0125 admission rewrite. Allocate the
+      next migration number from accepted main; TASK-0125 must reconcile its
+      unmerged 0021 migration afterward.
     exit_criteria_summary: >-
       A real governed local test run produces a durable structured result
       retrievable after restart; changed or untrusted approval tests cannot
