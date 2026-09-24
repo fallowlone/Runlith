@@ -992,6 +992,7 @@ fn outcome_tag(outcome: &OrchestrationOutcome) -> &'static str {
         OrchestrationOutcome::ExecutionSucceededButRejected { .. } => {
             "EXECUTION_SUCCEEDED_BUT_REJECTED"
         }
+        OrchestrationOutcome::BlockedByPrerequisite { .. } => "BLOCKED_BY_PREREQUISITE",
     }
 }
 

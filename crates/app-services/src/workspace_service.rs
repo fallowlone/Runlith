@@ -333,6 +333,30 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         self.store.get_workspace(id)
     }
 
+    /// Runs the TASK-0135 (G8) prerequisite preflight for one lease:
+    /// read-only validation of the task's declared
+    /// [`task_domain::Prerequisite`]s against the live repository
+    /// environment, bound to the lease's durable trusted Git anchor.
+    ///
+    /// Authority boundary: this informs, it never decides. The report is
+    /// returned to the caller (the orchestrator), which alone may map
+    /// `Failed` findings onto the journaled task `Block` transition;
+    /// nothing is persisted or transitioned here.
+    pub fn check_task_prerequisites(
+        &self,
+        lease: &WorkspaceLease,
+        repository_path: &str,
+        prerequisites: &[task_domain::Prerequisite],
+    ) -> Result<crate::preflight_service::PreflightReport, WorkspaceFailure> {
+        let anchor = self.load_anchor(lease.id())?;
+        Ok(crate::preflight_service::check_prerequisites(
+            &self.git,
+            repository_path,
+            &anchor,
+            prerequisites,
+        ))
+    }
+
     /// Observes the canonical diff for one lease, baselined at its recorded
     /// `base_revision` (ADR-0023 §6). Read-only: emits no journal evidence,
     /// mutates no Git state, completes no Task. The returned evidence

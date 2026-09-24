@@ -1,7 +1,7 @@
 //! Deterministic checked-in migrations with an explicit schema version.
 //!
 //! Versioning uses SQLite `PRAGMA user_version`: 0 means a fresh database,
-//! 18 is the supported version (`0001_task_core.sql`, then
+//! 20 is the supported version (`0001_task_core.sql`, then
 //! `0002_event_journal.sql`, then `0003_event_scope.sql`, then
 //! `0004_runtime_core.sql`, then `0005_workspace_leases.sql`, then
 //! `0006_attempt_reservations.sql`, then
@@ -11,7 +11,8 @@
 //! `0013_plan_cost_receipts.sql`, then `0014_plan_guardrails.sql`, then
 //! `0015_human_decisions.sql`, then `0016_g7_closure_remediation.sql`, then
 //! `0017_evidence_requirements.sql`, then
-//! `0018_planning_input_evidence_requirements.sql`). Newer
+//! `0018_planning_input_evidence_requirements.sql`, then
+//! `0019_observed_effects.sql`, then `0020_task_prerequisites.sql`). Newer
 //! versions fail closed; re-opening the current version is a no-op (never
 //! destructively re-applied). Executing migrations inside one SQLite
 //! transaction is storage consistency only — not TASK-0024 event atomicity.
@@ -21,7 +22,7 @@ use rusqlite::Connection;
 use crate::error::{StorageError, StorageResult};
 
 /// Schema version this adapter understands.
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 19;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 20;
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_task_core.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_event_journal.sql");
@@ -43,6 +44,7 @@ const MIGRATION_0017: &str = include_str!("../migrations/0017_evidence_requireme
 const MIGRATION_0018: &str =
     include_str!("../migrations/0018_planning_input_evidence_requirements.sql");
 const MIGRATION_0019: &str = include_str!("../migrations/0019_observed_effects.sql");
+const MIGRATION_0020: &str = include_str!("../migrations/0020_task_prerequisites.sql");
 
 /// Applies pending migrations to `connection`, which must already have
 /// `PRAGMA foreign_keys = ON`. Migrations run in order inside one SQLite
@@ -178,7 +180,12 @@ pub(crate) fn migrate(connection: &mut Connection) -> StorageResult<u32> {
             StorageError::Migration(format!("0019_observed_effects.sql failed: {error}"))
         })?;
     }
-    transaction.execute_batch("PRAGMA user_version = 19")?;
+    if current < 20 {
+        transaction.execute_batch(MIGRATION_0020).map_err(|error| {
+            StorageError::Migration(format!("0020_task_prerequisites.sql failed: {error}"))
+        })?;
+    }
+    transaction.execute_batch("PRAGMA user_version = 20")?;
     transaction.commit()?;
     Ok(SUPPORTED_SCHEMA_VERSION)
 }

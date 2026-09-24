@@ -14,8 +14,8 @@ use std::path::Path;
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use task_domain::{
-    validate_acyclic, EvidenceRequirement, Project, ProjectId, RequirementKind, RequirementParam,
-    SubjectBinding, Task, TaskId, TaskSnapshot, TaskState,
+    validate_acyclic, EvidenceRequirement, Prerequisite, PrerequisiteKind, Project, ProjectId,
+    RequirementKind, RequirementParam, SubjectBinding, Task, TaskId, TaskSnapshot, TaskState,
 };
 
 use crate::error::{map_constraint, StorageError, StorageResult};
@@ -202,6 +202,7 @@ impl SqliteStore {
         insert_task_row(&transaction, &snapshot)?;
         insert_task_strings(&transaction, &snapshot)?;
         insert_task_evidence_requirements(&transaction, &snapshot)?;
+        insert_task_prerequisites(&transaction, &snapshot)?;
         insert_task_edges(&transaction, &snapshot)?;
         transaction.commit()?;
         Ok(())
@@ -231,6 +232,7 @@ impl SqliteStore {
         insert_task_row(&transaction, &snapshot)?;
         insert_task_strings(&transaction, &snapshot)?;
         insert_task_evidence_requirements(&transaction, &snapshot)?;
+        insert_task_prerequisites(&transaction, &snapshot)?;
         insert_task_edges(&transaction, &snapshot)?;
         let committed = insert_journal_event(&transaction, event)?;
         transaction.commit()?;
@@ -280,8 +282,13 @@ impl SqliteStore {
             "DELETE FROM task_evidence_requirements WHERE task_id = ?1",
             params![snapshot.id.as_str()],
         )?;
+        transaction.execute(
+            "DELETE FROM task_prerequisites WHERE task_id = ?1",
+            params![snapshot.id.as_str()],
+        )?;
         insert_task_strings(&transaction, &snapshot)?;
         insert_task_evidence_requirements(&transaction, &snapshot)?;
+        insert_task_prerequisites(&transaction, &snapshot)?;
         insert_task_edges(&transaction, &snapshot)?;
         transaction.commit()?;
         Ok(())
@@ -699,6 +706,7 @@ fn load_task_snapshot(connection: &Connection, id: &str) -> StorageResult<Option
         depends_on,
         acceptance: ordered_values(&strings, "acceptance"),
         evidence_requirements: load_evidence_requirements(connection, id.as_str())?,
+        prerequisites: load_task_prerequisites(connection, id.as_str())?,
         allowed_paths: ordered_values(&strings, "allowed_path"),
         forbidden_paths: ordered_values(&strings, "forbidden_path"),
         verification: ordered_values(&strings, "verification"),
@@ -708,6 +716,33 @@ fn load_task_snapshot(connection: &Connection, id: &str) -> StorageResult<Option
         kind: row.kind,
         state,
     }))
+}
+
+/// Loads one Task's declared activation prerequisites in declaration order.
+/// Unknown kinds or values that fail domain validation fail closed as
+/// reconstruction errors — never silently dropped (TASK-0135).
+fn load_task_prerequisites(
+    connection: &Connection,
+    task_id: &str,
+) -> StorageResult<Vec<Prerequisite>> {
+    let mut statement = connection.prepare(
+        "SELECT prerequisite_kind, value FROM task_prerequisites
+         WHERE task_id = ?1 ORDER BY position",
+    )?;
+    let rows = statement.query_map(params![task_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut prerequisites = Vec::new();
+    for row in rows {
+        let (kind, value) = row?;
+        let kind = PrerequisiteKind::parse(&kind).map_err(|error| {
+            StorageError::Corrupt(format!("stored prerequisite kind {kind:?}: {error}"))
+        })?;
+        prerequisites.push(Prerequisite::new(kind, value).map_err(|error| {
+            StorageError::DomainReconstruction(format!("stored prerequisite: {error}"))
+        })?);
+    }
+    Ok(prerequisites)
 }
 
 /// Loads one Task's explicit evidence requirements in stored order. Stored
@@ -1018,6 +1053,28 @@ pub(crate) fn insert_task_evidence_requirements(
                 )
                 .map_err(|error| map_constraint(error, "insert evidence requirement parameter"))?;
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn insert_task_prerequisites(
+    connection: &Connection,
+    snapshot: &TaskSnapshot,
+) -> StorageResult<()> {
+    for (position, prerequisite) in snapshot.prerequisites.iter().enumerate() {
+        connection
+            .execute(
+                "INSERT INTO task_prerequisites
+                 (task_id, position, prerequisite_kind, value)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    snapshot.id.as_str(),
+                    position as i64,
+                    prerequisite.kind().as_str(),
+                    prerequisite.value(),
+                ],
+            )
+            .map_err(|error| map_constraint(error, "insert task prerequisite"))?;
     }
     Ok(())
 }

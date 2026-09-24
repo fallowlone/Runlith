@@ -465,6 +465,33 @@ impl<C: Clock> OrchestrationService<C> {
             )))
         })?;
         let ensured = workspace.ensure_workspace_ready(&workspace_request)?;
+        // TASK-0135 (G8): durable prerequisites are checked at
+        // workspace-attempt time, after admission (the journaled `Block`
+        // transition requires RUNNING) and before any provider invocation.
+        // Preflight informs, the orchestrator decides: positively `Failed`
+        // findings map onto the journaled `Block` with the bounded blocker
+        // report as the durable reason; `Indeterminate` findings are
+        // recorded nowhere and never block (backend outages must not wedge
+        // a task), and an empty declaration skips the check entirely.
+        // Recovery is the existing admitted-but-not-attempted resume path
+        // (zero attempts recorded).
+        if !task.prerequisites().is_empty() {
+            let report = workspace.check_task_prerequisites(
+                &ensured.lease,
+                &workspace_request.repository_path,
+                task.prerequisites(),
+            )?;
+            let failures = report.blocking_failures();
+            if !failures.is_empty() {
+                let reason = bounded_blocker_reason(&failures);
+                self.tasks.block(&work.task_id, reason.clone())?;
+                return Ok(OrchestrationOutcome::BlockedByPrerequisite {
+                    task_id: work.task_id.clone(),
+                    execution_id: work.execution_id.clone(),
+                    reason,
+                });
+            }
+        }
         let executor = make_executor(&task, &ensured.lease);
         self.run_workspace_attempt(work, executor, evaluator)
     }
@@ -761,6 +788,34 @@ pub(crate) fn derive_task_readiness(
         }
     }
     Ok(Some(derive_readiness(state, blocking)))
+}
+
+/// Upper bound in bytes on the composed blocker report journaled as the
+/// `Block` reason: keeps durable task content bounded even under the
+/// maximum prerequisite count (each contributing value is itself capped
+/// by the `Prerequisite` vocabulary).
+const MAX_BLOCKER_REASON_LEN: usize = 2048;
+
+/// Composes the bounded, human-readable blocker report from positively
+/// failed preflight findings (TASK-0135). Declaration order is preserved;
+/// truncation is explicit. Indeterminate findings are not blockers and
+/// never appear here.
+fn bounded_blocker_reason(failures: &[&crate::preflight_service::PreflightFinding]) -> String {
+    let mut reason = String::from("prerequisite preflight failed:");
+    for finding in failures {
+        let crate::preflight_service::PrerequisiteStatus::Failed { reason: detail } =
+            &finding.status
+        else {
+            continue;
+        };
+        let part = format!(" {} {:?} ({detail});", finding.kind.as_str(), finding.value);
+        if reason.len() + part.len() > MAX_BLOCKER_REASON_LEN {
+            reason.push_str(" ... (truncated)");
+            break;
+        }
+        reason.push_str(&part);
+    }
+    reason
 }
 
 impl<C: Clock + Clone> OrchestrationService<C> {

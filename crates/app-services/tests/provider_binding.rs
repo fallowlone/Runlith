@@ -597,3 +597,220 @@ mod unix {
         );
     }
 }
+
+// -- TASK-0135 (G8) prerequisite preflight gate ----------------------------
+//
+// Durable prerequisites on the task record are checked at workspace-attempt
+// time against the live repository environment. A positively `Failed`
+// check maps onto the journaled `Block` transition with the bounded
+// blocker report as its durable reason; the provider is never invoked.
+
+fn seed_ready_with_prerequisites(
+    tasks: &mut TaskService<FixedClock>,
+    project: &str,
+    id: &str,
+    prerequisites: Vec<task_domain::Prerequisite>,
+) -> TaskId {
+    if tasks
+        .get_project(&ProjectId::new(project).unwrap())
+        .unwrap()
+        .is_none()
+    {
+        tasks
+            .create_project(
+                &Project::new(
+                    ProjectId::new(project).unwrap(),
+                    format!("project {project}"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    let mut task = Task::draft(
+        TaskId::new(id).unwrap(),
+        ProjectId::new(project).unwrap(),
+        format!("objective {id}"),
+    )
+    .unwrap();
+    task.define_prerequisites(prerequisites).unwrap();
+    tasks.create_task(&task).unwrap();
+    tasks.mark_ready(&task.id().clone()).unwrap();
+    task.id().clone()
+}
+
+#[test]
+fn failed_prerequisites_block_before_provider_invocation_with_durable_report() {
+    let env = TestEnv::new("preflight-block");
+    let mut orchestration = env.orchestration();
+    // Two positively-failing checks: a missing repo file and a git ref
+    // that does not resolve. Both must land in the blocker report.
+    let task_id = seed_ready_with_prerequisites(
+        orchestration.tasks_mut(),
+        "P-1",
+        "T-1",
+        vec![
+            task_domain::Prerequisite::new(
+                task_domain::PrerequisiteKind::RepoFileExists,
+                "missing/required-input.txt",
+            )
+            .unwrap(),
+            task_domain::Prerequisite::new(
+                task_domain::PrerequisiteKind::GitAncestorRef,
+                "refs/heads/nonexistent-base",
+            )
+            .unwrap(),
+        ],
+    );
+    let mut workspace = env.workspace_service();
+    let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let executor = StubExecutor {
+        executes: calls.clone(),
+    };
+
+    let outcome = orchestration
+        .schedule_in_workspace(
+            &mut workspace,
+            &task_id,
+            ids("E-1", "A-1"),
+            workspace_request(&env, &ExecutionId::new("E-1").unwrap()),
+            |_, _| executor,
+            &evaluator,
+        )
+        .expect("preflight block is a decided outcome, not an error");
+    let OrchestrationOutcome::BlockedByPrerequisite {
+        task_id: blocked,
+        execution_id,
+        reason,
+    } = outcome
+    else {
+        panic!("failing prerequisites must block, got {outcome:?}");
+    };
+    assert_eq!(blocked, task_id);
+    assert!(reason.contains("missing/required-input.txt"), "{reason}");
+    assert!(reason.contains("refs/heads/nonexistent-base"), "{reason}");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "the provider is never invoked for a blocked task"
+    );
+
+    // The blocker report is durable: task state plus the journaled
+    // `Blocked` fact both carry it, readable after the fact from the
+    // canonical store.
+    let task = orchestration.tasks().get_task(&task_id).unwrap().unwrap();
+    assert_eq!(task.state(), TaskState::Blocked);
+    let events = orchestration
+        .tasks()
+        .store()
+        .list_events_for_task(&task_id)
+        .unwrap();
+    let blocked_event = events
+        .iter()
+        .find(|event| event.fact.event_type == storage_sqlite::EventType::Blocked)
+        .expect("journaled Blocked fact");
+    assert_eq!(blocked_event.fact.from_state, Some(TaskState::Running));
+    assert_eq!(blocked_event.fact.to_state, Some(TaskState::Blocked));
+    assert_eq!(
+        blocked_event.fact.reason.as_deref(),
+        Some(reason.as_str()),
+        "the journaled reason is the blocker report"
+    );
+
+    // Recovery shape: admitted-but-not-attempted (zero attempts), so the
+    // existing pre-attempt resume path owns the recovery once the
+    // prerequisite is satisfied.
+    assert!(
+        orchestration
+            .runtime()
+            .get_attempt(&AttemptId::new("A-1").unwrap())
+            .unwrap()
+            .is_none(),
+        "no attempt is created for a blocked task"
+    );
+    assert!(
+        orchestration
+            .runtime()
+            .get_execution(&execution_id)
+            .unwrap()
+            .is_some(),
+        "the admitted execution stays durable"
+    );
+}
+
+#[test]
+fn satisfied_prerequisites_let_the_workspace_cycle_proceed() {
+    let env = TestEnv::new("preflight-pass");
+    // The declared file exists in the repository working tree, and the
+    // declared command is on PATH (the fixtures themselves invoke git).
+    std::fs::write(env.repo.join("required-input.txt"), "present").expect("repo file");
+    let mut orchestration = env.orchestration();
+    let task_id = seed_ready_with_prerequisites(
+        orchestration.tasks_mut(),
+        "P-1",
+        "T-1",
+        vec![
+            task_domain::Prerequisite::new(
+                task_domain::PrerequisiteKind::RepoFileExists,
+                "required-input.txt",
+            )
+            .unwrap(),
+            task_domain::Prerequisite::new(task_domain::PrerequisiteKind::CommandOnPath, "git")
+                .unwrap(),
+        ],
+    );
+    let mut workspace = env.workspace_service();
+    let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let executor = StubExecutor {
+        executes: calls.clone(),
+    };
+
+    let outcome = orchestration
+        .schedule_in_workspace(
+            &mut workspace,
+            &task_id,
+            ids("E-1", "A-1"),
+            workspace_request(&env, &ExecutionId::new("E-1").unwrap()),
+            |_, _| executor,
+            &evaluator,
+        )
+        .expect("satisfied prerequisites never block the cycle");
+    assert!(
+        matches!(
+            outcome,
+            OrchestrationOutcome::ExecutionSucceededAndVerified { .. }
+        ),
+        "satisfied prerequisites let the cycle verify, got {outcome:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn task_without_prerequisites_skips_the_gate_entirely() {
+    // Legacy tasks (no declared prerequisites) behave exactly as before
+    // TASK-0135: no check, no block, no journaled prerequisite fact.
+    let env = TestEnv::new("preflight-none");
+    let mut orchestration = env.orchestration();
+    let task_id = seed_ready(orchestration.tasks_mut(), "P-1", "T-1");
+    let mut workspace = env.workspace_service();
+    let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
+    let executor = StubExecutor {
+        executes: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    };
+
+    let outcome = orchestration
+        .schedule_in_workspace(
+            &mut workspace,
+            &task_id,
+            ids("E-1", "A-1"),
+            workspace_request(&env, &ExecutionId::new("E-1").unwrap()),
+            |_, _| executor,
+            &evaluator,
+        )
+        .expect("empty declaration is not a blocker");
+    assert!(matches!(
+        outcome,
+        OrchestrationOutcome::ExecutionSucceededAndVerified { .. }
+    ));
+}

@@ -74,4 +74,21 @@ pub enum OrchestrationOutcome {
         /// Durable attempt concluded `Cancelled` by this cycle.
         attempt_id: AttemptId,
     },
+    /// TASK-0135 (G8): declared prerequisites failed preflight after
+    /// admission but before any Attempt was created. The trusted journaled
+    /// `Block` transition committed with the bounded blocker report as its
+    /// reason, so the report persists durably on the task record. No
+    /// provider was invoked; recovery is the existing
+    /// admitted-but-not-attempted resume path once the prerequisite is
+    /// satisfied. `Indeterminate` findings never produce this outcome -
+    /// only positively `Failed` checks block.
+    BlockedByPrerequisite {
+        /// Task identity.
+        task_id: TaskId,
+        /// Durable execution created by this cycle (zero attempts).
+        execution_id: ExecutionId,
+        /// Bounded human-readable blocker report (journaled as the Block
+        /// reason).
+        reason: String,
+    },
 }
