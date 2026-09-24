@@ -11,9 +11,11 @@
 
 use std::path::Path;
 
+use agent_runtime::ExecutionId;
 use plan_domain::{PlanDomainError, TaskPlanningAuthority};
 use storage_sqlite::{EventType, JournalEvent, NewJournalEvent, SqliteStore, StorageError};
 use task_domain::{DomainError, Project, ProjectId, Task, TaskId, TransitionCommand};
+use workspace::{LeaseLifecycle, WorkspaceStore};
 
 use crate::clock::{format_rfc3339, Clock, SystemClock};
 use crate::error::{ServiceError, ServiceResult};
@@ -115,6 +117,41 @@ impl<C: Clock> TaskService<C> {
             "create_task",
         );
         Ok(self.store.create_task_with_event(task, &event)?)
+    }
+
+    /// Binds the current policy to the base OID in the durable lease owned by
+    /// this Task's Execution. No base revision is accepted from the caller.
+    pub fn bind_evaluated_policy_base(
+        &mut self,
+        execution_id: &ExecutionId,
+    ) -> ServiceResult<storage_sqlite::EvaluatedPolicyBase> {
+        let execution = self.store.get_execution(execution_id)?.ok_or_else(|| {
+            ServiceError::Storage(StorageError::NotFound(format!(
+                "execution {execution_id} does not exist"
+            )))
+        })?;
+        let lease = self
+            .store
+            .get_workspace_for_execution(execution_id)
+            .map_err(|error| {
+                ServiceError::Storage(StorageError::ConstraintViolation(error.to_string()))
+            })?
+            .ok_or_else(|| {
+                ServiceError::Storage(StorageError::NotFound(format!(
+                    "execution {execution_id} has no workspace lease"
+                )))
+            })?;
+        if lease.lifecycle() != LeaseLifecycle::Ready {
+            return Err(ServiceError::Storage(StorageError::ConstraintViolation(
+                "evaluated policy base requires a READY workspace lease".into(),
+            )));
+        }
+        Ok(self.store.bind_evaluated_policy_base(
+            execution_id.as_str(),
+            execution.task_id().as_str(),
+            lease.id().as_str(),
+            lease.base_revision().as_str(),
+        )?)
     }
 
     /// Creates a DRAFT Task whose canonical planning metadata — allowed
