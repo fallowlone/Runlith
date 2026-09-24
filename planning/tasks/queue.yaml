@@ -4214,6 +4214,7 @@ items:
     depends_on:
       - TASK-0124
       - TASK-0143
+      - TASK-0146
     blocked_by: []
     references:
       - docs/architecture/adr/ADR-0018-independent-evaluation.md
@@ -4221,6 +4222,45 @@ items:
       - docs/architecture/adr/ADR-0024-g5-provider-execution-seam.md
       - crates/evaluation
       - crates/app-services/src/observed_effect_service.rs
+
+  - id: TASK-0146
+    gate: G8
+    title: Canonical TestMutationPolicy selection and persistence
+    objective: >-
+      Implement the ADR-0032 prerequisite contract for defining, authorizing,
+      selecting and durably binding the TestMutationPolicy used by TASK-0144
+      integrity assessment.
+    scope: >-
+      Policy Engine-owned policy model, serialization, immutable revision and
+      fingerprint, and authorization rules for Forbidden (trusted default)
+      and ScopedReviewed exact path/check authorization; trusted Task/application
+      selection and persistence of the selected immutable policy revision,
+      fingerprint and evaluated-base binding, including SQLite durability and
+      restart recovery. Selection must be trusted; provider, repository,
+      workspace and caller-supplied inputs may apply restrictions that only
+      narrow the selected policy, but may not create, widen or replace it. No integrity
+      assessment or test-harness evidence producer, reviewer identity record,
+      TASK-0125 completion rewrite, or general policy language. Allocate the
+      next migration from accepted main (expected 0021); TASK-0144 must allocate
+      its migration after this task lands, and TASK-0125 must then reconcile its
+      unmerged migration after TASK-0144.
+    exit_criteria_summary: >-
+      Focused tests establish trusted default Forbidden behavior, exact
+      ScopedReviewed path/check limits, rejection of invalid policies and
+      unauthorized or spoofed selection, invalidation of changed/stale policy
+      revisions, and selected-policy/base binding durability after restart.
+      Relevant workspace checks and independent security review pass.
+    depends_on:
+      - TASK-0143
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0032-g8-test-integrity-evidence-authoring.md
+      - docs/architecture/adr/ADR-0018-independent-evaluation.md
+      - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
+      - docs/architecture/INVARIANTS.md
+      - docs/architecture/task-engine.md
+      - crates/policy
+      - crates/app-services
 
   - id: TASK-0147
     gate: G9
@@ -4234,19 +4274,23 @@ items:
       Plan a Context Engine or agentctl surface for semantic navigation and
       progressive disclosure, with source-revision provenance, bounded
       output, freshness checks, security filtering, and reproducible
-      selection. Benchmark answer evidence against rg and an RTK-style
-      baseline, recording elapsed time and token/attention cost. Reuse
-      existing Context Engine and Resource contracts; no new vector database
-      by default. No G8 implementation or parallel retrieval subsystem.
-      Execute only after G8 closure and G9 activation under the existing
-      gate workflow.
+      selection. Before implementation, define a representative repository
+      question set, comparable runs across the finder, rg, and an RTK-style
+      baseline, and evidence-quality and token-cost measures. Record elapsed
+      time as well. Reuse existing Context Engine and Resource contracts; no
+      new vector database by default. No G8 implementation or parallel
+      retrieval subsystem. Execute only after G8 closure and G9 activation
+      under the existing gate workflow.
     exit_criteria_summary: >-
       A dogfoodable finder returns bounded, reopenable evidence tied to its
       source revision; stale or inaccessible sources are handled explicitly;
-      selection can be reproduced and explained. A benchmark compares
-      evidence quality, elapsed time, and token/attention cost with rg and an
-      RTK-style baseline on representative repository questions. Security
-      filtering and provenance behavior are documented and reviewable.
+      selection can be reproduced and explained. Before implementation, the
+      benchmark defines a representative repository question set and measures
+      evidence quality using relevance and source support, plus token cost
+      using a consistently reported input/output token count for comparable
+      runs of the finder, rg, and an RTK-style baseline. Elapsed time is
+      recorded. Security filtering and provenance behavior are documented and
+      reviewable.
     depends_on:
       - TASK-0137
     blocked_by: []
