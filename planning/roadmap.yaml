@@ -111,6 +111,12 @@ gates:
     planned_capabilities:
       - Context Provenance Envelope carrying source/time/type/sensitivity,
         permission scope, confidence and supersession metadata.
+      - Dogfoodable repository information finder through the Context Engine
+        (for example, an agentctl surface), semantic navigation with
+        progressive disclosure, source-revision provenance, bounded output,
+        freshness and security filtering, and reproducible selection;
+        benchmarked against rg and an RTK-style baseline for answer evidence,
+        time, and token/attention cost. No vector database by default.
       - Conditional Entity Graph only when entity ambiguity or relationship-heavy
         retrieval measurably justifies graph-assisted resolution.
       - TAKEOVER continuation, the resulting-revision reference and full
@@ -150,7 +156,10 @@ gates:
     objective: >-
       Eligibility-first, explainable provider/model routing on durable
       health and quota ledgers, with usage economics rollups and
-      offline-first shadow-mode evaluation. Proposed by the agent-router
+      offline-first shadow-mode evaluation comparing current eligibility,
+      verified outcome quality/confidence, latency, and cost per verified
+      success using fresh receipts; stale or unknown signals remain explicit.
+      Provider names do not imply capabilities. Proposed by the agent-router
       capability migration audit (TASK-0128); requires owner ratification
       before any G14 task starts. No live or learned routing until
       shadow-mode evidence (TASK-0138) is reviewed.
