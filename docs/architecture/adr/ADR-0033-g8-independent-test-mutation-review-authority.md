@@ -22,7 +22,7 @@ canonical trusted owner-managed setting inside Runlith settings:
 
 | Path | Required authority |
 |---|---|
-| **B1 — human** | Independently authenticated human and implementation principals; enforce reviewer != implementer; G6 authorization for the exact review; read-only access to the captured candidate and affected checks; trusted product capture and record authorship. |
+| **B1 — human** | A fresh interactive human presence and personally authored verdict in the trusted UI; the implementer is a separate governed AI Attempt; G6 authorization for the exact review; read-only access to the captured candidate and affected checks; trusted product capture and record authorship. |
 | **B2 — service** | Independently authenticated reviewer service and implementation principals; enforce reviewer != implementer; governed G5/G6 Runner execution with the same exact read-only scope; trusted product capture and record authorship. |
 
 The setting selects B1 or B2 at review admission. Policy binds its value and
@@ -39,28 +39,29 @@ selected-path controls denies review. There is no fallback between paths.
 B1 uses two distinct typed principal namespaces, populated only from trusted
 product records:
 
-- `HumanPrincipal`: the operating-system account identity plus fresh
-  interactive platform user-presence authentication, obtained by the trusted
-  Runlith desktop/control host for this exact review or owner-setting
-  operation. The product-owned process binds the authentication to a fresh
-  operation nonce and the exact input digest. Same-user IPC authentication,
-  `client_kind`, caller/provider text, and prior authentication alone do not
-  establish this principal. If the trusted host cannot obtain or bind fresh
-  user presence, the operation fails closed.
-- `ImplementationPrincipal`: a product-minted principal for the governed G5/G6
-  execution `Attempt`, bound to its Runner process and admission provenance.
-  It is derived from trusted execution records, never caller/provider text,
-  model labels, or an asserted identity.
+- `HumanPrincipal`: an interactive human actor who freshly confirms presence
+  through the trusted Runlith UI for this review and personally submits its
+  explicit verdict. The trusted product process binds that confirmation and
+  submission to a fresh operation nonce and the digest of the captured exact
+  review input. Same-user IPC, `client_kind`, caller/provider text, prior
+  authentication, or provider-process submission cannot establish or submit
+  this verdict. If fresh presence or trusted binding cannot be proven, the
+  operation fails closed.
+- `ImplementationPrincipal`: a product-minted, Runner-admitted AI Attempt
+  principal for the governed G5/G6 implementation execution, bound to its
+  Runner process and admission provenance. It is derived from trusted product
+  records, never caller/provider text, model labels, or an asserted identity.
 
-The product compares these typed principals using trusted provenance that
-resolves whether the authenticated human is the actor responsible for the
-implementation Attempt, and rejects a match before assignment and review
-admission. The principal namespaces remain distinct; the comparison is based
-on trusted attribution records, never string or caller-asserted identity
-equality. Provider output cannot acquire owner proof, choose the reviewer or
-assignment, or supply either principal. Required G5/G6 isolation cannot use an
-unsandboxed fallback. This contract selects no particular OS API, vendor, or
-cryptographic design.
+Independence means the human personally performs the fresh-presence and
+verdict-submission actions, while the separately proven implementation actor
+is the governed AI Attempt. Trusted product evidence must establish both typed
+actors and bind the human's verdict action to the exact captured input; the
+reviewer cannot be the implementing AI Attempt. Sharing an operating-system
+account alone neither proves nor disproves this independence. Provider output
+cannot acquire owner proof, choose the reviewer or assignment, supply either
+principal, or submit/impersonate the human verdict. Required G5/G6 isolation
+cannot use an unsandboxed fallback. This contract selects no particular OS
+API, vendor, or cryptographic design.
 
 Both paths review the exact captured base, candidate, changed-input manifest
 and affected checks read-only. They cannot write the candidate, mutate Git,
@@ -125,11 +126,11 @@ profile IDs, reviewer text and output claims are not identity proof.
 
 - `Forbidden` remains effective by default; unavailable or invalid selected
   review authority leaves `ScopedReviewed` ineligible.
-- B1 and B2 require independent principal proof, exact review binding, G6
-  authorization and read-only scope. B1 obtains fresh human presence through
-  the trusted host and derives the implementation principal from governed
-  Attempt records. B2 additionally requires governed G5 execution; selection
-  alone grants no authority.
+- B1 and B2 require independent actor/action proof, exact review binding, G6
+  authorization and read-only scope. B1 obtains fresh human presence and the
+  human-authored verdict through the trusted UI, and derives the implementation
+  principal from governed AI Attempt records. B2 additionally requires
+  governed G5 execution; selection alone grants no authority.
 - Review evidence, test results and optional human approvals remain distinct.
   Review cannot satisfy a separate approval requirement.
 - Evaluation authors trusted records; Runner enforces already-authorized
