@@ -4210,10 +4210,16 @@ items:
       retrievable after restart; a durable integrity assessment binds the
       exact changed inputs and governed invocation descriptor and reports
       tamper or blocked capture; missing
-      or unsupported capture emits no trusted result; producer contract
-      tests cover G5/G6/G7-shaped test results without
-      requiring unmerged TASK-0125 code; full workspace verification and
-      independent security review green.
+      or unsupported capture emits no trusted result; TASK-0144 acceptance is
+      limited to candidate-input selectors explicitly authorized by the exact
+      EvidenceRequirement revision and sufficient for the criterion scope; it
+      does not claim a full Rust test suite, compilation, runtime behavior, or
+      arbitrary repository tests. Compiled-test protocol, artifact execution,
+      and recovery validation require separate ratification/implementation and
+      do not block this candidate-input path. Producer contract tests cover
+      only the supported candidate-input result contract without requiring
+      unmerged TASK-0125 code; full workspace verification and independent
+      security review green.
     depends_on:
       - TASK-0124
       - TASK-0143
@@ -4244,9 +4250,11 @@ items:
       without claiming to run candidate Rust tests. Bind structured results,
       counts, selector, and digest separately for each method; specify freshness,
       restart, authorship, tamper, race, unsupported, and recovery semantics.
-      Record stable libtest result output as an explicit blocker for compiled
-      tests. No production code, dependencies, migration,
-      product/version or roadmap/gate status changes.
+      Record stable libtest result output and immutable launch-time artifact
+      binding as explicit compiled-test requirements/blockers. During this
+      proposal phase, no production code, dependencies, migration, product
+      version or roadmap/gate status changes. If TASK-0148 is later completed,
+      apply normal product/version completion bookkeeping under AGENT.md §26.
     exit_criteria_summary: >-
       Owner-Accepted ADR-0034, ratified after independent architecture/security
       review, is internally complete, linked and consistent with ADR-0018,

@@ -82,12 +82,28 @@ provider summary does not qualify; it must receive and evaluate the exact
 captured bytes. The trusted product validates a bounded structured result
 against the selector and invocation before persisting evidence.
 
+The exact trusted `EvidenceRequirement` revision for the criterion must
+explicitly authorize method `candidate-input`, the exact catalogued selector,
+and a scope whose inspected candidate inputs and asserted properties are
+sufficient for that criterion. The result records and is checked against that
+exact requirement revision and criterion scope. Missing, stale, mismatched, or
+insufficient authorization is blocked/unverified; selector or source-text
+matching alone never proves a runtime, compiled-code, or other behavior
+criterion. Evidence supports only the criterion and scope explicitly covered
+by its requirement.
+
 This is the proposed first implementation target for TASK-0144 because it
 can establish real governed, product-authored structured results for the
 precisely declared candidate-input checks without pretending a static harness
-tested candidate-compiled code. TASK-0144 must identify which acceptance
-requirements this narrow method can satisfy; unsupported criteria remain
-blocked/unverified. This method does not need a candidate build receipt.
+tested candidate-compiled code. TASK-0144 acceptance is limited to explicitly
+authorized candidate-input selectors and criteria whose required properties
+those selectors actually evaluate. It does not satisfy a general Rust test
+suite, compilation, runtime behavior, or arbitrary repository-test
+requirement. Unsupported or out-of-scope criteria remain blocked/unverified.
+This method does not need a candidate build receipt. Compiled-test structured
+protocol, artifact execution, and recovery validation require a separate
+ratification and implementation task; they do not block TASK-0144's
+candidate-input-only acceptance.
 
 ### 3. Governed build and exact artifact for compiled candidate tests
 
@@ -110,6 +126,15 @@ selected test artifact. Artifact selection must be derived from the trusted
 build output protocol, never a caller-supplied path. A failed, incomplete,
 ambiguous, or mismatched build emits no successful receipt and cannot proceed
 to a trusted test result.
+
+Before test launch, the selected artifact must be sealed or copied into an
+immutable, read-only execution input, with its identity and content digest
+verified against the build receipt. Runner must bind that verified input to
+the executable actually launched. An equivalent Runner binding is acceptable
+only if it checks both identity and content at the launch boundary; hashing a
+writable path and later launching that path is insufficient. If the platform
+cannot preserve and verify this binding, compiled-test execution is
+unsupported and blocked.
 
 ### 4. Bounded Rust compiled-test path and result-format decision
 
@@ -232,8 +257,10 @@ reviewed contract gap proves they cannot represent the required binding.
 - Durable observed effects remain product-authored evidence, separate from
   model-visible receipts and the G6 Security Audit. They grant no completion
   authority.
-- No production code, schema, dependency, product/version change, or gate
-  status change is authorized by this proposal.
+- This proposal authorizes no production code, schema, dependency, or product
+  version change. If TASK-0148 is later completed, normal completion
+  bookkeeping must update `product/version.toml` under AGENT.md §26; public
+  SemVer remains unchanged absent an explicit release decision.
 
 ## Security impact
 
@@ -265,7 +292,10 @@ evidence path is demonstrated.
 ## Acceptance and independent review
 
 Before this proposal is accepted, an independent architecture/security review
-must establish that:
+must establish that the candidate-input path is adequately specified and
+fail-closed. Compiled-test clauses below record constraints for a future
+separately ratified implementation; they are not acceptance gates for
+TASK-0144's candidate-input path. The review must establish that:
 
 1. snapshot scope covers all consumed tracked, staged, dirty, deleted, and
    untracked inputs and fails closed for unrepresented repository features;
@@ -276,14 +306,20 @@ must establish that:
    NativeRunner fallback;
 4. candidate-input evidence binds exact bytes, selector, evaluator identity,
    configuration, Policy/backend outcome, validated counts, and result digest;
-5. compiled-test receipts bind candidate, complete invocation/toolchain/
-   configuration, policy/backend outcome, and exact selected artifact bytes;
-6. both evidence paths validate malformed/truncated/tampered results and
-   restart freshness; compiled-test result protocol is separately reviewed;
+5. the proposed compiled-test contract records that receipts must bind
+   candidate, complete invocation/toolchain/configuration, policy/backend
+   outcome, and exact selected artifact bytes, and that test launch requires
+   a sealed artifact or equivalent Runner binding checked against the launched
+   executable; implementation validation is deferred;
+6. the candidate-input path validates malformed/truncated/tampered results and
+   restart freshness. Compiled-test result protocol, artifact binding, and
+   recovery validation are a separate ratification and implementation scope;
 7. races, crashes, duplicate/replay, partial persistence, unsupported states,
    and same-user tampering limits are stated without promoting uncertainty to
    success; and
 8. TASK-0144 acceptance criteria and dependencies are updated consistently,
+   with candidate-input evidence explicitly limited to the authorized
+   criterion scope and not represented as full Rust test proof,
    while ADR-0018, ADR-0026, ADR-0030, and ADR-0032 authority remains intact.
 
 Owner ratification must confirm the candidate-input method's scope, selector,
