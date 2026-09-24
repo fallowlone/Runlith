@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0148
+completed_through: TASK-0149
 current_gate: G8
-gate_status: IN_PROGRESS  # G7 closed by TASK-0120; G8 task bookkeeping through TASK-0148, independent gate closure remains pending
+gate_status: IN_PROGRESS  # G7 closed by TASK-0120; G8 bookkeeping through TASK-0149, independent gate closure remains pending
 
 items:
   - id: TASK-0012
@@ -4195,31 +4195,41 @@ items:
     scope: >-
       Trusted Evaluation/Runner composition and its SQLite evidence path;
       use the accepted G5/G6 governed execution boundary and TASK-0124
-      capture port. Bind producer output to exact subject, requirement,
+      capture port. For candidate-input evidence, support only the ADR-0035
+      method: an explicitly selected commit/tree in a clean linked worktree,
+      validated raw Git object graph/blob bytes, canonical digest manifest,
+      sealed product-owned snapshot, and paired metadata/live-worktree
+      freshness checks. Bind producer output to the exact subject, requirement,
       policy, attempt and evidence kind; record typed integrity and capture
-      statuses, not completion verdicts. Must work with the trusted default
-      Forbidden policy after TASK-0146; ScopedReviewed remains unavailable
-      until trusted owner selection and authorization are implemented by
-      TASK-0145. No provider self-verdicts, direct
-      probe process path, new completion
-      authority, G14 routing, or TASK-0125 admission rewrite. Allocate the
-      next migration number from accepted main; TASK-0125 must reconcile its
-      unmerged 0021 migration afterward.
+      statuses, not completion verdicts. Exclude standalone clones, dirty,
+      staged, untracked or ignored extra paths, LFS, symlinks, submodules,
+      filters, generated/external inputs, and compiled Rust tests. Must work
+      with the trusted default Forbidden policy after TASK-0146;
+      ScopedReviewed remains unavailable until trusted owner selection and
+      authorization are implemented by TASK-0145. No provider self-verdicts,
+      direct probe process path, new completion authority, G14 routing, or
+      TASK-0125 admission rewrite. Allocate the next migration number from
+      accepted main; TASK-0125 must reconcile its unmerged 0021 migration
+      afterward.
     exit_criteria_summary: >-
-      A real governed local test run produces a durable structured result
-      retrievable after restart; a durable integrity assessment binds the
-      exact changed inputs and governed invocation descriptor and reports
-      tamper or blocked capture; missing
-      or unsupported capture emits no trusted result; TASK-0144 acceptance is
-      limited to candidate-input selectors explicitly authorized by the exact
-      EvidenceRequirement revision and sufficient for the criterion scope; it
-      does not claim a full Rust test suite, compilation, runtime behavior, or
-      arbitrary repository tests. Compiled-test protocol, artifact execution,
-      and recovery validation require separate ratification/implementation and
-      do not block this candidate-input path. Producer contract tests cover
-      only the supported candidate-input result contract without requiring
-      unmerged TASK-0125 code; full workspace verification and independent
-      security review green.
+      A governed candidate-input check over the exact ADR-0035 sealed snapshot
+      produces a durable structured result retrievable after restart; a
+      durable integrity assessment binds the exact commit/tree/raw-blob
+      manifest and governed invocation descriptor and reports tamper or
+      blocked capture. Paired metadata and live-worktree freshness checks bind
+      the selected commit to the clean linked worktree and snapshot before and
+      after evaluation, result admission, completion, and reuse. Missing or
+      unsupported capture emits no trusted result. Evidence is limited to
+      selectors explicitly authorized by the exact EvidenceRequirement
+      revision and sufficient for the criterion scope; it makes no full Rust
+      test, compilation, runtime, or arbitrary repository-test claim. No
+      standalone clone, dirty/ignored extra paths, LFS, symlink, submodule,
+      filter, generated/external input, or compiled Rust test support.
+      Compiled-test protocol, artifact execution, and recovery validation
+      require separate ratification/implementation. Producer contract tests
+      cover only the supported candidate-input result contract without
+      requiring unmerged TASK-0125 code; full workspace verification and
+      independent security review green.
     depends_on:
       - TASK-0124
       - TASK-0143
@@ -4227,7 +4237,7 @@ items:
       - TASK-0148
       - TASK-0149
     blocked_by:
-      - TASK-0149
+      []
     references:
       - docs/architecture/adr/ADR-0018-independent-evaluation.md
       - docs/architecture/adr/ADR-0030-g8-observed-effect-claim-verification-contract.md
@@ -4296,30 +4306,31 @@ items:
 
   - id: TASK-0149
     gate: G8
-    title: Immutable Git candidate-input capture proposal (ADR)
+    title: Immutable Git candidate-input capture contract (ADR)
     objective: >-
-      Resolve the unprivileged macOS candidate-capture blocker for TASK-0144
-      with a bounded proposed contract based on an explicitly selected Git
-      commit/tree, product-resolved blob bytes, and a sealed product snapshot.
+      Ratify and record the bounded initial candidate-input method for
+      TASK-0144 based on an explicitly selected Git commit/tree,
+      product-resolved blob bytes, and a sealed product snapshot.
     scope: >-
       ADR-only prerequisite. Specify the exact commit/tree/blob subject and
       canonical SHA-256 path/mode/byte manifest; product-owned object
       resolution, materialization, verification, G5/G6 Runner invocation,
       requirement/selector/scope and Policy binding, freshness, workspace
       drift, durable recovery, and fail-closed repository-feature limits.
-      Initial support excludes dirty, staged, and untracked worktrees. State
-      the exact ADR-0034 and ADR-0032 contract changes required on ratification
-      and the privileged APFS snapshot-helper alternative and costs. ADR-0035
-      remains Proposed until independent architecture/security review and
-      owner ratification. No accepted ADR edits, implementation, tests,
-      migration, version, roadmap, or completion bookkeeping changes.
+      Initial support excludes standalone clones and dirty, staged, untracked,
+      or ignored worktree inputs. Record the paired metadata/live-worktree
+      freshness obligations, exact ADR-0034 and ADR-0032 amendments, and the
+      privileged APFS snapshot-helper alternative and costs. ADR-only
+      acceptance bookkeeping; no implementation, tests, migration, or roadmap
+      changes.
     exit_criteria_summary: >-
-      ADR-0035 is Proposed, linked, bounded to this method, and explicit about
-      unsupported inputs, freshness limits, security authority, alternatives,
-      and required ratification changes. TASK-0149 completes only after
-      independent architecture/security review and owner ratification of
-      ADR-0035. This proposal branch does not satisfy that criterion, mark
-      TASK-0144 done, or advance completed_through.
+      ADR-0035 is Accepted and linked, after owner ratification following
+      independent architecture/security review PASS of exact pre-acceptance
+      commit 2c63a0946dc7a6aeea719fa3688c7c1e880d6539. Its contract, ADR-0032
+      and ADR-0034 amendments, unsupported-input limits, freshness obligations,
+      security authority and alternatives are recorded. TASK-0149 is complete
+      on this branch; this outcome does not claim local merge or integration
+      into main, and does not mark TASK-0144 complete.
     depends_on:
       - TASK-0148
     blocked_by: []
@@ -4329,6 +4340,17 @@ items:
       - docs/architecture/adr/ADR-0032-g8-test-integrity-evidence-authoring.md
       - docs/architecture/adr/ADR-0030-g8-observed-effect-claim-verification-contract.md
       - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
+    outcome: >-
+      ADR-0035 ACCEPTED after owner ratification and independent
+      architecture/security review PASS of exact pre-acceptance commit
+      2c63a0946dc7a6aeea719fa3688c7c1e880d6539. ADR-0032 and ADR-0034 now
+      record the narrow initial candidate-input method: explicitly selected
+      immutable commit/tree, validated Git object graph and raw blobs,
+      canonical digest manifest, sealed product-owned snapshot, clean linked
+      worktree only, and paired metadata/live-worktree freshness checks.
+      Mutable-worktree, compiled-test, and unsupported repository-feature
+      methods remain deferred. Bookkeeping is complete on this branch only;
+      local merge/integration and TASK-0144 implementation are not claimed.
 
   - id: TASK-0146
     gate: G8
