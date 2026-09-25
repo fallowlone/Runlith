@@ -391,19 +391,68 @@ RESULT_ADMITTED → COMPLETE transition remain available only to a future
 completion-stage caller (TASK-0125), which must invoke them before any
 completion.
 
-**Permanent invalidation.** Operation status stays monotonic (it never
-regresses from RESULT_ADMITTED or COMPLETE). Any recorded failure additionally
-sets a permanent invalidation (time and code) on the operation, enforced by
-a database trigger that forbids changing or clearing it. Every evidence and
-integrity-assessment read, checkpoint append and COMPLETE transition refuses
-an invalidated operation. A failed Completion or restart-reuse freshness
-check, or a reuse binding mismatch, records such an invalidation; if it
-cannot be recorded, the operation fails with an error instead of silently
-continuing.
+**Permanent invalidation.** Operation status stays monotonic: it never
+regresses from RESULT_ADMITTED or COMPLETE. Integrity signals set a
+permanent invalidation (time and a fixed status:code) on the operation.
+A database trigger forbids changing or clearing it. Integrity signals are
+decided by the call site that detects them, never by matching error text.
+They are: the linked-worktree pointer, the linked-worktree gitdir
+back-reference, the selection binding, the Git
+object sources and object graph, the reuse evidence binding, the Completion
+immutable subject, the evaluator result disagreeing with the trusted
+recomputation, and every freshness checkpoint on the evaluation,
+result-admission, reuse and Completion paths. A selection mismatch counts
+only when the durable selection is bound to a different subject; an
+interrupted operation for the same subject is journaled only. Within
+those checks, a failure attributable to repository or worktree
+content or state is an integrity signal: object, pointer, gitdir or
+configuration content; a missing, special or changed file; and a check
+process that exits unsuccessfully, produces oversized output, times out
+or exits before reading its input. An unclassified failure inside a check
+defaults to an integrity signal. Every evidence read,
+integrity-assessment read,
+checkpoint append and COMPLETE transition refuses an invalidated
+operation. If an integrity signal's invalidation cannot be recorded, the
+failing call reports that alongside its error. Failures independent of
+content are journaled only and never invalidate.
+These are the product failing to launch or wait for a process, a G6
+authorization or storage error, a policy or Runner refusal, any other
+storage error, and a Task or attempt not in the evaluatable state. The
+same applies to the snapshot-write, evaluator and snapshot-removal
+launches, which are not integrity checks; the evaluator's reported result
+is still checked as an integrity signal. Admitted evidence survives such
+a transient failure and an idempotent retry stays safe — except during
+the live worktree scan: there, by owner decision 2026-09-25, a storage
+or authorization failure invalidates, because the scanned names are
+attacker-controlled.
+
+The live worktree scan (freshness observation B) authorizes entry names
+selected and iterated by a filesystem scanner, not fixed trusted names:
+those names are attacker-controlled. Any G6 authorization, audit schema
+failure or storage failure during that scan (including failures from
+unauditable names that cannot pass the security-audit CHECK constraints)
+is treated as a content failure and becomes an integrity signal.
+Unauditable names are not rejected before any scan. The product refuses
+to form a file scope the security audit could not record (`FileScope`
+rejects a root whose trimmed serialized form is empty); during the scan,
+that refusal is itself a content failure. Infrastructure classification
+of G6 failures applies only to checks that authorize fixed, trusted
+names, or a name validated before authorization: the authenticating
+reads of the worktree pointer and the Git common-dir path (fixed,
+trusted names); the linked-metadata back-reference reads
+(`worktrees/<name>/gitdir` and `commondir`), where `<name>` comes from
+the `.git` pointer and is validated as a name path under `worktrees/`
+before authorization; and the object-source metadata check
+(`validate_git_object_sources`: `objects/info/alternates`,
+`objects/info/http-alternates`, `info/grafts`, `shallow`).
+
+Owner decision
+2026-09-25, following an adversarial re-review.
 
 **Special files.** Descriptor-relative reads open entries non-blocking, so a
 FIFO or other special file in the worktree, in linked metadata, or in place
-of `.git` makes the check stale promptly instead of blocking it.
+of `.git` makes the check stale promptly instead of blocking it. Such a
+failure is an integrity signal and permanently invalidates the operation.
 
 Owner ratified 2026-09-25. Narrows authority: removes completion verdicts
 from TASK-0144's production path and grants no new filesystem, process or
