@@ -30,7 +30,17 @@ credential; the trusted host does):
      leaves this host in any form the child could observe (the *proxy*
      itself of course must reach the real internet for the one allowed
      forward; the CONFINED CHILD's own network scope is localhost-only,
-     enforced by the Seatbelt profile in step 6).
+     enforced by the Seatbelt profile in step 6). The forward is made
+     through a dedicated opener (`_OPENER`, round 3 hardening) that (a)
+     never follows a redirect -- a 3xx from upstream is relayed to the
+     child exactly as received rather than this process re-sending the
+     just-rewritten credential header to whatever host a `Location` might
+     name -- and (b) ignores ambient `http_proxy`/`https_proxy` env vars,
+     so the credential-bearing request cannot be silently routed through a
+     proxy the owner never asked this script to use. Default TLS
+     verification is unchanged. A defensive assertion also confirms the
+     request's own host is exactly `api.anthropic.com` immediately before
+     the real credential is attached to it.
   6. The confined child itself is launched by this script, under the
      production-shaped Seatbelt profile from gen_profile.sh, but with the
      network rule replaced by "outbound to this proxy's local port only"
@@ -69,6 +79,7 @@ Stdlib only.
 """
 
 import argparse
+import hmac
 import http.server
 import json
 import os
@@ -80,6 +91,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 VALID_MODES = ("api-key", "oauth")
@@ -115,6 +127,33 @@ PROMPT = f"Do not use any tools. Reply with exactly {MARKER} and nothing else."
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 GEN_PROFILE = os.path.join(SCRIPT_DIR, "gen_profile.sh")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follows a redirect. `redirect_request` returning `None` makes
+    `http_error_30x` return the original response object as-is instead of
+    issuing a second request -- so a 3xx from upstream is relayed to the
+    child exactly as received (and counted as one forwarded/upstream-status
+    entry, same as any other status), and this process never re-sends the
+    freshly rewritten credential header to whatever host a `Location`
+    might name. Only one HTTPS connection is ever made per forwarded
+    request, always to the URL this script built itself
+    (`UPSTREAM_URL + path`, asserted below)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# Built once, reused for every forward and for the self-check request.
+# `urllib.request.ProxyHandler({})` -- an EMPTY mapping, not the default
+# environment-reading constructor -- means this opener ignores any
+# ambient `http_proxy`/`https_proxy`/`HTTPS_PROXY`/`NO_PROXY` the host
+# environment might set, so the credential-bearing request cannot be
+# silently routed through a proxy the owner never asked this script to
+# use. No custom SSL context is installed, so `build_opener`'s default
+# `HTTPSHandler` (which uses `ssl.create_default_context()`: full chain
+# and hostname verification) is unchanged.
+_OPENER = urllib.request.build_opener(_NoRedirect(), urllib.request.ProxyHandler({}))
 
 
 class Counters:
@@ -176,7 +215,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if value is None:
             return False
         stripped = value[7:] if value.lower().startswith("bearer ") else value
-        return stripped == self.server.placeholder
+        # Constant-time comparison (hmac.compare_digest) rather than `==`,
+        # so response timing cannot be used to guess the placeholder byte
+        # by byte. The placeholder is a per-run random token, not a
+        # long-lived secret, but the comparison is hardened anyway since
+        # it is the sole gate on whether a request gets locally rejected
+        # or forwarded with the real credential.
+        return hmac.compare_digest(
+            stripped.encode("utf-8", errors="replace"),
+            self.server.placeholder.encode("utf-8"),
+        )
 
     # -- dispatch ---------------------------------------------------------
     def do_HEAD(self):
@@ -247,11 +295,30 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         headers["Host"] = UPSTREAM_HOST
 
         url = UPSTREAM_URL + path
+        # Defense in depth: the path allowlist in `_dispatch` already
+        # restricts `path` to exactly `ALLOWED_FORWARD_PATH` (plus any
+        # query string) before `_forward` is ever called, so this should
+        # be unreachable -- but the credential-header rewrite above never
+        # trusts that invariant blindly either. The real credential is
+        # attached to a request only after this assertion confirms the
+        # request's own host is exactly the real API, never a value that
+        # could route it, or a redirect from it, anywhere else (redirects
+        # are separately never followed at all -- see `_NoRedirect`).
+        if urllib.parse.urlsplit(url).hostname != UPSTREAM_HOST:
+            self.send_response(502)
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            return
         req = urllib.request.Request(url, data=body if body else None, headers=headers, method="POST")
         try:
             # Default TLS verification (no custom SSLContext -- urllib's
-            # default context validates the certificate chain and hostname).
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            # default `HTTPSHandler` in `_OPENER` uses
+            # `ssl.create_default_context()`, full chain and hostname
+            # verification). `_OPENER` also never follows a redirect and
+            # never honours an ambient proxy env var -- see its
+            # construction above.
+            with _OPENER.open(req, timeout=60) as resp:
                 self._relay_response(resp, resp.status, dict(resp.getheaders()))
         except urllib.error.HTTPError as error:
             self._relay_response(error, error.code, dict(error.headers or {}))
@@ -353,7 +420,7 @@ def run_self_check(server, port):
         method="POST",
     )
     try:
-        urllib.request.urlopen(req, timeout=10)
+        _OPENER.open(req, timeout=10)
         status = 200  # would be unexpected -- the check below still catches it
     except urllib.error.HTTPError as error:
         status = error.code
