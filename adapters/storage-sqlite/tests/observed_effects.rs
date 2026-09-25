@@ -4,11 +4,15 @@ use std::sync::{Arc, Barrier};
 
 use agent_runtime::{AttemptId, Execution, ExecutionId, ProviderRef};
 use evaluation::{
-    subject_fingerprint, EffectId, EffectKind, EffectPayload, EffectProvenance, EffectSubjectRef,
-    Sha256Digest,
+    candidate_sha256, subject_fingerprint, CandidateCheckpointPhase, CandidateDeletion,
+    CandidateFreshnessCheckpoint, CandidateIntegrityAssessment, CandidateIntegrityOutcome,
+    EffectId, EffectKind, EffectPayload, EffectProvenance, EffectSubjectRef, Sha256Digest,
 };
+use security_audit::{SecurityAuditAuthor, SecurityAuditEvent};
 use storage_sqlite::{
-    EventType, NewJournalEvent, SqliteStore, StorageError, SUPPORTED_SCHEMA_VERSION,
+    CandidateSelectionOutcome, EventType, NewJournalEvent, NewSecurityAuditRecord,
+    SecurityAuditOutcome, SecurityAuditSubject, SecurityAuditSubjectKind, SqliteStore,
+    StorageError, SUPPORTED_SCHEMA_VERSION,
 };
 use task_domain::{Project, ProjectId, Task, TaskId};
 
@@ -171,6 +175,459 @@ fn observed_effect_survives_close_and_reopen() {
 }
 
 #[test]
+fn candidate_result_and_typed_assessment_survive_restart_as_one_commit() {
+    let db = TestDb::new("candidate-assessment-restart");
+    let (execution, attempt, effect_id) = {
+        let mut store = db.open();
+        let (execution, attempt) = seed_runtime(&mut store);
+        store
+            .record_candidate_selection(
+                "T-EFFECT",
+                execution.as_str(),
+                attempt.as_str(),
+                "candidate-operation-1",
+                &"1".repeat(40),
+                &"3".repeat(40),
+                &format!("sha256:{}", "b".repeat(64)),
+                1,
+                &format!("sha256:{}", "c".repeat(64)),
+                "criterion-1",
+                "candidate.file-contains.v1",
+                "src/main.rs",
+                "accepted",
+                10,
+            )
+            .unwrap();
+        let subject = EffectSubjectRef::new(format!("attempt:{}", attempt.as_str())).unwrap();
+        let candidate_manifest = format!("sha256:{}", "d".repeat(64));
+        let mut assessment = CandidateIntegrityAssessment {
+            task_id: "T-EFFECT".to_owned(),
+            execution_id: execution.as_str().to_owned(),
+            attempt_id: attempt.as_str().to_owned(),
+            subject_ref: subject.as_str().to_owned(),
+            requirement_revision: format!("sha256:{}", "b".repeat(64)),
+            policy_revision: 1,
+            policy_fingerprint: format!("sha256:{}", "c".repeat(64)),
+            criterion_id: "criterion-1".to_owned(),
+            selector: "candidate.file-contains.v1".to_owned(),
+            selector_path: "src/main.rs".to_owned(),
+            selector_literal: "accepted".to_owned(),
+            invocation_id: "candidate-invocation-1".to_owned(),
+            evaluator_ref: "runlith.agentd.candidate-evaluator.v1".to_owned(),
+            runtime_ref: "agentd/1".to_owned(),
+            enforcement_ref: "runner-operation-1".to_owned(),
+            invocation_descriptor_version: 1,
+            invocation_descriptor_sha256: String::new(),
+            evaluator_executable: "/trusted/agentd".to_owned(),
+            toolchain_ref: "git-executable=/usr/bin/git;git version 2.54.0".to_owned(),
+            runner_backend: "native".to_owned(),
+            runner_plan_sha256: format!("sha256:{}", "6".repeat(64)),
+            runner_enforced_axes: 3,
+            runner_env_isolated: true,
+            base_commit_oid: "1".repeat(40),
+            base_tree_oid: "2".repeat(40),
+            base_manifest_sha256: format!("sha256:{}", "a".repeat(64)),
+            candidate_commit_oid: "3".repeat(40),
+            candidate_tree_oid: "4".repeat(40),
+            candidate_manifest_sha256: format!("sha256:{}", "d".repeat(64)),
+            deletions: vec![CandidateDeletion {
+                path: b"src/removed.rs".to_vec(),
+                base_mode: 0o100644,
+                base_blob_sha256: format!("sha256:{}", "5".repeat(64)),
+            }],
+            checkpoints: [
+                CandidateCheckpointPhase::Selection,
+                CandidateCheckpointPhase::BeforeEvaluation,
+                CandidateCheckpointPhase::AfterEvaluation,
+                CandidateCheckpointPhase::ResultAdmission,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, phase)| CandidateFreshnessCheckpoint {
+                phase,
+                observed_at_ms: 11 + index as u64,
+                git_metadata_fingerprint: format!("sha256:{}", "e".repeat(64)),
+                live_worktree_manifest_sha256: format!("sha256:{}", "f".repeat(64)),
+                matched: true,
+            })
+            .collect(),
+            outcome: CandidateIntegrityOutcome::Intact,
+            started_at_ms: 10,
+            completed_at_ms: 20,
+        };
+        assessment.refresh_invocation_descriptor_digest();
+        let git_path_bound_digest = assessment.invocation_descriptor_sha256.clone();
+        assessment.toolchain_ref = "git-executable=/other/git;git version 2.54.0".to_owned();
+        assert_ne!(
+            git_path_bound_digest,
+            assessment.canonical_invocation_descriptor_digest(),
+            "resolved Git executable path participates in the canonical invocation binding"
+        );
+        assessment.toolchain_ref = "git-executable=/usr/bin/git;git version 2.54.0".to_owned();
+        assessment.refresh_invocation_descriptor_digest();
+        let config = candidate_sha256(
+            format!(
+                "{}\0{}\0{}\0{}\0{}\0{}",
+                assessment.requirement_revision,
+                assessment.policy_fingerprint,
+                assessment.selector,
+                assessment.selector_path,
+                assessment.selector_literal,
+                assessment.invocation_descriptor_sha256,
+            )
+            .as_bytes(),
+        );
+        let fingerprint = subject_fingerprint(
+            EffectKind::TestSuiteResult,
+            subject.as_str(),
+            &[
+                ("content", &candidate_manifest),
+                ("toolchain", &assessment.runtime_ref),
+                ("config", &config),
+            ],
+        )
+        .unwrap();
+        store
+            .append_security_audit(&NewSecurityAuditRecord {
+                event: SecurityAuditEvent::IsolationEnforcement,
+                author: SecurityAuditAuthor::Runner,
+                outcome: Some(SecurityAuditOutcome::Enforced),
+                occurred_at_ms: 20,
+                correlation_id: assessment.enforcement_ref.clone(),
+                causation_id: Some(assessment.invocation_id.clone()),
+                operation_id: Some(assessment.enforcement_ref.clone()),
+                task_id: Some(assessment.task_id.clone()),
+                execution_id: Some(assessment.execution_id.clone()),
+                attempt_id: Some(assessment.attempt_id.clone()),
+                subject: Some(SecurityAuditSubject {
+                    kind: SecurityAuditSubjectKind::RunnerBackend,
+                    id: assessment.runner_backend.clone(),
+                }),
+                policy_fingerprint: Some(assessment.policy_fingerprint.clone()),
+                rule_id: None,
+                reason_code: None,
+                approval_request_id: None,
+                capabilities: vec![],
+            })
+            .unwrap();
+        let effect = store
+            .append_candidate_result(
+                subject,
+                fingerprint,
+                EffectPayload::TestSuiteResult {
+                    passed: 1,
+                    failed: 0,
+                    skipped: 0,
+                    result_sha256: Sha256Digest::new(format!("sha256:{}", "9".repeat(64))).unwrap(),
+                },
+                "2026-09-23T12:00:00Z",
+                EffectProvenance::new(execution.clone(), attempt.clone(), "agentd/1")
+                    .unwrap()
+                    .with_lineage(
+                        Some("runlith.agentd.candidate-evaluator.v1".to_owned()),
+                        Some("candidate-invocation-1".to_owned()),
+                    )
+                    .unwrap(),
+                &assessment,
+            )
+            .unwrap();
+        assert!(store
+            .get_candidate_evidence(execution.as_str(), attempt.as_str())
+            .is_err());
+        let pending_completion = store
+            .get_candidate_evidence_for_completion(execution.as_str(), attempt.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            pending_completion.integrity.deletions[0].path,
+            b"src/removed.rs"
+        );
+        assert_eq!(
+            pending_completion.integrity.invocation_descriptor_version,
+            1
+        );
+        store
+            .append_candidate_checkpoint(
+                execution.as_str(),
+                attempt.as_str(),
+                &CandidateFreshnessCheckpoint {
+                    phase: CandidateCheckpointPhase::Completion,
+                    observed_at_ms: 21,
+                    git_metadata_fingerprint: format!("sha256:{}", "e".repeat(64)),
+                    live_worktree_manifest_sha256: format!("sha256:{}", "f".repeat(64)),
+                    matched: true,
+                },
+            )
+            .unwrap();
+        store
+            .update_candidate_operation_status(
+                execution.as_str(),
+                attempt.as_str(),
+                "PENDING",
+                "RESULT_ADMITTED",
+                None,
+                21,
+            )
+            .unwrap();
+        store
+            .update_candidate_operation_status(
+                execution.as_str(),
+                attempt.as_str(),
+                "RESULT_ADMITTED",
+                "COMPLETE",
+                None,
+                21,
+            )
+            .unwrap();
+        (execution, attempt, effect.effect_id().clone())
+    };
+    let mut store = db.open();
+    assert_eq!(
+        store
+            .get_observed_effect(&effect_id)
+            .unwrap()
+            .unwrap()
+            .effect_kind(),
+        EffectKind::TestSuiteResult
+    );
+    let evidence = store
+        .get_candidate_evidence(execution.as_str(), attempt.as_str())
+        .unwrap()
+        .unwrap();
+    assert_eq!(evidence.effect.effect_kind(), EffectKind::TestSuiteResult);
+    assert_eq!(
+        evidence.integrity.candidate_manifest_sha256,
+        format!("sha256:{}", "d".repeat(64))
+    );
+    assert_eq!(evidence.integrity.deletions[0].path, b"src/removed.rs");
+    assert_eq!(evidence.integrity.invocation_descriptor_version, 1);
+    assert_eq!(
+        evidence.integrity.invocation_descriptor_sha256,
+        evidence.integrity.canonical_invocation_descriptor_digest()
+    );
+    assert_eq!(evidence.integrity.checkpoints.len(), 5);
+    assert_eq!(
+        store
+            .candidate_operation_status(execution.as_str(), attempt.as_str())
+            .unwrap()
+            .as_deref(),
+        Some("COMPLETE")
+    );
+    store
+        .append_candidate_checkpoint(
+            execution.as_str(),
+            attempt.as_str(),
+            &CandidateFreshnessCheckpoint {
+                phase: CandidateCheckpointPhase::Completion,
+                observed_at_ms: 23,
+                git_metadata_fingerprint: format!("sha256:{}", "e".repeat(64)),
+                live_worktree_manifest_sha256: format!("sha256:{}", "f".repeat(64)),
+                matched: true,
+            },
+        )
+        .expect("same-subject Completion recovery is idempotent");
+    assert!(store
+        .append_candidate_checkpoint(
+            execution.as_str(),
+            attempt.as_str(),
+            &CandidateFreshnessCheckpoint {
+                phase: CandidateCheckpointPhase::Completion,
+                observed_at_ms: 24,
+                git_metadata_fingerprint: format!("sha256:{}", "0".repeat(64)),
+                live_worktree_manifest_sha256: format!("sha256:{}", "f".repeat(64)),
+                matched: true,
+            },
+        )
+        .is_err());
+    store
+        .append_candidate_checkpoint(
+            execution.as_str(),
+            attempt.as_str(),
+            &CandidateFreshnessCheckpoint {
+                phase: CandidateCheckpointPhase::RestartReuse,
+                observed_at_ms: 22,
+                git_metadata_fingerprint: format!("sha256:{}", "7".repeat(64)),
+                live_worktree_manifest_sha256: format!("sha256:{}", "8".repeat(64)),
+                matched: true,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .get_candidate_evidence(execution.as_str(), attempt.as_str())
+            .unwrap()
+            .unwrap()
+            .integrity
+            .checkpoints
+            .len(),
+        6
+    );
+}
+
+#[test]
+fn candidate_mismatch_and_blocked_operation_statuses_survive_restart() {
+    for (status, detail) in [("MISMATCH", "freshness-mismatch"), ("BLOCKED", "g6-denied")] {
+        let db = TestDb::new(&format!("candidate-operation-{status}"));
+        let mut store = db.open();
+        let (execution, attempt) = seed_runtime(&mut store);
+        store
+            .record_candidate_selection(
+                "T-EFFECT",
+                execution.as_str(),
+                attempt.as_str(),
+                "candidate-operation-failure",
+                &"1".repeat(40),
+                &"3".repeat(40),
+                &format!("sha256:{}", "b".repeat(64)),
+                1,
+                &format!("sha256:{}", "c".repeat(64)),
+                "criterion-1",
+                "candidate.file-contains.v1",
+                "src/main.rs",
+                "accepted",
+                10,
+            )
+            .unwrap();
+        store
+            .record_candidate_operation_failure(
+                execution.as_str(),
+                attempt.as_str(),
+                status,
+                detail,
+                11,
+            )
+            .unwrap();
+        drop(store);
+        let store = db.open();
+        assert_eq!(
+            store
+                .candidate_operation_status(execution.as_str(), attempt.as_str())
+                .unwrap()
+                .as_deref(),
+            Some(status)
+        );
+        let history = store
+            .candidate_operation_history(execution.as_str(), attempt.as_str())
+            .unwrap()
+            .unwrap();
+        assert!(history.starts_with("PENDING\n"));
+        assert!(history.contains(detail));
+    }
+}
+
+/// TASK-0144 R2 (owner review 2026-09-25, MAJOR): `record_candidate_operation_failure`
+/// must never regress a durable `RESULT_ADMITTED` or `COMPLETE` row — the
+/// prior unconditional `UPDATE` could downgrade either into a failure
+/// status. Exercises the storage-layer compare-and-swap guard and its
+/// DB-level trigger backstop (`candidate_input_operations_status_no_regression`,
+/// migration 0022) directly, complementing the real-evaluator coverage in
+/// `bins/agentd/src/execution.rs`.
+#[test]
+fn candidate_operation_failure_never_regresses_result_admitted_or_complete() {
+    for terminal in ["RESULT_ADMITTED", "COMPLETE"] {
+        let db = TestDb::new(&format!("candidate-no-regression-{terminal}"));
+        let mut store = db.open();
+        let (execution, attempt) = seed_runtime(&mut store);
+        store
+            .record_candidate_selection(
+                "T-EFFECT",
+                execution.as_str(),
+                attempt.as_str(),
+                &format!("candidate-no-regression-{terminal}"),
+                &"1".repeat(40),
+                &"3".repeat(40),
+                &format!("sha256:{}", "b".repeat(64)),
+                1,
+                &format!("sha256:{}", "c".repeat(64)),
+                "criterion-1",
+                "candidate.file-contains.v1",
+                "src/main.rs",
+                "accepted",
+                10,
+            )
+            .unwrap();
+        store
+            .update_candidate_operation_status(
+                execution.as_str(),
+                attempt.as_str(),
+                "PENDING",
+                "RESULT_ADMITTED",
+                None,
+                11,
+            )
+            .unwrap();
+        if terminal == "COMPLETE" {
+            store
+                .update_candidate_operation_status(
+                    execution.as_str(),
+                    attempt.as_str(),
+                    "RESULT_ADMITTED",
+                    "COMPLETE",
+                    None,
+                    12,
+                )
+                .unwrap();
+        }
+
+        // A failure classified after reaching the terminal state must not
+        // change `status`, but must still succeed (journaling the failure)
+        // rather than erroring.
+        store
+            .record_candidate_operation_failure(
+                execution.as_str(),
+                attempt.as_str(),
+                "MISMATCH",
+                "late-failure-must-not-regress",
+                13,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .candidate_operation_status(execution.as_str(), attempt.as_str())
+                .unwrap()
+                .as_deref(),
+            Some(terminal),
+            "a failure after {terminal} must not regress the durable status"
+        );
+        let history = store
+            .candidate_operation_history(execution.as_str(), attempt.as_str())
+            .unwrap()
+            .unwrap();
+        assert!(
+            history.contains("late-failure-must-not-regress"),
+            "the failure must still be journaled: {history:?}"
+        );
+
+        // The DB-level trigger is a backstop against any writer that
+        // bypasses the guarded store methods: a raw UPDATE regressing
+        // status away from a terminal state must itself fail. A separate
+        // raw connection is used because `SqliteStore::connection` is
+        // crate-private.
+        drop(store);
+        let raw_connection = rusqlite::Connection::open(&db.path).unwrap();
+        let raw = raw_connection.execute(
+            "UPDATE candidate_input_operations SET status = 'BLOCKED' \
+             WHERE execution_id = ?1 AND attempt_id = ?2",
+            rusqlite::params![execution.as_str(), attempt.as_str()],
+        );
+        assert!(
+            raw.is_err(),
+            "a raw UPDATE regressing {terminal} must be rejected by the DB trigger"
+        );
+        drop(raw_connection);
+        let store = db.open();
+        assert_eq!(
+            store
+                .candidate_operation_status(execution.as_str(), attempt.as_str())
+                .unwrap()
+                .as_deref(),
+            Some(terminal),
+            "a rejected raw UPDATE must leave the durable status unchanged"
+        );
+    }
+}
+
+#[test]
 fn concurrent_writers_allocate_distinct_effect_ids_atomically() {
     let db = TestDb::new("atomic-id");
     let (execution, attempt) = {
@@ -295,7 +752,7 @@ fn cv_2_schema_18_migrates_to_19_with_closed_capture_authority() {
     }
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 21);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 22);
     let connection = rusqlite::Connection::open(&db.path).unwrap();
     let sql: String = connection
         .query_row(
@@ -308,10 +765,463 @@ fn cv_2_schema_18_migrates_to_19_with_closed_capture_authority() {
 }
 
 #[test]
+fn candidate_failure_after_admission_is_sticky_and_blocks_reuse() {
+    for terminal in ["RESULT_ADMITTED", "COMPLETE"] {
+        let db = TestDb::new(&format!("candidate-sticky-invalidation-{terminal}"));
+        let mut store = db.open();
+        let (execution, attempt) = seed_runtime(&mut store);
+        store
+            .record_candidate_selection(
+                "T-EFFECT",
+                execution.as_str(),
+                attempt.as_str(),
+                &format!("candidate-sticky-invalidation-{terminal}"),
+                &"1".repeat(40),
+                &"3".repeat(40),
+                &format!("sha256:{}", "b".repeat(64)),
+                1,
+                &format!("sha256:{}", "c".repeat(64)),
+                "criterion-1",
+                "candidate.file-contains.v1",
+                "src/main.rs",
+                "accepted",
+                10,
+            )
+            .unwrap();
+        store
+            .update_candidate_operation_status(
+                execution.as_str(),
+                attempt.as_str(),
+                "PENDING",
+                "RESULT_ADMITTED",
+                None,
+                11,
+            )
+            .unwrap();
+        if terminal == "COMPLETE" {
+            store
+                .update_candidate_operation_status(
+                    execution.as_str(),
+                    attempt.as_str(),
+                    "RESULT_ADMITTED",
+                    "COMPLETE",
+                    None,
+                    12,
+                )
+                .unwrap();
+        }
+
+        // Invalidate after reaching the terminal state
+        store
+            .invalidate_candidate_operation(
+                execution.as_str(),
+                attempt.as_str(),
+                "TAMPERED",
+                "post-admission-tamper",
+                13,
+            )
+            .unwrap();
+
+        // Status must still be the terminal state (no regression)
+        assert_eq!(
+            store
+                .candidate_operation_status(execution.as_str(), attempt.as_str())
+                .unwrap()
+                .as_deref(),
+            Some(terminal),
+            "status must not regress after invalidation"
+        );
+
+        // Invalidation must be set and sticky
+        let invalidation = store
+            .candidate_operation_invalidation(execution.as_str(), attempt.as_str())
+            .unwrap();
+        assert!(invalidation.is_some(), "invalidation must be recorded");
+        let (_, code) = invalidation.unwrap();
+        assert!(
+            code.starts_with("TAMPERED:"),
+            "invalidation code must start with TAMPERED: got {code}"
+        );
+
+        // All evidence getters must return ConstraintViolation when invalidated
+        let evidence_err = store
+            .get_candidate_evidence(execution.as_str(), attempt.as_str())
+            .unwrap_err();
+        assert!(
+            matches!(evidence_err, StorageError::ConstraintViolation(_)),
+            "get_candidate_evidence must fail with ConstraintViolation when invalidated"
+        );
+
+        let evidence_for_completion_err = store
+            .get_candidate_evidence_for_completion(execution.as_str(), attempt.as_str())
+            .unwrap_err();
+        assert!(
+            matches!(evidence_for_completion_err, StorageError::ConstraintViolation(_)),
+            "get_candidate_evidence_for_completion must fail with ConstraintViolation when invalidated"
+        );
+
+        let assessment_err = store
+            .get_candidate_integrity_assessment(execution.as_str(), attempt.as_str())
+            .unwrap_err();
+        assert!(
+            matches!(assessment_err, StorageError::ConstraintViolation(_)),
+            "get_candidate_integrity_assessment must fail with ConstraintViolation when invalidated"
+        );
+
+        // append_candidate_checkpoint must refuse when invalidated
+        let checkpoint_err = store
+            .append_candidate_checkpoint(
+                execution.as_str(),
+                attempt.as_str(),
+                &CandidateFreshnessCheckpoint {
+                    phase: CandidateCheckpointPhase::Completion,
+                    observed_at_ms: 14,
+                    git_metadata_fingerprint: "fp".to_owned(),
+                    live_worktree_manifest_sha256: format!("sha256:{}", "d".repeat(64)),
+                    matched: true,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(checkpoint_err, StorageError::ConstraintViolation(_)),
+            "append_candidate_checkpoint must fail with ConstraintViolation when invalidated"
+        );
+
+        // update_candidate_operation_status must refuse when invalidated
+        if terminal == "RESULT_ADMITTED" {
+            let status_err = store
+                .update_candidate_operation_status(
+                    execution.as_str(),
+                    attempt.as_str(),
+                    "RESULT_ADMITTED",
+                    "COMPLETE",
+                    None,
+                    15,
+                )
+                .unwrap_err();
+            assert!(
+                matches!(status_err, StorageError::ConstraintViolation(_)),
+                "update_candidate_operation_status must fail with ConstraintViolation when invalidated"
+            );
+        }
+
+        // A second failure record must not change the invalidated_at_ms/code (idempotent)
+        store
+            .record_candidate_operation_failure(
+                execution.as_str(),
+                attempt.as_str(),
+                "MISMATCH",
+                "second-failure",
+                16,
+            )
+            .unwrap();
+        let invalidation2 = store
+            .candidate_operation_invalidation(execution.as_str(), attempt.as_str())
+            .unwrap();
+        assert_eq!(
+            invalidation2,
+            Some((13, "TAMPERED:post-admission-tamper".to_owned())),
+            "invalidation must be unchanged by a second failure record"
+        );
+
+        // A raw SQL UPDATE attempting to clear invalidation must fail (trigger)
+        drop(store);
+        let raw_connection = rusqlite::Connection::open(&db.path).unwrap();
+        let raw = raw_connection.execute(
+            "UPDATE candidate_input_operations SET invalidated_at_ms = NULL, invalidation_code = NULL \
+             WHERE execution_id = ?1 AND attempt_id = ?2",
+            rusqlite::params![execution.as_str(), attempt.as_str()],
+        );
+        assert!(
+            raw.is_err(),
+            "a raw UPDATE attempting to clear invalidation must be rejected by the trigger"
+        );
+    }
+}
+
+#[test]
+fn candidate_journal_only_failure_after_admission_keeps_evidence_valid() {
+    // Verify that record_candidate_operation_failure (journal-only, no invalidation)
+    // does not block evidence access or prevent completion transitions on admitted rows.
+    let db = TestDb::new("candidate-journal-only-failure");
+    let mut store = db.open();
+    let (execution, attempt) = seed_runtime(&mut store);
+    store
+        .record_candidate_selection(
+            "T-EFFECT",
+            execution.as_str(),
+            attempt.as_str(),
+            "candidate-journal-only",
+            &"1".repeat(40),
+            &"3".repeat(40),
+            &format!("sha256:{}", "b".repeat(64)),
+            1,
+            &format!("sha256:{}", "c".repeat(64)),
+            "criterion-1",
+            "candidate.file-contains.v1",
+            "src/main.rs",
+            "accepted",
+            10,
+        )
+        .unwrap();
+    store
+        .update_candidate_operation_status(
+            execution.as_str(),
+            attempt.as_str(),
+            "PENDING",
+            "RESULT_ADMITTED",
+            None,
+            11,
+        )
+        .unwrap();
+
+    // Record a journal-only failure (non-integrity error, precondition failure, etc.)
+    store
+        .record_candidate_operation_failure(
+            execution.as_str(),
+            attempt.as_str(),
+            "BLOCKED",
+            "transient-error",
+            12,
+        )
+        .unwrap();
+
+    // Status must still be RESULT_ADMITTED (no regression)
+    assert_eq!(
+        store
+            .candidate_operation_status(execution.as_str(), attempt.as_str())
+            .unwrap()
+            .as_deref(),
+        Some("RESULT_ADMITTED"),
+        "journal-only failure must not regress status"
+    );
+
+    // Invalidation must be None (not recorded)
+    let invalidation = store
+        .candidate_operation_invalidation(execution.as_str(), attempt.as_str())
+        .unwrap();
+    assert_eq!(
+        invalidation, None,
+        "journal-only failure must not set invalidation"
+    );
+
+    // History must contain the failure entry
+    let history = store
+        .candidate_operation_history(execution.as_str(), attempt.as_str())
+        .unwrap();
+    assert!(
+        history.is_some_and(|h| h.contains("BLOCKED:transient-error")),
+        "failure must be journaled in status_history"
+    );
+
+    // Evidence getters must still work (not blocked)
+    // Note: load_candidate_evidence requires Completion checkpoint, so only test the
+    // lower-level assertion: invalidation check should pass.
+    assert!(
+        store
+            .candidate_operation_invalidation(execution.as_str(), attempt.as_str())
+            .unwrap()
+            .is_none(),
+        "evidence must still be accessible after journal-only failure"
+    );
+
+    // COMPLETE transition must still be possible
+    store
+        .update_candidate_operation_status(
+            execution.as_str(),
+            attempt.as_str(),
+            "RESULT_ADMITTED",
+            "COMPLETE",
+            None,
+            13,
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .candidate_operation_status(execution.as_str(), attempt.as_str())
+            .unwrap()
+            .as_deref(),
+        Some("COMPLETE"),
+        "COMPLETE transition must succeed after journal-only failure"
+    );
+}
+
+#[test]
+fn candidate_invalidate_with_invalid_status_fails() {
+    // Verify that invalidate_candidate_operation rejects BLOCKED status
+    let db = TestDb::new("candidate-invalidate-blocked-status");
+    let mut store = db.open();
+    let (execution, attempt) = seed_runtime(&mut store);
+    store
+        .record_candidate_selection(
+            "T-EFFECT",
+            execution.as_str(),
+            attempt.as_str(),
+            "candidate-invalid-status",
+            &"1".repeat(40),
+            &"3".repeat(40),
+            &format!("sha256:{}", "b".repeat(64)),
+            1,
+            &format!("sha256:{}", "c".repeat(64)),
+            "criterion-1",
+            "candidate.file-contains.v1",
+            "src/main.rs",
+            "accepted",
+            10,
+        )
+        .unwrap();
+
+    // Attempting to invalidate with BLOCKED status must fail
+    let result = store.invalidate_candidate_operation(
+        execution.as_str(),
+        attempt.as_str(),
+        "BLOCKED",
+        "invalid-status",
+        11,
+    );
+    assert!(
+        matches!(result, Err(StorageError::ConstraintViolation(_))),
+        "invalidate_candidate_operation with BLOCKED status must fail"
+    );
+}
+
+#[test]
 fn cv_2_arbitrary_effect_id_cannot_be_selected_by_caller() {
     let db = TestDb::new("id-owned-by-store");
     let mut store = db.open();
     let (execution, attempt) = seed_runtime(&mut store);
     let effect = append_sample(&mut store, &execution, &attempt, "artifact:id");
     assert_eq!(effect.effect_id(), &EffectId::new("effect-1").unwrap());
+}
+
+#[test]
+fn candidate_selection_distinguishes_subject_mismatch_from_incomplete() {
+    let db = TestDb::new("candidate-selection-outcomes");
+    let mut store = db.open();
+    let (execution, attempt) = seed_runtime(&mut store);
+
+    // First record: new row inserted
+    let result = store
+        .record_candidate_selection(
+            "T-EFFECT",
+            execution.as_str(),
+            attempt.as_str(),
+            "candidate-op-1",
+            &"1".repeat(40),
+            &"3".repeat(40),
+            &format!("sha256:{}", "b".repeat(64)),
+            1,
+            &format!("sha256:{}", "c".repeat(64)),
+            "criterion-1",
+            "candidate.file-contains.v1",
+            "src/main.rs",
+            "accepted",
+            10,
+        )
+        .unwrap();
+    assert_eq!(result, CandidateSelectionOutcome::Recorded);
+
+    // Same subject while PENDING: returns Incomplete
+    let result = store
+        .record_candidate_selection(
+            "T-EFFECT",
+            execution.as_str(),
+            attempt.as_str(),
+            "candidate-op-1",
+            &"1".repeat(40),
+            &"3".repeat(40),
+            &format!("sha256:{}", "b".repeat(64)),
+            1,
+            &format!("sha256:{}", "c".repeat(64)),
+            "criterion-1",
+            "candidate.file-contains.v1",
+            "src/main.rs",
+            "accepted",
+            11,
+        )
+        .unwrap();
+    assert_eq!(result, CandidateSelectionOutcome::Incomplete);
+
+    // Different selected_commit_oid: returns SubjectMismatch
+    let result = store
+        .record_candidate_selection(
+            "T-EFFECT",
+            execution.as_str(),
+            attempt.as_str(),
+            "candidate-op-1",
+            &"1".repeat(40),
+            &"4".repeat(40), // Different
+            &format!("sha256:{}", "b".repeat(64)),
+            1,
+            &format!("sha256:{}", "c".repeat(64)),
+            "criterion-1",
+            "candidate.file-contains.v1",
+            "src/main.rs",
+            "accepted",
+            12,
+        )
+        .unwrap();
+    assert_eq!(result, CandidateSelectionOutcome::SubjectMismatch);
+
+    // Advance to RESULT_ADMITTED
+    store
+        .update_candidate_operation_status(
+            execution.as_str(),
+            attempt.as_str(),
+            "PENDING",
+            "RESULT_ADMITTED",
+            Some("admitted"),
+            13,
+        )
+        .unwrap();
+
+    // Same subject after admission: returns ReuseAdmitted
+    let result = store
+        .record_candidate_selection(
+            "T-EFFECT",
+            execution.as_str(),
+            attempt.as_str(),
+            "candidate-op-1",
+            &"1".repeat(40),
+            &"3".repeat(40),
+            &format!("sha256:{}", "b".repeat(64)),
+            1,
+            &format!("sha256:{}", "c".repeat(64)),
+            "criterion-1",
+            "candidate.file-contains.v1",
+            "src/main.rs",
+            "accepted",
+            14,
+        )
+        .unwrap();
+    assert_eq!(result, CandidateSelectionOutcome::ReuseAdmitted);
+}
+
+#[test]
+fn invalidate_without_operation_row_returns_false() {
+    let db = TestDb::new("invalidate-without-row");
+    let mut store = db.open();
+    let (execution, attempt) = seed_runtime(&mut store);
+
+    // Try to invalidate a non-existent operation row
+    let result = store.invalidate_candidate_operation(
+        execution.as_str(),
+        attempt.as_str(),
+        "TAMPERED",
+        "test-code",
+        now_millis(),
+    );
+
+    // Should return Ok(false), not an error
+    assert!(
+        !result.unwrap(),
+        "invalidate should return false for non-existent row"
+    );
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
 }

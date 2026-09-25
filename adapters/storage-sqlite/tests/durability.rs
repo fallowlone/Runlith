@@ -675,7 +675,56 @@ fn fresh_database_migrates_to_current() {
     let db = TestDb::new("fresh");
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 21);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 22);
+}
+
+#[test]
+fn schema_21_upgrades_once_to_candidate_assessments_22_and_reopens() {
+    let db = TestDb::new("schema-21-to-22");
+    {
+        let connection = rusqlite::Connection::open(&db.path).unwrap();
+        for migration in MIGRATIONS_THROUGH_16 {
+            connection.execute_batch(migration).unwrap();
+        }
+        for migration in [
+            include_str!("../migrations/0017_evidence_requirements.sql"),
+            include_str!("../migrations/0018_planning_input_evidence_requirements.sql"),
+            include_str!("../migrations/0019_observed_effects.sql"),
+            include_str!("../migrations/0020_task_prerequisites.sql"),
+            include_str!("../migrations/0021_test_mutation_policy.sql"),
+        ] {
+            connection.execute_batch(migration).unwrap();
+        }
+        connection
+            .execute_batch("PRAGMA user_version = 21")
+            .unwrap();
+    }
+    secure_raw_fixture(&db.path);
+    {
+        let upgraded = db.open();
+        assert_eq!(upgraded.schema_version().unwrap(), 22);
+        assert_eq!(SUPPORTED_SCHEMA_VERSION, 22);
+    }
+    let reopened = db.open();
+    assert_eq!(reopened.schema_version().unwrap(), 22);
+    let assessment_columns: i64 = rusqlite::Connection::open(&db.path)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('candidate_input_assessments')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(assessment_columns, 36);
+    let operation_columns: i64 = rusqlite::Connection::open(&db.path)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('candidate_input_operations')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(operation_columns, 20);
 }
 
 #[test]

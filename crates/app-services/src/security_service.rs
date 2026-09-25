@@ -9,8 +9,8 @@ use std::fmt;
 use std::path::Path;
 
 use policy::{
-    CompiledPolicy, EffectiveCapabilities, PolicyContractError, PolicyDecision, PolicyEngine,
-    PolicyOutcome, PolicyRequest, ScopeId,
+    Capability, CompiledPolicy, EffectiveCapabilities, FileScope, PolicyContractError,
+    PolicyDecision, PolicyEngine, PolicyLayer, PolicyOutcome, PolicyRequest, PolicyRule, ScopeId,
 };
 use runner::{ChildEnvironment, IsolationBackend, IsolationRequirements, RunnerError};
 use secrets::{
@@ -284,6 +284,39 @@ impl<C: Clock + Clone> G6SecurityService<C> {
                 }
             }
         }
+    }
+
+    /// Re-presents one product-owned descriptor read as a fresh, exact G6
+    /// FilesystemRead request. The product's accepted Git-read operation is
+    /// the only caller allowed to supply this narrow root and relative path.
+    pub fn authorize_filesystem_read(
+        &mut self,
+        request: &PolicyRequest,
+        parent: &EffectiveCapabilities,
+        workspace_root: impl Into<String>,
+        relative_path: impl AsRef<Path>,
+    ) -> Result<G6Authorization, G6SecurityError> {
+        let workspace_root = workspace_root.into();
+        let capability =
+            Capability::FilesystemRead(FileScope::new(&workspace_root, relative_path.as_ref())?);
+        if request.requested().as_slice() != [capability.clone()] {
+            return Err(G6SecurityError::Policy(
+                PolicyContractError::AuthorityExpansion(capability),
+            ));
+        }
+        let policy = CompiledPolicy::compile(vec![PolicyRule::new(
+            "builtin.candidate.git-read.descriptor-filesystem-read",
+            "accepted_candidate_git_read_scope",
+            PolicyLayer::BuiltInHard,
+            PolicyOutcome::Allow,
+            capability.clone(),
+        )?])?;
+        if !parent.permits(&capability) {
+            return Err(G6SecurityError::Policy(
+                PolicyContractError::AuthorityExpansion(capability),
+            ));
+        }
+        self.authorize(request, parent, &policy, u64::MAX)
     }
 
     /// Applies the accepted Runner boundary immediately around a process

@@ -151,7 +151,7 @@ fn load_base(
     connection: &Connection,
     execution_id: &str,
 ) -> StorageResult<Option<EvaluatedPolicyBase>> {
-    let row: Option<(
+    type EvaluatedPolicyBaseRow = (
         String,
         String,
         i64,
@@ -163,7 +163,8 @@ fn load_base(
         String,
         String,
         i64,
-    )> = connection
+    );
+    let row: Option<EvaluatedPolicyBaseRow> = connection
         .query_row(
             "SELECT b.task_id, b.workspace_id, b.policy_revision, b.policy_fingerprint,
                 b.base_revision, p.serialized, p.fingerprint, e.task_id,

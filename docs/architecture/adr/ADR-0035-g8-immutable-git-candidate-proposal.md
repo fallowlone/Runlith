@@ -299,6 +299,165 @@ candidate-compiled tests requires a separately specified and ratified method.
 - APFS privileged snapshotting is unselected. No implementation, migration,
   dependency, or completion-authority change is authorized here.
 
+## Amendment 2026-09-25: Seatbelt ancestor metadata for candidate launches
+
+**Why needed.** Absolute-path resolution (`getcwd()`/`realpath()`), which a
+candidate-input Runner launch performs when positioning its CWD via
+`chdir` or resolving a linked Git worktree's `commondir` back-reference,
+walks every ancestor directory of the path being resolved. A macOS
+Seatbelt `subpath` grant covers only the given path and its descendants,
+never its ancestors, so a workspace or root several directories under a
+narrow allowed subtree failed closed with a misleading "Operation not
+permitted" even though the launch never reads outside its granted scope.
+
+**Exact grant.** `file-read-metadata` and `file-test-existence` only
+(stat/existence, never directory listing or file data) on the exact
+ancestor chain of the launch's workspace and filesystem roots, each
+emitted as an individual `literal` rule — never `subpath` or a pattern —
+after rejecting any source path containing a `..`/`.` component or a
+doubled separator. The filesystem root `/` itself yields no literal.
+
+**Candidate launches only.** The grant is owned by a typed,
+construction-time attribute (`RunnerLaunchPurpose` /
+`MacOsSeatbeltRunner::with_candidate_ancestor_metadata_grant`) that only
+`bins/agentd/src/execution.rs`'s trusted composition sets, only for the
+Git-read, snapshot-write, and evaluator-read-only candidate-input Runner
+operations. It defaults to absent (fail closed) and is never derived
+from caller, IPC, or per-launch input. Provider/tool launches never
+receive it and keep exactly the pre-amendment Seatbelt profile and
+behavior.
+
+Owner ratified 2026-09-25. This amendment narrows and documents a
+detail of the read-only Git plumbing plan's enforcement already
+authorized by this ADR's "Scoped G6 operation plans" and by ADR-0026's
+G6 Seatbelt authority surface; it grants no new filesystem data or
+listing access beyond what those sections already authorize, and no
+completion authority.
+
+## Amendment 2026-09-25: pinned Git executable for candidate-input reads
+
+**Why needed.** Candidate git-read launches resolved the Git executable
+from `PATH`, which may select a package-manager build such as Homebrew
+Git. Such a build loads dynamic libraries from its own prefix; under the
+candidate Seatbelt profile dyld cannot read them and the process aborts
+(observed: `Library not loaded: /opt/homebrew/opt/pcre2/lib/libpcre2-8.0.dylib`,
+SIGABRT). A `PATH`-resolved Git is also not the "pinned, trusted Git
+plumbing path" required by this ADR's "Git object source constraints".
+
+**Exact selection.** On macOS, candidate-input Git resolves only from
+this ordered list of Apple toolchain locations:
+`/Library/Developer/CommandLineTools/usr/bin/git`, then
+`/Applications/Xcode.app/Contents/Developer/usr/bin/git`. It never uses
+`PATH` or the `/usr/bin/git` xcrun shim, which depends on xcode-select
+state and caches outside the Seatbelt scope. A candidate is accepted only
+if it exists, canonicalizes to a regular file, and its canonical path
+equals its parent directory's canonical path joined with its file name, so
+a symlink redirecting the executable elsewhere is rejected. If no candidate
+qualifies, resolution fails closed with a path-free error; there is no
+fallback to `PATH` and no sandbox widening.
+
+On non-macOS platforms, candidate-input Git reads are unsupported, and
+the resolver falls back to the existing `resolve_git_executable()` PATH
+behavior since the candidate Seatbelt restriction does not apply there.
+
+**Scope.** The pinned Git executable is used only for candidate-input
+Git-read operations under `resolve_candidate_git_executable()`. Provider
+and workspace Git operations continue using the prior
+`resolve_git_executable()` PATH-based resolution, unchanged.
+
+Owner ratified 2026-09-25. Grants no new filesystem, process or
+completion authority.
+
+## Amendment 2026-09-25: evidence-only production evaluation and permanent invalidation
+
+**Why needed.** An independent adversarial review of TASK-0144 found
+(a) the production composition turned a candidate-input check into a Task
+completion (or failure) verdict, although TASK-0144's scope records typed
+integrity and capture statuses, not completion verdicts, and adds no
+completion authority; completion belongs to TASK-0125 claim verification
+(ADR-0032); and (b) a tamper or freshness mismatch detected after result
+admission was only journaled, so the evidence could still be read, reused,
+checkpointed and completed, contrary to this ADR ("a detected mismatch
+makes evidence stale/blocked and cannot produce or reuse a successful
+TEST_SUITE_RESULT").
+
+**Evidence-only production evaluation.** The production candidate-input
+evaluation durably admits bound evidence (operation status RESULT_ADMITTED
+with its Selection, BeforeEvaluation, AfterEvaluation and ResultAdmission
+checkpoints) and then reports no verdict, so the Task remains VERIFYING.
+Passing or failing the selector check is recorded in the evidence, never
+applied to the Task. The Completion freshness checkpoint and the
+RESULT_ADMITTED → COMPLETE transition remain available only to a future
+completion-stage caller (TASK-0125), which must invoke them before any
+completion.
+
+**Permanent invalidation.** Operation status stays monotonic: it never
+regresses from RESULT_ADMITTED or COMPLETE. Integrity signals set a
+permanent invalidation (time and a fixed status:code) on the operation.
+A database trigger forbids changing or clearing it. Integrity signals are
+decided by the call site that detects them, never by matching error text.
+They are: the linked-worktree pointer, the linked-worktree gitdir
+back-reference, the selection binding, the Git
+object sources and object graph, the reuse evidence binding, the Completion
+immutable subject, the evaluator result disagreeing with the trusted
+recomputation, and every freshness checkpoint on the evaluation,
+result-admission, reuse and Completion paths. A selection mismatch counts
+only when the durable selection is bound to a different subject; an
+interrupted operation for the same subject is journaled only. Within
+those checks, a failure attributable to repository or worktree
+content or state is an integrity signal: object, pointer, gitdir or
+configuration content; a missing, special or changed file; and a check
+process that exits unsuccessfully, produces oversized output, times out
+or exits before reading its input. An unclassified failure inside a check
+defaults to an integrity signal. Every evidence read,
+integrity-assessment read,
+checkpoint append and COMPLETE transition refuses an invalidated
+operation. If an integrity signal's invalidation cannot be recorded, the
+failing call reports that alongside its error. Failures independent of
+content are journaled only and never invalidate.
+These are the product failing to launch or wait for a process, a G6
+authorization or storage error, a policy or Runner refusal, any other
+storage error, and a Task or attempt not in the evaluatable state. The
+same applies to the snapshot-write, evaluator and snapshot-removal
+launches, which are not integrity checks; the evaluator's reported result
+is still checked as an integrity signal. Admitted evidence survives such
+a transient failure and an idempotent retry stays safe — except during
+the live worktree scan: there, by owner decision 2026-09-25, a storage
+or authorization failure invalidates, because the scanned names are
+attacker-controlled.
+
+The live worktree scan (freshness observation B) authorizes entry names
+selected and iterated by a filesystem scanner, not fixed trusted names:
+those names are attacker-controlled. Any G6 authorization, audit schema
+failure or storage failure during that scan (including failures from
+unauditable names that cannot pass the security-audit CHECK constraints)
+is treated as a content failure and becomes an integrity signal.
+Unauditable names are not rejected before any scan. The product refuses
+to form a file scope the security audit could not record (`FileScope`
+rejects a root whose trimmed serialized form is empty); during the scan,
+that refusal is itself a content failure. Infrastructure classification
+of G6 failures applies only to checks that authorize fixed, trusted
+names, or a name validated before authorization: the authenticating
+reads of the worktree pointer and the Git common-dir path (fixed,
+trusted names); the linked-metadata back-reference reads
+(`worktrees/<name>/gitdir` and `commondir`), where `<name>` comes from
+the `.git` pointer and is validated as a name path under `worktrees/`
+before authorization; and the object-source metadata check
+(`validate_git_object_sources`: `objects/info/alternates`,
+`objects/info/http-alternates`, `info/grafts`, `shallow`).
+
+Owner decision
+2026-09-25, following an adversarial re-review.
+
+**Special files.** Descriptor-relative reads open entries non-blocking, so a
+FIFO or other special file in the worktree, in linked metadata, or in place
+of `.git` makes the check stale promptly instead of blocking it. Such a
+failure is an integrity signal and permanently invalidates the operation.
+
+Owner ratified 2026-09-25. Narrows authority: removes completion verdicts
+from TASK-0144's production path and grants no new filesystem, process or
+completion authority.
+
 ## References
 
 - ADR-0018 — independent evaluation and completion authority.

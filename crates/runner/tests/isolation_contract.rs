@@ -648,6 +648,29 @@ fn login_principal_is_carried_into_the_plan() {
         .any(|(name, value)| name == OsStr::new("USER") && value == OsStr::new("principal")));
 }
 
+#[test]
+fn git_system_config_suppression_is_explicitly_allowlisted() {
+    let environment = ChildEnvironment::from_explicit([(
+        OsString::from("GIT_CONFIG_NOSYSTEM"),
+        OsString::from("1"),
+    )])
+    .expect("governed Git may disable host system configuration");
+    assert_eq!(
+        environment.vars(),
+        &[(OsString::from("GIT_CONFIG_NOSYSTEM"), OsString::from("1"))]
+    );
+    assert_eq!(
+        ChildEnvironment::from_explicit([(
+            OsString::from("GIT_CONFIG_GLOBAL"),
+            OsString::from("/tmp/untrusted-gitconfig"),
+        )])
+        .err(),
+        Some(RunnerError::EnvironmentNameNotAllowed {
+            name: "GIT_CONFIG_GLOBAL".to_owned(),
+        })
+    );
+}
+
 /// TASK-SEC-R1 R1-H2: ambient-shaped names cannot be smuggled into a plan, so
 /// a composition mistake cannot turn inheritance back on.
 #[test]

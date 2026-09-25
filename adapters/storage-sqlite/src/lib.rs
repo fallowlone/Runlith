@@ -17,6 +17,7 @@
 mod approval_store;
 mod approved_proposal_codec;
 mod audit_store;
+mod candidate_assessment_store;
 mod entry_store;
 mod error;
 mod event;
@@ -38,11 +39,13 @@ mod workspace_store;
 pub use approval_store::{
     ApprovalCapabilityRecord, ApprovalRecord, ApprovalState, NewApprovalRecord,
 };
+pub use candidate_assessment_store::{CandidateEvidence, CandidateSelectionOutcome};
 pub use entry_store::{
     AdmittedExecutionEntry, ExecutionEntryAdmission, PlanHeadPrecondition,
     PlanningInputPrecondition, StrandedPreAttemptEntry,
 };
 pub use error::{StorageError, StorageResult};
+pub use evaluation::CandidateIntegrityAssessment;
 pub use event::{
     AttemptOutcome, EventId, EventType, JournalEvent, NewJournalEvent, PlanRevisionJournalPayload,
     EVENT_SCHEMA_VERSION,

@@ -11,6 +11,7 @@
 //! authoritative lifecycle transition on that verdict. The evaluator never
 //! touches Task persistence, runtime persistence, or the journal.
 
+mod candidate;
 mod capture;
 mod error;
 mod observed_effect;
@@ -18,6 +19,13 @@ mod port;
 mod request;
 mod verdict;
 
+pub use candidate::{
+    candidate_sha256, CandidateCheckpointPhase, CandidateDeletion, CandidateError, CandidateFile,
+    CandidateFreshnessCheckpoint, CandidateIntegrityAssessment, CandidateIntegrityOutcome,
+    CandidateManifest, CandidateManifestEntry, CandidateSelector, CandidateTestResult,
+    GitObjectFormat, VerifiedCandidate, MAX_CANDIDATE_BLOB_BYTES, MAX_CANDIDATE_ENTRIES,
+    MAX_CANDIDATE_TREE_DEPTH,
+};
 pub use capture::{
     CaptureRequest, CapturedObservation, EffectCapturePort, ProcessExitObservation,
     ProcessExitObservationSink, SubjectMaterial, MAX_CAPTURE_PATH, MAX_CAPTURE_SUBJECT,

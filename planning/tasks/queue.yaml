@@ -4244,6 +4244,32 @@ items:
       - docs/architecture/adr/ADR-0024-g5-provider-execution-seam.md
       - crates/evaluation
       - crates/app-services/src/observed_effect_service.rs
+    outcome: >-
+      Implemented the ADR-0035 candidate-input evidence producer, adding
+      migration 0022 (candidate_input_assessments, candidate_input_operations)
+      for durable typed integrity and capture status evidence. Owner
+      decisions of 2026-09-25, recorded in ADR-0035 amendments: the Seatbelt
+      ancestor-metadata grant is limited to candidate launches; candidate
+      reads use a pinned Apple-toolchain Git; production evaluation is
+      evidence-only, so the Task stays VERIFYING and completion is left to
+      TASK-0125; invalidation is permanent, decided only by integrity
+      signals classified at the call site, so content failures invalidate
+      while infrastructure failures are journaled only, and scans fail
+      closed; and FileScope refuses to form any scope the security audit
+      could not record. Verification: macOS full workspace green at the
+      final reviewed head, 1ccaa37, and again at the R14 head (1961bcd,
+      17b9ec1 and this bookkeeping commit), which changed only G6 denial
+      messages, a dropped-diagnostic fix, and ADR-0035 wording, with no
+      functional change; cargo clippy --workspace --all-targets -D warnings
+      clean; 15/15 candidate tests, 0 failures, 123 `test result: ok`.
+      Independent reviews: several Haiku reviews plus Opus adversarial
+      reviews, ending in PASS-WITH-FINDINGS with no blockers on the R13
+      head. R4 (the agentctl flake observed in this round): traced to a
+      stale target/debug/agentd binary built while product/version.toml
+      held unresolved merge-conflict markers; no independent flake root
+      cause was established, and nothing in agentctl was changed. Known
+      limitations are deferred to TASK-0151. This outcome records
+      completion on the task branch; integration into main is not claimed.
 
   - id: TASK-0148
     gate: G8
@@ -4635,3 +4661,78 @@ items:
     references:
       - docs/architecture/context-engine.md
       - docs/architecture/adr/ADR-0010-context-derived-state.md
+
+  - id: TASK-0151
+    gate: G8
+    title: Candidate evidence hardening follow-ups (TASK-0144 deferred findings)
+    objective: >-
+      Remediate the hardening findings that TASK-0144's independent reviews
+      deferred, closing residual gaps in the ADR-0035 candidate-input
+      evidence producer's storage, audit and IPC boundaries without
+      widening its evidence scope or granting it completion authority.
+    scope: >-
+      No BEFORE DELETE trigger guards candidate operation rows;
+      append_candidate_result does not check invalidation before writing;
+      get_observed_effect can read an invalidated candidate result by
+      effect id; the evidence read and its invalidation check are separate,
+      non-atomic statements; status_history has an 8192-byte cap that can
+      be exceeded under repeated failures; there is no store-level binding
+      of an assessment to its selection; policy_fingerprint is checked for
+      format only, not reconciled against the current Policy; repository-
+      local config rejection (includes, fsmonitor) is only partial;
+      per-descriptor G6 audit volume during scans is unbounded; interior
+      `.` path components are not rejected; the pinned Git accepts a
+      symlinked parent directory; there is no independent fault-injection
+      test for scan-time G6 failures (a defense-in-depth layer); the
+      operator IPC VerificationSucceeded path ignores candidate evidence;
+      and migration 0022 was edited in place, so dev databases created at
+      the pre-fix branch head are inconsistent with it. No change to
+      TASK-0144's evidence-only production evaluation, permanent
+      invalidation or fail-closed scan guarantees.
+    exit_criteria_summary: >-
+      Each listed finding is either resolved with a focused regression test
+      or explicitly re-deferred with a recorded rationale; no finding
+      regresses TASK-0144's evidence-only production evaluation, permanent
+      invalidation or fail-closed scan guarantees; full workspace
+      verification and independent security review green.
+    depends_on:
+      - TASK-0144
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0035-g8-immutable-git-candidate-proposal.md
+
+  # Cross-gate remediation: blocks running the Claude provider under
+  # mandatory G6 confinement on macOS, needed before real-provider
+  # dogfooding of confined execution.
+  - id: TASK-0152
+    gate: G8
+    title: Confined Claude provider authentication without Keychain access (ADR first)
+    objective: >-
+      Choose, via an ADR, a mechanism that lets the confined Claude
+      provider authenticate without granting it Keychain, SecurityServer
+      or /usr/bin/security authority, so production can run the Claude
+      provider under mandatory G6 confinement on macOS.
+    scope: >-
+      ADR-only. TASK-0112 diagnosed the problem and TASK-0114 added a
+      fail-closed refusal
+      (provider_authentication_unsupported_in_mandatory_confinement); as a
+      result, production cannot today run the Claude provider under
+      mandatory G6 confinement on macOS. Evaluate, at minimum: a trusted-
+      host credential broker that injects a scoped token via the G6
+      secrets broker; and a trusted-host authenticated proxy. A Keychain
+      grant inside the sandbox remains rejected, per TASK-0112.
+      Implementation follows only after the ADR is accepted; no production
+      code changes in this task.
+    exit_criteria_summary: >-
+      An Accepted ADR selects a mechanism (or states why neither
+      candidate qualifies) that lets the confined Claude provider
+      authenticate without Keychain, SecurityServer or /usr/bin/security
+      authority, evaluated against both listed candidates, ratified by the
+      owner after independent architecture/security review PASS, and
+      linked from docs/architecture/adr/INDEX.md.
+    depends_on:
+      - TASK-0114
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
+      - docs/development/G7_TASK_0112_PROVIDER_AUTH_DIAGNOSIS.md
