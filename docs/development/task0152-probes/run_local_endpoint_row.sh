@@ -17,7 +17,13 @@
 # existing production code path. That absence is itself a capability
 # finding recorded in the evidence doc.
 #
-# Usage: run_local_endpoint_row.sh ROW_NAME [--env NAME=VALUE ...] [--no-credential]
+# Usage: run_local_endpoint_row.sh ROW_NAME [--env NAME=VALUE ...] \
+#          [--no-credential] [--cred-var NAME]
+#
+# --cred-var NAME (round 2, R8): which env var carries the dummy
+# credential (default ANTHROPIC_API_KEY). Used to probe
+# CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_AUTH_TOKEN header-shape behavior
+# against the local stub the same way R6/R7 probed ANTHROPIC_API_KEY.
 
 set -euo pipefail
 
@@ -32,10 +38,12 @@ ROW="${1:?row name required}"
 shift
 declare -a EXTRA_ENV=()
 NO_CREDENTIAL=0
+CRED_VAR="ANTHROPIC_API_KEY"
 while [ $# -gt 0 ]; do
   case "$1" in
     --env) EXTRA_ENV+=("$2"); shift 2 ;;
     --no-credential) NO_CREDENTIAL=1; shift ;;
+    --cred-var) CRED_VAR="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -102,7 +110,7 @@ declare -a ENV_ARGS=(
   "ANTHROPIC_BASE_URL=http://127.0.0.1:$PORT"
 )
 if [ "$NO_CREDENTIAL" != "1" ]; then
-  ENV_ARGS+=("ANTHROPIC_API_KEY=$DUMMY")
+  ENV_ARGS+=("${CRED_VAR}=${DUMMY}")
 fi
 for kv in "${EXTRA_ENV[@]:-}"; do
   [ -n "$kv" ] && ENV_ARGS+=("$kv")
@@ -123,19 +131,40 @@ if grep -q "$MARKER" "$STDOUT_RAW" 2>/dev/null; then
   MARKER_PRESENT=true
 fi
 
-if [ "$MARKER_PRESENT" = "false" ] && command -v log >/dev/null 2>&1; then
+# Round 2 (R8): capture denials unconditionally, not only on failure --
+# the question here ("did the CLI attempt any OTHER outbound connection,
+# e.g. a token-refresh or profile host, even while the main request
+# succeeded") specifically needs this on a SUCCESSFUL (marker present) row
+# too, not just a failing one.
+if command -v log >/dev/null 2>&1; then
   log show --last 2m --style compact \
     --predicate 'eventMessage CONTAINS "deny"' 2>/dev/null \
     | grep -iE "claude|sandbox" > "$DENIALS_RAW" || true
+fi
+# Sanitized denial summary: operation + target class only (network-outbound
+# denials specifically, since that is what "other outbound connection
+# attempted" means here) -- never a full raw line, never a path under a
+# user secret directory.
+NETWORK_DENIAL_COUNT=0
+if [ -s "$DENIALS_RAW" ]; then
+  NETWORK_DENIAL_COUNT=$(grep -ciE "network-outbound" "$DENIALS_RAW" 2>/dev/null || true)
+  [ -z "$NETWORK_DENIAL_COUNT" ] && NETWORK_DENIAL_COUNT=0
 fi
 
 cleanup
 trap - EXIT
 
 REQUEST_COUNT=$(wc -l < "$STUB_LOG" | tr -d ' ')
-STUB_PATHS=$(python3 -c "
+# Round 2 (R8) header-shape summary: paths hit, which credential header
+# name(s) were used (never values), and the raw (non-secret) value of
+# anthropic-beta/anthropic-version the CLI actually sent -- read straight
+# from stub_server.py's own sanitized log, not re-derived by guesswork.
+STUB_SUMMARY=$(python3 -c "
 import json
 paths = set()
+credential_headers = set()
+beta_values = set()
+version_values = set()
 try:
     with open('$STUB_LOG') as fh:
         for line in fh:
@@ -144,9 +173,22 @@ try:
                 continue
             entry = json.loads(line)
             paths.add(entry.get('path', ''))
+            ch = entry.get('credential_header')
+            if ch:
+                credential_headers.add(ch)
+            safe = entry.get('safe_header_values') or {}
+            if 'anthropic-beta' in safe:
+                beta_values.add(safe['anthropic-beta'])
+            if 'anthropic-version' in safe:
+                version_values.add(safe['anthropic-version'])
 except FileNotFoundError:
     pass
-print(json.dumps(sorted(paths)))
+print(json.dumps({
+    'stub_paths_hit': sorted(paths),
+    'credential_header_names_seen': sorted(credential_headers),
+    'anthropic_beta_values_seen': sorted(beta_values),
+    'anthropic_version_values_seen': sorted(version_values),
+}))
 ")
 
 CLASS="unclassified failure (exit ${CODE})"
@@ -160,16 +202,19 @@ elif grep -qiE "invalid.?x-api-key|invalid api key|authentication_error|401" "$S
   CLASS="auth rejected by stub (401/invalid key) -- stub reached, non-conformant response accepted as error"
 fi
 
-python3 - "$ROW" "$CODE" "$MARKER_PRESENT" "$CLASS" "$((END_EPOCH - START_EPOCH))" "$REQUEST_COUNT" "$STUB_PATHS" <<'PYEOF'
+python3 - "$ROW" "$CRED_VAR" "$CODE" "$MARKER_PRESENT" "$CLASS" "$((END_EPOCH - START_EPOCH))" "$REQUEST_COUNT" "$STUB_SUMMARY" "$NETWORK_DENIAL_COUNT" <<'PYEOF'
 import json, sys
-row, code, marker, cls, dur, count, paths = sys.argv[1:8]
-print(json.dumps({
+row, cred_var, code, marker, cls, dur, count, summary, net_denials = sys.argv[1:10]
+result = {
     "row": row,
+    "cred_var": cred_var,
     "exit": int(code),
     "marker": marker == "true",
     "class": cls,
     "duration_s": int(dur),
     "stub_request_count": int(count),
-    "stub_paths_hit": json.loads(paths),
-}))
+    "other_network_denials": int(net_denials),
+}
+result.update(json.loads(summary))
+print(json.dumps(result))
 PYEOF

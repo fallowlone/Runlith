@@ -205,10 +205,210 @@ only, boolean value-equals-dummy per auth header):
 - R7 (`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`): identical to R6 —
   `HEAD /api/hello` then `POST /v1/messages?beta=true` with `x-api-key`.
 
-`authorization: Bearer ...` was not directly observed by the stub in this
-task (R3/R4 hit the real API, not the stub), but is inferred from the
-result text `"...Invalid bearer token"` in R3/R4 — labeled as an inference,
-not a header-name capture.
+`authorization: Bearer ...` was not directly observed by the stub for R3/R4
+(those hit the real API, not the stub) and was only inferred there from the
+result text `"...Invalid bearer token"`. Round 2's R8 (below) directly
+observes it against the local stub and confirms the inference.
+
+## Round 2: R8 credential-mode header shape (against the local stub)
+
+Same local-endpoint harness as R6/R7
+([`task0152-probes/run_local_endpoint_row.sh`](task0152-probes/run_local_endpoint_row.sh),
+extended with `--cred-var NAME`), run once per proven-honoured credential
+variable, all under the exact production-shaped profile with the network
+rule replaced by "outbound to the stub's local port only" (same fidelity
+note as R6/R7: this network scope does not exist in the current production
+Runner backend — see above). Marker prompt, argv, and profile shape are
+otherwise identical to R6. `stub_server.py` was extended to also record
+the RAW value of `anthropic-beta`/`anthropic-version` (not secrets or
+identifiers — static capability-negotiation strings the CLI ships in its
+own binary) and which single header name carried the credential; every
+other header value, including any session/request-id-shaped header,
+remains unrecorded.
+
+| row | `--cred-var` | exit | marker | credential header seen | `anthropic-beta` value | `anthropic-version` |
+| --- | --- | ---: | :---: | --- | --- | --- |
+| R8 (api-key) | `ANTHROPIC_API_KEY` | `0` | present | `x-api-key` | `claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,fallback-credit-2026-06-01` | `2023-06-01` |
+| R8 (oauth) | `CLAUDE_CODE_OAUTH_TOKEN` | `0` | present | `authorization` | `claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24,extended-cache-ttl-2025-04-11` | `2023-06-01` |
+| R8 (auth-token) | `ANTHROPIC_AUTH_TOKEN` | `0` | present | `authorization` | `claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,fallback-credit-2026-06-01` | `2023-06-01` |
+
+All three rows hit exactly the same two paths as R6/R7:
+`HEAD /api/hello` then `POST /v1/messages?beta=true`.
+
+Findings:
+
+- **Credential header is a function of the variable, not incidental**:
+  `ANTHROPIC_API_KEY` → `x-api-key`; both `CLAUDE_CODE_OAUTH_TOKEN` and
+  `ANTHROPIC_AUTH_TOKEN` → `authorization: Bearer <value>`.
+- **`ANTHROPIC_AUTH_TOKEN`'s beta-flag set is identical to
+  `ANTHROPIC_API_KEY`'s**, despite sharing `ANTHROPIC_AUTH_TOKEN`'s
+  `authorization` transport with OAuth mode. `CLAUDE_CODE_OAUTH_TOKEN` is
+  the only mode that adds `oauth-2025-04-20` and `extended-cache-ttl-2025-04-11`
+  and omits `context-1m-2025-08-07`, `per-turn-control-2025-07-01`
+  [sic — CLI-emitted string is `per-turn-control-2026-07-01`],
+  `mid-conversation-tool-changes-2026-07-01`, and
+  `fallback-credit-2026-06-01`. The CLI itself decides this flag set based
+  on which credential variable is set; the Option B proxy therefore never
+  needs to add or guess an OAuth-specific flag — it only has to forward
+  whatever the CLI already sent (see the Option B probe section below).
+
+### Other outbound connection attempts (Seatbelt denials), all three modes
+
+Denial capture (`log show --predicate 'eventMessage CONTAINS "deny"'`,
+filtered to the `claude`/`sandbox` process names) was taken for every R8
+row regardless of success, specifically to answer "did the CLI attempt any
+OTHER destination, e.g. a token-refresh or profile host, even on a
+successful run". Retained only as operation + target class, per the
+Seatbelt-denial hygiene used throughout this task:
+
+| row | denied network-outbound target(s) observed |
+| --- | --- |
+| R8 (api-key) | `/private/var/run/mDNSResponder` only |
+| R8 (oauth) | `/private/var/run/mDNSResponder` only |
+| R8 (auth-token) | `/private/var/run/mDNSResponder` only |
+
+No other host, port, or path appears in any of the three rows' denial
+captures. `/private/var/run/mDNSResponder` is the same literal the
+production `*:443` network rule always explicitly allows alongside
+`*:443` (`adapters/runner-macos-seatbelt/src/lib.rs:236-238`); the
+local-endpoint profile intentionally omits it (network rule = the one
+local port only), so the CLI's routine mDNS-adjacent lookup is denied —
+and every row still completed successfully (marker present, exit `0`) in
+spite of that denial, so it is not a functional dependency. In particular:
+**no token-refresh call to any other host was observed in OAuth mode** in
+this probe shape (single short-lived non-interactive invocation with a
+fixed marker prompt; a longer-lived session approaching real token
+expiry was not tested and could behave differently — see "What this does
+not prove").
+
+## Option B probe (trusted-host authenticated proxy)
+
+This section documents the probe for **Option B**: a trusted-host process
+holds the real credential and runs a tiny local HTTP proxy; the confined
+child receives only a random per-run placeholder and can reach nothing but
+that proxy's `127.0.0.1:<port>`. This is empirical support for the ADR's
+selection of Option B — it is not itself the ADR and makes no
+recommendation.
+
+[`task0152-probes/owner_proxy_probe.py`](task0152-probes/owner_proxy_probe.py)
+(stdlib only) implements and was **not run against a real credential** by
+this task (per its constraints: no Keychain read, no `security`
+invocation by the implementer). Design, in the order it executes:
+
+1. Binds `127.0.0.1:0` (random port), generates a random per-run
+   placeholder (`secrets.token_urlsafe(32)`).
+2. Runs a **negative self-check first, before touching Keychain at all**:
+   sends one `POST /v1/messages` with a *wrong* placeholder and asserts a
+   local `401` with zero forwarded requests. This same code path is what
+   `--dry-self-check` exercises end-to-end without ever reading a
+   credential or contacting upstream (see verification below) — the
+   check inherently never forwards, since it fails at the placeholder
+   comparison before forwarding would ever be considered.
+3. Only after the self-check passes: reads the real credential from a
+   Keychain generic-password item the owner created themselves, via
+   `/usr/bin/security find-generic-password -s <service> -a <account> -w`
+   (value returned on stdout only — the subprocess argv never contains
+   it). The real credential exists only in this process's memory from
+   this point until the child has run, and is used only to construct one
+   HTTP header for one outbound HTTPS connection this process makes
+   itself.
+4. Launches the confined child with **only the placeholder** (never the
+   real credential) in the mode-appropriate variable
+   (`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`), under the
+   production-shaped profile from `gen_profile.sh` with the network rule
+   replaced by "this proxy's local port only", a fresh empty
+   `HOME`/`CLAUDE_CONFIG_DIR` under this run's own temp directory, and no
+   host `~/.claude` support-read — same pattern as R5 and
+   `owner_positive_probe.sh`.
+5. The proxy allowlists exactly two request shapes from the child:
+   `HEAD`/`GET /api/hello` (answered locally, no forward) and
+   `POST /v1/messages` with any query string (forwarded only if the
+   credential header matches the placeholder exactly). Every other
+   path/method is rejected locally with `403` and the path is recorded.
+   A `POST /v1/messages` whose credential header does not match the
+   placeholder is rejected locally with `401`, also never forwarded.
+6. A forwarded request has its credential header **rewritten**: API-key
+   mode sets `x-api-key` to the real key and drops any `authorization`;
+   OAuth mode sets `authorization: Bearer <real>` and drops any
+   `x-api-key`. `anthropic-beta` and `anthropic-version` are forwarded
+   **exactly as the CLI sent them** (R8, above, already proved the CLI
+   itself sends the correct flag set per mode, including OAuth's own
+   `oauth-2025-04-20` — nothing is added or guessed). Hop-by-hop headers
+   are stripped both directions. An SSE (`text/event-stream`) response is
+   relayed with a real byte-at-a-time streaming loop rather than buffered
+   and re-sent; a non-streaming JSON response is buffered once and
+   relayed with a recomputed `Content-Length`.
+7. Prints ONLY: CLI version, mode, child exit status, marker
+   present/absent, a classified failure reason, and integer counts
+   (`local_401`, `local_403` + its rejected paths, `forwarded`, and the
+   list of upstream HTTP status codes). Never a header value, a body, or
+   any account/org/request identifier.
+
+**Env-var hygiene for the confined child**: the launch uses
+`subprocess.Popen(argv, env=<explicit dict>)`, which passes the
+environment via the child's `envp` at exec time — a mechanism entirely
+separate from `argv` — rather than routing it through an external `env`
+command whose own argv would be briefly `ps`-visible (the exposure round 1
+fixed in `owner_positive_probe.sh`). In this script the point is close to
+moot regardless: the confined child never receives the real credential in
+any form, only the random placeholder, so this exposure class cannot occur
+for the child launch here no matter which technique is used. The real
+credential's only appearance anywhere in this process is as one header
+value on one outbound TLS connection the proxy itself makes.
+
+**Documented limitation, not glossed over**: unlike the bash `unset` round
+1 relies on, Python strings are immutable, so this script cannot
+guarantee the real credential's bytes are overwritten in process memory
+after use. The reference is held in the narrowest scope possible (one
+local variable) and dropped as soon as the child has run; this is a
+best-effort scope reduction, not a wipe guarantee, and is stated as such
+in the script's own docstring.
+
+### Owner commands
+
+One-time setup (owner runs both, on the host, not run by this task; `-w`
+as the LAST argument makes `security` prompt interactively so the value
+never appears in argv or shell history):
+
+```bash
+# API-key mode credential
+security add-generic-password -a "$USER" -s "runlith-task0152-owner-anthropic-api-key" -w
+
+# OAuth mode credential: the owner generates this themselves with
+# `claude setup-token` in their own terminal (this task never runs that
+# command, never sees the token, and never asks for it) and pastes the
+# resulting token ONLY at the `security` prompt below, never on a command
+# line.
+security add-generic-password -a "$USER" -s "runlith-task0152-owner-oauth-token" -w
+```
+
+Then, per mode:
+
+```bash
+python3 task0152-probes/owner_proxy_probe.py api-key --service runlith-task0152-owner-anthropic-api-key
+python3 task0152-probes/owner_proxy_probe.py oauth   --service runlith-task0152-owner-oauth-token
+```
+
+### What a pass proves, and does not prove
+
+A pass (`marker_present=True`, `forwarded=1`, exactly one `upstream_status_codes`
+entry in the 2xx range) proves: the confined child completed a real,
+authenticated Anthropic API round trip while holding only a random
+placeholder and having network access to nothing but `127.0.0.1:<port>`;
+the trusted host's proxy correctly rejected the pre-flight wrong-credential
+probe with no upstream call; and the real credential never crossed into
+the sandbox in any form.
+
+It does **not** prove: that the proxy is hardened against a
+concurrently-running hostile workload on the same host reusing the
+placeholder before the legitimate child does (single-probe, single-child
+design — no concurrency/TOCTOU analysis was performed); that a long-lived
+session near real OAuth token expiry does not trigger an additional
+outbound call this task's short marker-prompt probe never exercised (see
+the R8 "no token-refresh observed" caveat above); that the proxy's minimal
+path allowlist (`/api/hello`, `/v1/messages`) covers every path a future
+CLI version might need; or that this exact Python implementation is what
+ships — it is a probe proving the mechanism's shape, not production code.
 
 ## Capability and compatibility notes (read-only; input to the ADR)
 
@@ -307,6 +507,18 @@ touched by this document.
   `ANTHROPIC_ORGANIZATION_ID`) and cloud-provider variants
   (`CLAUDE_CODE_USE_BEDROCK`/Vertex/Foundry-family) named by `strings` are
   candidate, unproven — no fixture for those paths exists in this task.
+- **Option B was not run against a real credential or the real Anthropic
+  API.** `owner_proxy_probe.py`'s own mechanics (routing, rejection,
+  header rewrite, streaming) were exercised directly in-process against
+  synthetic requests, and its argument validation and negative self-check
+  were exercised end-to-end via `--dry-self-check` (which never touches
+  Keychain and never contacts upstream). What was **not** exercised: a
+  real forwarded request reaching the real Anthropic API and returning a
+  real 2xx, a real OAuth token's actual shape (only R8's dummy-credential
+  header-shape measurement stands in for it), and any multi-request or
+  long-lived-session behavior. This is the same class of gap
+  `owner_positive_probe.sh` has for Option A — the owner closes it by
+  running the script themselves.
 
 ## Owner-run positive probe
 
@@ -388,6 +600,15 @@ Repository boundaries read for this task (all at base `78079e3`):
 - installed CLI: `claude --help`, `claude auth --help`, and `strings` on
   the resolved executable (candidate variable names only; never a
   documentation lookup)
+
+Round 2 additionally:
+
+- [`task0152-probes/run_local_endpoint_row.sh`](task0152-probes/run_local_endpoint_row.sh)
+  (extended with `--cred-var`) and
+  [`task0152-probes/stub_server.py`](task0152-probes/stub_server.py)
+  (extended with `safe_header_values`/`credential_header` capture) for R8
+- [`task0152-probes/owner_proxy_probe.py`](task0152-probes/owner_proxy_probe.py)
+  for the Option B probe design
 
 No credential material, Keychain contents, or `security` command output
 was ever read. No interactive login or `setup-token` flow was invoked.
