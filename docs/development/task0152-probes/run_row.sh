@@ -58,13 +58,14 @@ chmod 700 "$RUNTIME_ROOT" 2>/dev/null || true
 mkdir -p "$RUNTIME_ROOT"/{config,data,state,cache,scratch}
 
 RAW_DIR="$SCRATCH/raw"
-mkdir -p "$RAW_DIR"
+RESULTS_DIR="$SCRATCH/results"
+mkdir -p "$RAW_DIR" "$RESULTS_DIR"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 STDOUT_RAW="$RAW_DIR/${ROW}-${STAMP}.stdout"
 STDERR_RAW="$RAW_DIR/${ROW}-${STAMP}.stderr"
 DENIALS_RAW="$RAW_DIR/${ROW}-${STAMP}.denials"
 
-PROFILE="$SCRATCH/results/${ROW}.sb"
+PROFILE="$RESULTS_DIR/${ROW}.sb"
 declare -a GEN_ARGS=(--workspace "$WORKSPACE" --claude-exec "$CLAUDE_EXEC" --runtime-root "$RUNTIME_ROOT" --network "$NETWORK" --out "$PROFILE")
 if [ "$SUPPORT_READ" = "1" ]; then
   [ -e "$HOME_DIR/.claude" ] && GEN_ARGS+=(--support-read "$HOME_DIR/.claude")
@@ -73,7 +74,15 @@ fi
 if [ "$NETWORK" = "none" ]; then
   : # host-only / no-sandbox rows call this script with SKIP_SANDBOX=1 instead
 fi
-bash "$SCRIPT_DIR/gen_profile.sh" "${GEN_ARGS[@]}" >/dev/null
+# A profile-generation failure is a HARNESS error, never a probe result: it
+# must never reach `classify()` and be reported as e.g. an
+# "unclassified failure (exit N)" row, which would misrepresent tooling
+# breakage as CLI/auth behavior. Report it distinctly and stop.
+if ! GEN_PROFILE_OUT="$(bash "$SCRIPT_DIR/gen_profile.sh" "${GEN_ARGS[@]}" 2>&1)"; then
+  echo "${GEN_PROFILE_OUT}" >&2
+  python3 -c "import json,sys; print(json.dumps({'row': sys.argv[1], 'harness_error': 'profile generation failed', 'exit': None, 'marker': False, 'class': None}))" "$ROW"
+  exit 1
+fi
 
 declare -a ENV_ARGS=(
   "PATH=/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$CLAUDE_EXEC")"
