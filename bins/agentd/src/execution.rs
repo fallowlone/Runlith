@@ -926,7 +926,27 @@ enum ProductionEvaluator {
 impl EvaluationPort for ProductionEvaluator {
     fn evaluate(&self, request: &EvaluationRequest) -> EvaluationResult<EvaluationVerdict> {
         match self {
-            Self::Candidate(evaluator) => evaluator.evaluate(request),
+            Self::Candidate(evaluator) => {
+                // Owner decision 2026-09-25 (adversarial review finding TASK-0144):
+                // production candidate-input evaluation records typed integrity and
+                // captures evidence (durable RESULT_ADMITTED), but then reports "no
+                // verdict" instead of releasing a completion verdict. The queue scope
+                // explicitly excludes completion verdicts and new completion authority.
+                // The Task stays VERIFYING for TASK-0125 claim verification.
+                let verdict = evaluator.evaluate(request)?;
+                match verdict {
+                    EvaluationVerdict::Verified => Err(
+                        evaluation::EvaluationError::new(
+                            "candidate-input evidence admitted (check passed); completion awaits claim verification"
+                        )
+                    ),
+                    EvaluationVerdict::Rejected => Err(
+                        evaluation::EvaluationError::new(
+                            "candidate-input evidence admitted (check failed); completion awaits claim verification"
+                        )
+                    ),
+                }
+            }
             Self::Pending(evaluator) => evaluator.evaluate(request),
         }
     }
@@ -935,13 +955,14 @@ impl EvaluationPort for ProductionEvaluator {
     // `revalidate_before_completion` silently wins for every
     // `ProductionEvaluator` variant, including `Candidate`: the durable
     // Completion freshness checkpoint and the `RESULT_ADMITTED` ->
-    // `COMPLETE` operation-status transition would never run, even though
-    // `finish()` (orchestration_service.rs) proceeds to mark the Task
-    // Completed right after this call succeeds. That would silently drop
-    // ADR-0035's Completion-phase freshness gate and leave every
-    // production candidate-input operation permanently stuck at
-    // `RESULT_ADMITTED` — never durably `COMPLETE` — despite the Task
-    // itself completing.
+    // `COMPLETE` operation-status transition would never run. For `Pending`,
+    // this call is needed, so we still delegate (though `finish()` in
+    // orchestration_service.rs will never invoke this for `Pending` unless
+    // a future completion-stage caller (TASK-0125) explicitly requests it).
+    // For `Candidate`: owner decision 2026-09-25 makes `evaluate()` return
+    // no verdict, so `finish()` never reaches this override — the Task stays
+    // VERIFYING. The delegation is kept so a future claim-verification caller
+    // can request the Completion freshness gate.
     fn revalidate_before_completion(&self, request: &EvaluationRequest) -> EvaluationResult<()> {
         match self {
             Self::Candidate(evaluator) => evaluator.revalidate_before_completion(request),
@@ -5720,8 +5741,10 @@ mod tests {
     /// TASK-0144 blocker (d): the full production candidate-input path —
     /// `dispatch_execution` → `run_background` → `ProductionEvaluator`
     /// selection → the real `CandidateInputEvaluator` under G6/Runner —
-    /// reaches Task `Completed`, and the durably persisted evidence binds
-    /// the *exact* evaluated commit/tree, independently cross-checked
+    /// records typed integrity and captures evidence at RESULT_ADMITTED
+    /// (operation status), leaving the Task VERIFYING for TASK-0125 claim
+    /// verification (owner decision 2026-09-25). The durably persisted evidence
+    /// binds the *exact* evaluated commit/tree, independently cross-checked
     /// against `git rev-parse` on the real repository (never a placeholder
     /// digest). A single green run is not evidence on its own: this test
     /// also proves the sealed candidate manifest is reproducible by
@@ -5729,7 +5752,7 @@ mod tests {
     /// is deterministic over immutable Git objects) and that the captured
     /// `TestSuiteResult` reflects the real file content, not a stub.
     #[test]
-    fn candidate_evaluator_completes_full_production_flow_with_verified_digest_bindings() {
+    fn candidate_evaluator_admits_bound_evidence_without_completing_the_task() {
         let sandbox = Sandbox::named("candidate-e2e");
         std::fs::create_dir_all(sandbox.repo.join("src")).unwrap();
         std::fs::write(sandbox.repo.join("src/example.rs"), b"fn accepted() {}\n").unwrap();
@@ -5769,21 +5792,22 @@ mod tests {
             .expect("task exists");
         assert_eq!(
             task.state(),
-            TaskState::Completed,
-            "the real candidate evaluator must independently verify and complete the Task"
+            TaskState::Verifying,
+            "candidate-input evaluation must never complete the Task (owner decision 2026-09-25)"
         );
         assert_eq!(
             store
                 .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
                 .unwrap()
                 .as_deref(),
-            Some("COMPLETE")
+            Some("RESULT_ADMITTED"),
+            "evidence must be durably admitted before completion runs"
         );
 
         let evidence = store
-            .get_candidate_evidence(execution_id.as_str(), attempt_id.as_str())
+            .get_candidate_evidence_for_completion(execution_id.as_str(), attempt_id.as_str())
             .unwrap()
-            .expect("candidate evidence persisted");
+            .expect("candidate evidence persisted at RESULT_ADMITTED");
         assert_eq!(
             evidence.integrity.candidate_commit_oid, expected_head,
             "assessment must bind the exact evaluated commit"
@@ -5796,6 +5820,11 @@ mod tests {
             .integrity
             .candidate_manifest_sha256
             .starts_with("sha256:"));
+        assert_eq!(
+            evidence.integrity.checkpoints.len(),
+            4,
+            "RESULT_ADMITTED state has exactly 4 checkpoints (Selection, BeforeEvaluation, AfterEvaluation, ResultAdmission)"
+        );
         match evidence.effect.payload() {
             evaluation::EffectPayload::TestSuiteResult { passed, failed, .. } => {
                 assert_eq!(
@@ -5858,13 +5887,15 @@ mod tests {
         );
         assert_eq!(recomputed.tree_oid, evidence.integrity.candidate_tree_oid);
 
-        // Post-completion re-evaluation must never silently re-verify: the
-        // Task is no longer VERIFYING, so a stray retry (e.g. a delayed
-        // duplicate dispatch after a restart) is refused, not honored.
+        // Re-evaluation on RESULT_ADMITTED must still report "no verdict":
+        // the Task is VERIFYING (not Completed), so a re-entry (e.g. after
+        // a restart while the operation is still RESULT_ADMITTED) must again
+        // return an error from the production composition, not replay the
+        // original evidence as a fresh verdict.
         let replay = fresh_evaluator.evaluate(&request);
         assert!(
             replay.is_err(),
-            "evaluating an already-Completed Task's attempt must never succeed again"
+            "re-evaluating during VERIFYING state must return no verdict (RESULT_ADMITTED state reuse)"
         );
     }
 
