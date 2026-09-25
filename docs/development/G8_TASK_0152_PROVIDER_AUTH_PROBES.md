@@ -323,7 +323,11 @@ invocation by the implementer). Design, in the order it executes:
 5. The proxy allowlists exactly two request shapes from the child:
    `HEAD`/`GET /api/hello` (answered locally, no forward) and
    `POST /v1/messages` with any query string (forwarded only if the
-   credential header matches the placeholder exactly). Every other
+   credential header matches the placeholder exactly, compared with
+   `hmac.compare_digest` on bytes — round 3 hardening; the placeholder is
+   a per-run random token rather than a long-lived secret, but the
+   comparison is hardened anyway since it is the sole local gate deciding
+   whether a request is forwarded with the real credential). Every other
    path/method is rejected locally with `403` and the path is recorded.
    A `POST /v1/messages` whose credential header does not match the
    placeholder is rejected locally with `401`, also never forwarded.
@@ -337,7 +341,33 @@ invocation by the implementer). Design, in the order it executes:
    are stripped both directions. An SSE (`text/event-stream`) response is
    relayed with a real byte-at-a-time streaming loop rather than buffered
    and re-sent; a non-streaming JSON response is buffered once and
-   relayed with a recomputed `Content-Length`.
+   relayed with a recomputed `Content-Length`. The forward is made
+   through a dedicated opener (round 3 hardening) with two properties:
+   (a) **it never follows a redirect** — a `redirect_request` override
+   returning `None` makes a 3xx from upstream come back as an
+   `HTTPError`, which is relayed to the child exactly as received (status
+   and headers, counted like any other response) instead of this process
+   issuing a second request; and (b) **it ignores ambient proxy
+   environment variables** (`urllib.request.ProxyHandler({})`, an empty
+   mapping rather than the default environment-reading constructor), so
+   `http_proxy`/`https_proxy` cannot silently reroute the
+   credential-bearing request. A defensive assertion also confirms the
+   outgoing request's host is exactly `api.anthropic.com` immediately
+   before the real credential is attached, even though the path allowlist
+   in step 5 already makes any other value unreachable in practice.
+   Reasoning for why a redirect specifically cannot carry the credential
+   to another host with this design: the credential header is attached to
+   exactly one `Request` object this script constructs itself
+   (`UPSTREAM_URL + path`, host asserted), and because no second request
+   is ever issued for a 3xx, there is no second `Request` object for that
+   header to be copied onto in the first place — verified empirically
+   against a throwaway local redirecting server (not the real API, no
+   credential involved): the opener raised on the first 302 without ever
+   opening a connection to the `Location` target, and end-to-end through
+   `ProxyHandler` the 302 (with its `Location` header) was relayed to the
+   test client unchanged, counted as `forwarded=1`,
+   `upstream_status=[302]`.
+   Default TLS verification is unchanged (no custom `SSLContext`).
 7. Prints ONLY: CLI version, mode, child exit status, marker
    present/absent, a classified failure reason, and integer counts
    (`local_401`, `local_403` + its rejected paths, `forwarded`, and the
