@@ -2846,10 +2846,12 @@ pub fn run_background(job: BackgroundJob) {
             // Task VERIFYING, then reports the absent verdict as an
             // error. Re-read durable state instead of trusting the
             // message: a concluded-Succeeded attempt means the cycle did
-            // its job and awaits the operator.
+            // its job and awaits the operator. Detail is still logged
+            // because a failing automated evaluator is otherwise indistinguishable from the no-verifier G5 posture.
             if attempt_concluded_succeeded(&composition.db_path, &execution_id, &attempt_id) {
                 eprintln!(
-                    "agentd: execution {execution_id} concluded: SUCCEEDED_AWAITING_OPERATOR_VERIFICATION"
+                    "agentd: execution {execution_id} concluded: SUCCEEDED_AWAITING_OPERATOR_VERIFICATION (verification not completed: {})",
+                    truncate_detail(&detail)
                 );
             } else {
                 eprintln!(
