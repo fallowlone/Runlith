@@ -161,6 +161,17 @@ impl crate::SqliteStore {
         Ok(())
     }
 
+    /// Journals a failure without ever regressing a successful terminal-ish
+    /// state. R2 (owner review 2026-09-25, MAJOR): this used to run an
+    /// unconditional `UPDATE`, so a failure classified from *any* later
+    /// call — including one racing or following a already-admitted
+    /// subject — could downgrade a durable `RESULT_ADMITTED` or `COMPLETE`
+    /// row. The `status`/`detail_code` columns now only change when the
+    /// row is not already in one of those two states (a single atomic
+    /// `UPDATE ... CASE` compares the row's own current status, so this is
+    /// compare-and-swap safe under concurrent callers without needing an
+    /// `expected` parameter); `status_history` is still always appended so
+    /// the failure is durably journaled either way.
     pub fn record_candidate_operation_failure(
         &mut self,
         execution_id: &str,
@@ -174,11 +185,15 @@ impl crate::SqliteStore {
                 "invalid candidate operation failure status".into(),
             ));
         }
+        let now_ms = now_ms.min(i64::MAX as u64) as i64;
         let changed = self.connection().execute(
-            "UPDATE candidate_input_operations SET status = ?1, detail_code = ?2, updated_at_ms = ?3,
+            "UPDATE candidate_input_operations SET
+                    status = CASE WHEN status IN ('RESULT_ADMITTED','COMPLETE') THEN status ELSE ?1 END,
+                    detail_code = CASE WHEN status IN ('RESULT_ADMITTED','COMPLETE') THEN detail_code ELSE ?2 END,
+                    updated_at_ms = ?3,
                     status_history = status_history || char(10) || ?6
              WHERE execution_id = ?4 AND attempt_id = ?5",
-            params![status, detail_code, now_ms.min(i64::MAX as u64) as i64, execution_id, attempt_id, format!("{status}:{detail_code}:{}", now_ms)],
+            params![status, detail_code, now_ms, execution_id, attempt_id, format!("{status}:{detail_code}:{now_ms}")],
         )?;
         if changed != 1 {
             return Err(StorageError::ConstraintViolation(

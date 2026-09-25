@@ -18,6 +18,17 @@ use std::ffi::OsString;
 pub struct MacOsSeatbeltRunner {
     support_read_roots: Vec<PathBuf>,
     support_write_roots: Vec<PathBuf>,
+    /// Owner-ratified 2026-09-25: whether this backend instance emits the
+    /// ancestor `file-read-metadata`/`file-test-existence` ("stat only")
+    /// grant a nested workspace needs for `getcwd()`/`realpath()`
+    /// resolution under Seatbelt. This is a typed, construction-time flag
+    /// decided only by trusted composition (`production_runner_backend`'s
+    /// caller in `bins/agentd/src/execution.rs`) — never a caller/IPC
+    /// string or per-launch input — and defaults to `false` (no grant,
+    /// fail closed). Only candidate-input Runner launches (Git-read,
+    /// snapshot-write, evaluator-read-only) set it; provider/tool launches
+    /// never do. See ADR-0035 "Amendment 2026-09-25".
+    grant_candidate_ancestor_metadata: bool,
 }
 
 impl MacOsSeatbeltRunner {
@@ -29,7 +40,18 @@ impl MacOsSeatbeltRunner {
         Self {
             support_read_roots,
             support_write_roots,
+            grant_candidate_ancestor_metadata: false,
         }
+    }
+
+    /// Owner-ratified 2026-09-25 (R1): opts this backend instance into the
+    /// narrow ancestor metadata/existence grant. Trusted composition calls
+    /// this only when building the backend for a candidate-input Runner
+    /// operation; it is never derived from caller input.
+    #[must_use]
+    pub fn with_candidate_ancestor_metadata_grant(mut self) -> Self {
+        self.grant_candidate_ancestor_metadata = true;
+        self
     }
 }
 
@@ -118,20 +140,41 @@ impl MacOsSeatbeltRunner {
         // never its ancestors — so a workspace/root nested several levels
         // under a narrow allowed subtree fails closed with a misleading
         // "Operation not permitted" even though the process only ever
-        // reads within its granted scope. Grant `file-read-metadata` and
-        // `file-test-existence` (stat/existence only — never directory
-        // contents or file data) on the exact ancestor chain of every
-        // workspace/root so that resolution succeeds without widening data
-        // access beyond the roots already explicitly granted above.
-        let mut ancestor_literals: Vec<PathBuf> = vec![workspace.to_path_buf()];
-        ancestor_literals.extend(read_roots.iter().cloned());
-        ancestor_literals.extend(write_roots.iter().cloned());
-        let mut ancestors: Vec<PathBuf> = ancestor_literals
-            .iter()
-            .flat_map(|path| path.ancestors().skip(1).map(Path::to_path_buf))
-            .collect();
-        ancestors.sort();
-        ancestors.dedup();
+        // reads within its granted scope.
+        //
+        // Owner-ratified 2026-09-25 (R1, ADR-0035 "Amendment 2026-09-25"):
+        // this grant applies only to candidate-input Runner launches
+        // (`grant_candidate_ancestor_metadata`, set only by trusted
+        // composition for Git-read/snapshot-write/evaluator-read-only
+        // operations) — never to provider/tool launches, which keep
+        // exactly main's behavior. Each ancestor is emitted as an exact
+        // `literal` (never `subpath`), granting `file-read-metadata` and
+        // `file-test-existence` only — stat/existence, never directory
+        // listing or file data — so a process can resolve its own
+        // absolute path without gaining any read of ancestor contents
+        // outside the roots already explicitly granted above.
+        let ancestors = if self.grant_candidate_ancestor_metadata {
+            let mut ancestor_sources: Vec<PathBuf> = vec![workspace.to_path_buf()];
+            ancestor_sources.extend(read_roots.iter().cloned());
+            ancestor_sources.extend(write_roots.iter().cloned());
+            for source in &ancestor_sources {
+                reject_unnormalized(source)?;
+            }
+            let mut ancestors: Vec<PathBuf> = ancestor_sources
+                .iter()
+                .flat_map(|path| path.ancestors().skip(1).map(Path::to_path_buf))
+                // The root `/` itself yields no literal: granting stat on
+                // the filesystem root is not meaningful ancestor-resolution
+                // authority and Apple's imported `system.sb` already covers
+                // it, so it is excluded rather than emitted redundantly.
+                .filter(|path| path != Path::new("/"))
+                .collect();
+            ancestors.sort();
+            ancestors.dedup();
+            ancestors
+        } else {
+            Vec::new()
+        };
 
         let mut profile = String::from(
             "(version 1)\n(deny default)\n(import \"system.sb\")\n(allow process-fork)\n",
@@ -243,6 +286,37 @@ fn checked_absolute(path: &Path) -> Result<&Path, RunnerError> {
     Ok(path)
 }
 
+/// R1(b): fails closed on any input whose ancestor chain could be
+/// ambiguous or escape-prone — a `..`/`.` component (never expected from
+/// an already-canonicalized source, but never trusted blindly here), a
+/// non-absolute path, or a doubled separator (`//`) that could make a
+/// naive ancestor walk disagree with the kernel's own resolution. Ancestor
+/// literals are computed only from paths that pass this check.
+fn reject_unnormalized(path: &Path) -> Result<(), RunnerError> {
+    let checked = checked_absolute(path)?;
+    let text = checked.to_str().ok_or(RunnerError::BackendUnavailable {
+        backend: "macOS Seatbelt requires UTF-8 paths",
+    })?;
+    if text.contains("//") {
+        return Err(RunnerError::BackendUnavailable {
+            backend: "macOS Seatbelt requires normalized ancestor source paths",
+        });
+    }
+    for component in checked.components() {
+        match component {
+            std::path::Component::RootDir | std::path::Component::Normal(_) => {}
+            std::path::Component::ParentDir
+            | std::path::Component::CurDir
+            | std::path::Component::Prefix(_) => {
+                return Err(RunnerError::BackendUnavailable {
+                    backend: "macOS Seatbelt requires normalized ancestor source paths",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn push_literal(profile: &mut String, path: &Path) -> Result<(), RunnerError> {
     let path = checked_absolute(path)?;
     profile.push_str("\n  (literal \"");
@@ -328,10 +402,7 @@ mod tests {
             )
         }
 
-        /// Builds the explicit isolation plan for one probe. Retained for
-        /// parity with isolation_contract.rs fixtures and future negative-path
-        /// assertions (TASK-SEC-R1). Not currently asserted on directly.
-        #[allow(dead_code)]
+        /// Builds the explicit isolation plan for one probe.
         fn plan(&self, executable: &Path, network: Option<&str>) -> IsolationPlan {
             let (effective, workspace, launch_executable) = self.authority(executable, network);
             IsolationPlan::compile(
@@ -617,6 +688,88 @@ mod tests {
                 .iter()
                 .all(|name| runner::CHILD_ENV_ALLOWLIST.contains(name)),
             "sandboxed child env exposed a non-allowlisted name: {observed}"
+        );
+    }
+
+    /// TASK-0144 R1(c) (owner-ratified 2026-09-25, adversarial, real
+    /// sandboxed child): mirrors `filesystem_scope_blocks_direct_and_symlink_escape`
+    /// for the candidate-input ancestor grant. `case.root` is the direct
+    /// parent of `case.workspace`, exactly the ancestor the grant covers:
+    /// stat succeeds, but listing the ancestor's entries and reading file
+    /// data placed directly in it (outside the authorized workspace
+    /// subtree) must both still fail.
+    #[test]
+    fn candidate_ancestor_grant_permits_stat_but_denies_listing_and_data() {
+        let case = Case::new("candidate-ancestor");
+        let secret = case.root.join("ancestor-secret.txt");
+        std::fs::write(&secret, b"secret").unwrap();
+
+        let backend = MacOsSeatbeltRunner::default().with_candidate_ancestor_metadata_grant();
+
+        let stat = run(
+            &backend,
+            &case,
+            Path::new("/usr/bin/stat"),
+            None,
+            &[case.root.to_str().unwrap()],
+        );
+        assert!(
+            stat.status.success(),
+            "a candidate launch must be able to stat an ancestor directory: {:?}",
+            String::from_utf8_lossy(&stat.stderr)
+        );
+
+        let listing = run(
+            &backend,
+            &case,
+            Path::new("/bin/ls"),
+            None,
+            &[case.root.to_str().unwrap()],
+        );
+        assert!(
+            !listing.status.success(),
+            "a candidate launch must not be able to list an ancestor directory's entries"
+        );
+
+        let data = run(
+            &backend,
+            &case,
+            Path::new("/usr/bin/head"),
+            None,
+            &["-c", "1", secret.to_str().unwrap()],
+        );
+        assert!(
+            !data.status.success(),
+            "a candidate launch must not read file data placed directly in an ancestor"
+        );
+    }
+
+    /// TASK-0144 R1(c) (owner-ratified 2026-09-25): a provider/tool launch
+    /// never opts into the ancestor grant — the emitted profile carries no
+    /// ancestor metadata rule at all, and behavior stays exactly what main
+    /// produces (ancestor stat denied).
+    #[test]
+    fn provider_launch_has_no_ancestor_grant_in_profile_or_behavior() {
+        let case = Case::new("provider-ancestor");
+        let backend = MacOsSeatbeltRunner::default();
+
+        let plan = case.plan(Path::new("/usr/bin/stat"), None);
+        let profile = backend.profile_for(&plan).expect("provider profile");
+        assert!(
+            !profile.contains("file-read-metadata"),
+            "a provider launch profile must carry no ancestor metadata grant: {profile}"
+        );
+
+        let stat = run(
+            &backend,
+            &case,
+            Path::new("/usr/bin/stat"),
+            None,
+            &[case.root.to_str().unwrap()],
+        );
+        assert!(
+            !stat.status.success(),
+            "a provider launch must not gain ancestor stat access (matches main)"
         );
     }
 }

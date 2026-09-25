@@ -131,19 +131,29 @@ enum ConfinementAuthVerdict {
 /// on the test host, which need not match production.
 #[cfg(target_os = "macos")]
 mod production_platform {
-    use super::{ConfinementAuthVerdict, IsolationBackend, PathBuf};
+    use super::{ConfinementAuthVerdict, IsolationBackend, PathBuf, RunnerLaunchPurpose};
     use std::sync::Arc;
 
     pub(super) fn runner_backend(
         support_read: Vec<PathBuf>,
         support_write: Vec<PathBuf>,
+        purpose: RunnerLaunchPurpose,
     ) -> Result<Arc<dyn IsolationBackend>, String> {
-        Ok(Arc::new(
-            runner_macos_seatbelt::MacOsSeatbeltRunner::with_support_roots(
-                support_read,
-                support_write,
-            ),
-        ))
+        let backend = runner_macos_seatbelt::MacOsSeatbeltRunner::with_support_roots(
+            support_read,
+            support_write,
+        );
+        let backend = match purpose {
+            // Owner-ratified 2026-09-25 (R1): only a candidate-input
+            // Runner launch (Git-read, snapshot-write, evaluator-read-
+            // only) gets the ancestor metadata/existence grant. This
+            // branch is the only place that decides it, from a compiled
+            // `RunnerLaunchPurpose` value this module's own call sites
+            // pass — never a caller/IPC string.
+            RunnerLaunchPurpose::CandidateInput => backend.with_candidate_ancestor_metadata_grant(),
+            RunnerLaunchPurpose::Provider => backend,
+        };
+        Ok(Arc::new(backend))
     }
 
     /// TASK-0112 measured the provider-owned macOS authentication path as
@@ -159,12 +169,13 @@ mod production_platform {
 
 #[cfg(not(target_os = "macos"))]
 mod production_platform {
-    use super::{ConfinementAuthVerdict, IsolationBackend, PathBuf};
+    use super::{ConfinementAuthVerdict, IsolationBackend, PathBuf, RunnerLaunchPurpose};
     use std::sync::Arc;
 
     pub(super) fn runner_backend(
         _support_read: Vec<PathBuf>,
         _support_write: Vec<PathBuf>,
+        _purpose: RunnerLaunchPurpose,
     ) -> Result<Arc<dyn IsolationBackend>, String> {
         Ok(Arc::new(runner_native::NativeRunner))
     }
@@ -176,11 +187,27 @@ mod production_platform {
         ConfinementAuthVerdict::NoMandatoryConfinement;
 }
 
+/// Owner-ratified 2026-09-25 (R1): which Runner surface a launch is for,
+/// decided only by this module's own trusted call sites — never derived
+/// from caller/IPC input. Governs whether the macOS Seatbelt backend
+/// grants the narrow ancestor metadata/existence read (candidate-input
+/// launches only; see ADR-0035 "Amendment 2026-09-25").
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RunnerLaunchPurpose {
+    /// Provider/tool process launches: exactly main's Seatbelt behavior,
+    /// no ancestor grant.
+    Provider,
+    /// Candidate-input Git-read, snapshot-write, or evaluator-read-only
+    /// launches: the narrow ancestor metadata/existence grant applies.
+    CandidateInput,
+}
+
 pub(crate) fn production_runner_backend(
     support_read: Vec<PathBuf>,
     support_write: Vec<PathBuf>,
+    purpose: RunnerLaunchPurpose,
 ) -> Result<Arc<dyn IsolationBackend>, String> {
-    production_platform::runner_backend(support_read, support_write)
+    production_platform::runner_backend(support_read, support_write, purpose)
 }
 
 /// Bound for server-local path inputs on the wire (repository paths).
@@ -674,7 +701,8 @@ pub(crate) fn prepare_provider_launch(
         }
     };
     let operation = PrivilegedOperation::from_policy_request(&launch.request);
-    let backend = production_runner_backend(support_read, support_write)?;
+    let backend =
+        production_runner_backend(support_read, support_write, RunnerLaunchPurpose::Provider)?;
     let environment = ChildEnvironment::from_explicit(environment_pairs)
         .map_err(|error| format!("G6 child environment refused: {error}"))?;
     let spec = ProcessSecuritySpec::new(
@@ -751,8 +779,11 @@ fn prepare_candidate_process(
     } else {
         ChildEnvironment::empty()
     };
-    let backend =
-        production_runner_backend(request.support_read.clone(), request.support_write.clone())?;
+    let backend = production_runner_backend(
+        request.support_read.clone(),
+        request.support_write.clone(),
+        RunnerLaunchPurpose::CandidateInput,
+    )?;
     let spec = ProcessSecuritySpec::new(
         workspace.clone(),
         executable_scope.clone(),
@@ -1048,19 +1079,18 @@ impl CandidateInputEvaluator {
         let candidate = self.verify_commit(&git_context, candidate_oid, object_format)?;
         let base_candidate =
             self.verify_commit(&git_context, &base.base_revision, object_format)?;
-        // The completion-gated public getter: `append_candidate_checkpoint`
-        // only accepts a `RestartReuse` checkpoint once a matching
-        // `Completion` checkpoint already exists (candidate_assessment_store.rs),
-        // so this reuse path is architecturally for re-evaluating an
-        // already-fully-completed attempt, never a bare RESULT_ADMITTED one.
-        // A retry before completion correctly falls through to a fresh
-        // evaluation below rather than reusing partial evidence; the
-        // RESULT_ADMITTED -> COMPLETE boundary's own restart-safety is
-        // `revalidate_candidate_completion`'s job (idempotent Completion
-        // checkpoint replay and operation-status `.or_else` recovery), not
-        // this evaluator entry point's.
+        // The completion-independent getter: it requires only the four
+        // pre-completion checkpoints, so it returns durable evidence for
+        // both a bare RESULT_ADMITTED row and a COMPLETE one. R2 (owner
+        // review 2026-09-25): re-invoking `evaluate()` while the operation
+        // is RESULT_ADMITTED must be a safe idempotent path — never the
+        // `StorageError::Corrupt` the completion-gated getter raises on a
+        // row that has not reached Completion yet.
         if let Some(evidence) = store
-            .get_candidate_evidence(request.execution_id.as_str(), request.attempt_id.as_str())
+            .get_candidate_evidence_for_completion(
+                request.execution_id.as_str(),
+                request.attempt_id.as_str(),
+            )
             .map_err(|error| format!("load prior candidate evidence: {error}"))?
         {
             let stored = &evidence.integrity;
@@ -1084,26 +1114,45 @@ impl CandidateInputEvaluator {
             {
                 return Err("durable candidate evidence binding changed; reuse refused".to_owned());
             }
-            let checkpoint = self.freshness_checkpoint(CandidateFreshnessRequest {
-                request,
-                invocation_id: &invocation_id,
-                root: &root,
-                anchor: &anchor,
-                candidate: &candidate,
-                format: object_format,
-                phase: evaluation::CandidateCheckpointPhase::RestartReuse,
-                started_at_ms: now_millis().min(stored.completed_at_ms),
-            })?;
-            if !checkpoint.matched {
-                return Err("candidate inputs changed; durable evidence reuse refused".to_owned());
-            }
-            store
-                .append_candidate_checkpoint(
+            let operation_status = store
+                .candidate_operation_status(
                     request.execution_id.as_str(),
                     request.attempt_id.as_str(),
-                    &checkpoint,
                 )
-                .map_err(|error| format!("persist candidate reuse checkpoint: {error}"))?;
+                .map_err(|error| format!("load candidate operation status: {error}"))?;
+            // Only a COMPLETE row's reuse is architecturally a "restart":
+            // `append_candidate_checkpoint` only accepts a `RestartReuse`
+            // checkpoint once a matching `Completion` checkpoint already
+            // exists. A RESULT_ADMITTED row (completion has not run yet)
+            // instead simply re-reports its already-admitted verdict below
+            // without touching checkpoints at all — "reuse admitted result
+            // pending completion revalidation" (R2) — and leaves the actual
+            // freshness re-check to whichever `revalidate_before_completion`
+            // call eventually runs.
+            if operation_status.as_deref() == Some("COMPLETE") {
+                let checkpoint = self.freshness_checkpoint(CandidateFreshnessRequest {
+                    request,
+                    invocation_id: &invocation_id,
+                    root: &root,
+                    anchor: &anchor,
+                    candidate: &candidate,
+                    format: object_format,
+                    phase: evaluation::CandidateCheckpointPhase::RestartReuse,
+                    started_at_ms: now_millis().min(stored.completed_at_ms),
+                })?;
+                if !checkpoint.matched {
+                    return Err(
+                        "candidate inputs changed; durable evidence reuse refused".to_owned()
+                    );
+                }
+                store
+                    .append_candidate_checkpoint(
+                        request.execution_id.as_str(),
+                        request.attempt_id.as_str(),
+                        &checkpoint,
+                    )
+                    .map_err(|error| format!("persist candidate reuse checkpoint: {error}"))?;
+            }
             return match evidence.effect.payload() {
                 evaluation::EffectPayload::TestSuiteResult {
                     passed: _, failed, ..
@@ -2859,45 +2908,62 @@ fn run_background_inner(
     let candidate_capture = effect_capture.clone();
     let cancel = cancel.clone();
     let environment_base = composition.provider_environment_base()?;
-    let snapshot_parent = db_path
-        .parent()
-        .ok_or_else(|| "candidate snapshot parent unavailable".to_owned())?
-        .join("candidate-input-snapshots");
-    std::fs::create_dir_all(&snapshot_parent)
-        .map_err(|_| "candidate snapshot authority root unavailable".to_owned())?;
-    let snapshot_metadata = std::fs::symlink_metadata(&snapshot_parent)
-        .map_err(|_| "candidate snapshot authority root unavailable".to_owned())?;
-    if snapshot_metadata.file_type().is_symlink() || !snapshot_metadata.is_dir() {
-        return Err("candidate snapshot authority root is not a real directory".to_owned());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if snapshot_metadata.permissions().mode() & 0o777 != 0o700 {
-            std::fs::set_permissions(&snapshot_parent, std::fs::Permissions::from_mode(0o700))
-                .map_err(|_| "candidate snapshot authority root cannot be secured".to_owned())?;
-        }
-    }
-    let snapshot_parent = snapshot_parent
-        .canonicalize()
-        .map_err(|_| "candidate snapshot authority root cannot be resolved".to_owned())?;
-    let candidate_evaluator = CandidateInputEvaluator {
-        db_path: db_path.clone(),
-        git_executable: composition
-            .git_executable
-            .as_ref()
-            .map_err(Clone::clone)?
-            .clone(),
-        snapshot_parent,
-        capture: candidate_capture,
-        evaluator_executable_override: composition.candidate_evaluator_executable_override.clone(),
-    };
-    let supports_candidate_input = storage_sqlite::SqliteStore::open(&db_path)
+    // R4 (owner review 2026-09-25): decide evaluator selection first,
+    // through the `OrchestrationService`'s own already-open store handle
+    // rather than opening a second `SqliteStore` connection just for this
+    // check — `SqliteStore::open` runs `verify_foreign_keys` and `migrate`
+    // on every call, real per-connection overhead this hot path paid on
+    // every single run regardless of whether it was candidate-input, which
+    // widened the window between a concluding attempt's DB commit and this
+    // cycle's live-owner release in `run_background`. The
+    // candidate-snapshot-authority filesystem setup below (create/verify/
+    // secure/canonicalize the snapshot directory) is real but comparatively
+    // cheap OS work; it is still skipped entirely for the common
+    // non-candidate case by gating it on the same check.
+    let supports_candidate_input = orchestration
+        .tasks()
+        .get_task(&work.task_id)
         .ok()
-        .and_then(|store| store.get_task(&work.task_id).ok().flatten())
+        .flatten()
         .is_some_and(|task| CandidateInputEvaluator::supports_task(&task));
     let selected_evaluator = if supports_candidate_input {
-        ProductionEvaluator::Candidate(candidate_evaluator)
+        let snapshot_parent = db_path
+            .parent()
+            .ok_or_else(|| "candidate snapshot parent unavailable".to_owned())?
+            .join("candidate-input-snapshots");
+        std::fs::create_dir_all(&snapshot_parent)
+            .map_err(|_| "candidate snapshot authority root unavailable".to_owned())?;
+        let snapshot_metadata = std::fs::symlink_metadata(&snapshot_parent)
+            .map_err(|_| "candidate snapshot authority root unavailable".to_owned())?;
+        if snapshot_metadata.file_type().is_symlink() || !snapshot_metadata.is_dir() {
+            return Err("candidate snapshot authority root is not a real directory".to_owned());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if snapshot_metadata.permissions().mode() & 0o777 != 0o700 {
+                std::fs::set_permissions(&snapshot_parent, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|_| {
+                        "candidate snapshot authority root cannot be secured".to_owned()
+                    })?;
+            }
+        }
+        let snapshot_parent = snapshot_parent
+            .canonicalize()
+            .map_err(|_| "candidate snapshot authority root cannot be resolved".to_owned())?;
+        ProductionEvaluator::Candidate(CandidateInputEvaluator {
+            db_path: db_path.clone(),
+            git_executable: composition
+                .git_executable
+                .as_ref()
+                .map_err(Clone::clone)?
+                .clone(),
+            snapshot_parent,
+            capture: candidate_capture,
+            evaluator_executable_override: composition
+                .candidate_evaluator_executable_override
+                .clone(),
+        })
     } else {
         ProductionEvaluator::Pending(PendingEvaluator)
     };
@@ -4569,7 +4635,8 @@ mod tests {
     #[test]
     fn production_confinement_and_provider_auth_verdict_stay_paired() {
         let backend =
-            production_runner_backend(Vec::new(), Vec::new()).expect("production backend");
+            production_runner_backend(Vec::new(), Vec::new(), RunnerLaunchPurpose::Provider)
+                .expect("production backend");
         let plan = runner::IsolationPlan::compile(
             &EffectiveCapabilities::new(vec![Capability::process("/usr/bin/true").unwrap()]),
             "/tmp",
@@ -5480,6 +5547,25 @@ mod tests {
     /// separately established accepted-plan binding is untouched: it is
     /// keyed by task id in its own table, not by requirement content.
     fn seed_candidate_ready(db: &Path, project: &str, task: &str, path: &str, literal: &str) {
+        seed_ready_with_requirement(
+            db,
+            project,
+            task,
+            candidate_requirement("criterion-candidate", path, literal),
+        );
+    }
+
+    /// Generalizes `seed_candidate_ready` over an arbitrary (possibly
+    /// malformed) `EvidenceRequirement`, so R3 can seed a Task whose
+    /// requirement names the candidate-input selector but fails
+    /// `CandidateSelector::from_requirement` (missing/extra param, wrong
+    /// selector value) and still reach the real production dispatch path.
+    fn seed_ready_with_requirement(
+        db: &Path,
+        project: &str,
+        task: &str,
+        requirement: task_domain::EvidenceRequirement,
+    ) {
         seed_ready_with_objective(db, project, task, format!("objective {task}"));
 
         let task_id = task_domain::TaskId::new(task).unwrap();
@@ -5498,13 +5584,11 @@ mod tests {
         if let Some(parent) = existing.parent() {
             replacement.set_parent(parent.clone()).unwrap();
         }
-        replacement.add_acceptance("criterion-candidate").unwrap();
         replacement
-            .define_evidence_requirements(vec![candidate_requirement(
-                "criterion-candidate",
-                path,
-                literal,
-            )])
+            .add_acceptance(requirement.criterion_id.clone())
+            .unwrap();
+        replacement
+            .define_evidence_requirements(vec![requirement])
             .unwrap();
         replacement.mark_ready().unwrap();
         tasks.store_mut().save_task(&replacement).unwrap();
@@ -5661,58 +5745,191 @@ mod tests {
         );
     }
 
-    /// TASK-0144 blockers (a)/(d): restart-safety at the durable boundary
-    /// between "trusted result admitted" and "Task completion", exercised
-    /// through the real `CandidateInputEvaluator`/`EvaluationPort` entry
-    /// points production uses — not a synthetic storage-only replay.
-    ///
-    /// The production cycle (`finish()` in `orchestration_service.rs`)
-    /// calls `evaluate()` then `revalidate_before_completion()` back to
-    /// back inside one Rust call with no externally triggerable pause in
-    /// between, so a literal process-kill mid-call cannot be injected from
-    /// a same-process test without OS-level fault injection this codebase
-    /// does not provide. This test instead drives Task/Execution/Attempt/
-    /// workspace state to exactly where a real cycle stands immediately
-    /// before evaluation — using the same public TaskService/RuntimeService
-    /// /WorkspaceService primitives `continue_workspace_cycle` itself calls
-    /// — then calls the evaluator's own methods directly and repeatedly,
-    /// simulating a daemon restart between phases with a fresh evaluator
-    /// instance each time. It proves: (1) a restarted evaluator that calls
-    /// `evaluate()` again on already-admitted evidence reuses it (appends
-    /// exactly one RestartReuse checkpoint) instead of re-running capture;
-    /// (2) `revalidate_before_completion()` is idempotent across a repeated
-    /// call, including through the same-subject Completion-checkpoint
-    /// replay path in `candidate_assessment_store.rs`; and (3) once the
-    /// candidate commit changes underneath (tamper), further reuse is
-    /// refused and a durable typed outcome is persisted — never a silent
-    /// re-verification.
+    /// TASK-0144 R3 (owner review 2026-09-25): a Task whose requirement
+    /// names the candidate-input selector but has malformed params
+    /// (missing, extra, or a wrong selector value) must never reach
+    /// `Verified` through the real production evaluator-selection wiring
+    /// (`run_background_inner`'s `CandidateInputEvaluator::supports_task`
+    /// check feeding `ProductionEvaluator`) — it must stay on exactly the
+    /// same pending/manual path a Task on `main` (which has no candidate
+    /// evaluator at all) follows: `supports_task` returns `false`,
+    /// `ProductionEvaluator::Pending` is selected, `PendingEvaluator`
+    /// always errors "no automated verifier", and the Task is left at
+    /// `Verifying` forever — never a false `Completed`, never any
+    /// candidate-input durable evidence at all.
     #[test]
-    fn candidate_evaluator_restart_reuse_is_idempotent_and_tamper_is_refused() {
-        let sandbox = Sandbox::named("candidate-restart");
+    fn malformed_candidate_requirement_never_verifies_through_production_wiring() {
+        for (label, requirement) in [
+            (
+                "missing_literal_param",
+                task_domain::EvidenceRequirement::new(
+                    "criterion-malformed",
+                    task_domain::RequirementKind::TestSuite,
+                    task_domain::SubjectBinding::ContentToolchainAndConfig,
+                    vec![
+                        task_domain::RequirementParam::new(
+                            "selector",
+                            "candidate.file-contains.v1",
+                        )
+                        .unwrap(),
+                        task_domain::RequirementParam::new("path", "src/example.rs").unwrap(),
+                    ],
+                    Some(format!("sha256:{}", "7".repeat(64))),
+                    true,
+                )
+                .unwrap(),
+            ),
+            (
+                "extra_unreviewed_param",
+                task_domain::EvidenceRequirement::new(
+                    "criterion-malformed",
+                    task_domain::RequirementKind::TestSuite,
+                    task_domain::SubjectBinding::ContentToolchainAndConfig,
+                    vec![
+                        task_domain::RequirementParam::new(
+                            "selector",
+                            "candidate.file-contains.v1",
+                        )
+                        .unwrap(),
+                        task_domain::RequirementParam::new("path", "src/example.rs").unwrap(),
+                        task_domain::RequirementParam::new("literal", "fn accepted()").unwrap(),
+                        task_domain::RequirementParam::new("unreviewed", "x").unwrap(),
+                    ],
+                    Some(format!("sha256:{}", "7".repeat(64))),
+                    true,
+                )
+                .unwrap(),
+            ),
+            (
+                "wrong_selector_value",
+                task_domain::EvidenceRequirement::new(
+                    "criterion-malformed",
+                    task_domain::RequirementKind::TestSuite,
+                    task_domain::SubjectBinding::ContentToolchainAndConfig,
+                    vec![
+                        task_domain::RequirementParam::new(
+                            "selector",
+                            "candidate.unreviewed-selector.v1",
+                        )
+                        .unwrap(),
+                        task_domain::RequirementParam::new("path", "src/example.rs").unwrap(),
+                        task_domain::RequirementParam::new("literal", "fn accepted()").unwrap(),
+                    ],
+                    Some(format!("sha256:{}", "7".repeat(64))),
+                    true,
+                )
+                .unwrap(),
+            ),
+        ] {
+            let sandbox = Sandbox::named(&format!("candidate-malformed-{label}"));
+            std::fs::create_dir_all(sandbox.repo.join("src")).unwrap();
+            std::fs::write(sandbox.repo.join("src/example.rs"), b"fn accepted() {}\n").unwrap();
+            git(&sandbox.repo, &["add", "src/example.rs"]);
+            git(&sandbox.repo, &["commit", "-q", "-m", "candidate content"]);
+
+            let task = format!("T-CANDIDATE-MALFORMED-{}", label.to_ascii_uppercase());
+            seed_ready_with_requirement(
+                &sandbox.db,
+                &format!("P-CANDIDATE-MALFORMED-{}", label.to_ascii_uppercase()),
+                &task,
+                requirement,
+            );
+
+            let fixture = fixture_script(
+                &sandbox.dir,
+                "success.sh",
+                "printf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"candidate content ready\",\"session_id\":\"22222222-2222-2222-2222-222222222222\"}'; exit 0\n",
+            );
+            let composition =
+                sandbox
+                    .composition(Some(fixture))
+                    .with_candidate_evaluator_executable_override(
+                        candidate_test_evaluator_executable(),
+                    );
+            let (response, job) = run_via_dispatch(&composition, run_request(&task, &sandbox.repo));
+            let run = run_payload(&response);
+            run_background(job.expect("accepted run yields a background job"));
+
+            let store = storage_sqlite::SqliteStore::open(&sandbox.db).expect("open store");
+            let stored_task = store
+                .get_task(&task_domain::TaskId::new(&task).unwrap())
+                .unwrap()
+                .expect("task exists");
+            assert_eq!(
+                stored_task.state(),
+                TaskState::Verifying,
+                "[{label}] a malformed candidate requirement must never verify; the Task must stay \
+                 on the pending/manual path exactly like main"
+            );
+            let execution_id = ExecutionId::new(run.execution_id.as_str()).unwrap();
+            let attempt_id = agent_runtime::AttemptId::new(run.attempt_id.as_str()).unwrap();
+            assert_eq!(
+                store
+                    .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                    .unwrap(),
+                None,
+                "[{label}] a malformed requirement must never route through the candidate \
+                 evaluator at all (supports_task() must be false), so no candidate operation \
+                 row is ever created"
+            );
+            assert!(
+                store
+                    .get_candidate_evidence(execution_id.as_str(), attempt_id.as_str())
+                    .unwrap()
+                    .is_none(),
+                "[{label}] no candidate-input durable evidence may exist for a malformed requirement"
+            );
+        }
+    }
+
+    /// Shared scaffolding for the restart/idempotency/no-regression tests
+    /// below: a real Task/Execution/Attempt/linked-worktree reaching
+    /// exactly the state a production cycle stands in immediately before
+    /// evaluation, built through the same public TaskService/
+    /// RuntimeService/WorkspaceService primitives `continue_workspace_cycle`
+    /// itself calls (never `dispatch_execution`/`run_background`, so the
+    /// caller can drive the evaluator's own methods directly and
+    /// repeatedly, simulating a daemon restart between phases with a fresh
+    /// evaluator instance each time).
+    struct CandidateRestartFixture {
+        sandbox: Sandbox,
+        request: EvaluationRequest,
+        lease: workspace::WorkspaceLease,
+    }
+
+    fn setup_candidate_restart_fixture(
+        suite: &str,
+        project: &str,
+        task: &str,
+        execution: &str,
+        attempt: &str,
+    ) -> CandidateRestartFixture {
+        let sandbox = Sandbox::named(suite);
         std::fs::create_dir_all(sandbox.repo.join("src")).unwrap();
         std::fs::write(sandbox.repo.join("src/example.rs"), b"fn accepted() {}\n").unwrap();
         git(&sandbox.repo, &["add", "src/example.rs"]);
         git(&sandbox.repo, &["commit", "-q", "-m", "candidate content"]);
 
-        let project_id = task_domain::ProjectId::new("P-CANDIDATE-RESTART").unwrap();
-        let task_id = task_domain::TaskId::new("T-CANDIDATE-RESTART").unwrap();
-        let execution_id = ExecutionId::new("E-CANDIDATE-RESTART").unwrap();
-        let attempt_id = agent_runtime::AttemptId::new("A-CANDIDATE-RESTART").unwrap();
+        let project_id = task_domain::ProjectId::new(project).unwrap();
+        let task_id = task_domain::TaskId::new(task).unwrap();
+        let execution_id = ExecutionId::new(execution).unwrap();
+        let attempt_id = agent_runtime::AttemptId::new(attempt).unwrap();
 
         let mut tasks = app_services::TaskService::open(&sandbox.db, app_services::SystemClock)
             .expect("open task service");
         tasks
             .create_project(
-                &task_domain::Project::new(project_id.clone(), "candidate restart project")
+                &task_domain::Project::new(project_id.clone(), format!("{project} project"))
                     .unwrap(),
             )
             .unwrap();
+        let criterion = format!("criterion-{task}");
         let mut built =
             task_domain::Task::draft(task_id.clone(), project_id, "prove restart safety").unwrap();
-        built.add_acceptance("criterion-restart").unwrap();
+        built.add_acceptance(&criterion).unwrap();
         built
             .define_evidence_requirements(vec![candidate_requirement(
-                "criterion-restart",
+                &criterion,
                 "src/example.rs",
                 "fn accepted()",
             )])
@@ -5747,7 +5964,8 @@ mod tests {
         let ensured = workspace
             .ensure_workspace_ready(&app_services::WorkspaceRequest {
                 execution_id: execution_id.clone(),
-                repository_ref: workspace::RepositoryRef::new("repo-local:restart").unwrap(),
+                repository_ref: workspace::RepositoryRef::new(format!("repo-local:{suite}"))
+                    .unwrap(),
                 repository_path: sandbox.repo.to_string_lossy().into_owned(),
                 base_revision: "HEAD".to_owned(),
             })
@@ -5769,26 +5987,71 @@ mod tests {
         tasks.bind_evaluated_policy_base(&execution_id).unwrap();
 
         let request = EvaluationRequest {
-            task_id: task_id.clone(),
-            execution_id: execution_id.clone(),
-            attempt_id: attempt_id.clone(),
+            task_id,
+            execution_id,
+            attempt_id,
             summary: "fixture summary".to_owned(),
             evidence_ref: "fixture-evidence".to_owned(),
         };
+        CandidateRestartFixture {
+            sandbox,
+            request,
+            lease: ensured.lease,
+        }
+    }
+
+    fn candidate_restart_evaluator(fixture: &CandidateRestartFixture) -> CandidateInputEvaluator {
         let evaluator = CandidateInputEvaluator {
-            db_path: sandbox.db.clone(),
+            db_path: fixture.sandbox.db.clone(),
             git_executable: candidate_test_git_executable(),
-            snapshot_parent: sandbox.dir.join("candidate-input-snapshots"),
+            snapshot_parent: fixture.sandbox.dir.join("candidate-input-snapshots"),
             capture: effect_capture_local::LocalEffectCapture::default(),
             evaluator_executable_override: Some(candidate_test_evaluator_executable()),
         };
         std::fs::create_dir_all(&evaluator.snapshot_parent).unwrap();
+        evaluator
+    }
+
+    /// TASK-0144 blockers (a)/(d): restart-safety at the durable boundary
+    /// between "trusted result admitted" and "Task completion", exercised
+    /// through the real `CandidateInputEvaluator`/`EvaluationPort` entry
+    /// points production uses — not a synthetic storage-only replay.
+    ///
+    /// The production cycle (`finish()` in `orchestration_service.rs`)
+    /// calls `evaluate()` then `revalidate_before_completion()` back to
+    /// back inside one Rust call with no externally triggerable pause in
+    /// between, so a literal process-kill mid-call cannot be injected from
+    /// a same-process test without OS-level fault injection this codebase
+    /// does not provide; see `setup_candidate_restart_fixture` for how this
+    /// drives the evaluator's own methods directly instead. It proves:
+    /// (1) `revalidate_before_completion()` is idempotent across a
+    /// repeated call, including through the same-subject Completion-
+    /// checkpoint replay path in `candidate_assessment_store.rs`; (2) once
+    /// Completion is durable, a further `evaluate()` validly reuses the
+    /// sealed evidence (exactly one RestartReuse checkpoint) instead of
+    /// re-running capture; and (3) once the candidate commit changes
+    /// underneath (tamper) *after* completion, `evaluate()` refuses to
+    /// reuse it and — per R2 (owner review 2026-09-25) — the durable
+    /// `COMPLETE` status is never regressed by that later failure; the
+    /// failure is journaled in `status_history` instead.
+    #[test]
+    fn candidate_evaluator_restart_reuse_is_idempotent_and_tamper_is_refused() {
+        let fixture = setup_candidate_restart_fixture(
+            "candidate-restart",
+            "P-CANDIDATE-RESTART",
+            "T-CANDIDATE-RESTART",
+            "E-CANDIDATE-RESTART",
+            "A-CANDIDATE-RESTART",
+        );
+        let execution_id = fixture.request.execution_id.clone();
+        let attempt_id = fixture.request.attempt_id.clone();
+        let evaluator = candidate_restart_evaluator(&fixture);
 
         let verdict = evaluator
-            .evaluate(&request)
+            .evaluate(&fixture.request)
             .expect("the real production evaluator admits durable evidence");
         assert_eq!(verdict, EvaluationVerdict::Verified);
-        let store = storage_sqlite::SqliteStore::open(&sandbox.db).expect("open store");
+        let store = storage_sqlite::SqliteStore::open(&fixture.sandbox.db).expect("open store");
         assert_eq!(
             store
                 .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
@@ -5804,25 +6067,10 @@ mod tests {
         assert_eq!(admitted.integrity.checkpoints.len(), 4);
 
         // -- simulated restart: a fresh evaluator instance (new process)
-        // revalidates and completes. Restart-safety at the RESULT_ADMITTED
-        // -> COMPLETE boundary is `revalidate_before_completion`'s job
-        // (idempotent Completion-checkpoint replay plus the operation-
-        // status `.or_else` recovery below), not `evaluate()`'s reuse
-        // branch: `append_candidate_checkpoint` only accepts a
-        // `RestartReuse` checkpoint once a matching `Completion` checkpoint
-        // already exists, so `evaluate()` re-entry only ever reuses an
-        // already-fully-completed attempt, never a bare RESULT_ADMITTED one
-        // (a retry before completion correctly falls through to a fresh
-        // evaluation instead).
-        let restarted = CandidateInputEvaluator {
-            db_path: sandbox.db.clone(),
-            git_executable: candidate_test_git_executable(),
-            snapshot_parent: sandbox.dir.join("candidate-input-snapshots"),
-            capture: effect_capture_local::LocalEffectCapture::default(),
-            evaluator_executable_override: Some(candidate_test_evaluator_executable()),
-        };
+        // revalidates and completes.
+        let restarted = candidate_restart_evaluator(&fixture);
         restarted
-            .revalidate_before_completion(&request)
+            .revalidate_before_completion(&fixture.request)
             .expect("completion revalidation succeeds after restart");
         assert_eq!(
             store
@@ -5834,7 +6082,7 @@ mod tests {
         // Idempotent replay across a simulated crash immediately after
         // Completion persisted but before the caller observed success.
         restarted
-            .revalidate_before_completion(&request)
+            .revalidate_before_completion(&fixture.request)
             .expect("a repeated completion revalidation on the same subject is idempotent");
         assert_eq!(
             store
@@ -5850,7 +6098,7 @@ mod tests {
         // evidence instead of re-running capture, appending exactly one
         // RestartReuse checkpoint.
         let reuse_verdict = restarted
-            .evaluate(&request)
+            .evaluate(&fixture.request)
             .expect("re-evaluating an already-completed attempt reuses durable evidence");
         assert_eq!(reuse_verdict, EvaluationVerdict::Verified);
         let reused = store
@@ -5865,32 +6113,135 @@ mod tests {
 
         // -- tamper/mismatch negative: HEAD moves in the linked worktree
         // after durable evidence was sealed --
-        let worktree = PathBuf::from(ensured.lease.worktree_ref());
+        let worktree = PathBuf::from(fixture.lease.worktree_ref());
         std::fs::write(worktree.join("src/example.rs"), b"fn tampered() {}\n").unwrap();
         git(
             &worktree,
             &["commit", "-aq", "-m", "tamper after admission"],
         );
 
-        let tampered = restarted.evaluate(&request);
+        let tampered = restarted.evaluate(&fixture.request);
         assert!(
             tampered.is_err(),
             "a changed candidate commit must never silently reuse a prior successful verdict"
         );
+        // R2 (owner review 2026-09-25, MAJOR): a failure classified from a
+        // later, tampered re-entry must never regress an already-COMPLETE
+        // row — it is journaled in status_history instead.
         let status_after_tamper = store
             .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
             .unwrap();
-        assert!(
-            matches!(
-                status_after_tamper.as_deref(),
-                Some("MISMATCH") | Some("BLOCKED") | Some("TAMPERED")
-            ),
-            "the tamper refusal must persist a durable typed outcome, got {status_after_tamper:?}"
-        );
-        assert_ne!(
+        assert_eq!(
             status_after_tamper.as_deref(),
             Some("COMPLETE"),
-            "a tampered candidate must never be reported as durably completed"
+            "a failure after COMPLETE must never regress the durable status"
+        );
+        let history_after_tamper = store
+            .candidate_operation_history(execution_id.as_str(), attempt_id.as_str())
+            .unwrap()
+            .unwrap();
+        assert!(
+            history_after_tamper.contains("BLOCKED") || history_after_tamper.contains("MISMATCH"),
+            "the tamper refusal must still be durably journaled, got {history_after_tamper:?}"
+        );
+    }
+
+    /// TASK-0144 R2 (owner review 2026-09-25, MAJOR): the crash-window
+    /// deadlock the review flagged — re-invoking `evaluate()` while the
+    /// operation is RESULT_ADMITTED (before completion) must be a safe
+    /// idempotent path, and a failure classified after RESULT_ADMITTED
+    /// must never regress it — exercised through the real
+    /// `CandidateInputEvaluator` entry point, not only store calls.
+    /// "Completion then succeeds exactly once" is covered by
+    /// `candidate_evaluator_restart_reuse_is_idempotent_and_tamper_is_refused`'s
+    /// single `revalidate_before_completion` -> COMPLETE transition; this
+    /// test focuses on the RESULT_ADMITTED window itself.
+    #[test]
+    fn candidate_evaluator_result_admitted_retry_is_idempotent_and_never_regresses() {
+        let fixture = setup_candidate_restart_fixture(
+            "candidate-cas",
+            "P-CANDIDATE-CAS",
+            "T-CANDIDATE-CAS",
+            "E-CANDIDATE-CAS",
+            "A-CANDIDATE-CAS",
+        );
+        let execution_id = fixture.request.execution_id.clone();
+        let attempt_id = fixture.request.attempt_id.clone();
+        let evaluator = candidate_restart_evaluator(&fixture);
+
+        let first = evaluator
+            .evaluate(&fixture.request)
+            .expect("first evaluate admits durable evidence");
+        assert_eq!(first, EvaluationVerdict::Verified);
+        let store = storage_sqlite::SqliteStore::open(&fixture.sandbox.db).expect("open store");
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("RESULT_ADMITTED")
+        );
+        let after_first = store
+            .get_candidate_evidence_for_completion(execution_id.as_str(), attempt_id.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_first.integrity.checkpoints.len(), 4);
+
+        // (i) Re-invoking evaluate() with no completion in between, and no
+        // change to the subject, is a safe idempotent no-op: it neither
+        // errors nor corrupts state (previously this hit
+        // `StorageError::Corrupt` from the completion-gated getter).
+        let second = evaluator
+            .evaluate(&fixture.request)
+            .expect("re-invoking evaluate() before completion must be idempotent, not Corrupt");
+        assert_eq!(second, EvaluationVerdict::Verified);
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("RESULT_ADMITTED"),
+            "an idempotent pre-completion retry must not change the durable status"
+        );
+        let after_second = store
+            .get_candidate_evidence_for_completion(execution_id.as_str(), attempt_id.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after_second.integrity.checkpoints.len(),
+            4,
+            "an idempotent pre-completion retry must not append a checkpoint or re-run capture"
+        );
+
+        // (ii) A failure classified after RESULT_ADMITTED must never
+        // downgrade it: tamper the worktree (still before completion) and
+        // re-invoke the real evaluator entry point again.
+        let worktree = PathBuf::from(fixture.lease.worktree_ref());
+        std::fs::write(worktree.join("src/example.rs"), b"fn tampered() {}\n").unwrap();
+        git(
+            &worktree,
+            &["commit", "-aq", "-m", "tamper before completion"],
+        );
+        let tampered = evaluator.evaluate(&fixture.request);
+        assert!(
+            tampered.is_err(),
+            "a changed candidate commit must never be silently reused"
+        );
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("RESULT_ADMITTED"),
+            "a failure classified after RESULT_ADMITTED must never regress the durable status"
+        );
+        let history = store
+            .candidate_operation_history(execution_id.as_str(), attempt_id.as_str())
+            .unwrap()
+            .unwrap();
+        assert!(
+            history.contains("BLOCKED") || history.contains("MISMATCH"),
+            "the failure must still be durably journaled in status_history, got {history:?}"
         );
     }
 

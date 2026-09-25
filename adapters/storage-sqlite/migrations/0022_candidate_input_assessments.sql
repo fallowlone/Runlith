@@ -59,3 +59,17 @@ CREATE TABLE candidate_input_operations (
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= started_at_ms),
     PRIMARY KEY(execution_id, attempt_id)
 );
+-- R2 (owner review 2026-09-25, MAJOR): DB-level backstop for the
+-- application-layer compare-and-swap guards in candidate_assessment_store.rs
+-- (update_candidate_operation_status, record_candidate_operation_failure).
+-- No writer — present or future — may regress status away from
+-- RESULT_ADMITTED or COMPLETE once reached; a crash-window failure must be
+-- journaled (status_history) without state regression, never silently
+-- overwrite an already-admitted or already-completed row.
+CREATE TRIGGER candidate_input_operations_status_no_regression
+BEFORE UPDATE OF status ON candidate_input_operations
+WHEN OLD.status IN ('RESULT_ADMITTED', 'COMPLETE')
+    AND NEW.status NOT IN ('RESULT_ADMITTED', 'COMPLETE')
+BEGIN
+    SELECT RAISE(ABORT, 'candidate operation status must not regress from RESULT_ADMITTED or COMPLETE');
+END;

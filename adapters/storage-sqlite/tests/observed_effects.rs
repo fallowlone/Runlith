@@ -514,6 +514,118 @@ fn candidate_mismatch_and_blocked_operation_statuses_survive_restart() {
     }
 }
 
+/// TASK-0144 R2 (owner review 2026-09-25, MAJOR): `record_candidate_operation_failure`
+/// must never regress a durable `RESULT_ADMITTED` or `COMPLETE` row — the
+/// prior unconditional `UPDATE` could downgrade either into a failure
+/// status. Exercises the storage-layer compare-and-swap guard and its
+/// DB-level trigger backstop (`candidate_input_operations_status_no_regression`,
+/// migration 0022) directly, complementing the real-evaluator coverage in
+/// `bins/agentd/src/execution.rs`.
+#[test]
+fn candidate_operation_failure_never_regresses_result_admitted_or_complete() {
+    for terminal in ["RESULT_ADMITTED", "COMPLETE"] {
+        let db = TestDb::new(&format!("candidate-no-regression-{terminal}"));
+        let mut store = db.open();
+        let (execution, attempt) = seed_runtime(&mut store);
+        store
+            .record_candidate_selection(
+                "T-EFFECT",
+                execution.as_str(),
+                attempt.as_str(),
+                &format!("candidate-no-regression-{terminal}"),
+                &"1".repeat(40),
+                &"3".repeat(40),
+                &format!("sha256:{}", "b".repeat(64)),
+                1,
+                &format!("sha256:{}", "c".repeat(64)),
+                "criterion-1",
+                "candidate.file-contains.v1",
+                "src/main.rs",
+                "accepted",
+                10,
+            )
+            .unwrap();
+        store
+            .update_candidate_operation_status(
+                execution.as_str(),
+                attempt.as_str(),
+                "PENDING",
+                "RESULT_ADMITTED",
+                None,
+                11,
+            )
+            .unwrap();
+        if terminal == "COMPLETE" {
+            store
+                .update_candidate_operation_status(
+                    execution.as_str(),
+                    attempt.as_str(),
+                    "RESULT_ADMITTED",
+                    "COMPLETE",
+                    None,
+                    12,
+                )
+                .unwrap();
+        }
+
+        // A failure classified after reaching the terminal state must not
+        // change `status`, but must still succeed (journaling the failure)
+        // rather than erroring.
+        store
+            .record_candidate_operation_failure(
+                execution.as_str(),
+                attempt.as_str(),
+                "MISMATCH",
+                "late-failure-must-not-regress",
+                13,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .candidate_operation_status(execution.as_str(), attempt.as_str())
+                .unwrap()
+                .as_deref(),
+            Some(terminal),
+            "a failure after {terminal} must not regress the durable status"
+        );
+        let history = store
+            .candidate_operation_history(execution.as_str(), attempt.as_str())
+            .unwrap()
+            .unwrap();
+        assert!(
+            history.contains("late-failure-must-not-regress"),
+            "the failure must still be journaled: {history:?}"
+        );
+
+        // The DB-level trigger is a backstop against any writer that
+        // bypasses the guarded store methods: a raw UPDATE regressing
+        // status away from a terminal state must itself fail. A separate
+        // raw connection is used because `SqliteStore::connection` is
+        // crate-private.
+        drop(store);
+        let raw_connection = rusqlite::Connection::open(&db.path).unwrap();
+        let raw = raw_connection.execute(
+            "UPDATE candidate_input_operations SET status = 'BLOCKED' \
+             WHERE execution_id = ?1 AND attempt_id = ?2",
+            rusqlite::params![execution.as_str(), attempt.as_str()],
+        );
+        assert!(
+            raw.is_err(),
+            "a raw UPDATE regressing {terminal} must be rejected by the DB trigger"
+        );
+        drop(raw_connection);
+        let store = db.open();
+        assert_eq!(
+            store
+                .candidate_operation_status(execution.as_str(), attempt.as_str())
+                .unwrap()
+                .as_deref(),
+            Some(terminal),
+            "a rejected raw UPDATE must leave the durable status unchanged"
+        );
+    }
+}
+
 #[test]
 fn concurrent_writers_allocate_distinct_effect_ids_atomically() {
     let db = TestDb::new("atomic-id");
