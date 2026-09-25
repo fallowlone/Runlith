@@ -421,7 +421,21 @@ storage error, and a Task or attempt not in the evaluatable state. The
 same applies to the snapshot-write, evaluator and snapshot-removal
 launches, which are not integrity checks; the evaluator's reported result
 is still checked as an integrity signal. Admitted evidence survives a
-transient failure and an idempotent retry stays safe. Owner decision
+transient failure and an idempotent retry stays safe.
+
+The live worktree scan (freshness observation B) authorizes entry names
+selected and iterated by a filesystem scanner, not fixed trusted names:
+those names are attacker-controlled. Any G6 authorization, audit schema
+failure or storage failure during that scan (including failures from
+unauditable names that cannot pass the security-audit CHECK constraints)
+is treated as a content failure and becomes an integrity signal.
+Unauditable names (e.g. paths that trim to empty) are rejected during
+capability formation itself, before any scan. Infrastructure classification
+of G6 failures applies only to checks that authorize fixed, trusted names:
+the authenticating reads of worktree pointer, linked metadata back-reference,
+and Git common-dir path.
+
+Owner decision
 2026-09-25, following an adversarial re-review.
 
 **Special files.** Descriptor-relative reads open entries non-blocking, so a
