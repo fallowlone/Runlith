@@ -373,6 +373,11 @@ pub struct ExecutionComposition {
     /// Canonical Git executable resolved once when the daemon composition is
     /// built. A poisoned later PATH cannot redirect privileged Git work.
     git_executable: Result<PathBuf, String>,
+    /// Canonical Git executable for candidate-input plumbing reads only.
+    /// On macOS, resolves to Apple's toolchain locations and rejects symlink
+    /// redirection. On other platforms, falls back to PATH resolution since
+    /// candidate input is unsupported there.
+    candidate_git_executable: Result<PathBuf, String>,
     /// Composition-owned provider executable override. `None` resolves
     /// `claude` via `PATH`; `Some` points at an explicit binary (tests
     /// inject fixture doubles). Never client-supplied — no IPC field
@@ -397,6 +402,7 @@ impl ExecutionComposition {
             cancels: CancelRegistry::fresh(),
             tracker: provider_claude::LiveProcessTracker::fresh(),
             git_executable: resolve_git_executable(),
+            candidate_git_executable: resolve_candidate_git_executable(),
             provider_executable,
             candidate_evaluator_executable_override: None,
         }
@@ -463,6 +469,75 @@ fn resolve_git_executable() -> Result<PathBuf, String> {
         return Err("git executable is not a regular file".to_owned());
     }
     Ok(executable)
+}
+
+/// ADR-0035 pinned trusted Git for candidate-input plumbing reads.
+/// Resolves a Git executable from a list of candidate paths, rejecting
+/// symlink redirection and requiring each candidate to be a regular file
+/// within its own install prefix. This ensures candidate Git reads use
+/// a trusted, pinned executable regardless of PATH or sandbox state.
+#[allow(dead_code)]
+fn resolve_pinned_git(candidates: &[&Path]) -> Result<PathBuf, String> {
+    for candidate in candidates {
+        // Must be metadata-accessible and resolve to a regular file.
+        if std::fs::symlink_metadata(candidate).is_err() {
+            continue;
+        }
+
+        let canonical = match std::fs::canonicalize(candidate) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        if !canonical.is_file() {
+            continue;
+        }
+
+        // Reject symlink redirection: canonical path must equal the
+        // candidate's filename joined to its parent's canonical path.
+        let candidate_parent = match candidate.parent() {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let canonical_parent = match candidate_parent.canonicalize() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        let expected_canonical = match candidate.file_name() {
+            Some(name) => canonical_parent.join(name),
+            None => continue,
+        };
+
+        if canonical == expected_canonical {
+            return Ok(canonical);
+        }
+    }
+
+    Err("no pinned trusted Git executable is available for candidate-input reads".to_owned())
+}
+
+/// Platform-specific resolver for candidate Git executable.
+/// On macOS, restricts to Apple's toolchain locations and rejects symlink
+/// redirection. On other platforms, falls back to PATH resolution since
+/// candidate input is unsupported there and the candidate Seatbelt
+/// restriction does not apply.
+fn resolve_candidate_git_executable() -> Result<PathBuf, String> {
+    #[cfg(target_os = "macos")]
+    {
+        resolve_pinned_git(&[
+            Path::new("/Library/Developer/CommandLineTools/usr/bin/git"),
+            Path::new("/Applications/Xcode.app/Contents/Developer/usr/bin/git"),
+        ])
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Candidate-input Git reads are unsupported off macOS. Keep the
+        // prior PATH-resolved behavior to avoid breaking non-candidate
+        // operations on platforms where candidate evaluation is unavailable.
+        resolve_git_executable()
+    }
 }
 
 /// Shared handle type for the serve loop.
@@ -3002,7 +3077,7 @@ fn run_background_inner(
         ProductionEvaluator::Candidate(CandidateInputEvaluator {
             db_path: db_path.clone(),
             git_executable: composition
-                .git_executable
+                .candidate_git_executable
                 .as_ref()
                 .map_err(Clone::clone)?
                 .clone(),
@@ -6332,5 +6407,145 @@ mod tests {
         );
         let inconsistent = result.replace("passed=1\nfailed=0", "passed=1\nfailed=1");
         assert!(parse_candidate_result(inconsistent.as_bytes(), &manifest).is_err());
+    }
+
+    #[test]
+    fn resolve_pinned_git_first_existing_candidate_wins() {
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let test_dir = std::env::temp_dir().join(format!(
+            "runlith-pinned-git-first-{id}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).expect("test dir");
+
+        let git1 = test_dir.join("git1");
+        let git2 = test_dir.join("git2");
+
+        std::fs::write(&git1, b"#!/bin/sh\necho git1\n").expect("git1 file");
+        std::fs::write(&git2, b"#!/bin/sh\necho git2\n").expect("git2 file");
+
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&git1, std::fs::Permissions::from_mode(0o755))
+            .expect("git1 chmod");
+        std::fs::set_permissions(&git2, std::fs::Permissions::from_mode(0o755))
+            .expect("git2 chmod");
+
+        let result = resolve_pinned_git(&[git1.as_path(), git2.as_path()]);
+        assert!(result.is_ok(), "first existing candidate should succeed");
+        let path = result.unwrap();
+        assert_eq!(path, git1, "first candidate should win");
+
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn resolve_pinned_git_falls_through_missing_first_candidate() {
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let test_dir = std::env::temp_dir().join(format!(
+            "runlith-pinned-git-missing-{id}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).expect("test dir");
+
+        let git1 = test_dir.join("missing");
+        let git2 = test_dir.join("git2");
+
+        std::fs::write(&git2, b"#!/bin/sh\necho git2\n").expect("git2 file");
+
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&git2, std::fs::Permissions::from_mode(0o755))
+            .expect("git2 chmod");
+
+        let result = resolve_pinned_git(&[git1.as_path(), git2.as_path()]);
+        assert!(
+            result.is_ok(),
+            "missing first candidate should fall through"
+        );
+        let path = result.unwrap();
+        assert_eq!(
+            path, git2,
+            "second candidate should be used when first missing"
+        );
+
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn resolve_pinned_git_none_present_returns_error() {
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let test_dir = std::env::temp_dir().join(format!(
+            "runlith-pinned-git-none-{id}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).expect("test dir");
+
+        let git1 = test_dir.join("missing1");
+        let git2 = test_dir.join("missing2");
+
+        let result = resolve_pinned_git(&[git1.as_path(), git2.as_path()]);
+        assert!(result.is_err(), "no candidates should error");
+        let err = result.unwrap_err();
+        assert_eq!(
+            err,
+            "no pinned trusted Git executable is available for candidate-input reads"
+        );
+        assert!(!err.contains("/"), "error must not leak paths");
+
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_pinned_git_rejects_symlink_redirection() {
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let test_dir = std::env::temp_dir().join(format!(
+            "runlith-pinned-git-symlink-{id}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).expect("test dir");
+
+        let other_dir = test_dir.join("other");
+        std::fs::create_dir(&other_dir).expect("other dir");
+
+        let target = other_dir.join("git_target");
+        std::fs::write(&target, b"#!/bin/sh\necho git\n").expect("git target");
+
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .expect("git target chmod");
+
+        let symlink = test_dir.join("git_link");
+        std::os::unix::fs::symlink(&target, &symlink).expect("create symlink");
+
+        let result = resolve_pinned_git(&[symlink.as_path()]);
+        assert!(
+            result.is_err(),
+            "symlink redirecting outside parent should be rejected"
+        );
+
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn resolve_pinned_git_rejects_directory() {
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let test_dir = std::env::temp_dir().join(format!(
+            "runlith-pinned-git-dir-{id}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        std::fs::create_dir_all(&test_dir).expect("test dir");
+
+        let git_dir = test_dir.join("git_dir");
+        std::fs::create_dir(&git_dir).expect("git_dir");
+
+        let result = resolve_pinned_git(&[git_dir.as_path()]);
+        assert!(result.is_err(), "directory should be rejected");
+
+        let _ = std::fs::remove_dir_all(&test_dir);
     }
 }
