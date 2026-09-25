@@ -476,7 +476,7 @@ fn resolve_git_executable() -> Result<PathBuf, String> {
 /// symlink redirection and requiring each candidate to be a regular file
 /// within its own install prefix. This ensures candidate Git reads use
 /// a trusted, pinned executable regardless of PATH or sandbox state.
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn resolve_pinned_git(candidates: &[&Path]) -> Result<PathBuf, String> {
     for candidate in candidates {
         // Must be metadata-accessible and resolve to a regular file.
@@ -6425,16 +6425,23 @@ mod tests {
         std::fs::write(&git1, b"#!/bin/sh\necho git1\n").expect("git1 file");
         std::fs::write(&git2, b"#!/bin/sh\necho git2\n").expect("git2 file");
 
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&git1, std::fs::Permissions::from_mode(0o755))
-            .expect("git1 chmod");
-        std::fs::set_permissions(&git2, std::fs::Permissions::from_mode(0o755))
-            .expect("git2 chmod");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&git1, std::fs::Permissions::from_mode(0o755))
+                .expect("git1 chmod");
+            std::fs::set_permissions(&git2, std::fs::Permissions::from_mode(0o755))
+                .expect("git2 chmod");
+        }
 
         let result = resolve_pinned_git(&[git1.as_path(), git2.as_path()]);
         assert!(result.is_ok(), "first existing candidate should succeed");
         let path = result.unwrap();
-        assert_eq!(path, git1, "first candidate should win");
+        assert_eq!(
+            path,
+            git1.canonicalize().expect("canonical git1"),
+            "first candidate should win"
+        );
 
         let _ = std::fs::remove_dir_all(&test_dir);
     }
@@ -6454,9 +6461,12 @@ mod tests {
 
         std::fs::write(&git2, b"#!/bin/sh\necho git2\n").expect("git2 file");
 
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&git2, std::fs::Permissions::from_mode(0o755))
-            .expect("git2 chmod");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&git2, std::fs::Permissions::from_mode(0o755))
+                .expect("git2 chmod");
+        }
 
         let result = resolve_pinned_git(&[git1.as_path(), git2.as_path()]);
         assert!(
@@ -6465,7 +6475,8 @@ mod tests {
         );
         let path = result.unwrap();
         assert_eq!(
-            path, git2,
+            path,
+            git2.canonicalize().expect("canonical git2"),
             "second candidate should be used when first missing"
         );
 
