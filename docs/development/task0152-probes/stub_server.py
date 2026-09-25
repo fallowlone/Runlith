@@ -7,7 +7,13 @@ other path the CLI happens to hit) to answer with a fixed marker string,
 optionally as an SSE stream. Every incoming request is logged to a SANITIZED
 JSONL file: method, path, header NAMES only, and a boolean for whether each
 auth-carrying header's VALUE equals the expected dummy placeholder. Header
-VALUES themselves are never written to the log or printed to stdout/stderr.
+VALUES themselves are never written to the log or printed to stdout/stderr,
+with two narrow, deliberate exceptions used by R8 (round 2): the RAW value
+of `anthropic-beta` and `anthropic-version` is recorded, because beta/API
+version flags are not secrets or account identifiers -- they are static
+capability negotiation strings the CLI ships in its own binary, the same
+for every user. No other header value is ever logged, and this exception
+list is not user-extensible from outside this file.
 
 Stdlib only (http.server), per TASK-0152 scope constraints.
 """
@@ -34,6 +40,10 @@ def _sanitized_log(entry: dict) -> None:
 
 
 AUTH_HEADER_NAMES = ("x-api-key", "authorization")
+# Non-secret, non-identifier headers whose raw value is safe to log (see
+# module docstring). Anything not in this exact tuple never has its value
+# recorded, regardless of what a caller asks for.
+SAFE_VALUE_HEADER_NAMES = ("anthropic-beta", "anthropic-version")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -51,6 +61,16 @@ class Handler(BaseHTTPRequestHandler):
                 # Only a boolean is retained -- never the header value.
                 stripped = value[7:] if value.lower().startswith("bearer ") else value
                 auth_value_matches[name] = stripped == DUMMY_CREDENTIAL
+        safe_values = {}
+        for name in SAFE_VALUE_HEADER_NAMES:
+            value = self.headers.get(name)
+            if value is not None:
+                safe_values[name] = value
+        credential_header = None
+        if self.headers.get("x-api-key") is not None:
+            credential_header = "x-api-key"
+        elif self.headers.get("authorization") is not None:
+            credential_header = "authorization"
         _record_len = int(self.headers.get("Content-Length", 0) or 0)
         body_raw = self.rfile.read(_record_len) if _record_len else b""
         stream_requested = False
@@ -66,6 +86,8 @@ class Handler(BaseHTTPRequestHandler):
                 "path": self.path,
                 "header_names": header_names,
                 "auth_header_value_equals_dummy": auth_value_matches,
+                "credential_header": credential_header,
+                "safe_header_values": safe_values,
                 "stream_requested": stream_requested,
             }
         )
