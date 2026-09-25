@@ -5,8 +5,8 @@ mod candidate_snapshot;
 
 pub use candidate_snapshot::{
     materialize_candidate_snapshot, read_candidate_snapshot, read_linked_metadata_file,
-    read_worktree_git_pointer, remove_candidate_snapshot, scan_live_worktree, CandidateSnapshot,
-    DescriptorReadOperation,
+    read_linked_metadata_file_if_present, read_worktree_git_pointer, remove_candidate_snapshot,
+    scan_live_worktree, CandidateSnapshot, DescriptorReadOperation,
 };
 
 use evaluation::{
@@ -108,14 +108,23 @@ impl EffectCapturePort for LocalEffectCapture {
                     subject_material: SubjectMaterial::ContentToolchainAndConfig {
                         digest: result.assessment.candidate_manifest_sha256.clone(),
                         toolchain: result.assessment.runtime_ref.clone(),
+                        // Must match `candidate_result_fingerprint` in
+                        // `adapters/storage-sqlite/src/candidate_assessment_store.rs`
+                        // field for field (including `invocation_descriptor_sha256`,
+                        // which binds the Git-executable-path-aware invocation
+                        // descriptor into the subject fingerprint): the store
+                        // independently recomputes this same hash from the
+                        // durable assessment and rejects a captured effect
+                        // whose fingerprint does not match it byte for byte.
                         config: evaluation::candidate_sha256(
                             format!(
-                                "{}\0{}\0{}\0{}\0{}",
+                                "{}\0{}\0{}\0{}\0{}\0{}",
                                 result.assessment.requirement_revision,
                                 result.assessment.policy_fingerprint,
                                 result.assessment.selector,
                                 result.assessment.selector_path,
                                 result.assessment.selector_literal,
+                                result.assessment.invocation_descriptor_sha256,
                             )
                             .as_bytes(),
                         ),

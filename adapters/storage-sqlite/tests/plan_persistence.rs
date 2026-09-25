@@ -1778,6 +1778,7 @@ fn schema_13_revision_history_without_lineage_fails_closed_after_upgrade() {
              DROP TABLE task_evidence_requirement_params;
              DROP TABLE task_evidence_requirements;
              DROP TABLE candidate_input_assessments;
+             DROP TABLE candidate_input_operations;
              DROP TABLE observed_effects;
              DROP TABLE planning_input_candidate_tasks;
              DROP TABLE human_decision_evidence;

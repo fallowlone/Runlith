@@ -465,6 +465,16 @@ impl<C: Clock> OrchestrationService<C> {
             )))
         })?;
         let ensured = workspace.ensure_workspace_ready(&workspace_request)?;
+        // TASK-0144 (G8): bind the immutable evaluated-base/policy pair as
+        // soon as the workspace lease is READY, before any provider or
+        // evaluator work runs. Idempotent (`ON CONFLICT(execution_id) DO
+        // NOTHING`, and `bind_evaluated_policy_base` refuses a changed
+        // binding), so a resumed/retried cycle for the same execution is
+        // safe. Every candidate-input (and future) evaluator that verifies
+        // against an immutable evaluated base depends on this binding
+        // existing; without it `get_evaluated_policy_base` never resolves
+        // and the Task can never reach a durable verdict.
+        self.tasks.bind_evaluated_policy_base(&work.execution_id)?;
         // TASK-0135 (G8): durable prerequisites are checked at
         // workspace-attempt time, after admission (the journaled `Block`
         // transition requires RUNNING) and before any provider invocation.

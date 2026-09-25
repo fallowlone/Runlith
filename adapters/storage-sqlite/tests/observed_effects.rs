@@ -179,6 +179,24 @@ fn candidate_result_and_typed_assessment_survive_restart_as_one_commit() {
     let (execution, attempt, effect_id) = {
         let mut store = db.open();
         let (execution, attempt) = seed_runtime(&mut store);
+        store
+            .record_candidate_selection(
+                "T-EFFECT",
+                execution.as_str(),
+                attempt.as_str(),
+                "candidate-operation-1",
+                &"1".repeat(40),
+                &"3".repeat(40),
+                &format!("sha256:{}", "b".repeat(64)),
+                1,
+                &format!("sha256:{}", "c".repeat(64)),
+                "criterion-1",
+                "candidate.file-contains.v1",
+                "src/main.rs",
+                "accepted",
+                10,
+            )
+            .unwrap();
         let subject = EffectSubjectRef::new(format!("attempt:{}", attempt.as_str())).unwrap();
         let candidate_manifest = format!("sha256:{}", "d".repeat(64));
         let mut assessment = CandidateIntegrityAssessment {
@@ -200,7 +218,7 @@ fn candidate_result_and_typed_assessment_survive_restart_as_one_commit() {
             invocation_descriptor_version: 1,
             invocation_descriptor_sha256: String::new(),
             evaluator_executable: "/trusted/agentd".to_owned(),
-            toolchain_ref: "git version 2.54.0".to_owned(),
+            toolchain_ref: "git-executable=/usr/bin/git;git version 2.54.0".to_owned(),
             runner_backend: "native".to_owned(),
             runner_plan_sha256: format!("sha256:{}", "6".repeat(64)),
             runner_enforced_axes: 3,
@@ -236,6 +254,15 @@ fn candidate_result_and_typed_assessment_survive_restart_as_one_commit() {
             started_at_ms: 10,
             completed_at_ms: 20,
         };
+        assessment.refresh_invocation_descriptor_digest();
+        let git_path_bound_digest = assessment.invocation_descriptor_sha256.clone();
+        assessment.toolchain_ref = "git-executable=/other/git;git version 2.54.0".to_owned();
+        assert_ne!(
+            git_path_bound_digest,
+            assessment.canonical_invocation_descriptor_digest(),
+            "resolved Git executable path participates in the canonical invocation binding"
+        );
+        assessment.toolchain_ref = "git-executable=/usr/bin/git;git version 2.54.0".to_owned();
         assessment.refresh_invocation_descriptor_digest();
         let config = candidate_sha256(
             format!(
@@ -331,6 +358,26 @@ fn candidate_result_and_typed_assessment_survive_restart_as_one_commit() {
                 },
             )
             .unwrap();
+        store
+            .update_candidate_operation_status(
+                execution.as_str(),
+                attempt.as_str(),
+                "PENDING",
+                "RESULT_ADMITTED",
+                None,
+                21,
+            )
+            .unwrap();
+        store
+            .update_candidate_operation_status(
+                execution.as_str(),
+                attempt.as_str(),
+                "RESULT_ADMITTED",
+                "COMPLETE",
+                None,
+                21,
+            )
+            .unwrap();
         (execution, attempt, effect.effect_id().clone())
     };
     let mut store = db.open();
@@ -358,6 +405,39 @@ fn candidate_result_and_typed_assessment_survive_restart_as_one_commit() {
         evidence.integrity.canonical_invocation_descriptor_digest()
     );
     assert_eq!(evidence.integrity.checkpoints.len(), 5);
+    assert_eq!(
+        store
+            .candidate_operation_status(execution.as_str(), attempt.as_str())
+            .unwrap()
+            .as_deref(),
+        Some("COMPLETE")
+    );
+    store
+        .append_candidate_checkpoint(
+            execution.as_str(),
+            attempt.as_str(),
+            &CandidateFreshnessCheckpoint {
+                phase: CandidateCheckpointPhase::Completion,
+                observed_at_ms: 23,
+                git_metadata_fingerprint: format!("sha256:{}", "e".repeat(64)),
+                live_worktree_manifest_sha256: format!("sha256:{}", "f".repeat(64)),
+                matched: true,
+            },
+        )
+        .expect("same-subject Completion recovery is idempotent");
+    assert!(store
+        .append_candidate_checkpoint(
+            execution.as_str(),
+            attempt.as_str(),
+            &CandidateFreshnessCheckpoint {
+                phase: CandidateCheckpointPhase::Completion,
+                observed_at_ms: 24,
+                git_metadata_fingerprint: format!("sha256:{}", "0".repeat(64)),
+                live_worktree_manifest_sha256: format!("sha256:{}", "f".repeat(64)),
+                matched: true,
+            },
+        )
+        .is_err());
     store
         .append_candidate_checkpoint(
             execution.as_str(),
@@ -381,6 +461,57 @@ fn candidate_result_and_typed_assessment_survive_restart_as_one_commit() {
             .len(),
         6
     );
+}
+
+#[test]
+fn candidate_mismatch_and_blocked_operation_statuses_survive_restart() {
+    for (status, detail) in [("MISMATCH", "freshness-mismatch"), ("BLOCKED", "g6-denied")] {
+        let db = TestDb::new(&format!("candidate-operation-{status}"));
+        let mut store = db.open();
+        let (execution, attempt) = seed_runtime(&mut store);
+        store
+            .record_candidate_selection(
+                "T-EFFECT",
+                execution.as_str(),
+                attempt.as_str(),
+                "candidate-operation-failure",
+                &"1".repeat(40),
+                &"3".repeat(40),
+                &format!("sha256:{}", "b".repeat(64)),
+                1,
+                &format!("sha256:{}", "c".repeat(64)),
+                "criterion-1",
+                "candidate.file-contains.v1",
+                "src/main.rs",
+                "accepted",
+                10,
+            )
+            .unwrap();
+        store
+            .record_candidate_operation_failure(
+                execution.as_str(),
+                attempt.as_str(),
+                status,
+                detail,
+                11,
+            )
+            .unwrap();
+        drop(store);
+        let store = db.open();
+        assert_eq!(
+            store
+                .candidate_operation_status(execution.as_str(), attempt.as_str())
+                .unwrap()
+                .as_deref(),
+            Some(status)
+        );
+        let history = store
+            .candidate_operation_history(execution.as_str(), attempt.as_str())
+            .unwrap()
+            .unwrap();
+        assert!(history.starts_with("PENDING\n"));
+        assert!(history.contains(detail));
+    }
 }
 
 #[test]

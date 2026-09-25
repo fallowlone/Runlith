@@ -9,6 +9,20 @@ use security_audit::{SecurityAuditEvent, SecurityAuditOutcome, SecurityAuditSubj
 
 use crate::{StorageError, StorageResult};
 
+type CandidateOperationRow = (
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CandidateEvidence {
     pub effect: ObservedEffect,
@@ -16,6 +30,164 @@ pub struct CandidateEvidence {
 }
 
 impl crate::SqliteStore {
+    pub fn candidate_operation_status(
+        &self,
+        execution_id: &str,
+        attempt_id: &str,
+    ) -> StorageResult<Option<String>> {
+        Ok(self.connection().query_row(
+            "SELECT status FROM candidate_input_operations WHERE execution_id = ?1 AND attempt_id = ?2",
+            params![execution_id, attempt_id],
+            |row| row.get(0),
+        ).optional()?)
+    }
+
+    pub fn candidate_operation_history(
+        &self,
+        execution_id: &str,
+        attempt_id: &str,
+    ) -> StorageResult<Option<String>> {
+        Ok(self.connection().query_row(
+            "SELECT status_history FROM candidate_input_operations WHERE execution_id = ?1 AND attempt_id = ?2",
+            params![execution_id, attempt_id],
+            |row| row.get(0),
+        ).optional()?)
+    }
+
+    /// Durably binds the selected subject before object graph resolution. An
+    /// interrupted PENDING operation is intentionally ambiguous and cannot
+    /// be silently replayed; only a fully admitted/completed identical
+    /// operation may be reopened for restart reuse.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_candidate_selection(
+        &mut self,
+        task_id: &str,
+        execution_id: &str,
+        attempt_id: &str,
+        operation_id: &str,
+        base_revision: &str,
+        selected_commit_oid: &str,
+        requirement_revision: &str,
+        policy_revision: u64,
+        policy_fingerprint: &str,
+        criterion_id: &str,
+        selector: &str,
+        selector_path: &str,
+        selector_literal: &str,
+        now_ms: u64,
+    ) -> StorageResult<bool> {
+        let existing: Option<CandidateOperationRow> = self
+            .connection()
+            .query_row(
+                "SELECT operation_id, base_revision, selected_commit_oid, requirement_revision,
+                    policy_revision, policy_fingerprint, criterion_id, selector,
+                    selector_path, selector_literal, status
+             FROM candidate_input_operations WHERE execution_id = ?1 AND attempt_id = ?2",
+                params![execution_id, attempt_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            let stored_task: String = self.connection().query_row(
+                "SELECT task_id FROM candidate_input_operations WHERE execution_id = ?1 AND attempt_id = ?2",
+                params![execution_id, attempt_id],
+                |row| row.get(0),
+            )?;
+            let same_subject = existing.1 == base_revision
+                && stored_task == task_id
+                && existing.2 == selected_commit_oid
+                && existing.3 == requirement_revision
+                && existing.4 == policy_revision as i64
+                && existing.5 == policy_fingerprint
+                && existing.6 == criterion_id
+                && existing.7 == selector
+                && existing.8 == selector_path
+                && existing.9 == selector_literal;
+            if same_subject && matches!(existing.10.as_str(), "RESULT_ADMITTED" | "COMPLETE") {
+                return Ok(false);
+            }
+            return Err(StorageError::ConstraintViolation(
+                "candidate operation is ambiguous, incomplete, or bound to another subject".into(),
+            ));
+        }
+        self.connection().execute(
+            "INSERT INTO candidate_input_operations (
+                task_id, execution_id, attempt_id, operation_id, base_revision,
+                selected_commit_oid, requirement_revision, policy_revision,
+                policy_fingerprint, criterion_id, selector, selector_path,
+                selector_literal, status, status_history, started_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'PENDING', 'PENDING', ?14, ?14)",
+            params![task_id, execution_id, attempt_id, operation_id, base_revision,
+                selected_commit_oid, requirement_revision, policy_revision as i64, policy_fingerprint,
+                criterion_id, selector, selector_path, selector_literal, now_ms.min(i64::MAX as u64) as i64],
+        )?;
+        Ok(true)
+    }
+
+    pub fn update_candidate_operation_status(
+        &mut self,
+        execution_id: &str,
+        attempt_id: &str,
+        expected: &str,
+        status: &str,
+        detail_code: Option<&str>,
+        now_ms: u64,
+    ) -> StorageResult<()> {
+        let changed = self.connection().execute(
+            "UPDATE candidate_input_operations SET status = ?1, detail_code = ?2, updated_at_ms = ?3,
+                    status_history = status_history || char(10) || ?7
+             WHERE execution_id = ?4 AND attempt_id = ?5 AND status = ?6",
+            params![status, detail_code, now_ms.min(i64::MAX as u64) as i64, execution_id, attempt_id, expected, format!("{status}:{detail_code:?}:{}", now_ms)],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::ConstraintViolation(
+                "candidate operation status transition is stale or ambiguous".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn record_candidate_operation_failure(
+        &mut self,
+        execution_id: &str,
+        attempt_id: &str,
+        status: &str,
+        detail_code: &str,
+        now_ms: u64,
+    ) -> StorageResult<()> {
+        if !matches!(status, "MISMATCH" | "BLOCKED" | "TAMPERED") {
+            return Err(StorageError::ConstraintViolation(
+                "invalid candidate operation failure status".into(),
+            ));
+        }
+        let changed = self.connection().execute(
+            "UPDATE candidate_input_operations SET status = ?1, detail_code = ?2, updated_at_ms = ?3,
+                    status_history = status_history || char(10) || ?6
+             WHERE execution_id = ?4 AND attempt_id = ?5",
+            params![status, detail_code, now_ms.min(i64::MAX as u64) as i64, execution_id, attempt_id, format!("{status}:{detail_code}:{}", now_ms)],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::ConstraintViolation(
+                "candidate operation failure record is unavailable".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn get_candidate_evidence(
         &self,
         execution_id: &str,
@@ -439,24 +611,36 @@ impl crate::SqliteStore {
             let duplicate_phase = assessment
                 .checkpoints
                 .iter()
-                .any(|item| item.phase == checkpoint.phase);
-            let invalid_phase_order = match checkpoint.phase {
-                CandidateCheckpointPhase::Completion => {
-                    duplicate_phase
-                        || [
-                            CandidateCheckpointPhase::Selection,
-                            CandidateCheckpointPhase::BeforeEvaluation,
-                            CandidateCheckpointPhase::AfterEvaluation,
-                            CandidateCheckpointPhase::ResultAdmission,
-                        ]
-                        .iter()
-                        .any(|phase| {
-                            !assessment
-                                .checkpoints
-                                .iter()
-                                .any(|item| item.phase == *phase && item.matched)
-                        })
+                .find(|item| item.phase == checkpoint.phase);
+            if checkpoint.phase == CandidateCheckpointPhase::Completion {
+                if let Some(previous) = duplicate_phase {
+                    if assessment.outcome == CandidateIntegrityOutcome::Intact
+                        && previous.matched
+                        && previous.git_metadata_fingerprint == checkpoint.git_metadata_fingerprint
+                        && previous.live_worktree_manifest_sha256
+                            == checkpoint.live_worktree_manifest_sha256
+                    {
+                        return Ok(());
+                    }
+                    return Err(StorageError::ConstraintViolation(
+                        "repeated candidate completion does not match the durable subject".into(),
+                    ));
                 }
+            }
+            let invalid_phase_order = match checkpoint.phase {
+                CandidateCheckpointPhase::Completion => [
+                    CandidateCheckpointPhase::Selection,
+                    CandidateCheckpointPhase::BeforeEvaluation,
+                    CandidateCheckpointPhase::AfterEvaluation,
+                    CandidateCheckpointPhase::ResultAdmission,
+                ]
+                .iter()
+                .any(|phase| {
+                    !assessment
+                        .checkpoints
+                        .iter()
+                        .any(|item| item.phase == *phase && item.matched)
+                }),
                 CandidateCheckpointPhase::RestartReuse => !assessment
                     .checkpoints
                     .iter()

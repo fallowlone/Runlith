@@ -352,6 +352,12 @@ pub struct ExecutionComposition {
     /// maps here, so a client cannot turn the daemon into an arbitrary
     /// process launcher.
     provider_executable: Option<PathBuf>,
+    /// Composition-owned override for the binary the candidate-input
+    /// evaluator re-execs (see
+    /// `CandidateInputEvaluator::evaluator_executable_override`). `None`
+    /// (every production composition) resolves the real running `agentd`
+    /// binary via `current_exe()`. Never client-supplied.
+    candidate_evaluator_executable_override: Option<PathBuf>,
 }
 
 impl ExecutionComposition {
@@ -365,7 +371,22 @@ impl ExecutionComposition {
             tracker: provider_claude::LiveProcessTracker::fresh(),
             git_executable: resolve_git_executable(),
             provider_executable,
+            candidate_evaluator_executable_override: None,
         }
+    }
+
+    /// Test-only builder: overrides the binary the candidate-input
+    /// evaluator re-execs. Production never calls this — the field stays
+    /// `None` and resolves `current_exe()`, the real running `agentd`
+    /// binary. Under `cargo test`, `current_exe()` is the test-harness
+    /// binary (no `__candidate-*` dispatch), so a test exercising the real
+    /// snapshot-write/evaluate re-exec must supply the actual built
+    /// `agentd` binary here.
+    #[cfg(test)]
+    #[must_use]
+    fn with_candidate_evaluator_executable_override(mut self, path: PathBuf) -> Self {
+        self.candidate_evaluator_executable_override = Some(path);
+        self
     }
 
     /// The durable database this composition works against.
@@ -777,6 +798,18 @@ struct CandidateInputEvaluator {
     git_executable: PathBuf,
     snapshot_parent: PathBuf,
     capture: effect_capture_local::LocalEffectCapture,
+    /// The trusted binary the Runner re-execs (with hidden
+    /// `__candidate-snapshot-write`/`__candidate-evaluate`/
+    /// `__candidate-snapshot-remove` arguments) to materialize and
+    /// evaluate the sealed candidate snapshot. Production always uses
+    /// `None`, resolving to `std::env::current_exe()` — the real running
+    /// `agentd` binary, whose `main()` owns that dispatch. Tests that
+    /// exercise this real re-exec path (not just the pure-Rust helper
+    /// functions) must override it with the actual built `agentd` binary:
+    /// under `cargo test --lib`, `current_exe()` resolves to the test
+    /// harness binary, which has no such dispatch and cannot stand in for
+    /// production here.
+    evaluator_executable_override: Option<PathBuf>,
 }
 
 enum ProductionEvaluator {
@@ -789,6 +822,24 @@ impl EvaluationPort for ProductionEvaluator {
         match self {
             Self::Candidate(evaluator) => evaluator.evaluate(request),
             Self::Pending(evaluator) => evaluator.evaluate(request),
+        }
+    }
+
+    // Without this override, `EvaluationPort`'s default no-op
+    // `revalidate_before_completion` silently wins for every
+    // `ProductionEvaluator` variant, including `Candidate`: the durable
+    // Completion freshness checkpoint and the `RESULT_ADMITTED` ->
+    // `COMPLETE` operation-status transition would never run, even though
+    // `finish()` (orchestration_service.rs) proceeds to mark the Task
+    // Completed right after this call succeeds. That would silently drop
+    // ADR-0035's Completion-phase freshness gate and leave every
+    // production candidate-input operation permanently stuck at
+    // `RESULT_ADMITTED` — never durably `COMPLETE` — despite the Task
+    // itself completing.
+    fn revalidate_before_completion(&self, request: &EvaluationRequest) -> EvaluationResult<()> {
+        match self {
+            Self::Candidate(evaluator) => evaluator.revalidate_before_completion(request),
+            Self::Pending(evaluator) => evaluator.revalidate_before_completion(request),
         }
     }
 }
@@ -835,6 +886,32 @@ impl CandidateInputEvaluator {
     }
 
     fn evaluate_candidate(&self, request: &EvaluationRequest) -> Result<EvaluationVerdict, String> {
+        let result = self.evaluate_candidate_inner(request);
+        if let Err(error) = &result {
+            if let Ok(mut store) = storage_sqlite::SqliteStore::open(&self.db_path) {
+                let status = if error.contains("changed") || error.contains("mismatch") {
+                    "MISMATCH"
+                } else if error.contains("object graph") || error.contains("tamper") {
+                    "TAMPERED"
+                } else {
+                    "BLOCKED"
+                };
+                let _ = store.record_candidate_operation_failure(
+                    request.execution_id.as_str(),
+                    request.attempt_id.as_str(),
+                    status,
+                    &status.to_ascii_lowercase(),
+                    now_millis(),
+                );
+            }
+        }
+        result
+    }
+
+    fn evaluate_candidate_inner(
+        &self,
+        request: &EvaluationRequest,
+    ) -> Result<EvaluationVerdict, String> {
         let invocation_id = format!(
             "candidate-{}-{}-{}",
             request.execution_id.as_str(),
@@ -921,7 +998,7 @@ impl CandidateInputEvaluator {
             invocation_id: &invocation_id,
             workspace: anchor.canonical_commondir(),
             gitdir: &linked_gitdir,
-            roots: vec![root.clone(), anchor.canonical_commondir().to_path_buf()],
+            roots: vec![anchor.canonical_commondir().to_path_buf()],
         };
         let git_version = self.git_output(&git_context, &["--version"], 128)?;
         let git_version = std::str::from_utf8(&git_version)
@@ -944,9 +1021,44 @@ impl CandidateInputEvaluator {
             .map_err(|_| "candidate HEAD is not UTF-8".to_owned())?
             .strip_suffix('\n')
             .ok_or_else(|| "candidate HEAD output is incomplete".to_owned())?;
+        let selector = requirements
+            .first()
+            .ok_or_else(|| "candidate selector missing".to_owned())?;
+        let _new_selection = store
+            .record_candidate_selection(
+                request.task_id.as_str(),
+                request.execution_id.as_str(),
+                request.attempt_id.as_str(),
+                &invocation_id,
+                &base.base_revision,
+                candidate_oid,
+                &selector.requirement_revision,
+                base.policy.revision(),
+                base.policy.fingerprint(),
+                &selector.criterion_id,
+                &selector.selector,
+                &selector.path,
+                &selector.literal,
+                now_millis(),
+            )
+            .map_err(|error| {
+                format!("persist candidate selection before object resolution: {error}")
+            })?;
+        self.validate_git_object_sources(&git_context)?;
         let candidate = self.verify_commit(&git_context, candidate_oid, object_format)?;
         let base_candidate =
             self.verify_commit(&git_context, &base.base_revision, object_format)?;
+        // The completion-gated public getter: `append_candidate_checkpoint`
+        // only accepts a `RestartReuse` checkpoint once a matching
+        // `Completion` checkpoint already exists (candidate_assessment_store.rs),
+        // so this reuse path is architecturally for re-evaluating an
+        // already-fully-completed attempt, never a bare RESULT_ADMITTED one.
+        // A retry before completion correctly falls through to a fresh
+        // evaluation below rather than reusing partial evidence; the
+        // RESULT_ADMITTED -> COMPLETE boundary's own restart-safety is
+        // `revalidate_candidate_completion`'s job (idempotent Completion
+        // checkpoint replay and operation-status `.or_else` recovery), not
+        // this evaluator entry point's.
         if let Some(evidence) = store
             .get_candidate_evidence(request.execution_id.as_str(), request.attempt_id.as_str())
             .map_err(|error| format!("load prior candidate evidence: {error}"))?
@@ -1031,8 +1143,11 @@ impl CandidateInputEvaluator {
                 .as_nanos()
         );
         let snapshot_input = encode_snapshot_files(&candidate.files)?;
-        let snapshot_writer = std::env::current_exe()
-            .map_err(|_| "agentd evaluator executable unavailable".to_owned())?;
+        let snapshot_writer = match &self.evaluator_executable_override {
+            Some(path) => path.clone(),
+            None => std::env::current_exe()
+                .map_err(|_| "agentd evaluator executable unavailable".to_owned())?,
+        };
         let evaluator_executable = snapshot_writer
             .canonicalize()
             .map_err(|_| "agentd evaluator executable cannot be canonicalized".to_owned())?;
@@ -1066,9 +1181,6 @@ impl CandidateInputEvaluator {
                 max_stdout: 0,
             },
         )?;
-        let selector = requirements
-            .first()
-            .ok_or_else(|| "candidate selector missing".to_owned())?;
         let output = run_candidate_process(
             &self.db_path,
             CandidateProcessRequest {
@@ -1077,7 +1189,12 @@ impl CandidateInputEvaluator {
                 execution_id: request.execution_id.as_str().to_owned(),
                 attempt_id: request.attempt_id.as_str().to_owned(),
                 invocation_id: format!("{invocation_id}.evaluator"),
-                workspace: self.snapshot_parent.clone(),
+                // `workspace` must match the sole filesystem root below
+                // exactly (the Runner refuses a launch whose authorized
+                // scope targets a different workspace than the plan's
+                // own): the evaluator is confined to this one sealed
+                // snapshot directory, never the whole snapshot parent.
+                workspace: snapshot_path.clone(),
                 filesystem_roots: vec![snapshot_path.clone()],
                 executable: evaluator_executable.clone(),
                 args: vec![
@@ -1161,7 +1278,14 @@ impl CandidateInputEvaluator {
             invocation_descriptor_version: 1,
             invocation_descriptor_sha256: String::new(),
             evaluator_executable: evaluator_executable_ref,
-            toolchain_ref: git_version.to_owned(),
+            toolchain_ref: format!(
+                "git-executable={};{git_version}",
+                self.git_executable
+                    .canonicalize()
+                    .map_err(|_| "candidate Git executable identity unavailable".to_owned())?
+                    .to_str()
+                    .ok_or_else(|| "candidate Git executable identity is unsupported".to_owned())?
+            ),
             runner_backend: output.runner.backend,
             runner_plan_sha256: output.runner.plan_sha256,
             runner_enforced_axes: output.runner.enforced_axes,
@@ -1210,7 +1334,22 @@ impl CandidateInputEvaluator {
                 request.execution_id.clone(),
                 request.attempt_id.clone(),
             )
-            .map_err(|error| format!("persist trusted candidate result before verdict: {error}"))?;
+            .map_err(|error| {
+                format!("persist trusted candidate result before verdict: {error:?}")
+            })?;
+        drop(capture_service);
+        let mut operation_store = storage_sqlite::SqliteStore::open(&self.db_path)
+            .map_err(|error| format!("reopen candidate operation store: {error}"))?;
+        operation_store
+            .update_candidate_operation_status(
+                request.execution_id.as_str(),
+                request.attempt_id.as_str(),
+                "PENDING",
+                "RESULT_ADMITTED",
+                None,
+                completed_at_ms,
+            )
+            .map_err(|error| format!("persist candidate operation admission: {error}"))?;
         Ok(if result.failed == 0 {
             EvaluationVerdict::Verified
         } else {
@@ -1295,7 +1434,7 @@ impl CandidateInputEvaluator {
             invocation_id: &assessment.invocation_id,
             workspace: anchor.canonical_commondir(),
             gitdir: &linked_gitdir,
-            roots: vec![root.clone(), anchor.canonical_commondir().to_path_buf()],
+            roots: vec![anchor.canonical_commondir().to_path_buf()],
         };
         let candidate =
             self.verify_commit(&git_context, &assessment.candidate_commit_oid, format)?;
@@ -1323,7 +1462,31 @@ impl CandidateInputEvaluator {
                 request.attempt_id.as_str(),
                 &checkpoint,
             )
-            .map_err(|error| format!("persist candidate completion checkpoint: {error}"))
+            .map_err(|error| format!("persist candidate completion checkpoint: {error}"))?;
+        store
+            .update_candidate_operation_status(
+                request.execution_id.as_str(),
+                request.attempt_id.as_str(),
+                "RESULT_ADMITTED",
+                "COMPLETE",
+                None,
+                checkpoint.observed_at_ms,
+            )
+            .or_else(|error| {
+                // A process may have crashed after persisting Completion but
+                // before advancing the operation row. A same-subject retry
+                // revalidates freshness above; permit this one recovery.
+                let status = store.candidate_operation_status(
+                    request.execution_id.as_str(),
+                    request.attempt_id.as_str(),
+                )?;
+                if status.as_deref() == Some("COMPLETE") {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            })
+            .map_err(|error| format!("persist candidate operation completion: {error}"))
     }
 
     fn git_output(
@@ -1347,9 +1510,19 @@ impl CandidateInputEvaluator {
         let workspace = context.workspace;
         let gitdir = context.gitdir;
         let roots = context.roots.clone();
+        // No `-C <workspace>` argument: the Runner already places the
+        // child's CWD at `workspace` (below, `current_dir`/`Command`
+        // spawn wiring). Git's own `-C` additionally calls `getcwd()` to
+        // remember the pre-`-C` directory before it chdir()s, which walks
+        // every ancestor of the sandboxed working directory and fails
+        // closed under the Seatbelt profile's narrow, workspace-scoped
+        // `subpath` grant (macOS Seatbelt denies reading ancestors of an
+        // allowed subpath; it only grants the subpath itself and its
+        // descendants). Passing `--git-dir` alone with an
+        // already-positioned CWD avoids that redundant internal chdir and
+        // its getcwd() call entirely, so the narrow common-dir-only scope
+        // ADR-0035's "Scoped G6 operation plans" requires keeps working.
         let mut process_args = vec![
-            "-C".into(),
-            workspace.as_os_str().into(),
             "--git-dir".into(),
             gitdir.as_os_str().into(),
             "--no-replace-objects".into(),
@@ -1405,6 +1578,133 @@ impl CandidateInputEvaluator {
         .map_err(|error| format!("candidate Git object graph rejected: {error}"))
     }
 
+    fn validate_git_object_sources(&self, context: &CandidateGitContext<'_>) -> Result<(), String> {
+        let config = self.git_output(
+            context,
+            &["config", "--no-includes", "--local", "--null", "--list"],
+            1024 * 1024,
+        )?;
+        for entry in config
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+        {
+            let lower = entry.iter().map(u8::to_ascii_lowercase).collect::<Vec<_>>();
+            if lower.starts_with(b"extensions.partialclone")
+                || (lower.starts_with(b"remote.")
+                    && lower.windows(9).any(|window| window == b".promisor"))
+            {
+                return Err("partial-clone/promisor Git configuration is unsupported".to_owned());
+            }
+        }
+        let common = context
+            .workspace
+            .to_str()
+            .ok_or_else(|| "trusted common directory is not UTF-8".to_owned())?
+            .to_owned();
+        let capability = Capability::FilesystemRead(
+            FileScope::new(&common, ".")
+                .map_err(|error| format!("object metadata scope: {error}"))?,
+        );
+        let root_request = PolicyRequest::new(
+            format!("{}.object-metadata", context.invocation_id),
+            "candidate-object-source-metadata",
+            RequestOrigin::new(
+                context.request.task_id.as_str(),
+                Some(context.request.execution_id.as_str().to_owned()),
+                Some(context.request.attempt_id.as_str().to_owned()),
+            )
+            .map_err(|error| format!("object metadata origin: {error}"))?,
+            RequestedCapabilities::new(vec![capability.clone()]),
+        )
+        .map_err(|error| format!("object metadata request: {error}"))?;
+        let policy = CompiledPolicy::compile(vec![PolicyRule::new(
+            "builtin.candidate.object-source-metadata",
+            "candidate_git_object_source_validation",
+            PolicyLayer::BuiltInHard,
+            PolicyOutcome::Allow,
+            capability.clone(),
+        )
+        .map_err(|error| format!("object metadata rule: {error}"))?])
+        .map_err(|error| format!("object metadata policy: {error}"))?;
+        let mut security = G6SecurityService::open(&self.db_path, app_services::SystemClock)
+            .map_err(|error| format!("object metadata G6 unavailable: {error}"))?;
+        let effective = match security
+            .authorize(
+                &root_request,
+                &EffectiveCapabilities::new(vec![capability]),
+                &policy,
+                u64::MAX,
+            )
+            .map_err(|error| format!("object metadata G6 authorization failed: {error}"))?
+        {
+            G6Authorization::Authorized { effective, .. } => effective,
+            G6Authorization::ApprovalRequired { .. } | G6Authorization::Denied { .. } => {
+                return Err("G6 denied Git object metadata access".to_owned());
+            }
+        };
+        let mut authorize = |path: &[u8], operation| {
+            let path = std::str::from_utf8(path).map_err(|_| {
+                evaluation::EffectError::CaptureFailed("Git metadata scope path invalid")
+            })?;
+            let operation = match operation {
+                effect_capture_local::DescriptorReadOperation::OpenDirectory => "open-directory",
+                effect_capture_local::DescriptorReadOperation::ReadDirectory => "read-directory",
+                effect_capture_local::DescriptorReadOperation::Metadata => "metadata",
+                effect_capture_local::DescriptorReadOperation::OpenFile => "open-file",
+                effect_capture_local::DescriptorReadOperation::ReadFile => "read-file",
+            };
+            let scoped =
+                Capability::FilesystemRead(FileScope::new(&common, path).map_err(|_| {
+                    evaluation::EffectError::CaptureFailed("Git metadata scope invalid")
+                })?);
+            let request = PolicyRequest::new(
+                format!(
+                    "{}.object-metadata.{}.{}",
+                    context.invocation_id,
+                    NEXT_CANDIDATE_OPERATION.fetch_add(1, Ordering::Relaxed),
+                    operation
+                ),
+                "candidate-object-source-metadata",
+                RequestOrigin::new(
+                    context.request.task_id.as_str(),
+                    Some(context.request.execution_id.as_str().to_owned()),
+                    Some(context.request.attempt_id.as_str().to_owned()),
+                )
+                .map_err(|_| evaluation::EffectError::CaptureFailed("metadata origin invalid"))?,
+                RequestedCapabilities::new(vec![scoped]),
+            )
+            .map_err(|_| evaluation::EffectError::CaptureFailed("metadata request invalid"))?;
+            match security
+                .authorize_filesystem_read(&request, &effective, common.clone(), path)
+                .map_err(|_| evaluation::EffectError::CaptureFailed("G6 denied metadata access"))?
+            {
+                G6Authorization::Authorized { .. } => Ok(()),
+                G6Authorization::ApprovalRequired { .. } | G6Authorization::Denied { .. } => Err(
+                    evaluation::EffectError::CaptureFailed("G6 denied metadata access"),
+                ),
+            }
+        };
+        for relative in [
+            "objects/info/alternates",
+            "objects/info/http-alternates",
+            "info/grafts",
+            "shallow",
+        ] {
+            let bytes = effect_capture_local::read_linked_metadata_file_if_present(
+                context.workspace,
+                relative.as_bytes(),
+                &mut authorize,
+            )
+            .map_err(|error| format!("Git object-source metadata read failed: {error}"))?;
+            if bytes.is_some() {
+                return Err(format!(
+                    "unsupported Git object source metadata: {relative}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn freshness_checkpoint(
         &self,
         freshness: CandidateFreshnessRequest<'_>,
@@ -1435,16 +1735,22 @@ impl CandidateInputEvaluator {
         if canonical_root != root {
             return Err("leased candidate worktree path is no longer canonical".to_owned());
         }
-        let roots = vec![
-            root.to_path_buf(),
-            anchor.canonical_commondir().to_path_buf(),
-        ];
+        // Plan A only: this reads the linked HEAD/index/common-dir through
+        // the read-only Git plumbing plan, scoped to the trusted common Git
+        // directory alone (ADR-0035 "Scoped G6 operation plans" — this plan
+        // "receives no ... live-source ... authority"). `root` (the leased
+        // worktree) is authorized separately below for Plan B's live
+        // filesystem scan; folding it into this Git-read plan's
+        // `filesystem_roots` would authorize a second, unrelated workspace
+        // under the same launch, which the Runner correctly refuses
+        // (`WorkspaceScopeMismatch`) since this plan's `workspace` is the
+        // common dir, not the worktree.
         let git_context = CandidateGitContext {
             request,
             invocation_id,
             workspace: anchor.canonical_commondir(),
             gitdir: &authenticated_gitdir,
-            roots: roots.clone(),
+            roots: vec![anchor.canonical_commondir().to_path_buf()],
         };
         let head = self.git_output(&git_context, &["rev-parse", "--verify", "HEAD"], 128)?;
         let index = self.git_output(
@@ -1643,10 +1949,15 @@ fn run_candidate_process(
         let axes = launch.enforced_axes();
         let runner = CandidateRunnerReceipt {
             operation_id,
-            backend: format!(
-                "{}:{:?}:{:?}",
-                backend.name, backend.runner, backend.platform
-            ),
+            // Must equal exactly what `enforce_process_operation`
+            // (crates/app-services/src/security_service.rs) records as the
+            // durable `IsolationEnforcement` audit record's
+            // `subject.id` (`backend_identity.name` alone — never a
+            // compound string), since `get_candidate_evidence_for_completion`
+            // requires an exact match between `runner_backend` and that
+            // audit subject to prove the enforcement record binds this
+            // exact invocation before completion can proceed.
+            backend: backend.name.to_owned(),
             plan_sha256: candidate_runner_plan_digest(launch.plan()),
             enforced_axes: u8::from(axes.requires(runner::IsolationAxis::Filesystem))
                 | (u8::from(axes.requires(runner::IsolationAxis::Network)) << 1)
@@ -2072,13 +2383,13 @@ fn authenticated_worktree_gitdir(
     };
     let gitdir_file = effect_capture_local::read_linked_metadata_file(
         anchor.canonical_commondir(),
-        format!("{relative_bytes}/gitdir").as_bytes(),
+        format!("worktrees/{relative_bytes}/gitdir").as_bytes(),
         &mut authorize,
     )
     .map_err(|error| format!("linked worktree back-reference read failed: {error}"))?;
     let commondir_file = effect_capture_local::read_linked_metadata_file(
         anchor.canonical_commondir(),
-        format!("{relative_bytes}/commondir").as_bytes(),
+        format!("worktrees/{relative_bytes}/commondir").as_bytes(),
         &mut authorize,
     )
     .map_err(|error| format!("linked worktree common-dir read failed: {error}"))?;
@@ -2579,6 +2890,7 @@ fn run_background_inner(
             .clone(),
         snapshot_parent,
         capture: candidate_capture,
+        evaluator_executable_override: composition.candidate_evaluator_executable_override.clone(),
     };
     let supports_candidate_input = storage_sqlite::SqliteStore::open(&db_path)
         .ok()
@@ -3839,6 +4151,32 @@ mod tests {
         assert!(output.status.success(), "git {args:?} failed");
     }
 
+    /// Like [`git`], but returns trimmed stdout for independent test-side
+    /// verification of what the real evaluator recorded (e.g. exact
+    /// commit/tree OIDs), instead of trusting the evaluator's own output.
+    fn git_stdout(repo: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(repo)
+            .stdin(std::process::Stdio::null())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("fixture git");
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8(output.stdout)
+            .expect("fixture git stdout is UTF-8")
+            .trim()
+            .to_owned()
+    }
+
     fn fixture_script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
         let mut file = std::fs::File::create(&path).expect("fixture file");
@@ -4990,6 +5328,68 @@ mod tests {
         assert_eq!(objects[0].1, "commit");
     }
 
+    #[test]
+    fn candidate_object_source_modes_are_checked_through_g6_and_runner() {
+        let sandbox = Sandbox::named("candidate-object-sources");
+        seed_ready(&sandbox.db, "P-CANDIDATE-SOURCES", "T-CANDIDATE-SOURCES");
+        let git_executable = candidate_test_git_executable();
+        let common = sandbox.repo.join(".git").canonicalize().unwrap();
+        let request = EvaluationRequest {
+            task_id: TaskId::new("T-CANDIDATE-SOURCES").unwrap(),
+            execution_id: ExecutionId::new("E-CANDIDATE-SOURCES").unwrap(),
+            attempt_id: agent_runtime::AttemptId::new("A-CANDIDATE-SOURCES").unwrap(),
+            summary: "fixture".to_owned(),
+            evidence_ref: "fixture".to_owned(),
+        };
+        let evaluator = CandidateInputEvaluator {
+            db_path: sandbox.db.clone(),
+            git_executable,
+            snapshot_parent: sandbox.dir.join("snapshots"),
+            capture: effect_capture_local::LocalEffectCapture::default(),
+            evaluator_executable_override: None,
+        };
+        let context = CandidateGitContext {
+            request: &request,
+            invocation_id: "candidate-object-sources-test",
+            workspace: &common,
+            gitdir: &common,
+            roots: vec![common.clone()],
+        };
+        evaluator
+            .validate_git_object_sources(&context)
+            .expect("ordinary local repository is supported");
+
+        let alternates = common.join("objects/info/alternates");
+        std::fs::write(&alternates, b"/untrusted/objects\n").unwrap();
+        assert!(evaluator.validate_git_object_sources(&context).is_err());
+        std::fs::remove_file(&alternates).unwrap();
+
+        let grafts = common.join("info/grafts");
+        std::fs::write(&grafts, b"0000000000000000000000000000000000000000\n").unwrap();
+        assert!(evaluator.validate_git_object_sources(&context).is_err());
+        std::fs::remove_file(&grafts).unwrap();
+
+        std::fs::write(
+            common.join("shallow"),
+            b"0000000000000000000000000000000000000000\n",
+        )
+        .unwrap();
+        assert!(evaluator.validate_git_object_sources(&context).is_err());
+        std::fs::remove_file(common.join("shallow")).unwrap();
+
+        git(
+            &sandbox.repo,
+            &["config", "extensions.partialClone", "origin"],
+        );
+        assert!(evaluator.validate_git_object_sources(&context).is_err());
+        git(
+            &sandbox.repo,
+            &["config", "--unset", "extensions.partialClone"],
+        );
+        git(&sandbox.repo, &["config", "remote.origin.promisor", "true"]);
+        assert!(evaluator.validate_git_object_sources(&context).is_err());
+    }
+
     fn candidate_test_git_executable() -> PathBuf {
         #[cfg(target_os = "macos")]
         let selected = PathBuf::from("/Library/Developer/CommandLineTools/usr/bin/git");
@@ -5004,6 +5404,494 @@ mod tests {
         let selected = selected.canonicalize().expect("fixture Git canonicalizes");
         assert!(selected.is_file(), "fixture Git is a regular file");
         selected
+    }
+
+    /// Locates the real `agentd` binary next to this test binary
+    /// (`target/<profile>/deps/agentd-<hash>` -> `target/<profile>/agentd`).
+    /// Production candidate evaluation re-execs the running `agentd`
+    /// binary itself (with hidden `__candidate-*` arguments) to
+    /// materialize and evaluate the sealed snapshot; under `cargo test
+    /// --lib`, `std::env::current_exe()` resolves to the test-harness
+    /// binary instead, which has no such dispatch. Tests exercising that
+    /// real re-exec path must run `cargo build --bin agentd` first and
+    /// pass this path as `CandidateInputEvaluator::evaluator_executable_override`.
+    fn candidate_test_evaluator_executable() -> PathBuf {
+        let mut path = std::env::current_exe().expect("test binary path is resolvable");
+        path.pop();
+        if path.ends_with("deps") {
+            path.pop();
+        }
+        let bin_name = if cfg!(windows) {
+            "agentd.exe"
+        } else {
+            "agentd"
+        };
+        let bin = path.join(bin_name);
+        assert!(
+            bin.is_file(),
+            "expected the real agentd binary at {bin:?}; run `cargo build --bin agentd` first"
+        );
+        bin.canonicalize()
+            .expect("agentd binary path canonicalizes")
+    }
+
+    /// Builds the trusted exact-param candidate-input requirement through
+    /// the real `task-domain` API (not the planner: TASK-0125 planner
+    /// authorship of these params is a separate, unmerged, out-of-scope
+    /// decision per the TASK-0144 envelope).
+    fn candidate_requirement(
+        criterion_id: &str,
+        path: &str,
+        literal: &str,
+    ) -> task_domain::EvidenceRequirement {
+        task_domain::EvidenceRequirement::new(
+            criterion_id,
+            task_domain::RequirementKind::TestSuite,
+            task_domain::SubjectBinding::ContentToolchainAndConfig,
+            vec![
+                task_domain::RequirementParam::new("selector", "candidate.file-contains.v1")
+                    .unwrap(),
+                task_domain::RequirementParam::new("path", path).unwrap(),
+                task_domain::RequirementParam::new("literal", literal).unwrap(),
+            ],
+            Some(format!("sha256:{}", "7".repeat(64))),
+            true,
+        )
+        .unwrap()
+    }
+
+    /// Seeds a project/Task reaching READY with exactly one acceptance
+    /// criterion bound to the trusted candidate-input requirement.
+    ///
+    /// `dispatch_execution`'s `Run` request refuses a Task with no current
+    /// accepted plan (`PlannedExecutionEntryOutcome::NoAcceptedPlan`), so a
+    /// bare `task-domain` construction cannot reach the real production
+    /// dispatch path on its own. This first materializes the Task through
+    /// the real planner (`seed_ready_with_objective`) so that
+    /// infrastructure gate is genuinely satisfied — the planner still
+    /// writes only the current default, empty-params requirement
+    /// (`planning_service.rs` `materialize_child_tasks`; authorship of
+    /// selector/path/literal params is the open ADR-0029 Option B decision,
+    /// out of scope here per the TASK-0144 envelope). It then overwrites
+    /// the task's trusted `EvidenceRequirement` revision with the exact
+    /// authorized candidate-input params through the real storage/domain
+    /// API (`task_domain::Task::define_evidence_requirements` plus
+    /// `SqliteStore::save_task`), never through the planner. The
+    /// separately established accepted-plan binding is untouched: it is
+    /// keyed by task id in its own table, not by requirement content.
+    fn seed_candidate_ready(db: &Path, project: &str, task: &str, path: &str, literal: &str) {
+        seed_ready_with_objective(db, project, task, format!("objective {task}"));
+
+        let task_id = task_domain::TaskId::new(task).unwrap();
+        let mut tasks = app_services::TaskService::open(db, app_services::SystemClock)
+            .expect("open task service");
+        let existing = tasks
+            .get_task(&task_id)
+            .unwrap()
+            .expect("planner materialized the task");
+        let mut replacement = task_domain::Task::draft(
+            task_id.clone(),
+            existing.project_id().clone(),
+            existing.objective().to_owned(),
+        )
+        .unwrap();
+        if let Some(parent) = existing.parent() {
+            replacement.set_parent(parent.clone()).unwrap();
+        }
+        replacement.add_acceptance("criterion-candidate").unwrap();
+        replacement
+            .define_evidence_requirements(vec![candidate_requirement(
+                "criterion-candidate",
+                path,
+                literal,
+            )])
+            .unwrap();
+        replacement.mark_ready().unwrap();
+        tasks.store_mut().save_task(&replacement).unwrap();
+    }
+
+    /// TASK-0144 blocker (d): the full production candidate-input path —
+    /// `dispatch_execution` → `run_background` → `ProductionEvaluator`
+    /// selection → the real `CandidateInputEvaluator` under G6/Runner —
+    /// reaches Task `Completed`, and the durably persisted evidence binds
+    /// the *exact* evaluated commit/tree, independently cross-checked
+    /// against `git rev-parse` on the real repository (never a placeholder
+    /// digest). A single green run is not evidence on its own: this test
+    /// also proves the sealed candidate manifest is reproducible by
+    /// recomputing it a second time from the same commit (`verify_commit`
+    /// is deterministic over immutable Git objects) and that the captured
+    /// `TestSuiteResult` reflects the real file content, not a stub.
+    #[test]
+    fn candidate_evaluator_completes_full_production_flow_with_verified_digest_bindings() {
+        let sandbox = Sandbox::named("candidate-e2e");
+        std::fs::create_dir_all(sandbox.repo.join("src")).unwrap();
+        std::fs::write(sandbox.repo.join("src/example.rs"), b"fn accepted() {}\n").unwrap();
+        git(&sandbox.repo, &["add", "src/example.rs"]);
+        git(&sandbox.repo, &["commit", "-q", "-m", "candidate content"]);
+        let expected_head = git_stdout(&sandbox.repo, &["rev-parse", "HEAD"]);
+        let expected_tree = git_stdout(&sandbox.repo, &["rev-parse", "HEAD^{tree}"]);
+
+        seed_candidate_ready(
+            &sandbox.db,
+            "P-CANDIDATE-E2E",
+            "T-CANDIDATE-E2E",
+            "src/example.rs",
+            "fn accepted()",
+        );
+
+        let fixture = fixture_script(
+            &sandbox.dir,
+            "success.sh",
+            "printf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"candidate content ready\",\"session_id\":\"11111111-1111-1111-1111-111111111111\"}'; exit 0\n",
+        );
+        let composition = sandbox
+            .composition(Some(fixture))
+            .with_candidate_evaluator_executable_override(candidate_test_evaluator_executable());
+        let (response, job) =
+            run_via_dispatch(&composition, run_request("T-CANDIDATE-E2E", &sandbox.repo));
+        let run = run_payload(&response);
+        run_background(job.expect("accepted run yields a background job"));
+
+        let execution_id = ExecutionId::new(run.execution_id.as_str()).unwrap();
+        let attempt_id = agent_runtime::AttemptId::new(run.attempt_id.as_str()).unwrap();
+
+        let store = storage_sqlite::SqliteStore::open(&sandbox.db).expect("open store");
+        let task = store
+            .get_task(&task_domain::TaskId::new("T-CANDIDATE-E2E").unwrap())
+            .unwrap()
+            .expect("task exists");
+        assert_eq!(
+            task.state(),
+            TaskState::Completed,
+            "the real candidate evaluator must independently verify and complete the Task"
+        );
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("COMPLETE")
+        );
+
+        let evidence = store
+            .get_candidate_evidence(execution_id.as_str(), attempt_id.as_str())
+            .unwrap()
+            .expect("candidate evidence persisted");
+        assert_eq!(
+            evidence.integrity.candidate_commit_oid, expected_head,
+            "assessment must bind the exact evaluated commit"
+        );
+        assert_eq!(
+            evidence.integrity.candidate_tree_oid, expected_tree,
+            "assessment must bind the exact evaluated tree"
+        );
+        assert!(evidence
+            .integrity
+            .candidate_manifest_sha256
+            .starts_with("sha256:"));
+        match evidence.effect.payload() {
+            evaluation::EffectPayload::TestSuiteResult { passed, failed, .. } => {
+                assert_eq!(
+                    (*passed, *failed),
+                    (1, 0),
+                    "the captured result must reflect the sealed snapshot's real bytes"
+                );
+            }
+            other => panic!("expected TestSuiteResult payload, got {other:?}"),
+        }
+
+        // Independent recomputation: resolving the same immutable commit a
+        // second time (a fresh evaluator instance, as a restarted daemon
+        // would) must reproduce byte-identical manifest/tree digests — this
+        // is not the same code path that produced the original assessment.
+        // Object reads need only the shared common Git directory (never a
+        // worktree-specific gitdir): commits/trees/blobs are content
+        // addressed and shared across every linked worktree.
+        let anchor = store
+            .get_trusted_anchor(
+                store
+                    .get_workspace_for_execution(&execution_id)
+                    .unwrap()
+                    .unwrap()
+                    .id(),
+            )
+            .unwrap()
+            .expect("trusted anchor recorded");
+        let request = EvaluationRequest {
+            task_id: task_domain::TaskId::new("T-CANDIDATE-E2E").unwrap(),
+            execution_id: execution_id.clone(),
+            attempt_id: attempt_id.clone(),
+            summary: "verify".to_owned(),
+            evidence_ref: "verify".to_owned(),
+        };
+        let fresh_evaluator = CandidateInputEvaluator {
+            db_path: sandbox.db.clone(),
+            git_executable: candidate_test_git_executable(),
+            snapshot_parent: sandbox.dir.join("candidate-input-snapshots"),
+            capture: effect_capture_local::LocalEffectCapture::default(),
+            evaluator_executable_override: Some(candidate_test_evaluator_executable()),
+        };
+        std::fs::create_dir_all(&fresh_evaluator.snapshot_parent).unwrap();
+        let format =
+            evaluation::GitObjectFormat::from_oid(&evidence.integrity.candidate_commit_oid)
+                .unwrap();
+        let context = CandidateGitContext {
+            request: &request,
+            invocation_id: "candidate-e2e-recompute",
+            workspace: anchor.canonical_commondir(),
+            gitdir: anchor.canonical_commondir(),
+            roots: vec![anchor.canonical_commondir().to_path_buf()],
+        };
+        let recomputed = fresh_evaluator
+            .verify_commit(&context, &evidence.integrity.candidate_commit_oid, format)
+            .expect("recomputing the sealed manifest over the same immutable commit");
+        assert_eq!(
+            recomputed.manifest.sha256, evidence.integrity.candidate_manifest_sha256,
+            "the manifest digest must be reproducible from the immutable Git objects alone"
+        );
+        assert_eq!(recomputed.tree_oid, evidence.integrity.candidate_tree_oid);
+
+        // Post-completion re-evaluation must never silently re-verify: the
+        // Task is no longer VERIFYING, so a stray retry (e.g. a delayed
+        // duplicate dispatch after a restart) is refused, not honored.
+        let replay = fresh_evaluator.evaluate(&request);
+        assert!(
+            replay.is_err(),
+            "evaluating an already-Completed Task's attempt must never succeed again"
+        );
+    }
+
+    /// TASK-0144 blockers (a)/(d): restart-safety at the durable boundary
+    /// between "trusted result admitted" and "Task completion", exercised
+    /// through the real `CandidateInputEvaluator`/`EvaluationPort` entry
+    /// points production uses — not a synthetic storage-only replay.
+    ///
+    /// The production cycle (`finish()` in `orchestration_service.rs`)
+    /// calls `evaluate()` then `revalidate_before_completion()` back to
+    /// back inside one Rust call with no externally triggerable pause in
+    /// between, so a literal process-kill mid-call cannot be injected from
+    /// a same-process test without OS-level fault injection this codebase
+    /// does not provide. This test instead drives Task/Execution/Attempt/
+    /// workspace state to exactly where a real cycle stands immediately
+    /// before evaluation — using the same public TaskService/RuntimeService
+    /// /WorkspaceService primitives `continue_workspace_cycle` itself calls
+    /// — then calls the evaluator's own methods directly and repeatedly,
+    /// simulating a daemon restart between phases with a fresh evaluator
+    /// instance each time. It proves: (1) a restarted evaluator that calls
+    /// `evaluate()` again on already-admitted evidence reuses it (appends
+    /// exactly one RestartReuse checkpoint) instead of re-running capture;
+    /// (2) `revalidate_before_completion()` is idempotent across a repeated
+    /// call, including through the same-subject Completion-checkpoint
+    /// replay path in `candidate_assessment_store.rs`; and (3) once the
+    /// candidate commit changes underneath (tamper), further reuse is
+    /// refused and a durable typed outcome is persisted — never a silent
+    /// re-verification.
+    #[test]
+    fn candidate_evaluator_restart_reuse_is_idempotent_and_tamper_is_refused() {
+        let sandbox = Sandbox::named("candidate-restart");
+        std::fs::create_dir_all(sandbox.repo.join("src")).unwrap();
+        std::fs::write(sandbox.repo.join("src/example.rs"), b"fn accepted() {}\n").unwrap();
+        git(&sandbox.repo, &["add", "src/example.rs"]);
+        git(&sandbox.repo, &["commit", "-q", "-m", "candidate content"]);
+
+        let project_id = task_domain::ProjectId::new("P-CANDIDATE-RESTART").unwrap();
+        let task_id = task_domain::TaskId::new("T-CANDIDATE-RESTART").unwrap();
+        let execution_id = ExecutionId::new("E-CANDIDATE-RESTART").unwrap();
+        let attempt_id = agent_runtime::AttemptId::new("A-CANDIDATE-RESTART").unwrap();
+
+        let mut tasks = app_services::TaskService::open(&sandbox.db, app_services::SystemClock)
+            .expect("open task service");
+        tasks
+            .create_project(
+                &task_domain::Project::new(project_id.clone(), "candidate restart project")
+                    .unwrap(),
+            )
+            .unwrap();
+        let mut built =
+            task_domain::Task::draft(task_id.clone(), project_id, "prove restart safety").unwrap();
+        built.add_acceptance("criterion-restart").unwrap();
+        built
+            .define_evidence_requirements(vec![candidate_requirement(
+                "criterion-restart",
+                "src/example.rs",
+                "fn accepted()",
+            )])
+            .unwrap();
+        tasks.create_task(&built).unwrap();
+        tasks.mark_ready(&task_id).unwrap();
+        tasks.claim(&task_id).unwrap();
+        tasks.start(&task_id).unwrap();
+
+        let mut runtime =
+            app_services::RuntimeService::open(&sandbox.db, app_services::SystemClock)
+                .expect("open runtime service");
+        runtime
+            .create_execution(execution_id.clone(), task_id.clone())
+            .unwrap();
+        runtime
+            .create_attempt(
+                &execution_id,
+                attempt_id.clone(),
+                agent_runtime::ProviderRef::new("fixture").unwrap(),
+            )
+            .unwrap();
+
+        std::fs::create_dir_all(sandbox.dir.join("workspaces")).unwrap();
+        let mut workspace = app_services::WorkspaceService::open(
+            &sandbox.db,
+            git_cli::GitCli::new(),
+            ManagedWorkspaceRoot::new(sandbox.dir.join("workspaces")).unwrap(),
+            app_services::SystemClock,
+        )
+        .expect("open workspace service");
+        let ensured = workspace
+            .ensure_workspace_ready(&app_services::WorkspaceRequest {
+                execution_id: execution_id.clone(),
+                repository_ref: workspace::RepositoryRef::new("repo-local:restart").unwrap(),
+                repository_path: sandbox.repo.to_string_lossy().into_owned(),
+                base_revision: "HEAD".to_owned(),
+            })
+            .expect("real linked worktree comes up READY");
+
+        runtime
+            .conclude_attempt(
+                &execution_id,
+                &attempt_id,
+                AttemptOutcome::Succeeded,
+                "fixture attempt succeeded",
+            )
+            .unwrap();
+        tasks
+            .submit_result(&task_id, "fixture summary".to_owned())
+            .unwrap();
+        tasks.route_to_review(&task_id).unwrap();
+        tasks.begin_verification(&task_id).unwrap();
+        tasks.bind_evaluated_policy_base(&execution_id).unwrap();
+
+        let request = EvaluationRequest {
+            task_id: task_id.clone(),
+            execution_id: execution_id.clone(),
+            attempt_id: attempt_id.clone(),
+            summary: "fixture summary".to_owned(),
+            evidence_ref: "fixture-evidence".to_owned(),
+        };
+        let evaluator = CandidateInputEvaluator {
+            db_path: sandbox.db.clone(),
+            git_executable: candidate_test_git_executable(),
+            snapshot_parent: sandbox.dir.join("candidate-input-snapshots"),
+            capture: effect_capture_local::LocalEffectCapture::default(),
+            evaluator_executable_override: Some(candidate_test_evaluator_executable()),
+        };
+        std::fs::create_dir_all(&evaluator.snapshot_parent).unwrap();
+
+        let verdict = evaluator
+            .evaluate(&request)
+            .expect("the real production evaluator admits durable evidence");
+        assert_eq!(verdict, EvaluationVerdict::Verified);
+        let store = storage_sqlite::SqliteStore::open(&sandbox.db).expect("open store");
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("RESULT_ADMITTED"),
+            "evidence must be durably admitted before completion runs"
+        );
+        let admitted = store
+            .get_candidate_evidence_for_completion(execution_id.as_str(), attempt_id.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(admitted.integrity.checkpoints.len(), 4);
+
+        // -- simulated restart: a fresh evaluator instance (new process)
+        // revalidates and completes. Restart-safety at the RESULT_ADMITTED
+        // -> COMPLETE boundary is `revalidate_before_completion`'s job
+        // (idempotent Completion-checkpoint replay plus the operation-
+        // status `.or_else` recovery below), not `evaluate()`'s reuse
+        // branch: `append_candidate_checkpoint` only accepts a
+        // `RestartReuse` checkpoint once a matching `Completion` checkpoint
+        // already exists, so `evaluate()` re-entry only ever reuses an
+        // already-fully-completed attempt, never a bare RESULT_ADMITTED one
+        // (a retry before completion correctly falls through to a fresh
+        // evaluation instead).
+        let restarted = CandidateInputEvaluator {
+            db_path: sandbox.db.clone(),
+            git_executable: candidate_test_git_executable(),
+            snapshot_parent: sandbox.dir.join("candidate-input-snapshots"),
+            capture: effect_capture_local::LocalEffectCapture::default(),
+            evaluator_executable_override: Some(candidate_test_evaluator_executable()),
+        };
+        restarted
+            .revalidate_before_completion(&request)
+            .expect("completion revalidation succeeds after restart");
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("COMPLETE")
+        );
+        // Idempotent replay across a simulated crash immediately after
+        // Completion persisted but before the caller observed success.
+        restarted
+            .revalidate_before_completion(&request)
+            .expect("a repeated completion revalidation on the same subject is idempotent");
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("COMPLETE")
+        );
+
+        // Now that Completion is durable, a further `evaluate()` on the
+        // same (execution, attempt) — e.g. a stray re-entry after the Task
+        // itself failed to observe completion — validly reuses the sealed
+        // evidence instead of re-running capture, appending exactly one
+        // RestartReuse checkpoint.
+        let reuse_verdict = restarted
+            .evaluate(&request)
+            .expect("re-evaluating an already-completed attempt reuses durable evidence");
+        assert_eq!(reuse_verdict, EvaluationVerdict::Verified);
+        let reused = store
+            .get_candidate_evidence(execution_id.as_str(), attempt_id.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reused.integrity.checkpoints.len(),
+            6,
+            "reuse appends exactly one RestartReuse checkpoint on top of Completion, it does not re-capture"
+        );
+
+        // -- tamper/mismatch negative: HEAD moves in the linked worktree
+        // after durable evidence was sealed --
+        let worktree = PathBuf::from(ensured.lease.worktree_ref());
+        std::fs::write(worktree.join("src/example.rs"), b"fn tampered() {}\n").unwrap();
+        git(
+            &worktree,
+            &["commit", "-aq", "-m", "tamper after admission"],
+        );
+
+        let tampered = restarted.evaluate(&request);
+        assert!(
+            tampered.is_err(),
+            "a changed candidate commit must never silently reuse a prior successful verdict"
+        );
+        let status_after_tamper = store
+            .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+            .unwrap();
+        assert!(
+            matches!(
+                status_after_tamper.as_deref(),
+                Some("MISMATCH") | Some("BLOCKED") | Some("TAMPERED")
+            ),
+            "the tamper refusal must persist a durable typed outcome, got {status_after_tamper:?}"
+        );
+        assert_ne!(
+            status_after_tamper.as_deref(),
+            Some("COMPLETE"),
+            "a tampered candidate must never be reported as durably completed"
+        );
     }
 
     #[test]

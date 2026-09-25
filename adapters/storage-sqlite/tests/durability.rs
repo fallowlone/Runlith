@@ -716,6 +716,15 @@ fn schema_21_upgrades_once_to_candidate_assessments_22_and_reopens() {
         )
         .unwrap();
     assert_eq!(assessment_columns, 36);
+    let operation_columns: i64 = rusqlite::Connection::open(&db.path)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('candidate_input_operations')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(operation_columns, 18);
 }
 
 #[test]

@@ -37,3 +37,25 @@ CREATE TABLE candidate_input_assessments (
     runner_env_isolated INTEGER NOT NULL CHECK (runner_env_isolated = 1)
 );
 CREATE INDEX candidate_input_assessments_task_idx ON candidate_input_assessments(task_id, execution_id, attempt_id, completed_at_ms);
+
+CREATE TABLE candidate_input_operations (
+    execution_id TEXT NOT NULL REFERENCES executions(id),
+    attempt_id TEXT NOT NULL REFERENCES execution_attempts(attempt_id),
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    operation_id TEXT NOT NULL UNIQUE CHECK (length(operation_id) BETWEEN 1 AND 1024),
+    base_revision TEXT NOT NULL CHECK (length(base_revision) BETWEEN 1 AND 1024),
+    selected_commit_oid TEXT NOT NULL CHECK (length(selected_commit_oid) IN (40,64)),
+    requirement_revision TEXT NOT NULL CHECK (length(requirement_revision) <= 1024),
+    policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
+    policy_fingerprint TEXT NOT NULL CHECK (length(policy_fingerprint) <= 1024),
+    criterion_id TEXT NOT NULL CHECK (length(criterion_id) <= 1024),
+    selector TEXT NOT NULL CHECK (selector = 'candidate.file-contains.v1'),
+    selector_path TEXT NOT NULL CHECK (length(selector_path) BETWEEN 1 AND 4096),
+    selector_literal TEXT NOT NULL CHECK (length(selector_literal) BETWEEN 1 AND 4096),
+    status TEXT NOT NULL CHECK (status IN ('PENDING','RESULT_ADMITTED','MISMATCH','BLOCKED','TAMPERED','COMPLETE')),
+    detail_code TEXT CHECK (detail_code IS NULL OR length(detail_code) <= 128),
+    status_history TEXT NOT NULL DEFAULT 'PENDING' CHECK (length(status_history) BETWEEN 1 AND 8192),
+    started_at_ms INTEGER NOT NULL CHECK (started_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= started_at_ms),
+    PRIMARY KEY(execution_id, attempt_id)
+);

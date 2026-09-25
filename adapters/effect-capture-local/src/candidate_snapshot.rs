@@ -382,6 +382,18 @@ mod macos {
             DescriptorReadOperation,
         ) -> Result<(), evaluation::EffectError>,
     ) -> Result<Vec<u8>, evaluation::EffectError> {
+        read_linked_metadata_file_if_present(common_dir, relative_path, authorize)?
+            .ok_or_else(|| failed("linked metadata file is absent"))
+    }
+
+    pub(super) fn read_linked_metadata_file_if_present(
+        common_dir: &Path,
+        relative_path: &[u8],
+        authorize: &mut impl FnMut(
+            &[u8],
+            DescriptorReadOperation,
+        ) -> Result<(), evaluation::EffectError>,
+    ) -> Result<Option<Vec<u8>>, evaluation::EffectError> {
         validate_name_path(relative_path)?;
         authorize(b".", DescriptorReadOperation::OpenDirectory)?;
         let authorized_root = common_dir;
@@ -435,6 +447,9 @@ mod macos {
             )
         };
         if fd < 0 {
+            if unsafe { *__error() } == 2 {
+                return Ok(None);
+            }
             return Err(failed("linked metadata file open failed"));
         }
         let file = unsafe { File::from_raw_fd(fd) };
@@ -448,10 +463,10 @@ mod macos {
         }
         let mut bytes = Vec::new();
         read_authorized(&file, &prefix, authorize, 4097, &mut bytes)?;
-        if bytes.is_empty() || bytes.len() > 4096 {
+        if bytes.len() > 4096 {
             return Err(failed("linked metadata file size is invalid"));
         }
-        Ok(bytes)
+        Ok(Some(bytes))
     }
 
     struct WalkState<'a> {
@@ -626,12 +641,21 @@ mod macos {
         }
         let mut names = Vec::new();
         let read_result = loop {
-            unsafe { *__error() = 0 };
             if let Some(authorize) = authorize.as_deref_mut() {
                 if let Err(error) = authorize(path, DescriptorReadOperation::ReadDirectory) {
                     break Err(error);
                 }
             }
+            // `errno` is reset immediately before `readdir`, never earlier:
+            // `authorize` above performs its own G6/storage work, whose
+            // internal syscalls (e.g. a `stat` that legitimately returns
+            // ENOENT for an absent lock/WAL file) can leave a stale nonzero
+            // `errno` behind. POSIX `readdir` guarantees `errno` reflects
+            // its own outcome only when checked without an intervening
+            // call; resetting any earlier would misattribute an unrelated
+            // side effect from `authorize` as a directory-read failure on
+            // a legitimate end-of-stream.
+            unsafe { *__error() = 0 };
             let entry = unsafe { readdir(stream) };
             if entry.is_null() {
                 let error = unsafe { *__error() };
@@ -871,12 +895,32 @@ pub fn read_linked_metadata_file(
     macos::read_linked_metadata_file(common_dir, relative_path, authorize)
 }
 
+#[cfg(target_os = "macos")]
+pub fn read_linked_metadata_file_if_present(
+    common_dir: &Path,
+    relative_path: &[u8],
+    authorize: &mut impl FnMut(&[u8], DescriptorReadOperation) -> Result<(), evaluation::EffectError>,
+) -> Result<Option<Vec<u8>>, evaluation::EffectError> {
+    macos::read_linked_metadata_file_if_present(common_dir, relative_path, authorize)
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn read_linked_metadata_file(
     _common_dir: &Path,
     _relative_path: &[u8],
     _authorize: &mut impl FnMut(&[u8], DescriptorReadOperation) -> Result<(), evaluation::EffectError>,
 ) -> Result<Vec<u8>, evaluation::EffectError> {
+    Err(evaluation::EffectError::Unsupported(
+        "descriptor-safe linked metadata reads are unsupported",
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn read_linked_metadata_file_if_present(
+    _common_dir: &Path,
+    _relative_path: &[u8],
+    _authorize: &mut impl FnMut(&[u8], DescriptorReadOperation) -> Result<(), evaluation::EffectError>,
+) -> Result<Option<Vec<u8>>, evaluation::EffectError> {
     Err(evaluation::EffectError::Unsupported(
         "descriptor-safe linked metadata reads are unsupported",
     ))
