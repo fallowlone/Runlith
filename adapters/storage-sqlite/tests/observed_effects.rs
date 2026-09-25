@@ -1213,9 +1213,8 @@ fn invalidate_without_operation_row_returns_false() {
     );
 
     // Should return Ok(false), not an error
-    assert_eq!(
-        result.unwrap(),
-        false,
+    assert!(
+        !result.unwrap(),
         "invalidate should return false for non-existent row"
     );
 }
