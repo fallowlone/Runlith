@@ -175,7 +175,7 @@ and [`task0152-probes/stub_server.py`](task0152-probes/stub_server.py).
 | R4 | production-shaped + `ANTHROPIC_AUTH_TOKEN=<dummy>` | `1` | absent | `"Failed to authenticate. API Error: 401 Invalid bearer token"`, `api_error_status: 401` | **honoured**: same class of real network auth rejection |
 | R5 | production-shaped + `ANTHROPIC_API_KEY=<dummy>`, fresh empty `HOME`, `CLAUDE_CONFIG_DIR` under scratch, no host `~/.claude` support-read at all, that dir as the only extra write root | `1` | absent | `"Invalid API key · Fix external API key"`, `api_error_status: 401` | the honoured mechanism needs **no** prior host `~/.claude` state at all: identical real-network rejection with a completely fresh identity anchor |
 | R6 | local-endpoint: `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>` (local stub), network scope = that port only (no `*:443`, no mDNSResponder), `ANTHROPIC_API_KEY=<dummy>` | `0` | **present** | `"TASK0152_EVIDENCE_OK"` | **the CLI completes a full non-interactive run against a trusted local HTTP endpoint, with internet access removed entirely from the sandbox profile** |
-| R6 (no-credential variant) | same local-endpoint profile, **no** credential env var set | `1` | absent | `"Not logged in · Please run /login"` | the CLI still refuses before ever POSTing to the local endpoint even though it is reachable — it checked connectivity (`HEAD /api/hello`, no auth headers) but never attempted `/v1/messages` without a credential |
+| R6 (no-credential variant) | same local-endpoint profile, **no** credential env var set | `1` | absent | `"Not logged in · Please run /login"` | the CLI DID reach the stub — it sent one `HEAD /api/hello` connectivity check (no auth headers) and the local endpoint was reachable — but it refused before ever sending the `POST /v1/messages` request; the credential-less refusal happens after connectivity is confirmed, not before any network attempt |
 | R7 | same as R6 plus `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` | `0` | present | `"TASK0152_EVIDENCE_OK"` | no observed change: still two requests to the stub, same paths, same headers; provenance-confirmed variable, **no behavioral effect measured in this exact probe shape** (not proof it does nothing generally) |
 
 Stability re-run at the end (same commands, same profile, fresh process):
@@ -319,21 +319,37 @@ no Keychain read). It:
 2. injects it into a confined child via only a TASK-0152-proven-honoured
    variable name (hardcoded allowlist: `ANTHROPIC_API_KEY`,
    `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN` — refuses any other
-   name without touching Keychain);
+   name without touching Keychain), with a fresh empty `HOME` and
+   `CLAUDE_CONFIG_DIR` under the run's own `mktemp` directory and no
+   support-read grant on any host `~/.claude`/`~/.claude.json` (same
+   pattern as probe row R5), so a pass proves the mechanism needs no
+   pre-existing host session state;
 3. runs the same production-shaped profile and marker prompt;
 4. prints only CLI version, exit status, marker present/absent, and a
    classified failure reason — never the credential value, never raw
-   provider output.
+   provider output. The credential value is never placed in the argv of
+   any process: the launch clears every inherited exported variable with
+   the `unset` builtin, re-`export`s only the allowlisted names (builtins
+   never appear as a separate `ps`-visible argv), and `exec`s
+   `sandbox-exec` directly rather than routing the credential through
+   `env NAME=value cmd`, whose own argv would otherwise be briefly
+   `ps`-visible.
 
-One-time setup the owner runs themselves (not run by this task; keeps the
-value out of shell history by reading it through an interactive prompt
-rather than a literal command-line argument):
+One-time setup the owner runs themselves (not run by this task). `-w` is
+given as the LAST argument with no value, so `security` itself prompts
+interactively for the password data and reads it directly from the
+terminal — this avoids both exposure paths a naive command would have: the
+value never appears as a `security` argv element (visible to any `ps`
+observer while the command runs) and it is never captured into a shell
+variable or typed as part of the command line (so it cannot land in shell
+history either):
 
 ```bash
-read -r -s -p "Value for the Claude credential to store: " CRED; echo
-security add-generic-password -a "$USER" -s "runlith-task0152-owner-claude-key" -w "$CRED"
-unset CRED
+security add-generic-password -a "$USER" -s "runlith-task0152-owner-claude-key" -w
 ```
+
+(`security` prints its own `password data for new item:` prompt; type the
+credential value there.)
 
 Then: `bash task0152-probes/owner_positive_probe.sh ANTHROPIC_API_KEY
 runlith-task0152-owner-claude-key`.

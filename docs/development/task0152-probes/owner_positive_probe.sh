@@ -2,16 +2,22 @@
 # TASK-0152 owner-run positive probe. NOT run by the implementer agent --
 # the owner runs this manually, with their own real credential, after
 # creating a Keychain item themselves (see the one-time setup command in
-# docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md, which uses an
-# interactive `read -s` prompt so the credential value never appears in
-# shell history).
+# docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md, which puts `-w` as
+# the LAST argument with no value so `security` prompts interactively and
+# the value never appears in argv or shell history).
 #
 # What it does:
 #   1. Reads the named Keychain generic-password item on the HOST, outside
-#      any sandbox (`security find-generic-password -w`).
+#      any sandbox (`security find-generic-password -w`; this call's own
+#      argv holds no secret -- `-w` only requests the value on stdout).
 #   2. Injects that value into a confined child, via ONLY the env var name
 #      the R2-R5 probes proved the installed CLI honours, under the exact
-#      production-shaped Seatbelt profile (gen_profile.sh).
+#      production-shaped Seatbelt profile (gen_profile.sh) -- but with a
+#      FRESH, empty HOME and CLAUDE_CONFIG_DIR under this run's own mktemp
+#      directory (same pattern as probe row R5), and no support-read grant
+#      on any host `~/.claude`/`~/.claude.json` at all. A pass therefore
+#      proves the mechanism needs no pre-existing host session state, not
+#      merely that it works with one.
 #   3. Runs the fixed harmless marker prompt, non-interactively.
 #   4. Prints ONLY: CLI version, exit status, marker present/absent, and a
 #      classified failure reason. Never the credential value, never raw
@@ -19,10 +25,18 @@
 #
 # Safety:
 #   - `set +x` always; this script never enables xtrace.
+#   - The credential value is never placed in the argv of ANY process.
+#     `env NAME=value cmd` (the naive approach) puts the pair in `env`'s own
+#     argv, which is `ps`-visible for the (small but real) window before
+#     `env` execs into `cmd`. This script instead runs the launch inside a
+#     subshell that clears every inherited exported variable
+#     (`compgen -e` + `unset`), re-`export`s only the allowlisted names
+#     (a shell builtin -- builtins never appear as a separate `ps` argv),
+#     and then `exec`s `sandbox-exec` directly -- no `env` process, and no
+#     argv anywhere ever contains the credential.
 #   - The credential value lives in one local variable for the shortest
 #     possible scope, is never `echo`ed, `printf`ed, logged, or written to
-#     any file, and is `unset` (and the underlying shell buffer overwritten
-#     where the shell supports it) before the script exits.
+#     any file, and is `unset` before the script exits.
 #   - Refuses to run unless the requested variable name is one of the
 #     names this task's probes actually proved honoured (not merely a
 #     strings/help-text candidate).
@@ -92,16 +106,20 @@ CLI_VERSION="$("$CLAUDE_EXEC" --version 2>/dev/null || echo unknown)"
 WORKDIR="$(mktemp -d)"
 WORKSPACE="$WORKDIR/workspace"
 RUNTIME_ROOT="$WORKDIR/runtime"
-mkdir -p "$WORKSPACE" "$RUNTIME_ROOT"/{config,data,state,cache,scratch}
-chmod 700 "$RUNTIME_ROOT"
+# Fresh, empty HOME and CLAUDE_CONFIG_DIR under this run's own mktemp dir --
+# same pattern probe row R5 used. No host `~/.claude`/`~/.claude.json` is
+# granted or referenced anywhere in this script: a pass here proves the
+# mechanism needs no pre-existing host session state.
+FRESH_HOME="$WORKDIR/home"
+CLAUDE_CONFIG_DIR_VALUE="$FRESH_HOME/.claude-config"
+mkdir -p "$WORKSPACE" "$RUNTIME_ROOT"/{config,data,state,cache,scratch} "$FRESH_HOME"
+chmod 700 "$RUNTIME_ROOT" "$FRESH_HOME"
 cleanup() { rm -rf "$WORKDIR"; }
 trap cleanup EXIT
 
 PROFILE="$WORKDIR/production-shaped.sb"
-declare -a GEN_ARGS=(--workspace "$WORKSPACE" --claude-exec "$CLAUDE_EXEC" --runtime-root "$RUNTIME_ROOT" --network prod443 --out "$PROFILE")
-[ -e "$HOME/.claude" ] && GEN_ARGS+=(--support-read "$HOME/.claude")
-[ -e "$HOME/.claude.json" ] && GEN_ARGS+=(--support-read "$HOME/.claude.json")
-bash "$SCRIPT_DIR/gen_profile.sh" "${GEN_ARGS[@]}" >/dev/null
+bash "$SCRIPT_DIR/gen_profile.sh" --workspace "$WORKSPACE" --claude-exec "$CLAUDE_EXEC" \
+  --runtime-root "$RUNTIME_ROOT" --network prod443 --out "$PROFILE" >/dev/null
 
 MARKER="TASK0152_OWNER_PROBE_OK"
 PROMPT="Do not use any tools. Reply with exactly ${MARKER} and nothing else."
@@ -119,23 +137,48 @@ fi
 STDOUT_FILE="$WORKDIR/stdout"
 STDERR_FILE="$WORKDIR/stderr"
 
+# Values needed inside the subshell below, captured now (before that
+# subshell strips its own exported environment) so they survive as plain
+# subshell-inherited shell variables even though they are not exported.
+LAUNCH_PATH="/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$CLAUDE_EXEC")"
+LAUNCH_XDG_CONFIG="$RUNTIME_ROOT/config"
+LAUNCH_XDG_DATA="$RUNTIME_ROOT/data"
+LAUNCH_XDG_STATE="$RUNTIME_ROOT/state"
+LAUNCH_XDG_CACHE="$RUNTIME_ROOT/cache"
+LAUNCH_TMP="$RUNTIME_ROOT/scratch"
+
 set +e
 (
-  cd "$WORKSPACE" && env -i \
-    "PATH=/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$CLAUDE_EXEC")" \
-    "HOME=$HOME" \
-    "USER=$ACCOUNT" \
-    "PWD=$WORKSPACE" \
-    "XDG_CONFIG_HOME=$RUNTIME_ROOT/config" \
-    "XDG_DATA_HOME=$RUNTIME_ROOT/data" \
-    "XDG_STATE_HOME=$RUNTIME_ROOT/state" \
-    "XDG_CACHE_HOME=$RUNTIME_ROOT/cache" \
-    "CLAUDE_CODE_TMPDIR=$RUNTIME_ROOT/scratch" \
-    "TMPDIR=$RUNTIME_ROOT/scratch" \
-    "TMP=$RUNTIME_ROOT/scratch" \
-    "TEMP=$RUNTIME_ROOT/scratch" \
-    "${VAR_NAME}=${CREDENTIAL_VALUE}" \
-    /usr/bin/sandbox-exec -p "$(cat "$PROFILE")" \
+  cd "$WORKSPACE" || exit 125
+  # Clear every exported variable this subshell inherited (ambient
+  # credentials, cloud config, PATH, HOME, everything) -- the `env -i`
+  # equivalent, but done with the `unset` builtin so no external process
+  # ever sees these names/values as argv. `compgen -e` itself is a builtin
+  # too; nothing here spawns a process before the final `exec`.
+  while IFS= read -r exported_name; do
+    unset "$exported_name" 2>/dev/null || true
+  done < <(compgen -e)
+
+  # Re-establish only the explicit allowlisted pairs, plus the credential
+  # variable under test, via the `export` builtin -- never via `env`'s
+  # argv, so the credential value is never written into any process's
+  # command line.
+  export PATH="$LAUNCH_PATH"
+  export HOME="$FRESH_HOME"
+  export USER="$ACCOUNT"
+  export PWD="$WORKSPACE"
+  export XDG_CONFIG_HOME="$LAUNCH_XDG_CONFIG"
+  export XDG_DATA_HOME="$LAUNCH_XDG_DATA"
+  export XDG_STATE_HOME="$LAUNCH_XDG_STATE"
+  export XDG_CACHE_HOME="$LAUNCH_XDG_CACHE"
+  export CLAUDE_CODE_TMPDIR="$LAUNCH_TMP"
+  export TMPDIR="$LAUNCH_TMP"
+  export TMP="$LAUNCH_TMP"
+  export TEMP="$LAUNCH_TMP"
+  export CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR_VALUE"
+  export "${VAR_NAME}=${CREDENTIAL_VALUE}"
+
+  exec /usr/bin/sandbox-exec -p "$(cat "$PROFILE")" \
     "$CLAUDE_EXEC" -p --safe-mode --output-format json "$PROMPT" \
     >"$STDOUT_FILE" 2>"$STDERR_FILE"
 )

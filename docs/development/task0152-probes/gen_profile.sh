@@ -120,12 +120,35 @@ check_safe_absolute() {
 # `std::fs::canonicalize(&executable)`) before it becomes a profile literal.
 CLAUDE_EXEC="$(readlink -f "$CLAUDE_EXEC")"
 
+# Canonicalize every other path input too. On macOS, `$TMPDIR`-derived
+# paths (`/var/folders/...`) are themselves a symlink to
+# `/private/var/folders/...`, and the kernel's own getcwd()/realpath()
+# resolution -- which a Seatbelt `subpath` grant must match -- returns the
+# resolved physical path, not the symlinked one (measured: `cd` into a
+# `/var/folders/...` workspace and `pwd -P` differs from the literal path
+# passed in). A profile built from the unresolved path silently denies
+# every read/write under it. This mirrors the same class of fix already
+# applied to `--claude-exec` above, now applied uniformly to every
+# filesystem-scope input so this tool works regardless of which directory
+# (assigned scratchpad, a bare `mktemp -d`, etc.) the caller points it at.
+WORKSPACE="$(readlink -f "$WORKSPACE")"
+RUNTIME_ROOT="$(readlink -f "$RUNTIME_ROOT")"
+for i in "${!SUPPORT_READ[@]}"; do
+  [ -n "${SUPPORT_READ[$i]}" ] && SUPPORT_READ[$i]="$(readlink -f "${SUPPORT_READ[$i]}")"
+done
+
 check_safe_absolute "$WORKSPACE"
 check_safe_absolute "$CLAUDE_EXEC"
 check_safe_absolute "$RUNTIME_ROOT"
 for r in "${SUPPORT_READ[@]:-}"; do
   [ -n "$r" ] && check_safe_absolute "$r"
 done
+
+# Ensure the output directory exists before writing -- on a fresh scratch
+# tree (e.g. `$SCRATCH/results/`) nothing else in this tool creates it, and
+# writing to a missing directory is the exact failure mode this script now
+# guards below (see the `||` after the profile-writing block).
+mkdir -p "$(dirname "$OUT")"
 
 {
   printf '(version 1)\n(deny default)\n(import "system.sb")\n(allow process-fork)\n'
@@ -174,6 +197,21 @@ done
       exit 2
       ;;
   esac
-} > "$OUT"
+} > "$OUT" || {
+  # A failed redirection on a `{ ... } > file` group is a documented bash
+  # quirk: it prints its own error but does NOT trip `set -e` (measured
+  # during harness hardening -- the script otherwise silently continued
+  # past a missing output directory, writing nothing, and the caller then
+  # ran `sandbox-exec` against a missing/empty profile file, which failed
+  # with an unrelated-looking sandbox-level exit code instead of a clear
+  # harness error). The explicit `||` here checks the redirection's exit
+  # status directly, which is unaffected by that `set -e` quirk.
+  echo "gen_profile.sh: failed to write profile to $OUT" >&2
+  exit 1
+}
+if [ ! -s "$OUT" ]; then
+  echo "gen_profile.sh: profile at $OUT is missing or empty after generation" >&2
+  exit 1
+fi
 
 echo "$OUT"

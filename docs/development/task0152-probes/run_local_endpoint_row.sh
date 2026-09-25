@@ -46,7 +46,8 @@ mkdir -p "$WORKSPACE" "$RUNTIME_ROOT"/{config,data,state,cache,scratch}
 chmod 700 "$RUNTIME_ROOT" 2>/dev/null || true
 
 RAW_DIR="$SCRATCH/raw"
-mkdir -p "$RAW_DIR"
+RESULTS_DIR="$SCRATCH/results"
+mkdir -p "$RAW_DIR" "$RESULTS_DIR"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 STDOUT_RAW="$RAW_DIR/${ROW}-${STAMP}.stdout"
 STDERR_RAW="$RAW_DIR/${ROW}-${STAMP}.stderr"
@@ -73,9 +74,17 @@ if [ -z "$PORT" ]; then
   exit 0
 fi
 
-PROFILE="$SCRATCH/results/${ROW}.sb"
-bash "$SCRIPT_DIR/gen_profile.sh" --workspace "$WORKSPACE" --claude-exec "$CLAUDE_EXEC" \
-  --runtime-root "$RUNTIME_ROOT" --network "local:$PORT" --out "$PROFILE" >/dev/null
+PROFILE="$RESULTS_DIR/${ROW}.sb"
+# A profile-generation failure is a HARNESS error, never a probe result --
+# see run_row.sh for the matching fix and its rationale (a bash `set -e`
+# quirk let a missing output directory pass silently through gen_profile.sh
+# and get misreported downstream as an ordinary CLI failure exit code).
+if ! GEN_PROFILE_OUT="$(bash "$SCRIPT_DIR/gen_profile.sh" --workspace "$WORKSPACE" --claude-exec "$CLAUDE_EXEC" \
+  --runtime-root "$RUNTIME_ROOT" --network "local:$PORT" --out "$PROFILE" 2>&1)"; then
+  echo "${GEN_PROFILE_OUT}" >&2
+  python3 -c "import json,sys; print(json.dumps({'row': sys.argv[1], 'harness_error': 'profile generation failed', 'exit': None, 'marker': False, 'class': None}))" "$ROW"
+  exit 1
+fi
 
 declare -a ENV_ARGS=(
   "PATH=/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$CLAUDE_EXEC")"
