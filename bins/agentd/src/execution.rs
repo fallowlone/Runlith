@@ -2903,8 +2903,7 @@ fn authenticated_worktree_gitdir(
             "linked worktree pointer contains unsupported bytes".to_owned(),
         ));
     }
-    let gitdir =
-        lexical_absolute(root, Path::new(raw_gitdir)).map_err(|e| CheckError::Content(e))?;
+    let gitdir = lexical_absolute(root, Path::new(raw_gitdir)).map_err(CheckError::Content)?;
     let worktrees_root = anchor.canonical_commondir().join("worktrees");
     let relative = gitdir.strip_prefix(&worktrees_root).map_err(|_| {
         CheckError::Content("linked Git metadata escapes the trusted common directory".to_owned())
@@ -3042,9 +3041,9 @@ fn authenticated_worktree_gitdir(
         .ok_or_else(|| {
             CheckError::Content("linked worktree common-dir framing is invalid".to_owned())
         })?;
-    if lexical_absolute(&gitdir, Path::new(backref)).map_err(|e| CheckError::Content(e))?
+    if lexical_absolute(&gitdir, Path::new(backref)).map_err(CheckError::Content)?
         != root.join(".git")
-        || lexical_absolute(&gitdir, Path::new(common_ref)).map_err(|e| CheckError::Content(e))?
+        || lexical_absolute(&gitdir, Path::new(common_ref)).map_err(CheckError::Content)?
             != anchor.canonical_commondir()
     {
         return Err(CheckError::Content(
