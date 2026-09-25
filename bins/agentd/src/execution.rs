@@ -7644,9 +7644,9 @@ mod tests {
         let bad_evaluator = CandidateInputEvaluator {
             db_path: fixture.sandbox.db.clone(),
             git_executable: fixture.sandbox.dir.join("no-such-git"),
-            snapshot_parent: fixture.sandbox.dir.join("snapshots"),
-            capture: fixture.evaluator.capture.clone(),
-            evaluator_executable_override: fixture.evaluator.evaluator_executable_override.clone(),
+            snapshot_parent: fixture.sandbox.dir.join("candidate-input-snapshots"),
+            capture: effect_capture_local::LocalEffectCapture::default(),
+            evaluator_executable_override: Some(candidate_test_evaluator_executable()),
         };
 
         // revalidate_before_completion must return Err.
