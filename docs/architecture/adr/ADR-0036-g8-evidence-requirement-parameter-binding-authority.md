@@ -30,7 +30,7 @@ runs. **No accepted contract or shipped code produces it.**
 
 Evidence:
 
-- `crates/task/src/requirement.rs:205-207` — `EvidenceRequirement.params`
+- `crates/task/src/requirement.rs:206-208` — `EvidenceRequirement.params`
   is documented as "Kind-specific parameters; empty means 'resolved by
   policy at check time' and is the documented v1 default." No code
   resolves that promise; there is no resolver.
@@ -43,7 +43,7 @@ Evidence:
   the plan-side criterion declaration the planner proposes and validation
   admits. It carries no parameter field at all; there is no channel for
   kind-specific parameters to enter a `PlanChangeSet` in the first place.
-- `crates/plan/src/validation.rs:478-503`
+- `crates/plan/src/validation.rs:478-540`
   (`check_criteria_preservation`) — when a plan changeset's children
   cover a parent's already-required criterion, a non-empty
   `requirement.params` on the *parent* side is one of the conditions that
@@ -218,7 +218,7 @@ ADR-0030/0032 already assume — one revision, bound once, replayed
 identically at verification and on restart — and requires no new
 supersession/versioning machinery beyond what
 `define_evidence_requirements` already has. Its cost is that
-`crates/plan/src/validation.rs:478-503`'s V9 `check_criteria_preservation`
+`crates/plan/src/validation.rs:478-540`'s V9 `check_criteria_preservation`
 must explicitly recognize an authorized, catalog-validated non-empty-params
 requirement as non-escalating when it covers a parent criterion — today's
 `!requirement.params.is_empty()` check would otherwise flag every such
@@ -309,6 +309,14 @@ ADR-0034's existing failure semantics.
 - `crates/policy` gains a new closed catalog type, structurally parallel
   to `TestMutationPolicy`, with its own revision/fingerprint.
 
+## Migration impact
+
+This is a docs-only ADR; no schema or data migration is required. Existing Tasks with empty `EvidenceRequirement` params remain valid and continue on the existing `PendingEvaluator`/manual verification path with no rewrite or backfill. Future implementation (this ADR's IMPL follow-ups) that persists binding records or new requirement revisions must allocate the next storage migration number from accepted main at that time and must not mutate existing requirement revisions (per ADR-0030, each binding is a new revision). Rollback semantics: if binding records are ignored, tasks fall back to unverified/manual state, never `PASS`.
+
+## Relation to TASK-0144
+
+TASK-0144 implements the ADR-0035 candidate-input producer whose parameter shape (`candidate.file-contains.v1` selector, path, literal, subject binding, policy fingerprint) is fixed by accepted ADR-0034/ADR-0035, not by this ADR. This ADR decides only who may bind those values into a Task's `EvidenceRequirement` revision. Therefore TASK-0144 does not depend on this ADR; until this ADR is ratified and its implementation follow-ups land, TASK-0144's evaluator is fail-closed and unreachable for planner-materialized Tasks (they stay on the manual/pending path). Production reachability, and TASK-0125's use of candidate-input evidence, depend on this ADR's implementation follow-ups.
+
 ## Security considerations
 
 A parameter binding is a completion-adjacent authority artifact: an
@@ -370,7 +378,7 @@ Task/Plan-domain data-shape and authority-boundary work only.
   precedent), TASK-0149 (ADR-0035, for the path-validation posture to
   reuse).
 - **IMPL-B — V9 preservation-check update.** Update
-  `crates/plan/src/validation.rs:478-503` so an authorized, catalog-valid
+  `crates/plan/src/validation.rs:478-540` so an authorized, catalog-valid
   bound-params requirement covering a preserved parent criterion is not
   flagged as `requirement_changed`. Depends on: IMPL-A.
 - **IMPL-C — Operator control-surface binding UI/IPC path.** Expose §1a's
@@ -408,7 +416,7 @@ decomposes and schedules them after ratification.
   production `EvidenceRequirement` writer; always empty params.
 - `crates/plan/src/risk.rs:139-152` — `CriterionDecl` carries no params
   field.
-- `crates/plan/src/validation.rs:478-503` — V9 `requirement_changed`
+- `crates/plan/src/validation.rs:478-540` — V9 `requirement_changed`
   signal on non-empty parent params.
 - `crates/policy/src/test_mutation.rs:1-40` — closed policy-enum
   precedent this ADR's catalog shape follows.

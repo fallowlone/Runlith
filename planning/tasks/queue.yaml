@@ -4375,7 +4375,9 @@ items:
       TestMutationPolicy selection/authorization (TASK-0145/0146), and any
       production code, schema, or dependency change. List proposed bounded
       implementation follow-up tasks in the ADR only; do not create them in
-      this queue.
+      this queue. TASK-0144 is intentionally not dependent on TASK-0150
+      (producer shape fixed by ADR-0034/0035); see ADR-0036 "Relation to
+      TASK-0144".
     exit_criteria_summary: >-
       A Proposed ADR-0036 states the binding-authority decision with
       options, tradeoffs, and an owner-ratifiable recommendation for each of:
