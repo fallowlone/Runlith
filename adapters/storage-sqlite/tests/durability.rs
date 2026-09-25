@@ -724,7 +724,7 @@ fn schema_21_upgrades_once_to_candidate_assessments_22_and_reopens() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(operation_columns, 18);
+    assert_eq!(operation_columns, 20);
 }
 
 #[test]

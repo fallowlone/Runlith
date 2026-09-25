@@ -55,9 +55,12 @@ CREATE TABLE candidate_input_operations (
     status TEXT NOT NULL CHECK (status IN ('PENDING','RESULT_ADMITTED','MISMATCH','BLOCKED','TAMPERED','COMPLETE')),
     detail_code TEXT CHECK (detail_code IS NULL OR length(detail_code) <= 128),
     status_history TEXT NOT NULL DEFAULT 'PENDING' CHECK (length(status_history) BETWEEN 1 AND 8192),
+    invalidated_at_ms INTEGER CHECK (invalidated_at_ms IS NULL OR invalidated_at_ms >= 0),
+    invalidation_code TEXT CHECK (invalidation_code IS NULL OR length(invalidation_code) BETWEEN 1 AND 256),
     started_at_ms INTEGER NOT NULL CHECK (started_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= started_at_ms),
-    PRIMARY KEY(execution_id, attempt_id)
+    PRIMARY KEY(execution_id, attempt_id),
+    CHECK ((invalidated_at_ms IS NULL AND invalidation_code IS NULL) OR (invalidated_at_ms IS NOT NULL AND invalidation_code IS NOT NULL))
 );
 -- R2 (owner review 2026-09-25, MAJOR): DB-level backstop for the
 -- application-layer compare-and-swap guards in candidate_assessment_store.rs
@@ -72,4 +75,20 @@ WHEN OLD.status IN ('RESULT_ADMITTED', 'COMPLETE')
     AND NEW.status NOT IN ('RESULT_ADMITTED', 'COMPLETE')
 BEGIN
     SELECT RAISE(ABORT, 'candidate operation status must not regress from RESULT_ADMITTED or COMPLETE');
+END;
+
+-- Sticky invalidation (TASK-0144, owner decision 2026-09-25): once
+-- invalidated_at_ms and invalidation_code are set (indicating a detected
+-- tamper or mismatch after admission), they cannot be changed or cleared.
+-- A permanent record of the invalidation fact is guaranteed to exist until
+-- the row is deleted (which policy forbids). Combined with evidence-getter
+-- checks, this makes the evidence stale/blocked and prevents reuse or
+-- completion. Invalidation is independent of status: status remains
+-- monotonic (R2), while invalidation is the sticky barrier.
+CREATE TRIGGER candidate_input_operations_invalidation_sticky
+BEFORE UPDATE OF invalidated_at_ms, invalidation_code ON candidate_input_operations
+WHEN OLD.invalidated_at_ms IS NOT NULL
+    AND (NEW.invalidated_at_ms IS NOT OLD.invalidated_at_ms OR NEW.invalidation_code IS NOT OLD.invalidation_code)
+BEGIN
+    SELECT RAISE(ABORT, 'candidate operation invalidation is permanent');
 END;

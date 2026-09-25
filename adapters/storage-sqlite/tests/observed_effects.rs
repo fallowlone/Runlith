@@ -764,6 +764,181 @@ fn cv_2_schema_18_migrates_to_19_with_closed_capture_authority() {
 }
 
 #[test]
+fn candidate_failure_after_admission_is_sticky_and_blocks_reuse() {
+    for terminal in ["RESULT_ADMITTED", "COMPLETE"] {
+        let db = TestDb::new(&format!("candidate-sticky-invalidation-{terminal}"));
+        let mut store = db.open();
+        let (execution, attempt) = seed_runtime(&mut store);
+        store
+            .record_candidate_selection(
+                "T-EFFECT",
+                execution.as_str(),
+                attempt.as_str(),
+                &format!("candidate-sticky-invalidation-{terminal}"),
+                &"1".repeat(40),
+                &"3".repeat(40),
+                &format!("sha256:{}", "b".repeat(64)),
+                1,
+                &format!("sha256:{}", "c".repeat(64)),
+                "criterion-1",
+                "candidate.file-contains.v1",
+                "src/main.rs",
+                "accepted",
+                10,
+            )
+            .unwrap();
+        store
+            .update_candidate_operation_status(
+                execution.as_str(),
+                attempt.as_str(),
+                "PENDING",
+                "RESULT_ADMITTED",
+                None,
+                11,
+            )
+            .unwrap();
+        if terminal == "COMPLETE" {
+            store
+                .update_candidate_operation_status(
+                    execution.as_str(),
+                    attempt.as_str(),
+                    "RESULT_ADMITTED",
+                    "COMPLETE",
+                    None,
+                    12,
+                )
+                .unwrap();
+        }
+
+        // Record a failure after reaching the terminal state
+        store
+            .record_candidate_operation_failure(
+                execution.as_str(),
+                attempt.as_str(),
+                "TAMPERED",
+                "post-admission-tamper",
+                13,
+            )
+            .unwrap();
+
+        // Status must still be the terminal state (no regression)
+        assert_eq!(
+            store
+                .candidate_operation_status(execution.as_str(), attempt.as_str())
+                .unwrap()
+                .as_deref(),
+            Some(terminal),
+            "status must not regress after invalidation"
+        );
+
+        // Invalidation must be set and sticky
+        let invalidation = store
+            .candidate_operation_invalidation(execution.as_str(), attempt.as_str())
+            .unwrap();
+        assert!(invalidation.is_some(), "invalidation must be recorded");
+        let (_, code) = invalidation.unwrap();
+        assert!(
+            code.starts_with("TAMPERED:"),
+            "invalidation code must start with TAMPERED: got {code}"
+        );
+
+        // All evidence getters must return ConstraintViolation when invalidated
+        let evidence_err = store
+            .get_candidate_evidence(execution.as_str(), attempt.as_str())
+            .unwrap_err();
+        assert!(
+            matches!(evidence_err, StorageError::ConstraintViolation(_)),
+            "get_candidate_evidence must fail with ConstraintViolation when invalidated"
+        );
+
+        let evidence_for_completion_err = store
+            .get_candidate_evidence_for_completion(execution.as_str(), attempt.as_str())
+            .unwrap_err();
+        assert!(
+            matches!(evidence_for_completion_err, StorageError::ConstraintViolation(_)),
+            "get_candidate_evidence_for_completion must fail with ConstraintViolation when invalidated"
+        );
+
+        let assessment_err = store
+            .get_candidate_integrity_assessment(execution.as_str(), attempt.as_str())
+            .unwrap_err();
+        assert!(
+            matches!(assessment_err, StorageError::ConstraintViolation(_)),
+            "get_candidate_integrity_assessment must fail with ConstraintViolation when invalidated"
+        );
+
+        // append_candidate_checkpoint must refuse when invalidated
+        let checkpoint_err = store
+            .append_candidate_checkpoint(
+                execution.as_str(),
+                attempt.as_str(),
+                &CandidateFreshnessCheckpoint {
+                    phase: CandidateCheckpointPhase::Completion,
+                    observed_at_ms: 14,
+                    git_metadata_fingerprint: "fp".to_owned(),
+                    live_worktree_manifest_sha256: format!("sha256:{}", "d".repeat(64)),
+                    matched: true,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(checkpoint_err, StorageError::ConstraintViolation(_)),
+            "append_candidate_checkpoint must fail with ConstraintViolation when invalidated"
+        );
+
+        // update_candidate_operation_status must refuse when invalidated
+        if terminal == "RESULT_ADMITTED" {
+            let status_err = store
+                .update_candidate_operation_status(
+                    execution.as_str(),
+                    attempt.as_str(),
+                    "RESULT_ADMITTED",
+                    "COMPLETE",
+                    None,
+                    15,
+                )
+                .unwrap_err();
+            assert!(
+                matches!(status_err, StorageError::ConstraintViolation(_)),
+                "update_candidate_operation_status must fail with ConstraintViolation when invalidated"
+            );
+        }
+
+        // A second failure record must not change the invalidated_at_ms/code (idempotent)
+        store
+            .record_candidate_operation_failure(
+                execution.as_str(),
+                attempt.as_str(),
+                "MISMATCH",
+                "second-failure",
+                16,
+            )
+            .unwrap();
+        let invalidation2 = store
+            .candidate_operation_invalidation(execution.as_str(), attempt.as_str())
+            .unwrap();
+        assert_eq!(
+            invalidation2,
+            Some((13, "TAMPERED:post-admission-tamper".to_owned())),
+            "invalidation must be unchanged by a second failure record"
+        );
+
+        // A raw SQL UPDATE attempting to clear invalidation must fail (trigger)
+        drop(store);
+        let raw_connection = rusqlite::Connection::open(&db.path).unwrap();
+        let raw = raw_connection.execute(
+            "UPDATE candidate_input_operations SET invalidated_at_ms = NULL, invalidation_code = NULL \
+             WHERE execution_id = ?1 AND attempt_id = ?2",
+            rusqlite::params![execution.as_str(), attempt.as_str()],
+        );
+        assert!(
+            raw.is_err(),
+            "a raw UPDATE attempting to clear invalidation must be rejected by the trigger"
+        );
+    }
+}
+
+#[test]
 fn cv_2_arbitrary_effect_id_cannot_be_selected_by_caller() {
     let db = TestDb::new("id-owned-by-store");
     let mut store = db.open();
