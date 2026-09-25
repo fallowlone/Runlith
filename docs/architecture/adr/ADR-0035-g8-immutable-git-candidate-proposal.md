@@ -336,29 +336,25 @@ completion authority.
 
 ## Amendment 2026-09-25: pinned Git executable for candidate-input reads
 
-**Why needed.** Candidate git-read launches resolve the Git executable
-from `PATH` via `resolve_git_executable()`, which may locate a
-package-manager or development-tool build (e.g. Homebrew git). Such
-builds dynamically load external libraries; on macOS, a Seatbelt profile
-narrower than the full system permits dyld to abort with "Library not
-loaded" (e.g. a Homebrew git seeking
-`/opt/homebrew/opt/pcre2/lib/libpcre2-8.0.dylib` outside the candidate
-Seatbelt scope). A PATH-resolved git is also not the "pinned, trusted
-Git plumbing path" this ADR's "Git object source constraints" section
-requires.
+**Why needed.** Candidate git-read launches resolved the Git executable
+from `PATH`, which may select a package-manager build such as Homebrew
+Git. Such a build loads dynamic libraries from its own prefix; under the
+candidate Seatbelt profile dyld cannot read them and the process aborts
+(observed: `Library not loaded: /opt/homebrew/opt/pcre2/lib/libpcre2-8.0.dylib`,
+SIGABRT). A `PATH`-resolved Git is also not the "pinned, trusted Git
+plumbing path" required by this ADR's "Git object source constraints".
 
-**Exact selection.** On macOS, candidate Git reads resolve from an
-exact, ordered list of Apple toolchain locations only:
-`/Library/Developer/CommandLineTools/usr/bin/git` (Command Line Tools)
-and `/Applications/Xcode.app/Contents/Developer/usr/bin/git` (Xcode).
-The Path resolution never uses `PATH` or the xcrun shim at `/usr/bin/git`
-(which depends on xcode-select state and cache outside the Seatbelt
-scope). Each candidate is validated by resolving its absolute `symlink_metadata`
-and `canonicalize()` path; the canonical path must equal the candidate's
-filename joined to its parent directory's canonical path, rejecting any
-symlink that redirects outside the pinned location. If no valid candidate
-is found, the resolver fails closed with a path-free error message. No
-sandbox widening or fallback to PATH occurs.
+**Exact selection.** On macOS, candidate-input Git resolves only from
+this ordered list of Apple toolchain locations:
+`/Library/Developer/CommandLineTools/usr/bin/git`, then
+`/Applications/Xcode.app/Contents/Developer/usr/bin/git`. It never uses
+`PATH` or the `/usr/bin/git` xcrun shim, which depends on xcode-select
+state and caches outside the Seatbelt scope. A candidate is accepted only
+if it exists, canonicalizes to a regular file, and its canonical path
+equals its parent directory's canonical path joined with its file name, so
+a symlink redirecting the executable elsewhere is rejected. If no candidate
+qualifies, resolution fails closed with a path-free error; there is no
+fallback to `PATH` and no sandbox widening.
 
 On non-macOS platforms, candidate-input Git reads are unsupported, and
 the resolver falls back to the existing `resolve_git_executable()` PATH
