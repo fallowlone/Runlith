@@ -39,6 +39,7 @@ mod macos {
     const O_CREAT: c_int = 0x0200;
     const O_EXCL: c_int = 0x0800;
     const O_NOFOLLOW: c_int = 0x0100;
+    const O_NONBLOCK: c_int = 0x0004; // Darwin <sys/fcntl.h>
     const O_DIRECTORY: c_int = 0x100000;
     const O_CLOEXEC: c_int = 0x1000000;
     const AT_REMOVEDIR: c_int = 0x80;
@@ -154,11 +155,14 @@ mod macos {
                     .map_err(|_| failed("snapshot directory sealing failed"))?;
             } else {
                 let component = component(name)?;
+                // O_NONBLOCK ensures special files (FIFO, device) fail promptly
+                // on open rather than blocking forever; ADR-0035 requires checks
+                // to fail closed, never hang.
                 let fd = unsafe {
                     openat(
                         dir.as_raw_fd(),
                         component.as_ptr(),
-                        O_RDONLY | O_NOFOLLOW | O_CLOEXEC,
+                        O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK,
                     )
                 };
                 if fd < 0 {
@@ -249,7 +253,7 @@ mod macos {
                 openat(
                     directory.as_raw_fd(),
                     component.as_ptr(),
-                    O_RDONLY | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC,
+                    O_RDONLY | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC | O_NONBLOCK,
                 )
             };
             if child_fd >= 0 {
@@ -265,7 +269,7 @@ mod macos {
                 openat(
                     directory.as_raw_fd(),
                     component.as_ptr(),
-                    O_RDONLY | O_NOFOLLOW | O_CLOEXEC,
+                    O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK,
                 )
             };
             if file_fd < 0 {
@@ -351,7 +355,7 @@ mod macos {
             openat(
                 root_file.as_raw_fd(),
                 name.as_ptr(),
-                O_RDONLY | O_NOFOLLOW | O_CLOEXEC,
+                O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK,
             )
         };
         if fd < 0 {
@@ -443,7 +447,7 @@ mod macos {
             openat(
                 current.as_raw_fd(),
                 leaf.as_ptr(),
-                O_RDONLY | O_NOFOLLOW | O_CLOEXEC,
+                O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK,
             )
         };
         if fd < 0 {
@@ -506,7 +510,7 @@ mod macos {
                         openat(
                             directory.as_raw_fd(),
                             c_name.as_ptr(),
-                            O_RDONLY | O_NOFOLLOW | O_CLOEXEC,
+                            O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK,
                         )
                     };
                     if fd < 0 {
@@ -573,7 +577,7 @@ mod macos {
                         openat(
                             directory.as_raw_fd(),
                             c_name.as_ptr(),
-                            O_RDONLY | O_NOFOLLOW | O_CLOEXEC,
+                            O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK,
                         )
                     };
                     if fd < 0 {
@@ -775,7 +779,7 @@ mod macos {
             openat(
                 AT_FDCWD,
                 path.as_ptr(),
-                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC,
+                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK,
             )
         };
         if fd < 0 {
@@ -790,7 +794,7 @@ mod macos {
             openat(
                 parent.as_raw_fd(),
                 name.as_ptr(),
-                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC,
+                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK,
             )
         };
         if fd < 0 {
