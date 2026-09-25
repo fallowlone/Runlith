@@ -1980,6 +1980,28 @@ impl CandidateInputEvaluator {
     }
 }
 
+fn candidate_operation_label(
+    operation: CandidateG6Operation,
+    args: &[std::ffi::OsString],
+) -> &'static str {
+    match operation {
+        CandidateG6Operation::GitRead => "git-read",
+        CandidateG6Operation::SnapshotWrite => {
+            // Check if this is a snapshot-remove by looking at the first argument
+            if args
+                .first()
+                .and_then(|arg| arg.to_str())
+                .is_some_and(|s| s == "__candidate-snapshot-remove")
+            {
+                "snapshot-remove"
+            } else {
+                "snapshot-write"
+            }
+        }
+        CandidateG6Operation::EvaluatorReadOnly => "evaluator",
+    }
+}
+
 fn run_candidate_process(
     db_path: &Path,
     request: CandidateProcessRequest,
@@ -1993,6 +2015,8 @@ fn run_candidate_process(
     let args = request.args;
     let input = request.input;
     let max_stdout = request.max_stdout;
+    let operation = request.operation;
+    let op_label = candidate_operation_label(operation, &args);
     let output = prepared.invoke(|launch| {
         let backend = launch.backend();
         let axes = launch.enforced_axes();
@@ -2081,7 +2105,28 @@ fn run_candidate_process(
             .map_err(|_| "candidate process stderr read failed".to_owned())?;
         if !status.success() || stdout.len() as u64 > max_stdout || stderr.len() as u64 > MAX_STDERR
         {
-            return Err("candidate process returned unsupported output or status".to_owned());
+            let exit_info = if let Some(code) = status.code() {
+                format!("exit: {}", code)
+            } else {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    if let Some(signal) = status.signal() {
+                        format!("signal {}", signal)
+                    } else {
+                        "unknown".to_owned()
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    "unknown".to_owned()
+                }
+            };
+            let stdout_bytes = stdout.len() as u64;
+            let stderr_bytes = stderr.len() as u64;
+            return Err(format!(
+                "candidate {op_label} process returned unsupported output or status ({exit_info}, stdout_bytes: {stdout_bytes}/{max_stdout}, stderr_bytes: {stderr_bytes}/{MAX_STDERR})"
+            ));
         }
         Ok(CandidateProcessOutput { stdout, runner })
     })?;
@@ -2847,7 +2892,8 @@ pub fn run_background(job: BackgroundJob) {
             // error. Re-read durable state instead of trusting the
             // message: a concluded-Succeeded attempt means the cycle did
             // its job and awaits the operator. Detail is still logged
-            // because a failing automated evaluator is otherwise indistinguishable from the no-verifier G5 posture.
+            // because a failing automated evaluator is otherwise
+            // indistinguishable from the no-verifier G5 posture.
             if attempt_concluded_succeeded(&composition.db_path, &execution_id, &attempt_id) {
                 eprintln!(
                     "agentd: execution {execution_id} concluded: SUCCEEDED_AWAITING_OPERATOR_VERIFICATION (verification not completed: {})",
