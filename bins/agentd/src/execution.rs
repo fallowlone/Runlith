@@ -955,14 +955,10 @@ impl EvaluationPort for ProductionEvaluator {
     // `revalidate_before_completion` silently wins for every
     // `ProductionEvaluator` variant, including `Candidate`: the durable
     // Completion freshness checkpoint and the `RESULT_ADMITTED` ->
-    // `COMPLETE` operation-status transition would never run. For `Pending`,
-    // this call is needed, so we still delegate (though `finish()` in
-    // orchestration_service.rs will never invoke this for `Pending` unless
-    // a future completion-stage caller (TASK-0125) explicitly requests it).
-    // For `Candidate`: owner decision 2026-09-25 makes `evaluate()` return
-    // no verdict, so `finish()` never reaches this override — the Task stays
-    // VERIFYING. The delegation is kept so a future claim-verification caller
-    // can request the Completion freshness gate.
+    // `COMPLETE` operation-status transition would never run.
+    // Neither variant currently reaches this from `finish()`; the delegation
+    // exists so a future claim-verification caller gets the Completion
+    // freshness gate for Candidate, and Pending uses the port's default no-op.
     fn revalidate_before_completion(&self, request: &EvaluationRequest) -> EvaluationResult<()> {
         match self {
             Self::Candidate(evaluator) => evaluator.revalidate_before_completion(request),
@@ -1208,7 +1204,7 @@ impl CandidateInputEvaluator {
                 || stored.candidate_tree_oid != candidate.tree_oid
                 || stored.candidate_manifest_sha256 != candidate.manifest.sha256
             {
-                return Err("durable candidate evidence binding changed; reuse refused".to_owned());
+                return Err("durable candidate evidence binding tampered; reuse refused".to_owned());
             }
             let operation_status = store
                 .candidate_operation_status(
@@ -1599,6 +1595,13 @@ impl CandidateInputEvaluator {
             started_at_ms: assessment.started_at_ms,
         })?;
         if !checkpoint.matched {
+            let _ = store.record_candidate_operation_failure(
+                request.execution_id.as_str(),
+                request.attempt_id.as_str(),
+                "MISMATCH",
+                "completion-freshness",
+                now_millis(),
+            );
             return Err("candidate inputs changed before Task completion".to_owned());
         }
         store
@@ -6396,6 +6399,104 @@ mod tests {
         assert!(
             history.contains("BLOCKED") || history.contains("MISMATCH"),
             "the failure must still be durably journaled in status_history, got {history:?}"
+        );
+    }
+
+    /// TASK-0144: sticky invalidation blocks completion and reuse.
+    /// Verify that when the candidate worktree changes after admission,
+    /// revalidate_before_completion records a durable failure and blocks
+    /// COMPLETE transition. Further evaluate() calls must also fail (fail closed).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn candidate_worktree_change_after_admission_blocks_completion_and_reuse() {
+        let fixture = setup_candidate_restart_fixture(
+            "candidate-sticky",
+            "P-CANDIDATE-STICKY",
+            "T-CANDIDATE-STICKY",
+            "E-CANDIDATE-STICKY",
+            "A-CANDIDATE-STICKY",
+        );
+        let execution_id = fixture.request.execution_id.clone();
+        let attempt_id = fixture.request.attempt_id.clone();
+        let evaluator = candidate_restart_evaluator(&fixture);
+
+        // First evaluate() admits the evidence.
+        let verdict = evaluator
+            .evaluate(&fixture.request)
+            .expect("first evaluate admits durable evidence");
+        assert_eq!(verdict, EvaluationVerdict::Verified);
+        let store = storage_sqlite::SqliteStore::open(&fixture.sandbox.db).expect("open store");
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("RESULT_ADMITTED"),
+            "evidence must be admitted before completion"
+        );
+
+        // Create an untracked file in the candidate worktree without changing HEAD.
+        // This taints the live worktree manifest without actually committing.
+        let worktree = PathBuf::from(fixture.lease.worktree_ref());
+        std::fs::write(worktree.join("src/untracked.rs"), b"fn untracked() {}\n")
+            .expect("write untracked file");
+
+        // revalidate_before_completion must fail (freshness mismatch)
+        // and record an invalidation that blocks further operations.
+        let revalidate_err = evaluator.revalidate_before_completion(&fixture.request);
+        assert!(
+            revalidate_err.is_err(),
+            "revalidate_before_completion must fail when worktree changed"
+        );
+
+        // Status must still be RESULT_ADMITTED (no regression by R2)
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("RESULT_ADMITTED"),
+            "status must not regress to COMPLETE"
+        );
+
+        // Invalidation must be recorded with code starting with "MISMATCH:"
+        let invalidation = store
+            .candidate_operation_invalidation(execution_id.as_str(), attempt_id.as_str())
+            .expect("load invalidation")
+            .expect("invalidation must be set");
+        assert!(
+            invalidation.1.starts_with("MISMATCH:"),
+            "invalidation code must start with MISMATCH:, got {}",
+            invalidation.1
+        );
+
+        // Now remove the untracked file; the worktree is back to a clean state.
+        std::fs::remove_file(worktree.join("src/untracked.rs")).expect("remove untracked file");
+
+        // revalidate_before_completion must STILL fail because the operation
+        // is now invalidated (sticky barrier), even though the worktree is clean.
+        let revalidate_again = evaluator.revalidate_before_completion(&fixture.request);
+        assert!(
+            revalidate_again.is_err(),
+            "revalidate_before_completion must still fail (invalidation is permanent)"
+        );
+
+        // Status must still be RESULT_ADMITTED.
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("RESULT_ADMITTED"),
+            "status must remain RESULT_ADMITTED (never became COMPLETE)"
+        );
+
+        // Further evaluate() must also fail (fail closed) because evidence is
+        // now invalidated and blocked from reuse.
+        let evaluate_again = evaluator.evaluate(&fixture.request);
+        assert!(
+            evaluate_again.is_err(),
+            "evaluate() must fail (evidence invalidated and blocked)"
         );
     }
 
