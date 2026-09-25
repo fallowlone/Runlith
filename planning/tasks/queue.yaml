@@ -4380,7 +4380,9 @@ items:
       TASK-0144".
     exit_criteria_summary: >-
       ADR-0036 is Accepted and linked, after owner ratification 2026-09-25
-      of the binding-authority decision covering authority/source, timing,
+      following independent architecture/security review PASS of exact
+      pre-acceptance commit 48f793ede6a5b9ae5f722b16a0bdddbee99e4434 of the
+      binding-authority decision covering authority/source, timing,
       revisioning/durability, failure semantics, and scope limits (recorded
       as D1-D5 in the ADR's "Ratified decisions"); documents file:line
       evidence for the current gap (crates/task/src/requirement.rs,
@@ -4408,7 +4410,9 @@ items:
       - crates/plan/src/risk.rs
       - crates/plan/src/validation.rs
     outcome: >-
-      ADR-0036 ACCEPTED after owner ratification 2026-09-25. Ratified:
+      ADR-0036 ACCEPTED after owner ratification 2026-09-25 following
+      independent architecture/security review PASS of exact pre-acceptance
+      commit 48f793ede6a5b9ae5f722b16a0bdddbee99e4434. Ratified:
       operator-authored parameter binding requires ADR-0033 B1-grade fresh
       interactive user-presence authority, fail-closed (D1); the
       product-owned closed selector catalog lives in crates/policy
