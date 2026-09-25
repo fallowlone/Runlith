@@ -884,7 +884,7 @@ fn prepare_candidate_process(
         .to_str()
         .ok_or_else(|| CheckError::infra("candidate process executable is not UTF-8"))?;
     let executable_scope = ScopeId::new(executable_scope.to_owned())
-        .map_err(|error| format!("candidate executable scope: {error}"))?;
+        .map_err(|error| CheckError::infra(format!("candidate executable scope: {error}")))?;
     let workspace = request.workspace.canonicalize().map_err(|_| {
         CheckError::Content("candidate process workspace cannot be canonicalized".to_owned())
     })?;
@@ -892,7 +892,8 @@ fn prepare_candidate_process(
         .to_str()
         .ok_or_else(|| CheckError::Content("candidate process workspace is not UTF-8".to_owned()))?
         .to_owned();
-    let launch = build_candidate_launch_security(request)?;
+    let launch = build_candidate_launch_security(request)
+        .map_err(|error| CheckError::infra(format!("candidate launch security: {error}")))?;
     let mut security =
         G6SecurityService::open(db_path, app_services::SystemClock).map_err(|error| {
             CheckError::infra(format!("G6 candidate authorization unavailable: {error}"))
@@ -2266,7 +2267,6 @@ impl CandidateInputEvaluator {
         &self,
         freshness: CandidateFreshnessRequest<'_>,
     ) -> Result<evaluation::CandidateFreshnessCheckpoint, CheckError> {
-        use std::cell::RefCell;
         let CandidateFreshnessRequest {
             request,
             invocation_id,
@@ -2365,7 +2365,6 @@ impl CandidateInputEvaluator {
         })?])
         .map_err(|error| CheckError::Content(format!("candidate descriptor policy: {error}")))?;
         let root_parent = EffectiveCapabilities::new(vec![root_read]);
-        let infra_error_freshness: RefCell<Option<String>> = RefCell::new(None);
         let filesystem_authority = match descriptor_authority
             .authorize(&root_request, &root_parent, &root_policy, u64::MAX)
             .map_err(|error| {
@@ -2375,9 +2374,16 @@ impl CandidateInputEvaluator {
             })? {
             G6Authorization::Authorized { effective, .. } => effective,
             G6Authorization::ApprovalRequired { .. } | G6Authorization::Denied { .. } => {
-                return Err(CheckError::infra("G6 denied candidate worktree root read"));
+                return Err(CheckError::infra(
+                    "G6 denied candidate linked-metadata read",
+                ));
             }
         };
+        // Scanned worktree entry names are attacker-controlled. Any G6 authorization
+        // or audit failure during that scan (including storage failures from unauditable
+        // names) is treated as a content failure so the scan invalidates, not a transient
+        // infrastructure issue. This prevents tamper + unauditable-name from reaching
+        // COMPLETE without invalidation (TASK-0144, owner decision 2026-09-25).
         let mut authorize_descriptor = |relative_path: &[u8], operation| {
             let relative_path = std::str::from_utf8(relative_path).map_err(|_| {
                 evaluation::EffectError::CaptureFailed(
@@ -2422,9 +2428,10 @@ impl CandidateInputEvaluator {
                     workspace_root.clone(),
                     relative_path,
                 )
-                .map_err(|e| {
-                    // Capture G6 errors as infrastructure failures.
-                    *infra_error_freshness.borrow_mut() = Some(e.to_string());
+                .map_err(|_e| {
+                    // G6 failures during live worktree scan are content failures: the name
+                    // may be unauditable (e.g., all-spaces) or policy-denied. Neither is
+                    // transient infrastructure. Do not set infra_error_freshness.
                     evaluation::EffectError::CaptureFailed(
                         "G6 denied candidate descriptor filesystem read",
                     )
@@ -2432,6 +2439,7 @@ impl CandidateInputEvaluator {
             match authorization {
                 G6Authorization::Authorized { .. } => Ok(()),
                 G6Authorization::ApprovalRequired { .. } | G6Authorization::Denied { .. } => {
+                    // G6 authorization failure is also content: scanned names are attacker-controlled.
                     Err(evaluation::EffectError::CaptureFailed(
                         "G6 denied candidate descriptor filesystem read",
                     ))
@@ -2452,17 +2460,14 @@ impl CandidateInputEvaluator {
         let scan = match result {
             Ok(s) => s,
             Err(e) => {
-                let infra = infra_error_freshness.borrow_mut().take();
-                return Err(classify_reader_failure(
-                    infra,
-                    format!("live worktree scan failed: {e}"),
-                ));
+                // Live worktree scan failures during authorize_descriptor are content failures
+                // (scanned names are attacker-controlled, including any G6 failures or
+                // unauditable names). No infrastructure error cell is maintained for the scan.
+                return Err(CheckError::Content(format!(
+                    "live worktree scan failed: {e}"
+                )));
             }
         };
-        // Check for infrastructure errors captured during authorize_descriptor callbacks.
-        if let Some(msg) = infra_error_freshness.into_inner() {
-            return Err(CheckError::Infrastructure(msg));
-        }
         let pointer_after =
             read_authorized_worktree_pointer(&self.db_path, request, invocation_id, root)?;
         let authenticated_after = authenticated_worktree_gitdir(
@@ -2981,7 +2986,9 @@ fn authenticated_worktree_gitdir(
         })? {
         G6Authorization::Authorized { effective, .. } => effective,
         G6Authorization::ApprovalRequired { .. } | G6Authorization::Denied { .. } => {
-            return Err(CheckError::infra("G6 denied linked metadata access"));
+            return Err(CheckError::infra(
+                "G6 denied candidate linked-metadata read",
+            ));
         }
     };
     let infra_error: RefCell<Option<String>> = RefCell::new(None);
@@ -7770,5 +7777,104 @@ mod tests {
             Some("COMPLETE"),
             "status must become COMPLETE after successful revalidation"
         );
+    }
+
+    /// TASK-0144: unauditable worktree entry names (e.g., all-spaces)
+    /// invalidate the candidate after admission. The live worktree scan
+    /// treats G6 and audit storage failures as content failures, so they
+    /// become integrity signals and permanently invalidate. Removing the
+    /// offending file does not clear the invalidation: the candidate is
+    /// tampered.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn candidate_unauditable_name_in_worktree_after_admission_still_invalidates() {
+        let fixture = setup_candidate_restart_fixture(
+            "candidate-unauditable",
+            "P-CANDIDATE-UNAUDITABLE",
+            "T-CANDIDATE-UNAUDITABLE",
+            "E-CANDIDATE-UNAUDITABLE",
+            "A-CANDIDATE-UNAUDITABLE",
+        );
+        let execution_id = fixture.request.execution_id.clone();
+        let attempt_id = fixture.request.attempt_id.clone();
+        let evaluator = candidate_restart_evaluator(&fixture);
+        let store = storage_sqlite::SqliteStore::open(&fixture.sandbox.db).expect("open store");
+
+        // First evaluate() admits the evidence with status RESULT_ADMITTED.
+        let verdict = evaluator
+            .evaluate(&fixture.request)
+            .expect("first evaluate admits durable evidence");
+        assert_eq!(verdict, EvaluationVerdict::Verified);
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("RESULT_ADMITTED"),
+            "evidence must be admitted before creating unauditable file"
+        );
+
+        // Create an untracked file with a space-only name in the worktree.
+        // This makes the worktree dirty and unauditable: the live-scan will
+        // try to create a FileScope for " ", which fails because the scope
+        // cannot pass the audit schema CHECK (length(trim(scope)) > 0).
+        let worktree_path = PathBuf::from(fixture.lease.worktree_ref());
+        std::fs::write(worktree_path.join(" "), b"x").expect("write space-named file to worktree");
+
+        // revalidate_before_completion must fail because the worktree has
+        // become stale (dirty file that cannot be audited).
+        let result = evaluator.revalidate_before_completion(&fixture.request);
+        assert!(
+            result.is_err(),
+            "revalidate must fail with unauditable file in worktree"
+        );
+
+        // Invalidation must be set with a code starting MISMATCH:freshness-completion.
+        let invalidation = store
+            .candidate_operation_invalidation(execution_id.as_str(), attempt_id.as_str())
+            .expect("load invalidation");
+        assert!(
+            invalidation.is_some(),
+            "unauditable name must set permanent invalidation"
+        );
+        let (code, _) = invalidation.unwrap();
+        assert!(
+            code.starts_with("MISMATCH:freshness-completion"),
+            "invalidation code must indicate completion-phase freshness failure, got: {code}"
+        );
+
+        // Remove the offending file.
+        std::fs::remove_file(worktree_path.join(" "))
+            .expect("remove space-named file from worktree");
+
+        // STILL revalidate_before_completion must return Err, and the status
+        // must never regress from RESULT_ADMITTED or COMPLETE. The candidate
+        // is permanently tampered.
+        let result = evaluator.revalidate_before_completion(&fixture.request);
+        assert!(
+            result.is_err(),
+            "revalidate must still fail after removing unauditable file"
+        );
+
+        // Status must still be RESULT_ADMITTED (never regressed to an incomplete state).
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("RESULT_ADMITTED"),
+            "status must never regress after permanent invalidation"
+        );
+
+        // Invalidation persists.
+        let invalidation_after = store
+            .candidate_operation_invalidation(execution_id.as_str(), attempt_id.as_str())
+            .expect("load invalidation after file removal");
+        assert!(
+            invalidation_after.is_some(),
+            "invalidation must persist after file removal"
+        );
+        let (code_after, _) = invalidation_after.unwrap();
+        assert_eq!(code_after, code, "invalidation code must not change");
     }
 }
