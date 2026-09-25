@@ -86,6 +86,17 @@ impl FileScope {
     ) -> Result<Self, PolicyContractError> {
         let workspace = checked_id("workspace", workspace.into())?;
         let root = normalize_relative_path(root.as_ref())?;
+        // Ensure the serialized scope (root.to_string_lossy()) would pass the
+        // audit schema CHECK `length(trim(scope)) > 0`. Scoped file names are
+        // attacker-controlled (in live worktree scans), so refuse any root whose
+        // trimmed string representation is empty.
+        let scope_serialized = root.to_string_lossy();
+        if scope_serialized.trim().is_empty() {
+            return Err(PolicyContractError::MalformedScope {
+                field: "filesystem_root",
+                value: scope_serialized.into_owned(),
+            });
+        }
         Ok(Self { workspace, root })
     }
 
@@ -993,6 +1004,54 @@ mod tests {
             FileScope::new("ws-1", "/tmp/outside"),
             Err(PolicyContractError::MalformedScope { .. })
         ));
+    }
+
+    #[test]
+    fn unauditable_space_only_scope_is_refused() {
+        // G6 audit schema CHECK requires length(trim(scope)) > 0. A file path
+        // consisting only of spaces would fail this CHECK and be unauditable.
+        // FileScope::new must refuse it.
+        assert!(matches!(
+            FileScope::new("ws-1", " "),
+            Err(PolicyContractError::MalformedScope {
+                field: "filesystem_root",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn unauditable_whitespace_only_scope_is_refused() {
+        // Tabs and multiple spaces all trim to empty and are unauditable.
+        assert!(matches!(
+            FileScope::new("ws-1", "\t"),
+            Err(PolicyContractError::MalformedScope {
+                field: "filesystem_root",
+                ..
+            })
+        ));
+        assert!(matches!(
+            FileScope::new("ws-1", "   "),
+            Err(PolicyContractError::MalformedScope {
+                field: "filesystem_root",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn scope_with_leading_trailing_spaces_is_accepted() {
+        // A path like " a " is valid: trim("  a  ") has length > 0.
+        // Normalize-relative-path treats it as Normal component " a ".
+        let scope = FileScope::new("ws-1", " a ").unwrap();
+        assert_eq!(scope.root(), std::path::Path::new(" a "));
+    }
+
+    #[test]
+    fn scope_with_spaces_in_middle_is_accepted() {
+        // "a b" is auditable: trim("a b") = "a b" with length 3.
+        let scope = FileScope::new("ws-1", "a b").unwrap();
+        assert_eq!(scope.root(), std::path::Path::new("a b"));
     }
 
     #[test]

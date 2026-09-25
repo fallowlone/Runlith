@@ -29,6 +29,18 @@ pub struct CandidateEvidence {
     pub integrity: CandidateIntegrityAssessment,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateSelectionOutcome {
+    /// A new candidate operation row was inserted.
+    Recorded,
+    /// Same subject and already in RESULT_ADMITTED or COMPLETE state; can be reused.
+    ReuseAdmitted,
+    /// Different subject (integrity signal): candidate operation is bound to another subject.
+    SubjectMismatch,
+    /// Same subject but in an intermediate state (PENDING, BLOCKED, etc.); operation is incomplete or ambiguous.
+    Incomplete,
+}
+
 impl crate::SqliteStore {
     pub fn candidate_operation_status(
         &self,
@@ -98,7 +110,7 @@ impl crate::SqliteStore {
         selector_path: &str,
         selector_literal: &str,
         now_ms: u64,
-    ) -> StorageResult<bool> {
+    ) -> StorageResult<CandidateSelectionOutcome> {
         let existing: Option<CandidateOperationRow> = self
             .connection()
             .query_row(
@@ -141,11 +153,12 @@ impl crate::SqliteStore {
                 && existing.8 == selector_path
                 && existing.9 == selector_literal;
             if same_subject && matches!(existing.10.as_str(), "RESULT_ADMITTED" | "COMPLETE") {
-                return Ok(false);
+                return Ok(CandidateSelectionOutcome::ReuseAdmitted);
             }
-            return Err(StorageError::ConstraintViolation(
-                "candidate operation is ambiguous, incomplete, or bound to another subject".into(),
-            ));
+            if !same_subject {
+                return Ok(CandidateSelectionOutcome::SubjectMismatch);
+            }
+            return Ok(CandidateSelectionOutcome::Incomplete);
         }
         self.connection().execute(
             "INSERT INTO candidate_input_operations (
@@ -158,7 +171,7 @@ impl crate::SqliteStore {
                 selected_commit_oid, requirement_revision, policy_revision as i64, policy_fingerprint,
                 criterion_id, selector, selector_path, selector_literal, now_ms.min(i64::MAX as u64) as i64],
         )?;
-        Ok(true)
+        Ok(CandidateSelectionOutcome::Recorded)
     }
 
     pub fn update_candidate_operation_status(
@@ -192,21 +205,16 @@ impl crate::SqliteStore {
         Ok(())
     }
 
-    /// Journals a failure without ever regressing a successful terminal-ish
-    /// state. R2 (owner review 2026-09-25, MAJOR): this used to run an
-    /// unconditional `UPDATE`, so a failure classified from *any* later
-    /// call — including one racing or following a already-admitted
-    /// subject — could downgrade a durable `RESULT_ADMITTED` or `COMPLETE`
-    /// row. The `status`/`detail_code` columns now only change when the
-    /// row is not already in one of those two states (a single atomic
-    /// `UPDATE ... CASE` compares the row's own current status, so this is
-    /// compare-and-swap safe under concurrent callers without needing an
-    /// `expected` parameter); `status_history` is still always appended so
-    /// the failure is durably journaled either way. TASK-0144: additionally,
-    /// for every failure (pre- or post-admission), `invalidated_at_ms` and
-    /// `invalidation_code` are set once and then become immutable (sticky
-    /// trigger). This makes the evidence stale/blocked and prevents reuse or
-    /// completion, regardless of status.
+    /// Journals a failure to status_history. Changes status and detail_code only
+    /// for rows that are not in RESULT_ADMITTED or COMPLETE state; already-admitted
+    /// evidence is never downgraded. R2 (owner review 2026-09-25, MAJOR): this used
+    /// to run an unconditional `UPDATE`, so a failure classified from *any* later
+    /// call — including one racing or following an already-admitted subject — could
+    /// downgrade a durable `RESULT_ADMITTED` or `COMPLETE` row. Infrastructure and
+    /// precondition errors are journaled only; they must NOT invalidate, so admitted
+    /// evidence survives a transient failure and replay stays safe. TASK-0144: for
+    /// integrity-signal failures, use `invalidate_candidate_operation` instead to
+    /// permanently block reuse and completion.
     pub fn record_candidate_operation_failure(
         &mut self,
         execution_id: &str,
@@ -226,11 +234,9 @@ impl crate::SqliteStore {
                     status = CASE WHEN status IN ('RESULT_ADMITTED','COMPLETE') THEN status ELSE ?1 END,
                     detail_code = CASE WHEN status IN ('RESULT_ADMITTED','COMPLETE') THEN detail_code ELSE ?2 END,
                     updated_at_ms = ?3,
-                    invalidated_at_ms = COALESCE(invalidated_at_ms, ?3),
-                    invalidation_code = COALESCE(invalidation_code, ?7),
                     status_history = status_history || char(10) || ?6
              WHERE execution_id = ?4 AND attempt_id = ?5",
-            params![status, detail_code, now_ms, execution_id, attempt_id, format!("{status}:{detail_code}:{now_ms}"), format!("{status}:{detail_code}")],
+            params![status, detail_code, now_ms, execution_id, attempt_id, format!("{status}:{detail_code}:{now_ms}")],
         )?;
         if changed != 1 {
             return Err(StorageError::ConstraintViolation(
@@ -238,6 +244,42 @@ impl crate::SqliteStore {
             ));
         }
         Ok(())
+    }
+
+    /// Permanently invalidates candidate evidence with a MISMATCH or TAMPERED status.
+    /// This records an integrity signal at the call site and prevents reuse or
+    /// completion. Sets invalidated_at_ms and invalidation_code once (sticky),
+    /// appends to status_history, and updates status/detail_code with the same
+    /// CASE protection for admitted/complete rows as other terminal-state updates.
+    /// Returns Ok(true) if the row was updated, Ok(false) if there is no row for
+    /// (execution_id, attempt_id), and Err if status is invalid or a real storage error occurs.
+    pub fn invalidate_candidate_operation(
+        &mut self,
+        execution_id: &str,
+        attempt_id: &str,
+        status: &str,
+        detail_code: &str,
+        now_ms: u64,
+    ) -> StorageResult<bool> {
+        if !matches!(status, "MISMATCH" | "TAMPERED") {
+            return Err(StorageError::ConstraintViolation(
+                "invalidate_candidate_operation requires status MISMATCH or TAMPERED".into(),
+            ));
+        }
+        let now_ms = now_ms.min(i64::MAX as u64) as i64;
+        let invalidation_code = format!("{status}:{detail_code}");
+        let changed = self.connection().execute(
+            "UPDATE candidate_input_operations SET
+                    status = CASE WHEN status IN ('RESULT_ADMITTED','COMPLETE') THEN status ELSE ?1 END,
+                    detail_code = CASE WHEN status IN ('RESULT_ADMITTED','COMPLETE') THEN detail_code ELSE ?2 END,
+                    updated_at_ms = ?3,
+                    invalidated_at_ms = COALESCE(invalidated_at_ms, ?3),
+                    invalidation_code = COALESCE(invalidation_code, ?7),
+                    status_history = status_history || char(10) || ?6
+             WHERE execution_id = ?4 AND attempt_id = ?5",
+            params![status, detail_code, now_ms, execution_id, attempt_id, format!("{status}:{detail_code}:{now_ms}"), invalidation_code],
+        )?;
+        Ok(changed == 1)
     }
 
     pub fn get_candidate_evidence(
