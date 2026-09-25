@@ -595,6 +595,16 @@ impl SandboxedLaunch {
         self.report.backend
     }
 
+    #[must_use]
+    pub const fn enforced_axes(&self) -> EnforcementAxes {
+        self.report.enforced
+    }
+
+    #[must_use]
+    pub const fn environment_isolated(&self) -> bool {
+        self.report.env_isolated
+    }
+
     /// Binds an exact program/argv. The backend installs its restrictions for
     /// the verified plan; the returned [`SandboxedCommand`] is the only
     /// spawnable form of that child.

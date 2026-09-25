@@ -66,6 +66,35 @@ pub struct CandidateManifest {
     pub total_bytes: u64,
 }
 
+/// A committed path present in the evaluated base tree and absent from the
+/// selected candidate tree. Raw path bytes and the base blob digest are kept
+/// so the deletion remains independently auditable after restart.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CandidateDeletion {
+    pub path: Vec<u8>,
+    pub base_mode: u32,
+    pub base_blob_sha256: String,
+}
+
+impl CandidateDeletion {
+    pub fn between(base: &CandidateManifest, candidate: &CandidateManifest) -> Vec<Self> {
+        base.entries
+            .iter()
+            .filter(|entry| {
+                candidate
+                    .entries
+                    .binary_search_by(|candidate_entry| candidate_entry.path.cmp(&entry.path))
+                    .is_err()
+            })
+            .map(|entry| Self {
+                path: entry.path.clone(),
+                base_mode: entry.mode,
+                base_blob_sha256: entry.sha256.clone(),
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedCandidate {
     pub commit_oid: String,
@@ -104,12 +133,22 @@ pub struct CandidateIntegrityAssessment {
     pub evaluator_ref: String,
     pub runtime_ref: String,
     pub enforcement_ref: String,
+    pub invocation_descriptor_version: u32,
+    pub invocation_descriptor_sha256: String,
+    pub evaluator_executable: String,
+    pub toolchain_ref: String,
+    pub runner_backend: String,
+    pub runner_plan_sha256: String,
+    /// Runner enforcement axes: filesystem=1, network=2, process=4.
+    pub runner_enforced_axes: u8,
+    pub runner_env_isolated: bool,
     pub base_commit_oid: String,
     pub base_tree_oid: String,
     pub base_manifest_sha256: String,
     pub candidate_commit_oid: String,
     pub candidate_tree_oid: String,
     pub candidate_manifest_sha256: String,
+    pub deletions: Vec<CandidateDeletion>,
     pub checkpoints: Vec<CandidateFreshnessCheckpoint>,
     pub outcome: CandidateIntegrityOutcome,
     pub started_at_ms: u64,
@@ -155,6 +194,58 @@ pub enum CandidateIntegrityOutcome {
 }
 
 impl CandidateIntegrityAssessment {
+    pub fn refresh_invocation_descriptor_digest(&mut self) {
+        self.invocation_descriptor_sha256 = self.canonical_invocation_descriptor_digest();
+    }
+
+    #[must_use]
+    pub fn canonical_invocation_descriptor_digest(&self) -> String {
+        let mut hash = Sha256::new();
+        hash.update(b"runlith:candidate-invocation-descriptor:v1\0");
+        for value in [
+            self.task_id.as_str(),
+            self.execution_id.as_str(),
+            self.attempt_id.as_str(),
+            self.subject_ref.as_str(),
+            self.base_commit_oid.as_str(),
+            self.base_tree_oid.as_str(),
+            self.base_manifest_sha256.as_str(),
+            self.candidate_commit_oid.as_str(),
+            self.candidate_tree_oid.as_str(),
+            self.candidate_manifest_sha256.as_str(),
+            self.requirement_revision.as_str(),
+            self.policy_fingerprint.as_str(),
+            self.criterion_id.as_str(),
+            self.selector.as_str(),
+            self.selector_path.as_str(),
+            self.selector_literal.as_str(),
+            self.invocation_id.as_str(),
+            self.evaluator_ref.as_str(),
+            self.runtime_ref.as_str(),
+            self.evaluator_executable.as_str(),
+            self.toolchain_ref.as_str(),
+            self.enforcement_ref.as_str(),
+            self.runner_backend.as_str(),
+            self.runner_plan_sha256.as_str(),
+        ] {
+            field(&mut hash, value.as_bytes());
+        }
+        hash.update(self.policy_revision.to_be_bytes());
+        hash.update(self.invocation_descriptor_version.to_be_bytes());
+        hash.update([
+            self.runner_enforced_axes,
+            u8::from(self.runner_env_isolated),
+        ]);
+        hash.update((self.deletions.len() as u64).to_be_bytes());
+        for deletion in &self.deletions {
+            field(&mut hash, &deletion.path);
+            hash.update(deletion.base_mode.to_be_bytes());
+            field(&mut hash, deletion.base_blob_sha256.as_bytes());
+            hash.update([0]); // Candidate path is absent by deletion definition.
+        }
+        format!("sha256:{:x}", hash.finalize())
+    }
+
     pub fn validate(&self) -> Result<(), CandidateError> {
         let phases = self
             .checkpoints
@@ -187,12 +278,31 @@ impl CandidateIntegrityAssessment {
             || self.evaluator_ref.is_empty()
             || self.runtime_ref.is_empty()
             || self.enforcement_ref.is_empty()
+            || self.invocation_descriptor_version != 1
+            || !valid_sha256(&self.invocation_descriptor_sha256)
+            || self.evaluator_executable.is_empty()
+            || self.toolchain_ref.is_empty()
+            || self.runner_backend.is_empty()
+            || !valid_sha256(&self.runner_plan_sha256)
+            || self.runner_enforced_axes & 0b011 != 0b011
+            || self.runner_enforced_axes & !0b111 != 0
+            || !self.runner_env_isolated
             || !valid_sha256(&self.base_manifest_sha256)
             || !valid_sha256(&self.candidate_manifest_sha256)
             || !valid_oid(&self.base_commit_oid)
             || !valid_oid(&self.base_tree_oid)
             || !valid_oid(&self.candidate_commit_oid)
             || !valid_oid(&self.candidate_tree_oid)
+            || self
+                .deletions
+                .windows(2)
+                .any(|pair| pair[0].path >= pair[1].path)
+            || self.deletions.iter().any(|deletion| {
+                validate_candidate_path(&deletion.path).is_err()
+                    || (deletion.base_mode != 0o100644 && deletion.base_mode != 0o100755)
+                    || !valid_sha256(&deletion.base_blob_sha256)
+            })
+            || self.invocation_descriptor_sha256 != self.canonical_invocation_descriptor_digest()
             || self.started_at_ms > self.completed_at_ms
             || unique_non_reuse_phases.len()
                 != self
@@ -945,6 +1055,45 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn committed_deletions_bind_raw_path_mode_and_base_blob_digest() {
+        let digest = candidate_sha256(b"base bytes");
+        let base = CandidateManifest {
+            version: 1,
+            entries: vec![
+                CandidateManifestEntry {
+                    path: b"keep.txt".to_vec(),
+                    mode: 0o100644,
+                    length: 4,
+                    sha256: candidate_sha256(b"keep"),
+                },
+                CandidateManifestEntry {
+                    path: b"raw-\xff-name".to_vec(),
+                    mode: 0o100755,
+                    length: 10,
+                    sha256: digest.clone(),
+                },
+            ],
+            sha256: candidate_sha256(b"base manifest"),
+            total_bytes: 14,
+        };
+        let candidate = CandidateManifest {
+            version: 1,
+            entries: vec![base.entries[0].clone()],
+            sha256: candidate_sha256(b"candidate manifest"),
+            total_bytes: 4,
+        };
+
+        assert_eq!(
+            CandidateDeletion::between(&base, &candidate),
+            vec![CandidateDeletion {
+                path: b"raw-\xff-name".to_vec(),
+                base_mode: 0o100755,
+                base_blob_sha256: digest,
+            }]
+        );
+    }
     use std::collections::HashMap;
 
     fn object(kind: &str, bytes: &[u8]) -> (String, String, Vec<u8>) {

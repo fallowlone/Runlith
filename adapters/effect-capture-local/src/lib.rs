@@ -5,7 +5,8 @@ mod candidate_snapshot;
 
 pub use candidate_snapshot::{
     materialize_candidate_snapshot, read_candidate_snapshot, read_linked_metadata_file,
-    read_worktree_git_pointer, scan_live_worktree, CandidateSnapshot, DescriptorReadOperation,
+    read_worktree_git_pointer, remove_candidate_snapshot, scan_live_worktree, CandidateSnapshot,
+    DescriptorReadOperation,
 };
 
 use evaluation::{
@@ -548,7 +549,7 @@ mod tests {
             evaluation::CandidateCheckpointPhase::AfterEvaluation,
             evaluation::CandidateCheckpointPhase::ResultAdmission,
         ];
-        let assessment = CandidateIntegrityAssessment {
+        let mut assessment = CandidateIntegrityAssessment {
             task_id: "task-1".to_owned(),
             execution_id: execution.as_str().to_owned(),
             attempt_id: attempt.as_str().to_owned(),
@@ -564,12 +565,21 @@ mod tests {
             evaluator_ref: "runlith.agentd.candidate-evaluator.v1".to_owned(),
             runtime_ref: "agentd/1".to_owned(),
             enforcement_ref: "G6+Runner".to_owned(),
+            invocation_descriptor_version: 1,
+            invocation_descriptor_sha256: String::new(),
+            evaluator_executable: "/trusted/agentd".to_owned(),
+            toolchain_ref: "git version 2.54.0".to_owned(),
+            runner_backend: "native".to_owned(),
+            runner_plan_sha256: format!("sha256:{}", "8".repeat(64)),
+            runner_enforced_axes: 3,
+            runner_env_isolated: true,
             base_commit_oid: "1".repeat(40),
             base_tree_oid: "2".repeat(40),
             base_manifest_sha256: format!("sha256:{}", "c".repeat(64)),
             candidate_commit_oid: "3".repeat(40),
             candidate_tree_oid: "4".repeat(40),
             candidate_manifest_sha256: format!("sha256:{}", "d".repeat(64)),
+            deletions: vec![],
             checkpoints: phases
                 .into_iter()
                 .enumerate()
@@ -585,6 +595,7 @@ mod tests {
             started_at_ms: 10,
             completed_at_ms: 20,
         };
+        assessment.refresh_invocation_descriptor_digest();
         let result = CandidateTestResult {
             selector: assessment.selector.clone(),
             passed: 1,

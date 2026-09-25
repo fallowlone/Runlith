@@ -4,12 +4,14 @@ use std::sync::{Arc, Barrier};
 
 use agent_runtime::{AttemptId, Execution, ExecutionId, ProviderRef};
 use evaluation::{
-    candidate_sha256, subject_fingerprint, CandidateCheckpointPhase, CandidateFreshnessCheckpoint,
-    CandidateIntegrityAssessment, CandidateIntegrityOutcome, EffectId, EffectKind, EffectPayload,
-    EffectProvenance, EffectSubjectRef, Sha256Digest,
+    candidate_sha256, subject_fingerprint, CandidateCheckpointPhase, CandidateDeletion,
+    CandidateFreshnessCheckpoint, CandidateIntegrityAssessment, CandidateIntegrityOutcome,
+    EffectId, EffectKind, EffectPayload, EffectProvenance, EffectSubjectRef, Sha256Digest,
 };
+use security_audit::{SecurityAuditAuthor, SecurityAuditEvent};
 use storage_sqlite::{
-    EventType, NewJournalEvent, SqliteStore, StorageError, SUPPORTED_SCHEMA_VERSION,
+    EventType, NewJournalEvent, NewSecurityAuditRecord, SecurityAuditOutcome, SecurityAuditSubject,
+    SecurityAuditSubjectKind, SqliteStore, StorageError, SUPPORTED_SCHEMA_VERSION,
 };
 use task_domain::{Project, ProjectId, Task, TaskId};
 
@@ -179,25 +181,7 @@ fn candidate_result_and_typed_assessment_survive_restart_as_one_commit() {
         let (execution, attempt) = seed_runtime(&mut store);
         let subject = EffectSubjectRef::new(format!("attempt:{}", attempt.as_str())).unwrap();
         let candidate_manifest = format!("sha256:{}", "d".repeat(64));
-        let config = candidate_sha256(
-            format!(
-                "sha256:{}\0sha256:{}\0candidate.file-contains.v1\0src/main.rs\0accepted",
-                "b".repeat(64),
-                "c".repeat(64),
-            )
-            .as_bytes(),
-        );
-        let fingerprint = subject_fingerprint(
-            EffectKind::TestSuiteResult,
-            subject.as_str(),
-            &[
-                ("content", &candidate_manifest),
-                ("toolchain", "agentd/1"),
-                ("config", &config),
-            ],
-        )
-        .unwrap();
-        let assessment = CandidateIntegrityAssessment {
+        let mut assessment = CandidateIntegrityAssessment {
             task_id: "T-EFFECT".to_owned(),
             execution_id: execution.as_str().to_owned(),
             attempt_id: attempt.as_str().to_owned(),
@@ -212,13 +196,26 @@ fn candidate_result_and_typed_assessment_survive_restart_as_one_commit() {
             invocation_id: "candidate-invocation-1".to_owned(),
             evaluator_ref: "runlith.agentd.candidate-evaluator.v1".to_owned(),
             runtime_ref: "agentd/1".to_owned(),
-            enforcement_ref: "G6+Runner".to_owned(),
+            enforcement_ref: "runner-operation-1".to_owned(),
+            invocation_descriptor_version: 1,
+            invocation_descriptor_sha256: String::new(),
+            evaluator_executable: "/trusted/agentd".to_owned(),
+            toolchain_ref: "git version 2.54.0".to_owned(),
+            runner_backend: "native".to_owned(),
+            runner_plan_sha256: format!("sha256:{}", "6".repeat(64)),
+            runner_enforced_axes: 3,
+            runner_env_isolated: true,
             base_commit_oid: "1".repeat(40),
             base_tree_oid: "2".repeat(40),
             base_manifest_sha256: format!("sha256:{}", "a".repeat(64)),
             candidate_commit_oid: "3".repeat(40),
             candidate_tree_oid: "4".repeat(40),
             candidate_manifest_sha256: format!("sha256:{}", "d".repeat(64)),
+            deletions: vec![CandidateDeletion {
+                path: b"src/removed.rs".to_vec(),
+                base_mode: 0o100644,
+                base_blob_sha256: format!("sha256:{}", "5".repeat(64)),
+            }],
             checkpoints: [
                 CandidateCheckpointPhase::Selection,
                 CandidateCheckpointPhase::BeforeEvaluation,
@@ -239,6 +236,52 @@ fn candidate_result_and_typed_assessment_survive_restart_as_one_commit() {
             started_at_ms: 10,
             completed_at_ms: 20,
         };
+        assessment.refresh_invocation_descriptor_digest();
+        let config = candidate_sha256(
+            format!(
+                "{}\0{}\0{}\0{}\0{}\0{}",
+                assessment.requirement_revision,
+                assessment.policy_fingerprint,
+                assessment.selector,
+                assessment.selector_path,
+                assessment.selector_literal,
+                assessment.invocation_descriptor_sha256,
+            )
+            .as_bytes(),
+        );
+        let fingerprint = subject_fingerprint(
+            EffectKind::TestSuiteResult,
+            subject.as_str(),
+            &[
+                ("content", &candidate_manifest),
+                ("toolchain", &assessment.runtime_ref),
+                ("config", &config),
+            ],
+        )
+        .unwrap();
+        store
+            .append_security_audit(&NewSecurityAuditRecord {
+                event: SecurityAuditEvent::IsolationEnforcement,
+                author: SecurityAuditAuthor::Runner,
+                outcome: Some(SecurityAuditOutcome::Enforced),
+                occurred_at_ms: 20,
+                correlation_id: assessment.enforcement_ref.clone(),
+                causation_id: Some(assessment.invocation_id.clone()),
+                operation_id: Some(assessment.enforcement_ref.clone()),
+                task_id: Some(assessment.task_id.clone()),
+                execution_id: Some(assessment.execution_id.clone()),
+                attempt_id: Some(assessment.attempt_id.clone()),
+                subject: Some(SecurityAuditSubject {
+                    kind: SecurityAuditSubjectKind::RunnerBackend,
+                    id: assessment.runner_backend.clone(),
+                }),
+                policy_fingerprint: Some(assessment.policy_fingerprint.clone()),
+                rule_id: None,
+                reason_code: None,
+                approval_request_id: None,
+                capabilities: vec![],
+            })
+            .unwrap();
         let effect = store
             .append_candidate_result(
                 subject,
@@ -263,6 +306,18 @@ fn candidate_result_and_typed_assessment_survive_restart_as_one_commit() {
         assert!(store
             .get_candidate_evidence(execution.as_str(), attempt.as_str())
             .is_err());
+        let pending_completion = store
+            .get_candidate_evidence_for_completion(execution.as_str(), attempt.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            pending_completion.integrity.deletions[0].path,
+            b"src/removed.rs"
+        );
+        assert_eq!(
+            pending_completion.integrity.invocation_descriptor_version,
+            1
+        );
         store
             .append_candidate_checkpoint(
                 execution.as_str(),
@@ -295,6 +350,12 @@ fn candidate_result_and_typed_assessment_survive_restart_as_one_commit() {
     assert_eq!(
         evidence.integrity.candidate_manifest_sha256,
         format!("sha256:{}", "d".repeat(64))
+    );
+    assert_eq!(evidence.integrity.deletions[0].path, b"src/removed.rs");
+    assert_eq!(evidence.integrity.invocation_descriptor_version, 1);
+    assert_eq!(
+        evidence.integrity.invocation_descriptor_sha256,
+        evidence.integrity.canonical_invocation_descriptor_digest()
     );
     assert_eq!(evidence.integrity.checkpoints.len(), 5);
     store

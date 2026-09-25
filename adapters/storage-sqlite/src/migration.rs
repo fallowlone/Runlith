@@ -1,7 +1,7 @@
 //! Deterministic checked-in migrations with an explicit schema version.
 //!
 //! Versioning uses SQLite `PRAGMA user_version`: 0 means a fresh database,
-//! 20 is the supported version (`0001_task_core.sql`, then
+//! 22 is the supported version (`0001_task_core.sql`, then
 //! `0002_event_journal.sql`, then `0003_event_scope.sql`, then
 //! `0004_runtime_core.sql`, then `0005_workspace_leases.sql`, then
 //! `0006_attempt_reservations.sql`, then

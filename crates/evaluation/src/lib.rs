@@ -20,7 +20,7 @@ mod request;
 mod verdict;
 
 pub use candidate::{
-    candidate_sha256, CandidateCheckpointPhase, CandidateError, CandidateFile,
+    candidate_sha256, CandidateCheckpointPhase, CandidateDeletion, CandidateError, CandidateFile,
     CandidateFreshnessCheckpoint, CandidateIntegrityAssessment, CandidateIntegrityOutcome,
     CandidateManifest, CandidateManifestEntry, CandidateSelector, CandidateTestResult,
     GitObjectFormat, VerifiedCandidate, MAX_CANDIDATE_BLOB_BYTES, MAX_CANDIDATE_ENTRIES,
