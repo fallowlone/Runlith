@@ -6578,8 +6578,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(
-            history_after_tamper.contains("BLOCKED") || history_after_tamper.contains("MISMATCH"),
-            "the tamper refusal must still be durably journaled, got {history_after_tamper:?}"
+            history_after_tamper.contains("TAMPERED:selection-binding"),
+            "the post-admission HEAD change must be journaled as the selection-binding integrity signal, got {history_after_tamper:?}"
+        );
+        let invalidation = store
+            .candidate_operation_invalidation(execution_id.as_str(), attempt_id.as_str())
+            .unwrap();
+        assert!(
+            invalidation.is_some()
+                && invalidation.as_ref().unwrap().1 == "TAMPERED:selection-binding",
+            "invalidation must be set with TAMPERED:selection-binding code"
         );
     }
 
@@ -6677,8 +6685,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(
-            history.contains("BLOCKED") || history.contains("MISMATCH"),
-            "the failure must still be durably journaled in status_history, got {history:?}"
+            history.contains("TAMPERED:selection-binding"),
+            "the post-admission HEAD change must be journaled as the selection-binding integrity signal, got {history:?}"
+        );
+        let invalidation = store
+            .candidate_operation_invalidation(execution_id.as_str(), attempt_id.as_str())
+            .unwrap();
+        assert!(
+            invalidation.is_some()
+                && invalidation.as_ref().unwrap().1 == "TAMPERED:selection-binding",
+            "invalidation must be set with TAMPERED:selection-binding code"
         );
     }
 
@@ -7022,10 +7038,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(
-            history_after_tamper.contains("BLOCKED")
-                || history_after_tamper.contains("MISMATCH")
-                || history_after_tamper.contains("TAMPERED"),
-            "the tamper refusal must still be durably journaled, got {history_after_tamper:?}"
+            history_after_tamper.contains("TAMPERED:selection-binding"),
+            "the tamper refusal must still be durably journaled with selection-binding, got {history_after_tamper:?}"
         );
 
         // After HEAD is restored to the original commit, evaluate must still return Err
@@ -7036,12 +7050,27 @@ mod tests {
             evaluate_after_restore.is_err(),
             "evaluate must still fail after HEAD restore (invalidation is sticky)"
         );
-        let evidence_after_restore = store
-            .get_candidate_evidence_for_completion(execution_id.as_str(), attempt_id.as_str())
-            .unwrap();
+        let evidence_after_restore =
+            store.get_candidate_evidence_for_completion(execution_id.as_str(), attempt_id.as_str());
         assert!(
-            evidence_after_restore.is_some(),
-            "evidence should still be present but invalidation blocks it"
+            evidence_after_restore.is_err(),
+            "invalidated evidence must stay unreadable after HEAD is restored"
+        );
+        let error_msg = evidence_after_restore.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("invalidated"),
+            "error must contain 'invalidated' message, got: {}",
+            error_msg
+        );
+        let invalidation_after_restore = store
+            .candidate_operation_invalidation(execution_id.as_str(), attempt_id.as_str())
+            .unwrap();
+        assert_eq!(
+            invalidation_after_restore
+                .as_ref()
+                .map(|(_, code)| code.as_str()),
+            Some("TAMPERED:selection-binding"),
+            "invalidation code must remain TAMPERED:selection-binding after restore"
         );
     }
 
