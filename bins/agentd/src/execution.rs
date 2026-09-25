@@ -7837,7 +7837,7 @@ mod tests {
             invalidation.is_some(),
             "unauditable name must set permanent invalidation"
         );
-        let (code, _) = invalidation.unwrap();
+        let (_, code) = invalidation.unwrap();
         assert!(
             code.starts_with("MISMATCH:freshness-completion"),
             "invalidation code must indicate completion-phase freshness failure, got: {code}"
@@ -7874,7 +7874,7 @@ mod tests {
             invalidation_after.is_some(),
             "invalidation must persist after file removal"
         );
-        let (code_after, _) = invalidation_after.unwrap();
+        let (_, code_after) = invalidation_after.unwrap();
         assert_eq!(code_after, code, "invalidation code must not change");
     }
 }
