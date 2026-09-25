@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agent_runtime::{AttemptId, ExecutionId, ProviderRef};
-use agentd::DaemonConfig;
+use agentd::{execution::ExecutionComposition, DaemonConfig};
 use app_services::{
     FixedClock, OrchestrationIds, OrchestrationOutcome, OrchestrationService,
     PlannedOrchestrationOutcome, PlanningPolicyContext, PlanningService,
@@ -17,9 +17,10 @@ use fake_evaluator::{EvaluatorMode, FakeEvaluator};
 use fake_planner::{FakePlanner, FakePlannerScenario};
 use plan_domain::{
     AffectedParentCriterion, CriterionId, DecompositionRequest, EvidenceRef, PlanBranchId,
-    PlanningBudget, RiskClass, ScopeBound, VerificationMethod,
+    PlannerCallSpend, PlannerFault, PlanningBudget, RiskClass, ScopeBound, VerificationMethod,
     MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH, MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
 };
+use policy::CapabilityKind;
 use scheduler::{ExecutionPort, ExecutionProblem, WorkEvidence, WorkItem};
 use task_domain::{Project, ProjectId, Task, TaskId, TaskState};
 
@@ -53,7 +54,6 @@ impl Drop for TestDb {
 }
 
 #[cfg(unix)]
-#[allow(dead_code)]
 fn fixture(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     let mut file = std::fs::File::create(&path).expect("fixture file");
