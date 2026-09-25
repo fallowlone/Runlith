@@ -1300,30 +1300,8 @@ impl CandidateInputEvaluator {
             .snapshot_parent
             .join("candidate-snapshots")
             .join(&snapshot_name);
-        run_candidate_process(
-            &self.db_path,
-            CandidateProcessRequest {
-                operation: CandidateG6Operation::SnapshotWrite,
-                task_id: request.task_id.as_str().to_owned(),
-                execution_id: request.execution_id.as_str().to_owned(),
-                attempt_id: request.attempt_id.as_str().to_owned(),
-                invocation_id: format!("{invocation_id}.snapshot-write"),
-                workspace: self.snapshot_parent.clone(),
-                filesystem_roots: vec![self.snapshot_parent.clone()],
-                executable: snapshot_writer,
-                args: vec![
-                    "__candidate-snapshot-write".into(),
-                    self.snapshot_parent.as_os_str().into(),
-                    snapshot_name.clone().into(),
-                ],
-                input: snapshot_input,
-                support_read: vec![self.snapshot_parent.clone()],
-                support_write: vec![self.snapshot_parent.clone()],
-                max_stdout: 0,
-            },
-        )?;
 
-        // Removal is attempted on every path after snapshot-write succeeds.
+        // Removal is attempted on every path after the snapshot-write attempt starts.
         // On error, removal is best-effort; on success, removal errors are fatal.
         let remove_snapshot = || {
             run_candidate_process(
@@ -1349,6 +1327,32 @@ impl CandidateInputEvaluator {
                 },
             )
         };
+
+        if let Err(e) = run_candidate_process(
+            &self.db_path,
+            CandidateProcessRequest {
+                operation: CandidateG6Operation::SnapshotWrite,
+                task_id: request.task_id.as_str().to_owned(),
+                execution_id: request.execution_id.as_str().to_owned(),
+                attempt_id: request.attempt_id.as_str().to_owned(),
+                invocation_id: format!("{invocation_id}.snapshot-write"),
+                workspace: self.snapshot_parent.clone(),
+                filesystem_roots: vec![self.snapshot_parent.clone()],
+                executable: snapshot_writer,
+                args: vec![
+                    "__candidate-snapshot-write".into(),
+                    self.snapshot_parent.as_os_str().into(),
+                    snapshot_name.clone().into(),
+                ],
+                input: snapshot_input,
+                support_read: vec![self.snapshot_parent.clone()],
+                support_write: vec![self.snapshot_parent.clone()],
+                max_stdout: 0,
+            },
+        ) {
+            let _ = remove_snapshot();
+            return Err(e);
+        }
 
         let output = run_candidate_process(
             &self.db_path,
