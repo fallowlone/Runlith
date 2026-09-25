@@ -391,19 +391,31 @@ RESULT_ADMITTED → COMPLETE transition remain available only to a future
 completion-stage caller (TASK-0125), which must invoke them before any
 completion.
 
-**Permanent invalidation.** Operation status stays monotonic (it never
-regresses from RESULT_ADMITTED or COMPLETE). Any recorded failure additionally
-sets a permanent invalidation (time and code) on the operation, enforced by
-a database trigger that forbids changing or clearing it. Every evidence and
-integrity-assessment read, checkpoint append and COMPLETE transition refuses
-an invalidated operation. A failed Completion or restart-reuse freshness
-check, or a reuse binding mismatch, records such an invalidation; if it
-cannot be recorded, the operation fails with an error instead of silently
-continuing.
+**Permanent invalidation.** Operation status stays monotonic: it never
+regresses from RESULT_ADMITTED or COMPLETE. Integrity signals set a
+permanent invalidation (time and a fixed status:code) on the operation.
+A database trigger forbids changing or clearing it. Integrity signals are
+decided by the call site that detects them, never by matching error text.
+They are: the linked-worktree pointer, the selection binding, the Git
+object sources and object graph, the reuse evidence binding, the Completion
+immutable subject, the evaluator result disagreeing with the trusted
+recomputation, and every freshness checkpoint on the evaluation,
+result-admission, reuse and Completion paths. The freshness checkpoints
+include any error raised inside the check, such as a special file or a FIFO
+in the scanned worktree. Every evidence read, integrity-assessment read,
+checkpoint append and COMPLETE transition refuses an invalidated
+operation. If an integrity signal's invalidation cannot be recorded, the
+failing call reports that alongside its error. Infrastructure and
+precondition failures, such as a process launch failure, a timeout, a
+storage error, or a Task or attempt not in the evaluatable state, are
+journaled only. They never invalidate, so admitted evidence survives a
+transient failure and an idempotent retry stays safe. Owner decision
+2026-09-25, following an adversarial re-review.
 
 **Special files.** Descriptor-relative reads open entries non-blocking, so a
 FIFO or other special file in the worktree, in linked metadata, or in place
-of `.git` makes the check stale promptly instead of blocking it.
+of `.git` makes the check stale promptly instead of blocking it. Such a
+failure is an integrity signal and permanently invalidates the operation.
 
 Owner ratified 2026-09-25. Narrows authority: removes completion verdicts
 from TASK-0144's production path and grants no new filesystem, process or
