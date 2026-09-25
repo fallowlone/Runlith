@@ -2124,17 +2124,6 @@ fn run_candidate_process(
             };
             let stdout_bytes = stdout.len() as u64;
             let stderr_bytes = stderr.len() as u64;
-            // DIAGNOSTIC (TASK-0144, temporary): revert before review.
-            eprintln!(
-                "agentd: DIAGNOSTIC candidate {} stderr: {}",
-                op_label,
-                String::from_utf8_lossy(&stderr[..stderr.len().min(4000)])
-            );
-            eprintln!(
-                "agentd: DIAGNOSTIC candidate {} stdout: {}",
-                op_label,
-                String::from_utf8_lossy(&stdout[..stdout.len().min(1000)])
-            );
             return Err(format!(
                 "candidate {op_label} process returned unsupported output or status ({exit_info}, stdout_bytes: {stdout_bytes}/{max_stdout}, stderr_bytes: {stderr_bytes}/{MAX_STDERR})"
             ));
