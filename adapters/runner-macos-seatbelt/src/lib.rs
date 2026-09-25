@@ -109,9 +109,41 @@ impl MacOsSeatbeltRunner {
         write_roots.sort();
         write_roots.dedup();
 
+        // Absolute-path resolution (`getcwd()`/`realpath()`, which a
+        // process legitimately performing `chdir`-based CWD positioning or
+        // resolving a symlinked/relative reference such as a linked Git
+        // worktree's `commondir` back-reference needs) walks every
+        // ancestor directory of the path being resolved. A Seatbelt
+        // `subpath` grant covers only the given path and its descendants —
+        // never its ancestors — so a workspace/root nested several levels
+        // under a narrow allowed subtree fails closed with a misleading
+        // "Operation not permitted" even though the process only ever
+        // reads within its granted scope. Grant `file-read-metadata` and
+        // `file-test-existence` (stat/existence only — never directory
+        // contents or file data) on the exact ancestor chain of every
+        // workspace/root so that resolution succeeds without widening data
+        // access beyond the roots already explicitly granted above.
+        let mut ancestor_literals: Vec<PathBuf> = vec![workspace.to_path_buf()];
+        ancestor_literals.extend(read_roots.iter().cloned());
+        ancestor_literals.extend(write_roots.iter().cloned());
+        let mut ancestors: Vec<PathBuf> = ancestor_literals
+            .iter()
+            .flat_map(|path| path.ancestors().skip(1).map(Path::to_path_buf))
+            .collect();
+        ancestors.sort();
+        ancestors.dedup();
+
         let mut profile = String::from(
             "(version 1)\n(deny default)\n(import \"system.sb\")\n(allow process-fork)\n",
         );
+
+        if !ancestors.is_empty() {
+            profile.push_str("(allow file-read-metadata file-test-existence");
+            for path in &ancestors {
+                push_literal(&mut profile, path)?;
+            }
+            profile.push_str(")\n");
+        }
 
         profile.push_str("(allow process-exec");
         for path in &process_paths {
