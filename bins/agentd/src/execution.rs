@@ -1322,6 +1322,34 @@ impl CandidateInputEvaluator {
                 max_stdout: 0,
             },
         )?;
+
+        // Removal is attempted on every path after snapshot-write succeeds.
+        // On error, removal is best-effort; on success, removal errors are fatal.
+        let remove_snapshot = || {
+            run_candidate_process(
+                &self.db_path,
+                CandidateProcessRequest {
+                    operation: CandidateG6Operation::SnapshotWrite,
+                    task_id: request.task_id.as_str().to_owned(),
+                    execution_id: request.execution_id.as_str().to_owned(),
+                    attempt_id: request.attempt_id.as_str().to_owned(),
+                    invocation_id: format!("{invocation_id}.snapshot-remove"),
+                    workspace: self.snapshot_parent.clone(),
+                    filesystem_roots: vec![self.snapshot_parent.clone()],
+                    executable: evaluator_executable.clone(),
+                    args: vec![
+                        "__candidate-snapshot-remove".into(),
+                        self.snapshot_parent.as_os_str().into(),
+                        snapshot_name.clone().into(),
+                    ],
+                    input: Vec::new(),
+                    support_read: vec![self.snapshot_parent.clone()],
+                    support_write: vec![self.snapshot_parent.clone()],
+                    max_stdout: 0,
+                },
+            )
+        };
+
         let output = run_candidate_process(
             &self.db_path,
             CandidateProcessRequest {
@@ -1351,31 +1379,32 @@ impl CandidateInputEvaluator {
                 support_write: Vec::new(),
                 max_stdout: 4096,
             },
-        )?;
-        let result = parse_candidate_result(&output.stdout, &candidate.manifest.sha256)?;
-        validate_candidate_result(&result, &candidate, selector)?;
-        run_candidate_process(
-            &self.db_path,
-            CandidateProcessRequest {
-                operation: CandidateG6Operation::SnapshotWrite,
-                task_id: request.task_id.as_str().to_owned(),
-                execution_id: request.execution_id.as_str().to_owned(),
-                attempt_id: request.attempt_id.as_str().to_owned(),
-                invocation_id: format!("{invocation_id}.snapshot-remove"),
-                workspace: self.snapshot_parent.clone(),
-                filesystem_roots: vec![self.snapshot_parent.clone()],
-                executable: evaluator_executable.clone(),
-                args: vec![
-                    "__candidate-snapshot-remove".into(),
-                    self.snapshot_parent.as_os_str().into(),
-                    snapshot_name.into(),
-                ],
-                input: Vec::new(),
-                support_read: vec![self.snapshot_parent.clone()],
-                support_write: vec![self.snapshot_parent.clone()],
-                max_stdout: 0,
-            },
-        )?;
+        );
+
+        let output = match output {
+            Ok(output) => output,
+            Err(e) => {
+                // Error path: best-effort removal, return original error
+                let _ = remove_snapshot();
+                return Err(e);
+            }
+        };
+
+        let result = match parse_candidate_result(&output.stdout, &candidate.manifest.sha256) {
+            Ok(result) => result,
+            Err(e) => {
+                let _ = remove_snapshot();
+                return Err(e);
+            }
+        };
+
+        if let Err(e) = validate_candidate_result(&result, &candidate, selector) {
+            let _ = remove_snapshot();
+            return Err(e);
+        }
+
+        // Success path: removal error is fatal
+        remove_snapshot()?;
         for phase in [
             evaluation::CandidateCheckpointPhase::AfterEvaluation,
             evaluation::CandidateCheckpointPhase::ResultAdmission,
@@ -1595,13 +1624,18 @@ impl CandidateInputEvaluator {
             started_at_ms: assessment.started_at_ms,
         })?;
         if !checkpoint.matched {
-            let _ = store.record_candidate_operation_failure(
+            store.record_candidate_operation_failure(
                 request.execution_id.as_str(),
                 request.attempt_id.as_str(),
                 "MISMATCH",
                 "completion-freshness",
                 now_millis(),
-            );
+            )
+            .map_err(|error| {
+                format!(
+                    "candidate inputs changed before Task completion; invalidation could not be recorded: {error}"
+                )
+            })?;
             return Err("candidate inputs changed before Task completion".to_owned());
         }
         store
