@@ -1024,8 +1024,12 @@ impl EvaluationPort for CandidateInputEvaluator {
     }
 
     fn revalidate_before_completion(&self, request: &EvaluationRequest) -> EvaluationResult<()> {
-        self.revalidate_candidate_completion(request)
-            .map_err(|err| evaluation::EvaluationError::new(err.into_message()))
+        let result = self.revalidate_candidate_completion(request);
+        if let Err(CandidateError::Other(_)) = &result {
+            // Infrastructure/precondition error: journal only (no invalidation).
+            self.journal_other(request);
+        }
+        result.map_err(|err| evaluation::EvaluationError::new(err.into_message()))
     }
 }
 
@@ -1062,7 +1066,10 @@ impl CandidateInputEvaluator {
                         code,
                         now_millis(),
                     ) {
-                        Ok(()) => Err(CandidateError::Integrity(msg)),
+                        Ok(true) => Err(CandidateError::Integrity(msg)),
+                        Ok(false) => Err(CandidateError::Integrity(format!(
+                            "{msg} (no candidate operation recorded yet; nothing to invalidate)"
+                        ))),
                         Err(e) => Err(CandidateError::Integrity(format!(
                             "{msg}; invalidation could not be recorded: {e}"
                         ))),
@@ -1072,6 +1079,21 @@ impl CandidateInputEvaluator {
                     "{msg}; invalidation could not be recorded: {e}"
                 ))),
             },
+        }
+    }
+
+    /// Helper: best-effort journaling of infrastructure/precondition failures
+    /// (CandidateError::Other) without invalidation. Used for errors that may
+    /// occur late in the execution path (e.g., during completion revalidation).
+    fn journal_other(&self, request: &EvaluationRequest) {
+        if let Ok(mut store) = storage_sqlite::SqliteStore::open(&self.db_path) {
+            let _ = store.record_candidate_operation_failure(
+                request.execution_id.as_str(),
+                request.attempt_id.as_str(),
+                "BLOCKED",
+                "blocked",
+                now_millis(),
+            );
         }
     }
 
@@ -1085,15 +1107,7 @@ impl CandidateInputEvaluator {
                 }
                 CandidateError::Other(msg) => {
                     // Infrastructure/precondition error: journal only (no invalidation).
-                    if let Ok(mut store) = storage_sqlite::SqliteStore::open(&self.db_path) {
-                        let _ = store.record_candidate_operation_failure(
-                            request.execution_id.as_str(),
-                            request.attempt_id.as_str(),
-                            "BLOCKED",
-                            "blocked",
-                            now_millis(),
-                        );
-                    }
+                    self.journal_other(request);
                     return Err(msg.clone());
                 }
             }
@@ -1199,13 +1213,19 @@ impl CandidateInputEvaluator {
             "worktree-pointer",
             read_authorized_worktree_pointer(&self.db_path, request, &invocation_id, &root),
         )?;
-        let linked_gitdir = authenticated_worktree_gitdir(
-            &self.db_path,
+        // Wrap infrastructure errors as integrity signals; later R12b will split them out.
+        let linked_gitdir = self.integrity(
             request,
-            &invocation_id,
-            &root,
-            &selected_pointer,
-            &anchor,
+            "TAMPERED",
+            "worktree-gitdir",
+            authenticated_worktree_gitdir(
+                &self.db_path,
+                request,
+                &invocation_id,
+                &root,
+                &selected_pointer,
+                &anchor,
+            ),
         )?;
         let git_context = CandidateGitContext {
             request,
@@ -1238,40 +1258,52 @@ impl CandidateInputEvaluator {
         let selector = requirements
             .first()
             .ok_or_else(|| "candidate selector missing".to_owned())?;
-        let _new_selection = store
-            .record_candidate_selection(
-                request.task_id.as_str(),
-                request.execution_id.as_str(),
-                request.attempt_id.as_str(),
-                &invocation_id,
-                &base.base_revision,
-                candidate_oid,
-                &selector.requirement_revision,
-                base.policy.revision(),
-                base.policy.fingerprint(),
-                &selector.criterion_id,
-                &selector.selector,
-                &selector.path,
-                &selector.literal,
-                now_millis(),
-            )
-            .map_err(|error| {
-                // ConstraintViolation (binding mismatch) is an integrity signal;
-                // other storage errors are infrastructure failures.
-                if matches!(error, storage_sqlite::StorageError::ConstraintViolation(_)) {
-                    return self
-                        .integrity(
-                            request,
-                            "TAMPERED",
-                            "selection-binding",
-                            Err::<(), _>(format!(
-                                "persist candidate selection before object resolution: {error}"
-                            )),
-                        )
-                        .unwrap_err();
-                }
-                format!("persist candidate selection before object resolution: {error}").into()
-            })?;
+        match store.record_candidate_selection(
+            request.task_id.as_str(),
+            request.execution_id.as_str(),
+            request.attempt_id.as_str(),
+            &invocation_id,
+            &base.base_revision,
+            candidate_oid,
+            &selector.requirement_revision,
+            base.policy.revision(),
+            base.policy.fingerprint(),
+            &selector.criterion_id,
+            &selector.selector,
+            &selector.path,
+            &selector.literal,
+            now_millis(),
+        ) {
+            Ok(storage_sqlite::CandidateSelectionOutcome::Recorded) => {
+                // New operation recorded; continue with validation.
+            }
+            Ok(storage_sqlite::CandidateSelectionOutcome::ReuseAdmitted) => {
+                // Same subject and already admitted; allow restart reuse.
+            }
+            Ok(storage_sqlite::CandidateSelectionOutcome::SubjectMismatch) => {
+                // Different subject: integrity signal (tampering detected).
+                return Err(self
+                    .integrity(
+                        request,
+                        "TAMPERED",
+                        "selection-binding",
+                        Err::<(), _>("persist candidate selection before object resolution: subject mismatch".to_owned()),
+                    )
+                    .unwrap_err());
+            }
+            Ok(storage_sqlite::CandidateSelectionOutcome::Incomplete) => {
+                // Same subject but interrupted operation; not replayed.
+                return Err(CandidateError::Other(
+                    "candidate operation is incomplete or ambiguous; not replayed".to_owned(),
+                ));
+            }
+            Err(error) => {
+                // Storage error: infrastructure failure.
+                return Err(CandidateError::Other(format!(
+                    "persist candidate selection before object resolution: {error}"
+                )));
+            }
+        }
         self.integrity(
             request,
             "TAMPERED",
@@ -1788,13 +1820,19 @@ impl CandidateInputEvaluator {
                 &root,
             ),
         )?;
-        let linked_gitdir = authenticated_worktree_gitdir(
-            &self.db_path,
+        // Wrap infrastructure errors as integrity signals; later R12b will split them out.
+        let linked_gitdir = self.integrity(
             request,
-            &assessment.invocation_id,
-            &root,
-            &pointer,
-            &anchor,
+            "TAMPERED",
+            "worktree-gitdir",
+            authenticated_worktree_gitdir(
+                &self.db_path,
+                request,
+                &assessment.invocation_id,
+                &root,
+                &pointer,
+                &anchor,
+            ),
         )?;
         let format = evaluation::GitObjectFormat::from_oid(&assessment.candidate_commit_oid)
             .map_err(|error| format!("candidate completion object format invalid: {error}"))?;
@@ -7264,5 +7302,104 @@ mod tests {
         assert!(result.is_err(), "directory should be rejected");
 
         let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn candidate_gitdir_backreference_tamper_after_admission_stays_invalidated() {
+        let fixture = setup_candidate_restart_fixture(
+            "candidate-gitdir-tamper",
+            "P-CANDIDATE-GITDIR",
+            "T-CANDIDATE-GITDIR",
+            "E-CANDIDATE-GITDIR",
+            "A-CANDIDATE-GITDIR",
+        );
+        let execution_id = fixture.request.execution_id.clone();
+        let attempt_id = fixture.request.attempt_id.clone();
+        let evaluator = candidate_restart_evaluator(&fixture);
+
+        // First evaluate() admits the evidence.
+        let verdict = evaluator
+            .evaluate(&fixture.request)
+            .expect("first evaluate admits durable evidence");
+        assert_eq!(verdict, EvaluationVerdict::Verified);
+        let store = storage_sqlite::SqliteStore::open(&fixture.sandbox.db).expect("open store");
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("RESULT_ADMITTED"),
+            "evidence must be admitted before completion"
+        );
+
+        // Locate the linked worktree metadata gitdir back-reference file and save its contents.
+        let worktree = PathBuf::from(fixture.lease.worktree_ref());
+        let anchor = store
+            .get_trusted_anchor(fixture.lease.id())
+            .expect("load anchor")
+            .expect("anchor must exist");
+        let common_dir = anchor.canonical_commondir();
+        let worktree_name = worktree
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .expect("worktree name");
+        let gitdir_file = common_dir
+            .join("worktrees")
+            .join(worktree_name)
+            .join("gitdir");
+
+        let original_gitdir = std::fs::read(&gitdir_file).expect("read original gitdir file");
+
+        // Tamper with the gitdir file: overwrite it with a different path.
+        let tampered_path = b"/fake/git/dir\n";
+        std::fs::write(&gitdir_file, tampered_path).expect("tamper gitdir file");
+
+        // revalidate_before_completion must fail (gitdir mismatch is TAMPERED:worktree-gitdir).
+        let revalidate_err = evaluator.revalidate_before_completion(&fixture.request);
+        assert!(
+            revalidate_err.is_err(),
+            "revalidate_before_completion must fail when gitdir is tampered"
+        );
+
+        // Invalidation must be recorded with code starting with "TAMPERED:worktree-gitdir".
+        let invalidation = store
+            .candidate_operation_invalidation(execution_id.as_str(), attempt_id.as_str())
+            .expect("load invalidation")
+            .expect("invalidation must be set");
+        assert!(
+            invalidation.1.starts_with("TAMPERED:worktree-gitdir"),
+            "invalidation code must start with TAMPERED:worktree-gitdir, got {}",
+            invalidation.1
+        );
+
+        // Restore the original gitdir file.
+        std::fs::write(&gitdir_file, &original_gitdir).expect("restore gitdir file");
+
+        // revalidate_before_completion must STILL fail because the operation
+        // is now invalidated (sticky barrier), even though the gitdir is restored.
+        let revalidate_again = evaluator.revalidate_before_completion(&fixture.request);
+        assert!(
+            revalidate_again.is_err(),
+            "revalidate_before_completion must still fail (invalidation is permanent)"
+        );
+
+        // Status must still be RESULT_ADMITTED (never became COMPLETE).
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("RESULT_ADMITTED"),
+            "status must remain RESULT_ADMITTED (never became COMPLETE)"
+        );
+
+        // get_candidate_evidence_for_completion must fail (evidence invalidated).
+        let evidence_err =
+            store.get_candidate_evidence_for_completion(execution_id.as_str(), attempt_id.as_str());
+        assert!(
+            evidence_err.is_err(),
+            "get_candidate_evidence_for_completion must fail after invalidation"
+        );
     }
 }
