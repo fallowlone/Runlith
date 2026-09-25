@@ -1,6 +1,6 @@
 # ADR-0036 — G8 EvidenceRequirement Parameter Binding Authority
 
-Status: **Accepted** (TASK-0150; owner ratified 2026-09-25)
+Status: **Accepted** (TASK-0150; owner ratified 2026-09-25 after independent architecture/security review PASS of exact pre-acceptance commit `48f793ede6a5b9ae5f722b16a0bdddbee99e4434`)
 Gate: G8
 
 > This decision states who is authorized to bind exact kind-specific
