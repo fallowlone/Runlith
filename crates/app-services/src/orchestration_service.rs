@@ -465,6 +465,16 @@ impl<C: Clock> OrchestrationService<C> {
             )))
         })?;
         let ensured = workspace.ensure_workspace_ready(&workspace_request)?;
+        // TASK-0144 (G8): bind the immutable evaluated-base/policy pair as
+        // soon as the workspace lease is READY, before any provider or
+        // evaluator work runs. Idempotent (`ON CONFLICT(execution_id) DO
+        // NOTHING`, and `bind_evaluated_policy_base` refuses a changed
+        // binding), so a resumed/retried cycle for the same execution is
+        // safe. Every candidate-input (and future) evaluator that verifies
+        // against an immutable evaluated base depends on this binding
+        // existing; without it `get_evaluated_policy_base` never resolves
+        // and the Task can never reach a durable verdict.
+        self.tasks.bind_evaluated_policy_base(&work.execution_id)?;
         // TASK-0135 (G8): durable prerequisites are checked at
         // workspace-attempt time, after admission (the journaled `Block`
         // transition requires RUNNING) and before any provider invocation.
@@ -717,24 +727,30 @@ impl<C: Clock> OrchestrationService<C> {
                 self.tasks.begin_verification(task_id)?;
 
                 // -- independent verdict (the executor never judges) ---------
-                let verdict = evaluator
-                    .evaluate(&EvaluationRequest {
-                        task_id: task_id.clone(),
-                        execution_id: execution_id.clone(),
-                        attempt_id: attempt_id.clone(),
-                        summary,
-                        evidence_ref,
-                    })
-                    .map_err(|error| {
-                        // No verdict reached: the Task stays VERIFYING
-                        // (durable) with its evidence intact. Reported, never
-                        // retried inside this cycle.
-                        ServiceError::Storage(StorageError::ConstraintViolation(format!(
-                            "independent evaluation produced no verdict: {error}"
-                        )))
-                    })?;
+                let evaluation_request = EvaluationRequest {
+                    task_id: task_id.clone(),
+                    execution_id: execution_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    summary,
+                    evidence_ref,
+                };
+                let verdict = evaluator.evaluate(&evaluation_request).map_err(|error| {
+                    // No verdict reached: the Task stays VERIFYING
+                    // (durable) with its evidence intact. Reported, never
+                    // retried inside this cycle.
+                    ServiceError::Storage(StorageError::ConstraintViolation(format!(
+                        "independent evaluation produced no verdict: {error}"
+                    )))
+                })?;
                 match verdict {
                     EvaluationVerdict::Verified => {
+                        evaluator
+                            .revalidate_before_completion(&evaluation_request)
+                            .map_err(|error| {
+                                ServiceError::Storage(StorageError::ConstraintViolation(format!(
+                                    "completion freshness revalidation failed: {error}"
+                                )))
+                            })?;
                         self.tasks.verification_succeeded(
                             task_id,
                             "VERIFIED via independent evaluation",

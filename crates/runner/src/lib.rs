@@ -45,6 +45,9 @@ pub const CHILD_ENV_ALLOWLIST: &[&str] = &[
     "LANG",
     "LC_ALL",
     "LC_CTYPE",
+    // Git-only system-config suppression. Composition sets the literal value
+    // for governed repository reads; ambient values are never inherited.
+    "GIT_CONFIG_NOSYSTEM",
     // Provider runtime redirection (explicit private directories).
     "XDG_CONFIG_HOME",
     "XDG_DATA_HOME",
@@ -590,6 +593,16 @@ impl SandboxedLaunch {
     #[must_use]
     pub fn backend(&self) -> BackendIdentity {
         self.report.backend
+    }
+
+    #[must_use]
+    pub const fn enforced_axes(&self) -> EnforcementAxes {
+        self.report.enforced
+    }
+
+    #[must_use]
+    pub const fn environment_isolated(&self) -> bool {
+        self.report.env_isolated
     }
 
     /// Binds an exact program/argv. The backend installs its restrictions for

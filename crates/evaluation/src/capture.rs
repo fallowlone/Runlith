@@ -1,6 +1,9 @@
 use agent_runtime::{AttemptId, ExecutionId};
 
-use crate::{EffectError, EffectKind, EffectPayload, Sha256Digest};
+use crate::{
+    CandidateIntegrityAssessment, CandidateTestResult, EffectError, EffectKind, EffectPayload,
+    Sha256Digest,
+};
 
 pub const MAX_CAPTURE_PATH: usize = 4096;
 pub const MAX_CAPTURE_SUBJECT: usize = 1024;
@@ -116,6 +119,11 @@ pub enum SubjectMaterial {
         digest: String,
         toolchain: String,
     },
+    ContentToolchainAndConfig {
+        digest: String,
+        toolchain: String,
+        config: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -171,4 +179,27 @@ pub trait EffectCapturePort: Send + Sync {
         execution_id: &ExecutionId,
         attempt_id: &AttemptId,
     ) -> Result<CapturedObservation, EffectError>;
+
+    /// Returns product-minted candidate evidence only when a governed
+    /// evaluator placed a matching result and integrity assessment at the
+    /// capture boundary. Implementations default to unavailable.
+    fn candidate_assessment(
+        &self,
+        _execution_id: &ExecutionId,
+        _attempt_id: &AttemptId,
+    ) -> Result<Option<CandidateIntegrityAssessment>, EffectError> {
+        Ok(None)
+    }
+
+    fn observe_candidate_result(
+        &self,
+        _execution_id: ExecutionId,
+        _attempt_id: AttemptId,
+        _result: CandidateTestResult,
+        _assessment: CandidateIntegrityAssessment,
+    ) -> Result<(), EffectError> {
+        Err(EffectError::Unsupported(
+            "trusted candidate result source unavailable",
+        ))
+    }
 }

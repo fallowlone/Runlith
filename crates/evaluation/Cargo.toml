@@ -11,3 +11,4 @@ path = "src/lib.rs"
 task-domain = { path = "../task" }
 agent-runtime = { path = "../agent-runtime" }
 sha2 = "0.10"
+sha1 = "0.10"

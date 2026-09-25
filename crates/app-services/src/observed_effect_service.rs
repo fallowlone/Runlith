@@ -50,6 +50,30 @@ impl<C: crate::Clock, P: EffectCapturePort, G: GitPort> ObservedEffectService<C,
                 evaluation::EffectError::CaptureFailed("adapter returned the wrong effect kind"),
             ));
         }
+        let candidate_assessment = if observed.kind == EffectKind::TestSuiteResult {
+            let assessment = self
+                .port
+                .candidate_assessment(&execution_id, &attempt_id)
+                .map_err(ObservedEffectServiceError::Capture)?
+                .ok_or_else(|| {
+                    ObservedEffectServiceError::Lineage(
+                        "trusted candidate integrity assessment is unavailable".to_owned(),
+                    )
+                })?;
+            assessment
+                .validate()
+                .map_err(|error| ObservedEffectServiceError::Lineage(error.to_string()))?;
+            if assessment.execution_id != execution_id.as_str()
+                || assessment.attempt_id != attempt_id.as_str()
+            {
+                return Err(ObservedEffectServiceError::Lineage(
+                    "candidate integrity assessment lineage mismatch".to_owned(),
+                ));
+            }
+            Some(assessment)
+        } else {
+            None
+        };
         self.revalidate_resolved_target(&resolved)?;
 
         let subject_ref = EffectSubjectRef::new(observed.subject_ref.clone())
@@ -57,22 +81,49 @@ impl<C: crate::Clock, P: EffectCapturePort, G: GitPort> ObservedEffectService<C,
         let fields = material_fields(&observed.subject_material);
         let fingerprint = subject_fingerprint(observed.kind, subject_ref.as_str(), &fields)
             .map_err(ObservedEffectServiceError::Effect)?;
-        let runtime_ref = if observed.kind == EffectKind::GitState {
+        let runtime_ref = if let Some(assessment) = &candidate_assessment {
+            assessment.runtime_ref.clone()
+        } else if observed.kind == EffectKind::GitState {
             format!("{}+{}", self.git.backend_ref(), self.port.backend_ref())
         } else {
             self.port.backend_ref().to_owned()
         };
         let provenance = EffectProvenance::new(execution_id, attempt_id, runtime_ref)
+            .and_then(|provenance| {
+                provenance.with_lineage(
+                    candidate_assessment
+                        .as_ref()
+                        .map(|item| item.evaluator_ref.clone()),
+                    candidate_assessment
+                        .as_ref()
+                        .map(|item| item.invocation_id.clone()),
+                )
+            })
             .map_err(ObservedEffectServiceError::Effect)?;
-        self.store
-            .append_observed_effect(
-                subject_ref,
-                fingerprint,
-                observed.payload,
-                crate::format_rfc3339(self.clock.now_millis()),
-                provenance,
-            )
-            .map_err(ObservedEffectServiceError::Storage)
+        let captured_at = crate::format_rfc3339(self.clock.now_millis());
+        match candidate_assessment {
+            Some(assessment) => self
+                .store
+                .append_candidate_result(
+                    subject_ref,
+                    fingerprint,
+                    observed.payload,
+                    captured_at,
+                    provenance,
+                    &assessment,
+                )
+                .map_err(ObservedEffectServiceError::Storage),
+            None => self
+                .store
+                .append_observed_effect(
+                    subject_ref,
+                    fingerprint,
+                    observed.payload,
+                    captured_at,
+                    provenance,
+                )
+                .map_err(ObservedEffectServiceError::Storage),
+        }
     }
 
     pub fn store(&self) -> &SqliteStore {
@@ -271,6 +322,15 @@ fn material_fields(material: &SubjectMaterial) -> Vec<(&'static str, &str)> {
         SubjectMaterial::ContentAndToolchain { digest, toolchain } => vec![
             ("content", digest.as_str()),
             ("toolchain", toolchain.as_str()),
+        ],
+        SubjectMaterial::ContentToolchainAndConfig {
+            digest,
+            toolchain,
+            config,
+        } => vec![
+            ("content", digest.as_str()),
+            ("toolchain", toolchain.as_str()),
+            ("config", config.as_str()),
         ],
     }
 }
