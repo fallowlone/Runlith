@@ -211,14 +211,10 @@ pub(crate) fn production_runner_backend(
     production_platform::runner_backend(support_read, support_write, purpose)
 }
 
-/// Classification of candidate evaluation errors into integrity signals and
-/// infrastructure/precondition failures. Integrity signals (tamper detection,
-/// evaluator mismatch, etc.) are permanently recorded at their call site and
-/// prevent reuse/completion. Other errors are journaled only.
-#[derive(Clone, Debug)]
 /// Failure inside a candidate integrity check. `Content` failures are
 /// attributable to repository/worktree content or state and are integrity
 /// signals; `Infrastructure` failures are not and are journaled only.
+#[derive(Clone, Debug)]
 enum CheckError {
     /// Failure attributable to repository/worktree content or state.
     /// Integrity signals and permanently invalidate.
@@ -249,6 +245,11 @@ impl From<String> for CheckError {
     }
 }
 
+/// Classification of candidate evaluation errors into integrity signals and
+/// infrastructure/precondition failures. Integrity signals (tamper detection,
+/// evaluator mismatch, etc.) are permanently recorded at their call site and
+/// prevent reuse/completion. Other errors are journaled only.
+#[derive(Clone, Debug)]
 enum CandidateError {
     /// An integrity signal (worktree pointer tampering, object graph mismatch,
     /// evaluator result disagreement, freshness checkpoint mismatch, etc.).
@@ -1257,7 +1258,7 @@ impl CandidateInputEvaluator {
             "worktree-pointer",
             read_authorized_worktree_pointer(&self.db_path, request, &invocation_id, &root),
         )?;
-        // Wrap infrastructure errors as integrity signals; later R12b will split them out.
+        // Infrastructure failures from G6 auth/storage are now properly classified separately.
         let linked_gitdir = self.integrity(
             request,
             "TAMPERED",
@@ -1894,7 +1895,7 @@ impl CandidateInputEvaluator {
                 &root,
             ),
         )?;
-        // Wrap infrastructure errors as integrity signals; later R12b will split them out.
+        // Infrastructure failures from G6 auth/storage are now properly classified separately.
         let linked_gitdir = self.integrity(
             request,
             "TAMPERED",
@@ -2233,21 +2234,28 @@ impl CandidateInputEvaluator {
             "info/grafts",
             "shallow",
         ] {
-            let bytes = effect_capture_local::read_linked_metadata_file_if_present(
+            let result = effect_capture_local::read_linked_metadata_file_if_present(
                 context.workspace,
                 relative.as_bytes(),
                 &mut authorize,
-            )
-            .map_err(|error| {
-                CheckError::Content(format!("Git object-source metadata read failed: {error}"))
-            })?;
+            );
+            let bytes = match result {
+                Ok(b) => b,
+                Err(e) => {
+                    let infra = infra_error.borrow_mut().take();
+                    return Err(classify_reader_failure(
+                        infra,
+                        format!("Git object-source metadata read failed: {e}"),
+                    ));
+                }
+            };
             if bytes.is_some() {
                 return Err(CheckError::Content(format!(
                     "unsupported Git object source metadata: {relative}"
                 )));
             }
         }
-        // If an infrastructure error was captured, return it as such.
+        // Check for infrastructure errors captured during authorize callbacks.
         if let Some(msg) = infra_error.into_inner() {
             return Err(CheckError::Infrastructure(msg));
         }
@@ -2440,8 +2448,17 @@ impl CandidateInputEvaluator {
             &pointer_before_scan,
             anchor,
         )?;
-        let scan = effect_capture_local::scan_live_worktree(root, &mut authorize_descriptor)
-            .map_err(|error| CheckError::Content(format!("live worktree scan failed: {error}")))?;
+        let result = effect_capture_local::scan_live_worktree(root, &mut authorize_descriptor);
+        let scan = match result {
+            Ok(s) => s,
+            Err(e) => {
+                let infra = infra_error_freshness.borrow_mut().take();
+                return Err(classify_reader_failure(
+                    infra,
+                    format!("live worktree scan failed: {e}"),
+                ));
+            }
+        };
         // Check for infrastructure errors captured during authorize_descriptor callbacks.
         if let Some(msg) = infra_error_freshness.into_inner() {
             return Err(CheckError::Infrastructure(msg));
@@ -2647,6 +2664,10 @@ fn run_candidate_process(
             )));
         }
         Ok(CandidateProcessOutput { stdout, runner })
+    })
+    .map_err(|e| {
+        // G6 enforcement (audit-append failures and Runner refusals) is infrastructure.
+        CheckError::infra(e)
     })?;
     output
 }
@@ -2996,33 +3017,52 @@ fn authenticated_worktree_gitdir(
             RequestedCapabilities::new(vec![capability]),
         )
         .map_err(|_| evaluation::EffectError::CaptureFailed("linked metadata request invalid"))?;
-        security
+        match security
             .authorize_filesystem_read(&request, &effective, common.clone(), path)
             .map_err(|e| {
                 // Capture G6 errors as infrastructure failures.
                 *infra_error.borrow_mut() = Some(e.to_string());
                 evaluation::EffectError::CaptureFailed("G6 denied linked metadata operation")
-            })?;
-        Ok(())
+            })? {
+            G6Authorization::Authorized { .. } => Ok(()),
+            G6Authorization::ApprovalRequired { .. } | G6Authorization::Denied { .. } => {
+                *infra_error.borrow_mut() = Some("G6 denied candidate descriptor read".to_owned());
+                Err(evaluation::EffectError::CaptureFailed(
+                    "G6 denied linked metadata operation",
+                ))
+            }
+        }
     };
-    let gitdir_file = effect_capture_local::read_linked_metadata_file(
+    let result = effect_capture_local::read_linked_metadata_file(
         anchor.canonical_commondir(),
         format!("worktrees/{relative_bytes}/gitdir").as_bytes(),
         &mut authorize,
-    )
-    .map_err(|error| {
-        CheckError::Content(format!(
-            "linked worktree back-reference read failed: {error}"
-        ))
-    })?;
-    let commondir_file = effect_capture_local::read_linked_metadata_file(
+    );
+    let gitdir_file = match result {
+        Ok(f) => f,
+        Err(e) => {
+            let infra = infra_error.borrow_mut().take();
+            return Err(classify_reader_failure(
+                infra,
+                format!("linked worktree back-reference read failed: {e}"),
+            ));
+        }
+    };
+    let result = effect_capture_local::read_linked_metadata_file(
         anchor.canonical_commondir(),
         format!("worktrees/{relative_bytes}/commondir").as_bytes(),
         &mut authorize,
-    )
-    .map_err(|error| {
-        CheckError::Content(format!("linked worktree common-dir read failed: {error}"))
-    })?;
+    );
+    let commondir_file = match result {
+        Ok(f) => f,
+        Err(e) => {
+            let infra = infra_error.borrow_mut().take();
+            return Err(classify_reader_failure(
+                infra,
+                format!("linked worktree common-dir read failed: {e}"),
+            ));
+        }
+    };
     // Check for infrastructure errors captured during authorize callbacks.
     if let Some(msg) = infra_error.into_inner() {
         return Err(CheckError::Infrastructure(msg));
@@ -3133,24 +3173,38 @@ fn read_authorized_worktree_pointer(
         )
         .map_err(|_| evaluation::EffectError::CaptureFailed("pointer request invalid"))?;
         let _operation = operation;
-        security
+        match security
             .authorize_filesystem_read(&request, &effective, workspace.clone(), path)
             .map_err(|e| {
                 // Capture G6 errors as infrastructure failures.
                 *infra_error.borrow_mut() = Some(e.to_string());
                 evaluation::EffectError::CaptureFailed("G6 denied worktree pointer operation")
-            })?;
-        Ok(())
+            })? {
+            G6Authorization::Authorized { .. } => Ok(()),
+            G6Authorization::ApprovalRequired { .. } | G6Authorization::Denied { .. } => {
+                *infra_error.borrow_mut() = Some("G6 denied candidate descriptor read".to_owned());
+                Err(evaluation::EffectError::CaptureFailed(
+                    "G6 denied worktree pointer operation",
+                ))
+            }
+        }
     };
-    let result =
-        effect_capture_local::read_worktree_git_pointer(root, &mut authorize).map_err(|error| {
-            CheckError::Content(format!("authorized worktree pointer read failed: {error}"))
-        })?;
+    let result = effect_capture_local::read_worktree_git_pointer(root, &mut authorize);
+    let value = match result {
+        Ok(v) => v,
+        Err(e) => {
+            let infra = infra_error.borrow_mut().take();
+            return Err(classify_reader_failure(
+                infra,
+                format!("authorized worktree pointer read failed: {e}"),
+            ));
+        }
+    };
     // Check for infrastructure errors captured during authorize callbacks.
     if let Some(msg) = infra_error.into_inner() {
         return Err(CheckError::Infrastructure(msg));
     }
-    Ok(result)
+    Ok(value)
 }
 
 fn lexical_absolute(base: &Path, path: &Path) -> Result<PathBuf, String> {
@@ -4770,6 +4824,15 @@ fn truncate_id(value: &str) -> String {
     }
 }
 
+/// Classifies a descriptor-reader failure: an infrastructure error captured
+/// by the authorize callback wins over the reader's own (content) error.
+fn classify_reader_failure(infra: Option<String>, content: String) -> CheckError {
+    match infra {
+        Some(msg) => CheckError::Infrastructure(msg),
+        None => CheckError::Content(content),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4778,6 +4841,17 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn classify_reader_failure_prefers_captured_infrastructure() {
+        // Infrastructure error wins over reader's own error.
+        let result = classify_reader_failure(Some("g6".to_owned()), "x".to_owned());
+        assert!(matches!(result, CheckError::Infrastructure(msg) if msg == "g6"));
+
+        // Reader's error becomes Content when no infrastructure error was captured.
+        let result = classify_reader_failure(None, "x".to_owned());
+        assert!(matches!(result, CheckError::Content(msg) if msg == "x"));
+    }
 
     struct Sandbox {
         dir: PathBuf,
