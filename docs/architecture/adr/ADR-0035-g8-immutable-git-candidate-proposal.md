@@ -396,19 +396,31 @@ regresses from RESULT_ADMITTED or COMPLETE. Integrity signals set a
 permanent invalidation (time and a fixed status:code) on the operation.
 A database trigger forbids changing or clearing it. Integrity signals are
 decided by the call site that detects them, never by matching error text.
-They are: the linked-worktree pointer, the selection binding, the Git
+They are: the linked-worktree pointer, the linked-worktree gitdir
+back-reference, the selection binding, the Git
 object sources and object graph, the reuse evidence binding, the Completion
 immutable subject, the evaluator result disagreeing with the trusted
 recomputation, and every freshness checkpoint on the evaluation,
-result-admission, reuse and Completion paths. The freshness checkpoints
-include any error raised inside the check, such as a special file or a FIFO
-in the scanned worktree. Every evidence read, integrity-assessment read,
+result-admission, reuse and Completion paths. A selection mismatch counts
+only when the durable selection is bound to a different subject; an
+interrupted operation for the same subject is journaled only. Within
+those checks, a failure attributable to repository or worktree
+content or state is an integrity signal: object, pointer, gitdir or
+configuration content; a missing, special or changed file; and a check
+process that exits unsuccessfully, produces oversized output, times out
+or exits before reading its input. An unclassified failure inside a check
+defaults to an integrity signal. Every evidence read,
+integrity-assessment read,
 checkpoint append and COMPLETE transition refuses an invalidated
 operation. If an integrity signal's invalidation cannot be recorded, the
-failing call reports that alongside its error. Infrastructure and
-precondition failures, such as a process launch failure, a timeout, a
-storage error, or a Task or attempt not in the evaluatable state, are
-journaled only. They never invalidate, so admitted evidence survives a
+failing call reports that alongside its error. Failures independent of
+content are journaled only and never invalidate.
+These are the product failing to launch or wait for a process, a G6
+authorization or storage error, a policy or Runner refusal, any other
+storage error, and a Task or attempt not in the evaluatable state. The
+same applies to the snapshot-write, evaluator and snapshot-removal
+launches, which are not integrity checks; the evaluator's reported result
+is still checked as an integrity signal. Admitted evidence survives a
 transient failure and an idempotent retry stays safe. Owner decision
 2026-09-25, following an adversarial re-review.
 
