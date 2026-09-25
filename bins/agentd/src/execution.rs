@@ -233,12 +233,6 @@ impl CandidateError {
             Self::Integrity(msg) | Self::Other(msg) => msg,
         }
     }
-
-    fn message(&self) -> &str {
-        match self {
-            Self::Integrity(msg) | Self::Other(msg) => msg,
-        }
-    }
 }
 
 impl From<String> for CandidateError {
@@ -6904,7 +6898,10 @@ mod tests {
             app_services::TaskService::open(&fixture.sandbox.db, app_services::SystemClock)
                 .expect("open task service");
         tasks
-            .verification_failed(&fixture.request.task_id)
+            .verification_failed(
+                &fixture.request.task_id,
+                "precondition fixture: task moved out of VERIFYING",
+            )
             .expect("move task out of VERIFYING");
 
         // Now evaluate() must return an error due to the precondition failure
