@@ -216,6 +216,31 @@ pub(crate) fn production_runner_backend(
 /// evaluator mismatch, etc.) are permanently recorded at their call site and
 /// prevent reuse/completion. Other errors are journaled only.
 #[derive(Clone, Debug)]
+/// Failure inside a candidate integrity check. `Content` failures are
+/// attributable to repository/worktree content or state and are integrity
+/// signals; `Infrastructure` failures are not and are journaled only.
+enum CheckError {
+    /// Failure attributable to repository/worktree content or state.
+    /// Integrity signals and permanently invalidate.
+    Content(String),
+    /// Failure independent of content (git spawn, storage error, policy denial).
+    /// Journaled only; does not invalidate.
+    Infrastructure(String),
+}
+
+impl CheckError {
+    /// Create a CheckError marked as infrastructure failure.
+    fn infra(msg: impl Into<String>) -> Self {
+        Self::Infrastructure(msg.into())
+    }
+}
+
+impl From<String> for CheckError {
+    fn from(e: String) -> Self {
+        Self::Content(e)
+    }
+}
+
 enum CandidateError {
     /// An integrity signal (worktree pointer tampering, object graph mismatch,
     /// evaluator result disagreement, freshness checkpoint mismatch, etc.).
@@ -238,6 +263,15 @@ impl CandidateError {
 impl From<String> for CandidateError {
     fn from(msg: String) -> Self {
         Self::Other(msg)
+    }
+}
+
+impl From<CheckError> for CandidateError {
+    fn from(err: CheckError) -> Self {
+        match err {
+            CheckError::Content(msg) => Self::Integrity(msg),
+            CheckError::Infrastructure(msg) => Self::Other(msg),
+        }
     }
 }
 
@@ -841,37 +875,40 @@ pub(crate) fn prepare_provider_launch(
 fn prepare_candidate_process(
     db_path: &Path,
     request: &CandidateProcessRequest,
-) -> Result<PreparedProviderLaunch, String> {
+) -> Result<PreparedProviderLaunch, CheckError> {
     let executable_scope = request
         .executable
         .canonicalize()
-        .map_err(|_| "candidate process executable cannot be canonicalized".to_owned())?;
+        .map_err(|_| CheckError::infra("candidate process executable cannot be canonicalized"))?;
     let executable_scope = executable_scope
         .to_str()
-        .ok_or_else(|| "candidate process executable is not UTF-8".to_owned())?;
+        .ok_or_else(|| CheckError::infra("candidate process executable is not UTF-8"))?;
     let executable_scope = ScopeId::new(executable_scope.to_owned())
         .map_err(|error| format!("candidate executable scope: {error}"))?;
-    let workspace = request
-        .workspace
-        .canonicalize()
-        .map_err(|_| "candidate process workspace cannot be canonicalized".to_owned())?;
+    let workspace = request.workspace.canonicalize().map_err(|_| {
+        CheckError::Content("candidate process workspace cannot be canonicalized".to_owned())
+    })?;
     let workspace = workspace
         .to_str()
-        .ok_or_else(|| "candidate process workspace is not UTF-8".to_owned())?
+        .ok_or_else(|| CheckError::Content("candidate process workspace is not UTF-8".to_owned()))?
         .to_owned();
     let launch = build_candidate_launch_security(request)?;
-    let mut security = G6SecurityService::open(db_path, app_services::SystemClock)
-        .map_err(|error| format!("G6 candidate authorization unavailable: {error}"))?;
+    let mut security =
+        G6SecurityService::open(db_path, app_services::SystemClock).map_err(|error| {
+            CheckError::infra(format!("G6 candidate authorization unavailable: {error}"))
+        })?;
     let authorization = security
         .authorize(&launch.request, &launch.parent, &launch.policy, u64::MAX)
-        .map_err(|error| format!("G6 candidate authorization failed: {error}"))?;
+        .map_err(|error| {
+            CheckError::infra(format!("G6 candidate authorization failed: {error}"))
+        })?;
     let effective = match authorization {
         G6Authorization::Authorized { effective, .. } => effective,
         G6Authorization::ApprovalRequired { .. } => {
-            return Err("G6 approval required for candidate input operation".to_owned());
+            return Err(CheckError::infra("G6 approval required"));
         }
         G6Authorization::Denied { .. } => {
-            return Err("G6 denied candidate input operation".to_owned());
+            return Err(CheckError::infra("G6 denied"));
         }
     };
     let operation_record = PrivilegedOperation::from_policy_request(&launch.request);
@@ -881,7 +918,9 @@ fn prepare_candidate_process(
             std::ffi::OsString::from("GIT_CONFIG_NOSYSTEM"),
             std::ffi::OsString::from("1"),
         )])
-        .map_err(|error| format!("candidate Git environment is invalid: {error}"))?
+        .map_err(|error| {
+            CheckError::infra(format!("candidate Git environment is invalid: {error}"))
+        })?
     } else {
         ChildEnvironment::empty()
     };
@@ -905,7 +944,9 @@ fn prepare_candidate_process(
         requirements,
         environment,
     )
-    .map_err(|error| format!("Runner refused candidate input operation: {error}"))?;
+    .map_err(|error| {
+        CheckError::infra(format!("Runner refused candidate input operation: {error}"))
+    })?;
     Ok(PreparedProviderLaunch {
         security,
         operation: operation_record,
@@ -1045,19 +1086,23 @@ impl CandidateInputEvaluator {
 
     /// Records an integrity signal (a permanent invalidation) at the call site.
     /// status must be exactly "MISMATCH" or "TAMPERED".
-    /// On success, returns CandidateError::Integrity with the original message.
-    /// If the store cannot be opened or invalidation fails, the error message
-    /// includes the store error.
+    /// Content(msg): invalidates the operation and returns CandidateError::Integrity.
+    /// Infrastructure(msg): does not invalidate; returns CandidateError::Other.
     fn integrity<T>(
         &self,
         request: &EvaluationRequest,
         status: &'static str,
         code: &'static str,
-        result: Result<T, String>,
+        result: Result<T, CheckError>,
     ) -> Result<T, CandidateError> {
         match result {
             Ok(value) => Ok(value),
-            Err(msg) => match storage_sqlite::SqliteStore::open(&self.db_path) {
+            Err(CheckError::Infrastructure(msg)) => {
+                // Infrastructure errors are journaled only; evidence is not invalidated.
+                Err(CandidateError::Other(msg))
+            }
+            Err(CheckError::Content(msg)) => match storage_sqlite::SqliteStore::open(&self.db_path)
+            {
                 Ok(mut store) => {
                     match store.invalidate_candidate_operation(
                         request.execution_id.as_str(),
@@ -1234,7 +1279,12 @@ impl CandidateInputEvaluator {
             gitdir: &linked_gitdir,
             roots: vec![anchor.canonical_commondir().to_path_buf()],
         };
-        let git_version = self.git_output(&git_context, &["--version"], 128)?;
+        let git_version = self.integrity(
+            request,
+            "TAMPERED",
+            "object-graph",
+            self.git_output(&git_context, &["--version"], 128),
+        )?;
         let git_version = std::str::from_utf8(&git_version)
             .map_err(|_| "candidate Git version is not UTF-8".to_owned())?
             .strip_suffix('\n')
@@ -1242,15 +1292,24 @@ impl CandidateInputEvaluator {
         if !git_version.starts_with("git version ") || git_version.len() > 128 {
             return Err("candidate Git version is unsupported".to_owned().into());
         }
-        let object_format =
-            self.git_output(&git_context, &["rev-parse", "--show-object-format"], 64)?;
+        let object_format = self.integrity(
+            request,
+            "TAMPERED",
+            "object-graph",
+            self.git_output(&git_context, &["rev-parse", "--show-object-format"], 64),
+        )?;
         let object_format = std::str::from_utf8(&object_format)
             .map_err(|_| "Git object format output is unsupported".to_owned())?
             .strip_suffix('\n')
             .ok_or_else(|| "Git object format output is incomplete".to_owned())?;
         let object_format = evaluation::GitObjectFormat::from_repository_format(object_format)
             .map_err(|error| format!("unsupported Git object format: {error}"))?;
-        let head = self.git_output(&git_context, &["rev-parse", "--verify", "HEAD"], 128)?;
+        let head = self.integrity(
+            request,
+            "TAMPERED",
+            "object-graph",
+            self.git_output(&git_context, &["rev-parse", "--verify", "HEAD"], 128),
+        )?;
         let candidate_oid = std::str::from_utf8(&head)
             .map_err(|_| "candidate HEAD is not UTF-8".to_owned())?
             .strip_suffix('\n')
@@ -1287,7 +1346,7 @@ impl CandidateInputEvaluator {
                         request,
                         "TAMPERED",
                         "selection-binding",
-                        Err::<(), _>("persist candidate selection before object resolution: subject mismatch".to_owned()),
+                        Err::<(), _>(CheckError::Content("persist candidate selection before object resolution: subject mismatch".to_owned())),
                     )
                     .unwrap_err());
             }
@@ -1360,9 +1419,9 @@ impl CandidateInputEvaluator {
                         request,
                         "TAMPERED",
                         "reuse-binding",
-                        Err::<(), _>(
+                        Err::<(), _>(CheckError::Content(
                             "durable candidate evidence binding tampered; reuse refused".to_owned(),
-                        ),
+                        )),
                     )
                     .unwrap_err());
             }
@@ -1403,10 +1462,10 @@ impl CandidateInputEvaluator {
                             request,
                             "MISMATCH",
                             "freshness-reuse",
-                            Err::<(), _>(
+                            Err::<(), _>(CheckError::Content(
                                 "candidate inputs changed; durable evidence reuse refused"
                                     .to_owned(),
-                            ),
+                            )),
                         )
                         .unwrap_err());
                 }
@@ -1460,7 +1519,9 @@ impl CandidateInputEvaluator {
                     request,
                     "MISMATCH",
                     "freshness-before-evaluation",
-                    Err::<(), _>("candidate inputs changed before evaluation".to_owned()),
+                    Err::<(), _>(CheckError::Content(
+                        "candidate inputs changed before evaluation".to_owned(),
+                    )),
                 )
                 .unwrap_err());
         }
@@ -1587,7 +1648,12 @@ impl CandidateInputEvaluator {
             Err(e) => {
                 let _ = remove_snapshot();
                 return Err(self
-                    .integrity(request, "TAMPERED", "evaluator-result", Err::<(), _>(e))
+                    .integrity(
+                        request,
+                        "TAMPERED",
+                        "evaluator-result",
+                        Err::<(), _>(CheckError::Content(e)),
+                    )
                     .unwrap_err());
             }
         };
@@ -1595,7 +1661,12 @@ impl CandidateInputEvaluator {
         if let Err(e) = validate_candidate_result(&result, &candidate, selector) {
             let _ = remove_snapshot();
             return Err(self
-                .integrity(request, "TAMPERED", "evaluator-result", Err::<(), _>(e))
+                .integrity(
+                    request,
+                    "TAMPERED",
+                    "evaluator-result",
+                    Err::<(), _>(CheckError::Content(e)),
+                )
                 .unwrap_err());
         }
 
@@ -1629,7 +1700,9 @@ impl CandidateInputEvaluator {
                     request,
                     "MISMATCH",
                     "freshness-result-admission",
-                    Err::<(), _>("candidate inputs changed during evaluation".to_owned()),
+                    Err::<(), _>(CheckError::Content(
+                        "candidate inputs changed during evaluation".to_owned(),
+                    )),
                 )
                 .unwrap_err());
         }
@@ -1857,7 +1930,9 @@ impl CandidateInputEvaluator {
                     request,
                     "TAMPERED",
                     "completion-subject",
-                    Err::<(), _>("candidate completion immutable subject changed".to_owned()),
+                    Err::<(), _>(CheckError::Content(
+                        "candidate completion immutable subject changed".to_owned(),
+                    )),
                 )
                 .unwrap_err());
         }
@@ -1882,7 +1957,9 @@ impl CandidateInputEvaluator {
                     request,
                     "MISMATCH",
                     "freshness-completion",
-                    Err("candidate inputs changed before Task completion".to_owned()),
+                    Err(CheckError::Content(
+                        "candidate inputs changed before Task completion".to_owned(),
+                    )),
                 )
                 .unwrap_err());
         }
@@ -1928,7 +2005,7 @@ impl CandidateInputEvaluator {
         context: &CandidateGitContext<'_>,
         args: &[&str],
         max_stdout: u64,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, CheckError> {
         self.git_output_with_input(context, args, Vec::new(), max_stdout)
     }
 
@@ -1938,7 +2015,7 @@ impl CandidateInputEvaluator {
         args: &[&str],
         input: Vec<u8>,
         max_stdout: u64,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, CheckError> {
         let request = context.request;
         let invocation_id = context.invocation_id;
         let workspace = context.workspace;
@@ -1992,27 +2069,49 @@ impl CandidateInputEvaluator {
         context: &CandidateGitContext<'_>,
         commit_oid: &str,
         format: evaluation::GitObjectFormat,
-    ) -> Result<evaluation::VerifiedCandidate, String> {
-        evaluation::VerifiedCandidate::from_commit_with_batch(commit_oid, format, |oids| {
-            let mut input = Vec::new();
-            for oid in oids {
-                input.extend_from_slice(oid.as_bytes());
-                input.push(b'\n');
-            }
-            let output = self
-                .git_output_with_input(
-                    context,
-                    &["cat-file", "--batch"],
-                    input,
-                    evaluation::MAX_CANDIDATE_BLOB_BYTES + 64 * 1024 * 1024,
-                )
-                .map_err(|_| evaluation::CandidateError::MissingObject)?;
-            parse_git_batch(&output, oids)
+    ) -> Result<evaluation::VerifiedCandidate, CheckError> {
+        use std::cell::RefCell;
+        let infra_error: RefCell<Option<String>> = RefCell::new(None);
+        let result =
+            evaluation::VerifiedCandidate::from_commit_with_batch(commit_oid, format, |oids| {
+                let mut input = Vec::new();
+                for oid in oids {
+                    input.extend_from_slice(oid.as_bytes());
+                    input.push(b'\n');
+                }
+                let output = self
+                    .git_output_with_input(
+                        context,
+                        &["cat-file", "--batch"],
+                        input,
+                        evaluation::MAX_CANDIDATE_BLOB_BYTES + 64 * 1024 * 1024,
+                    )
+                    .map_err(|e| {
+                        // Capture infrastructure errors for later reclassification.
+                        match e {
+                            CheckError::Infrastructure(msg) => {
+                                *infra_error.borrow_mut() = Some(msg);
+                                evaluation::CandidateError::MissingObject
+                            }
+                            CheckError::Content(_) => evaluation::CandidateError::MissingObject,
+                        }
+                    })?;
+                parse_git_batch(&output, oids)
+            });
+        // If an infrastructure error was captured, return it as such.
+        if let Some(msg) = infra_error.into_inner() {
+            return Err(CheckError::Infrastructure(msg));
+        }
+        result.map_err(|error| {
+            CheckError::Content(format!("candidate Git object graph rejected: {error}"))
         })
-        .map_err(|error| format!("candidate Git object graph rejected: {error}"))
     }
 
-    fn validate_git_object_sources(&self, context: &CandidateGitContext<'_>) -> Result<(), String> {
+    fn validate_git_object_sources(
+        &self,
+        context: &CandidateGitContext<'_>,
+    ) -> Result<(), CheckError> {
+        use std::cell::RefCell;
         let config = self.git_output(
             context,
             &["config", "--no-includes", "--local", "--null", "--list"],
@@ -2027,17 +2126,19 @@ impl CandidateInputEvaluator {
                 || (lower.starts_with(b"remote.")
                     && lower.windows(9).any(|window| window == b".promisor"))
             {
-                return Err("partial-clone/promisor Git configuration is unsupported".to_owned());
+                return Err(CheckError::Content(
+                    "partial-clone/promisor Git configuration is unsupported".to_owned(),
+                ));
             }
         }
         let common = context
             .workspace
             .to_str()
-            .ok_or_else(|| "trusted common directory is not UTF-8".to_owned())?
+            .ok_or_else(|| CheckError::Content("trusted common directory is not UTF-8".to_owned()))?
             .to_owned();
         let capability = Capability::FilesystemRead(
             FileScope::new(&common, ".")
-                .map_err(|error| format!("object metadata scope: {error}"))?,
+                .map_err(|error| CheckError::Content(format!("object metadata scope: {error}")))?,
         );
         let root_request = PolicyRequest::new(
             format!("{}.object-metadata", context.invocation_id),
@@ -2047,10 +2148,10 @@ impl CandidateInputEvaluator {
                 Some(context.request.execution_id.as_str().to_owned()),
                 Some(context.request.attempt_id.as_str().to_owned()),
             )
-            .map_err(|error| format!("object metadata origin: {error}"))?,
+            .map_err(|error| CheckError::Content(format!("object metadata origin: {error}")))?,
             RequestedCapabilities::new(vec![capability.clone()]),
         )
-        .map_err(|error| format!("object metadata request: {error}"))?;
+        .map_err(|error| CheckError::Content(format!("object metadata request: {error}")))?;
         let policy = CompiledPolicy::compile(vec![PolicyRule::new(
             "builtin.candidate.object-source-metadata",
             "candidate_git_object_source_validation",
@@ -2058,10 +2159,12 @@ impl CandidateInputEvaluator {
             PolicyOutcome::Allow,
             capability.clone(),
         )
-        .map_err(|error| format!("object metadata rule: {error}"))?])
-        .map_err(|error| format!("object metadata policy: {error}"))?;
+        .map_err(|error| CheckError::Content(format!("object metadata rule: {error}")))?])
+        .map_err(|error| CheckError::Content(format!("object metadata policy: {error}")))?;
         let mut security = G6SecurityService::open(&self.db_path, app_services::SystemClock)
-            .map_err(|error| format!("object metadata G6 unavailable: {error}"))?;
+            .map_err(|error| {
+                CheckError::infra(format!("G6 object metadata unavailable: {error}"))
+            })?;
         let effective = match security
             .authorize(
                 &root_request,
@@ -2069,13 +2172,15 @@ impl CandidateInputEvaluator {
                 &policy,
                 u64::MAX,
             )
-            .map_err(|error| format!("object metadata G6 authorization failed: {error}"))?
-        {
+            .map_err(|error| {
+                CheckError::infra(format!("G6 object metadata authorization failed: {error}"))
+            })? {
             G6Authorization::Authorized { effective, .. } => effective,
             G6Authorization::ApprovalRequired { .. } | G6Authorization::Denied { .. } => {
-                return Err("G6 denied Git object metadata access".to_owned());
+                return Err(CheckError::infra("G6 denied Git object metadata access"));
             }
         };
+        let infra_error: RefCell<Option<String>> = RefCell::new(None);
         let mut authorize = |path: &[u8], operation| {
             let path = std::str::from_utf8(path).map_err(|_| {
                 evaluation::EffectError::CaptureFailed("Git metadata scope path invalid")
@@ -2110,8 +2215,11 @@ impl CandidateInputEvaluator {
             .map_err(|_| evaluation::EffectError::CaptureFailed("metadata request invalid"))?;
             match security
                 .authorize_filesystem_read(&request, &effective, common.clone(), path)
-                .map_err(|_| evaluation::EffectError::CaptureFailed("G6 denied metadata access"))?
-            {
+                .map_err(|e| {
+                    // Capture G6 errors as infrastructure failures.
+                    *infra_error.borrow_mut() = Some(e.to_string());
+                    evaluation::EffectError::CaptureFailed("G6 denied metadata access")
+                })? {
                 G6Authorization::Authorized { .. } => Ok(()),
                 G6Authorization::ApprovalRequired { .. } | G6Authorization::Denied { .. } => Err(
                     evaluation::EffectError::CaptureFailed("G6 denied metadata access"),
@@ -2129,12 +2237,18 @@ impl CandidateInputEvaluator {
                 relative.as_bytes(),
                 &mut authorize,
             )
-            .map_err(|error| format!("Git object-source metadata read failed: {error}"))?;
+            .map_err(|error| {
+                CheckError::Content(format!("Git object-source metadata read failed: {error}"))
+            })?;
             if bytes.is_some() {
-                return Err(format!(
+                return Err(CheckError::Content(format!(
                     "unsupported Git object source metadata: {relative}"
-                ));
+                )));
             }
+        }
+        // If an infrastructure error was captured, return it as such.
+        if let Some(msg) = infra_error.into_inner() {
+            return Err(CheckError::Infrastructure(msg));
         }
         Ok(())
     }
@@ -2142,7 +2256,8 @@ impl CandidateInputEvaluator {
     fn freshness_checkpoint(
         &self,
         freshness: CandidateFreshnessRequest<'_>,
-    ) -> Result<evaluation::CandidateFreshnessCheckpoint, String> {
+    ) -> Result<evaluation::CandidateFreshnessCheckpoint, CheckError> {
+        use std::cell::RefCell;
         let CandidateFreshnessRequest {
             request,
             invocation_id,
@@ -2163,11 +2278,13 @@ impl CandidateInputEvaluator {
             &pointer_before,
             anchor,
         )?;
-        let canonical_root = root
-            .canonicalize()
-            .map_err(|_| "leased candidate worktree is unavailable".to_owned())?;
+        let canonical_root = root.canonicalize().map_err(|_| {
+            CheckError::Content("leased candidate worktree is unavailable".to_owned())
+        })?;
         if canonical_root != root {
-            return Err("leased candidate worktree path is no longer canonical".to_owned());
+            return Err(CheckError::Content(
+                "leased candidate worktree path is no longer canonical".to_owned(),
+            ));
         }
         // Plan A only: this reads the linked HEAD/index/common-dir through
         // the read-only Git plumbing plan, scoped to the trusted common Git
@@ -2198,20 +2315,21 @@ impl CandidateInputEvaluator {
             4096,
         )?;
         let common_path = std::str::from_utf8(&common)
-            .map_err(|_| "Git common directory is invalid".to_owned())?
+            .map_err(|_| CheckError::Content("Git common directory is invalid".to_owned()))?
             .trim_end_matches('\n');
         let common_path = PathBuf::from(common_path);
         let mut descriptor_authority =
-            G6SecurityService::open(&self.db_path, app_services::SystemClock)
-                .map_err(|error| format!("G6 descriptor read authority unavailable: {error}"))?;
+            G6SecurityService::open(&self.db_path, app_services::SystemClock).map_err(|error| {
+                CheckError::infra(format!("G6 descriptor read authority unavailable: {error}"))
+            })?;
         let workspace_root = root
             .to_str()
-            .ok_or_else(|| "candidate worktree root is not UTF-8".to_owned())?
+            .ok_or_else(|| CheckError::Content("candidate worktree root is not UTF-8".to_owned()))?
             .to_owned();
-        let root_read = Capability::FilesystemRead(
-            FileScope::new(&workspace_root, ".")
-                .map_err(|error| format!("candidate descriptor root scope: {error}"))?,
-        );
+        let root_read =
+            Capability::FilesystemRead(FileScope::new(&workspace_root, ".").map_err(|error| {
+                CheckError::Content(format!("candidate descriptor root scope: {error}"))
+            })?);
         let root_request = PolicyRequest::new(
             format!("{invocation_id}.git-read.fs-root"),
             "candidate-live-worktree-descriptor-scan",
@@ -2220,10 +2338,12 @@ impl CandidateInputEvaluator {
                 Some(request.execution_id.as_str().to_owned()),
                 Some(request.attempt_id.as_str().to_owned()),
             )
-            .map_err(|error| format!("candidate descriptor origin: {error}"))?,
+            .map_err(|error| {
+                CheckError::Content(format!("candidate descriptor origin: {error}"))
+            })?,
             RequestedCapabilities::new(vec![root_read.clone()]),
         )
-        .map_err(|error| format!("candidate descriptor request: {error}"))?;
+        .map_err(|error| CheckError::Content(format!("candidate descriptor request: {error}")))?;
         let root_policy = CompiledPolicy::compile(vec![PolicyRule::new(
             "builtin.candidate.git-read.exact-worktree-root",
             "accepted_candidate_git_read_scope",
@@ -2231,16 +2351,22 @@ impl CandidateInputEvaluator {
             PolicyOutcome::Allow,
             root_read.clone(),
         )
-        .map_err(|error| format!("candidate descriptor policy rule: {error}"))?])
-        .map_err(|error| format!("candidate descriptor policy: {error}"))?;
+        .map_err(|error| {
+            CheckError::Content(format!("candidate descriptor policy rule: {error}"))
+        })?])
+        .map_err(|error| CheckError::Content(format!("candidate descriptor policy: {error}")))?;
         let root_parent = EffectiveCapabilities::new(vec![root_read]);
+        let infra_error_freshness: RefCell<Option<String>> = RefCell::new(None);
         let filesystem_authority = match descriptor_authority
             .authorize(&root_request, &root_parent, &root_policy, u64::MAX)
-            .map_err(|error| format!("candidate descriptor root authority failed: {error}"))?
-        {
+            .map_err(|error| {
+                CheckError::infra(format!(
+                    "candidate descriptor root authority failed: {error}"
+                ))
+            })? {
             G6Authorization::Authorized { effective, .. } => effective,
             G6Authorization::ApprovalRequired { .. } | G6Authorization::Denied { .. } => {
-                return Err("G6 denied candidate worktree root read".to_owned());
+                return Err(CheckError::infra("G6 denied candidate worktree root read"));
             }
         };
         let mut authorize_descriptor = |relative_path: &[u8], operation| {
@@ -2287,7 +2413,9 @@ impl CandidateInputEvaluator {
                     workspace_root.clone(),
                     relative_path,
                 )
-                .map_err(|_| {
+                .map_err(|e| {
+                    // Capture G6 errors as infrastructure failures.
+                    *infra_error_freshness.borrow_mut() = Some(e.to_string());
                     evaluation::EffectError::CaptureFailed(
                         "G6 denied candidate descriptor filesystem read",
                     )
@@ -2312,7 +2440,11 @@ impl CandidateInputEvaluator {
             anchor,
         )?;
         let scan = effect_capture_local::scan_live_worktree(root, &mut authorize_descriptor)
-            .map_err(|error| format!("live worktree scan failed: {error}"))?;
+            .map_err(|error| CheckError::Content(format!("live worktree scan failed: {error}")))?;
+        // Check for infrastructure errors captured during authorize_descriptor callbacks.
+        if let Some(msg) = infra_error_freshness.into_inner() {
+            return Err(CheckError::Infrastructure(msg));
+        }
         let pointer_after =
             read_authorized_worktree_pointer(&self.db_path, request, invocation_id, root)?;
         let authenticated_after = authenticated_worktree_gitdir(
@@ -2324,7 +2456,7 @@ impl CandidateInputEvaluator {
             anchor,
         )?;
         let live_manifest = evaluation::CandidateManifest::from_files(&scan.files)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| CheckError::Content(error.to_string()))?;
         let dirs_match = scan.directories == manifest_directories(&candidate.manifest.entries);
         let head_matches =
             std::str::from_utf8(&head).is_ok_and(|value| value.trim_end() == candidate.commit_oid);
@@ -2347,7 +2479,7 @@ impl CandidateInputEvaluator {
         let git_metadata_fingerprint = evaluation::candidate_sha256(&metadata);
         let matched = format
             == evaluation::GitObjectFormat::from_oid(&candidate.commit_oid)
-                .map_err(|error| error.to_string())?
+                .map_err(|error| CheckError::Content(error.to_string()))?
             && common_path == anchor.canonical_commondir()
             && head_matches
             && index_matches
@@ -2390,7 +2522,7 @@ fn candidate_operation_label(
 fn run_candidate_process(
     db_path: &Path,
     request: CandidateProcessRequest,
-) -> Result<CandidateProcessOutput, String> {
+) -> Result<CandidateProcessOutput, CheckError> {
     const MAX_STDERR: u64 = 64 * 1024;
     const TIMEOUT: Duration = Duration::from_secs(30);
     let prepared = prepare_candidate_process(db_path, &request)?;
@@ -2424,7 +2556,7 @@ fn run_candidate_process(
         };
         let command = launch
             .bind(runner::CommandSpec::new(program, args))
-            .map_err(|error| format!("Runner refused candidate command: {error}"))?;
+            .map_err(|error| CheckError::infra(format!("Runner refused candidate command: {error}")))?;
         let mut child = command
             .spawn(|wire| {
                 wire.current_dir(&workspace)
@@ -2432,19 +2564,19 @@ fn run_candidate_process(
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped());
             })
-            .map_err(|_| "candidate process spawn failed".to_owned())?;
+            .map_err(|_| CheckError::infra("candidate process spawn failed"))?;
         let mut child_stdin = child
             .stdin
             .take()
-            .ok_or_else(|| "candidate process stdin unavailable".to_owned())?;
+            .ok_or_else(|| CheckError::infra("candidate process stdin unavailable"))?;
         let child_stdout = child
             .stdout
             .take()
-            .ok_or_else(|| "candidate process stdout unavailable".to_owned())?;
+            .ok_or_else(|| CheckError::infra("candidate process stdout unavailable"))?;
         let child_stderr = child
             .stderr
             .take()
-            .ok_or_else(|| "candidate process stderr unavailable".to_owned())?;
+            .ok_or_else(|| CheckError::infra("candidate process stderr unavailable"))?;
         let stdin_writer = std::thread::spawn(move || {
             use std::io::Write;
             child_stdin.write_all(&input)
@@ -2465,29 +2597,29 @@ fn run_candidate_process(
         let status = loop {
             if let Some(status) = child
                 .try_wait()
-                .map_err(|_| "candidate process wait failed".to_owned())?
+                .map_err(|_| CheckError::infra("candidate process wait failed"))?
             {
                 break status;
             }
             if std::time::Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("candidate process timed out".to_owned());
+                return Err(CheckError::Content("candidate process timed out".to_owned()));
             }
             std::thread::sleep(Duration::from_millis(10));
         };
         stdin_writer
             .join()
-            .map_err(|_| "candidate process stdin task failed".to_owned())?
-            .map_err(|_| "candidate process input write failed".to_owned())?;
+            .map_err(|_| CheckError::infra("candidate process stdin task failed"))?
+            .map_err(|_| CheckError::Content("candidate process input write failed".to_owned()))?;
         let stdout = stdout_reader
             .join()
-            .map_err(|_| "candidate process stdout task failed".to_owned())?
-            .map_err(|_| "candidate process stdout read failed".to_owned())?;
+            .map_err(|_| CheckError::infra("candidate process stdout task failed"))?
+            .map_err(|_| CheckError::infra("candidate process stdout read failed"))?;
         let stderr = stderr_reader
             .join()
-            .map_err(|_| "candidate process stderr task failed".to_owned())?
-            .map_err(|_| "candidate process stderr read failed".to_owned())?;
+            .map_err(|_| CheckError::infra("candidate process stderr task failed"))?
+            .map_err(|_| CheckError::infra("candidate process stderr read failed"))?;
         if !status.success() || stdout.len() as u64 > max_stdout || stderr.len() as u64 > MAX_STDERR
         {
             let exit_info = if let Some(code) = status.code() {
@@ -2509,9 +2641,9 @@ fn run_candidate_process(
             };
             let stdout_bytes = stdout.len() as u64;
             let stderr_bytes = stderr.len() as u64;
-            return Err(format!(
+            return Err(CheckError::Content(format!(
                 "candidate {op_label} process returned unsupported output or status ({exit_info}, stdout_bytes: {stdout_bytes}/{max_stdout}, stderr_bytes: {stderr_bytes}/{MAX_STDERR})"
-            ));
+            )));
         }
         Ok(CandidateProcessOutput { stdout, runner })
     })?;
@@ -2755,35 +2887,44 @@ fn authenticated_worktree_gitdir(
     root: &Path,
     pointer: &[u8],
     anchor: &workspace::TrustedCommonGit,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, CheckError> {
+    use std::cell::RefCell;
     let text = std::str::from_utf8(pointer)
-        .map_err(|_| "linked worktree pointer is not UTF-8".to_owned())?;
+        .map_err(|_| CheckError::Content("linked worktree pointer is not UTF-8".to_owned()))?;
     let raw_gitdir = text
         .strip_prefix("gitdir: ")
         .and_then(|text| text.strip_suffix('\n'))
-        .ok_or_else(|| "linked worktree pointer framing is invalid".to_owned())?;
+        .ok_or_else(|| {
+            CheckError::Content("linked worktree pointer framing is invalid".to_owned())
+        })?;
     if raw_gitdir.contains('\n') || raw_gitdir.contains('\0') {
-        return Err("linked worktree pointer contains unsupported bytes".to_owned());
+        return Err(CheckError::Content(
+            "linked worktree pointer contains unsupported bytes".to_owned(),
+        ));
     }
-    let gitdir = lexical_absolute(root, Path::new(raw_gitdir))?;
+    let gitdir =
+        lexical_absolute(root, Path::new(raw_gitdir)).map_err(|e| CheckError::Content(e))?;
     let worktrees_root = anchor.canonical_commondir().join("worktrees");
-    let relative = gitdir
-        .strip_prefix(&worktrees_root)
-        .map_err(|_| "linked Git metadata escapes the trusted common directory".to_owned())?;
+    let relative = gitdir.strip_prefix(&worktrees_root).map_err(|_| {
+        CheckError::Content("linked Git metadata escapes the trusted common directory".to_owned())
+    })?;
     if relative.as_os_str().is_empty() {
-        return Err("linked Git metadata directory is ambiguous".to_owned());
+        return Err(CheckError::Content(
+            "linked Git metadata directory is ambiguous".to_owned(),
+        ));
     }
     let relative_bytes = relative
         .to_str()
-        .ok_or_else(|| "linked Git metadata path is not UTF-8".to_owned())?
+        .ok_or_else(|| CheckError::Content("linked Git metadata path is not UTF-8".to_owned()))?
         .replace(std::path::MAIN_SEPARATOR, "/");
     let common = anchor
         .canonical_commondir()
         .to_str()
-        .ok_or_else(|| "trusted common directory is not UTF-8".to_owned())?
+        .ok_or_else(|| CheckError::Content("trusted common directory is not UTF-8".to_owned()))?
         .to_owned();
     let capability = Capability::FilesystemRead(
-        FileScope::new(&common, ".").map_err(|error| format!("linked metadata scope: {error}"))?,
+        FileScope::new(&common, ".")
+            .map_err(|error| CheckError::Content(format!("linked metadata scope: {error}")))?,
     );
     let policy_request = PolicyRequest::new(
         format!(
@@ -2796,10 +2937,10 @@ fn authenticated_worktree_gitdir(
             Some(request.execution_id.as_str().to_owned()),
             Some(request.attempt_id.as_str().to_owned()),
         )
-        .map_err(|error| format!("linked metadata origin: {error}"))?,
+        .map_err(|error| CheckError::Content(format!("linked metadata origin: {error}")))?,
         RequestedCapabilities::new(vec![capability.clone()]),
     )
-    .map_err(|error| format!("linked metadata request: {error}"))?;
+    .map_err(|error| CheckError::Content(format!("linked metadata request: {error}")))?;
     let policy = CompiledPolicy::compile(vec![PolicyRule::new(
         "builtin.candidate.linked-metadata",
         "authenticated_linked_worktree_metadata",
@@ -2807,20 +2948,22 @@ fn authenticated_worktree_gitdir(
         PolicyOutcome::Allow,
         capability.clone(),
     )
-    .map_err(|error| format!("linked metadata rule: {error}"))?])
-    .map_err(|error| format!("linked metadata policy: {error}"))?;
+    .map_err(|error| CheckError::Content(format!("linked metadata rule: {error}")))?])
+    .map_err(|error| CheckError::Content(format!("linked metadata policy: {error}")))?;
     let mut security = G6SecurityService::open(db_path, app_services::SystemClock)
-        .map_err(|error| format!("linked metadata G6 unavailable: {error}"))?;
+        .map_err(|error| CheckError::infra(format!("G6 linked metadata unavailable: {error}")))?;
     let parent = EffectiveCapabilities::new(vec![capability]);
     let effective = match security
         .authorize(&policy_request, &parent, &policy, u64::MAX)
-        .map_err(|error| format!("linked metadata G6 authorization failed: {error}"))?
-    {
+        .map_err(|error| {
+            CheckError::infra(format!("G6 linked metadata authorization failed: {error}"))
+        })? {
         G6Authorization::Authorized { effective, .. } => effective,
         G6Authorization::ApprovalRequired { .. } | G6Authorization::Denied { .. } => {
-            return Err("G6 denied linked metadata access".to_owned());
+            return Err(CheckError::infra("G6 denied linked metadata access"));
         }
     };
+    let infra_error: RefCell<Option<String>> = RefCell::new(None);
     let mut authorize = |path: &[u8], operation| {
         let path = std::str::from_utf8(path)
             .map_err(|_| evaluation::EffectError::CaptureFailed("linked metadata path invalid"))?;
@@ -2855,7 +2998,9 @@ fn authenticated_worktree_gitdir(
         .map_err(|_| evaluation::EffectError::CaptureFailed("linked metadata request invalid"))?;
         security
             .authorize_filesystem_read(&request, &effective, common.clone(), path)
-            .map_err(|_| {
+            .map_err(|e| {
+                // Capture G6 errors as infrastructure failures.
+                *infra_error.borrow_mut() = Some(e.to_string());
                 evaluation::EffectError::CaptureFailed("G6 denied linked metadata operation")
             })?;
         Ok(())
@@ -2865,25 +3010,45 @@ fn authenticated_worktree_gitdir(
         format!("worktrees/{relative_bytes}/gitdir").as_bytes(),
         &mut authorize,
     )
-    .map_err(|error| format!("linked worktree back-reference read failed: {error}"))?;
+    .map_err(|error| {
+        CheckError::Content(format!(
+            "linked worktree back-reference read failed: {error}"
+        ))
+    })?;
     let commondir_file = effect_capture_local::read_linked_metadata_file(
         anchor.canonical_commondir(),
         format!("worktrees/{relative_bytes}/commondir").as_bytes(),
         &mut authorize,
     )
-    .map_err(|error| format!("linked worktree common-dir read failed: {error}"))?;
+    .map_err(|error| {
+        CheckError::Content(format!("linked worktree common-dir read failed: {error}"))
+    })?;
+    // Check for infrastructure errors captured during authorize callbacks.
+    if let Some(msg) = infra_error.into_inner() {
+        return Err(CheckError::Infrastructure(msg));
+    }
     let backref = std::str::from_utf8(&gitdir_file)
-        .map_err(|_| "linked worktree back-reference is invalid".to_owned())?
+        .map_err(|_| CheckError::Content("linked worktree back-reference is invalid".to_owned()))?
         .strip_suffix('\n')
-        .ok_or_else(|| "linked worktree back-reference framing is invalid".to_owned())?;
+        .ok_or_else(|| {
+            CheckError::Content("linked worktree back-reference framing is invalid".to_owned())
+        })?;
     let common_ref = std::str::from_utf8(&commondir_file)
-        .map_err(|_| "linked worktree common-dir reference is invalid".to_owned())?
+        .map_err(|_| {
+            CheckError::Content("linked worktree common-dir reference is invalid".to_owned())
+        })?
         .strip_suffix('\n')
-        .ok_or_else(|| "linked worktree common-dir framing is invalid".to_owned())?;
-    if lexical_absolute(&gitdir, Path::new(backref))? != root.join(".git")
-        || lexical_absolute(&gitdir, Path::new(common_ref))? != anchor.canonical_commondir()
+        .ok_or_else(|| {
+            CheckError::Content("linked worktree common-dir framing is invalid".to_owned())
+        })?;
+    if lexical_absolute(&gitdir, Path::new(backref)).map_err(|e| CheckError::Content(e))?
+        != root.join(".git")
+        || lexical_absolute(&gitdir, Path::new(common_ref)).map_err(|e| CheckError::Content(e))?
+            != anchor.canonical_commondir()
     {
-        return Err("linked worktree metadata does not authenticate the root pointer".to_owned());
+        return Err(CheckError::Content(
+            "linked worktree metadata does not authenticate the root pointer".to_owned(),
+        ));
     }
     Ok(gitdir)
 }
@@ -2893,15 +3058,16 @@ fn read_authorized_worktree_pointer(
     request: &EvaluationRequest,
     invocation_id: &str,
     root: &Path,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, CheckError> {
+    use std::cell::RefCell;
     let workspace = root
         .to_str()
-        .ok_or_else(|| "candidate worktree root is not UTF-8".to_owned())?
+        .ok_or_else(|| CheckError::Content("candidate worktree root is not UTF-8".to_owned()))?
         .to_owned();
-    let capability = Capability::FilesystemRead(
-        FileScope::new(&workspace, ".")
-            .map_err(|error| format!("candidate pointer root scope: {error}"))?,
-    );
+    let capability =
+        Capability::FilesystemRead(FileScope::new(&workspace, ".").map_err(|error| {
+            CheckError::Content(format!("candidate pointer root scope: {error}"))
+        })?);
     let policy_request = PolicyRequest::new(
         format!(
             "{invocation_id}.pointer-root:{}",
@@ -2913,10 +3079,10 @@ fn read_authorized_worktree_pointer(
             Some(request.execution_id.as_str().to_owned()),
             Some(request.attempt_id.as_str().to_owned()),
         )
-        .map_err(|error| format!("candidate pointer origin: {error}"))?,
+        .map_err(|error| CheckError::Content(format!("candidate pointer origin: {error}")))?,
         RequestedCapabilities::new(vec![capability.clone()]),
     )
-    .map_err(|error| format!("candidate pointer request: {error}"))?;
+    .map_err(|error| CheckError::Content(format!("candidate pointer request: {error}")))?;
     let policy = CompiledPolicy::compile(vec![PolicyRule::new(
         "builtin.candidate.worktree-pointer",
         "accepted_candidate_git_read_scope",
@@ -2924,20 +3090,26 @@ fn read_authorized_worktree_pointer(
         PolicyOutcome::Allow,
         capability.clone(),
     )
-    .map_err(|error| format!("candidate pointer rule: {error}"))?])
-    .map_err(|error| format!("candidate pointer policy: {error}"))?;
+    .map_err(|error| CheckError::Content(format!("candidate pointer rule: {error}")))?])
+    .map_err(|error| CheckError::Content(format!("candidate pointer policy: {error}")))?;
     let mut security = G6SecurityService::open(db_path, app_services::SystemClock)
-        .map_err(|error| format!("candidate pointer G6 unavailable: {error}"))?;
+        .map_err(|error| CheckError::infra(format!("G6 candidate pointer unavailable: {error}")))?;
     let parent = EffectiveCapabilities::new(vec![capability]);
     let effective = match security
         .authorize(&policy_request, &parent, &policy, u64::MAX)
-        .map_err(|error| format!("candidate pointer G6 authorization failed: {error}"))?
-    {
+        .map_err(|error| {
+            CheckError::infra(format!(
+                "G6 candidate pointer authorization failed: {error}"
+            ))
+        })? {
         G6Authorization::Authorized { effective, .. } => effective,
         G6Authorization::ApprovalRequired { .. } | G6Authorization::Denied { .. } => {
-            return Err("G6 denied candidate worktree pointer read".to_owned());
+            return Err(CheckError::infra(
+                "G6 denied candidate worktree pointer read",
+            ));
         }
     };
+    let infra_error: RefCell<Option<String>> = RefCell::new(None);
     let mut authorize = |path: &[u8], operation| {
         let path = std::str::from_utf8(path)
             .map_err(|_| evaluation::EffectError::CaptureFailed("pointer path invalid"))?;
@@ -2963,13 +3135,22 @@ fn read_authorized_worktree_pointer(
         let _operation = operation;
         security
             .authorize_filesystem_read(&request, &effective, workspace.clone(), path)
-            .map_err(|_| {
+            .map_err(|e| {
+                // Capture G6 errors as infrastructure failures.
+                *infra_error.borrow_mut() = Some(e.to_string());
                 evaluation::EffectError::CaptureFailed("G6 denied worktree pointer operation")
             })?;
         Ok(())
     };
-    effect_capture_local::read_worktree_git_pointer(root, &mut authorize)
-        .map_err(|error| format!("authorized worktree pointer read failed: {error}"))
+    let result =
+        effect_capture_local::read_worktree_git_pointer(root, &mut authorize).map_err(|error| {
+            CheckError::Content(format!("authorized worktree pointer read failed: {error}"))
+        })?;
+    // Check for infrastructure errors captured during authorize callbacks.
+    if let Some(msg) = infra_error.into_inner() {
+        return Err(CheckError::Infrastructure(msg));
+    }
+    Ok(result)
 }
 
 fn lexical_absolute(base: &Path, path: &Path) -> Result<PathBuf, String> {
@@ -7400,6 +7581,106 @@ mod tests {
         assert!(
             evidence_err.is_err(),
             "get_candidate_evidence_for_completion must fail after invalidation"
+        );
+    }
+
+    #[test]
+    fn check_error_defaults_to_content() {
+        // CheckError::from(String) is Content (the default).
+        let err: CheckError = "test message".to_owned().into();
+        assert!(matches!(err, CheckError::Content(_)));
+
+        // CheckError::infra(..) is Infrastructure.
+        let err = CheckError::infra("infrastructure message");
+        assert!(matches!(err, CheckError::Infrastructure(_)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn candidate_git_launch_failure_after_admission_does_not_invalidate() {
+        let fixture = setup_candidate_restart_fixture(
+            "candidate-git-launch",
+            "P-CANDIDATE-GIT-LAUNCH",
+            "T-CANDIDATE-GIT-LAUNCH",
+            "E-CANDIDATE-GIT-LAUNCH",
+            "A-CANDIDATE-GIT-LAUNCH",
+        );
+        let execution_id = fixture.request.execution_id.clone();
+        let attempt_id = fixture.request.attempt_id.clone();
+        let evaluator = candidate_restart_evaluator(&fixture);
+
+        // First evaluate() admits the evidence with status RESULT_ADMITTED.
+        let verdict = evaluator
+            .evaluate(&fixture.request)
+            .expect("first evaluate admits durable evidence");
+        assert_eq!(verdict, EvaluationVerdict::Verified);
+        let store = storage_sqlite::SqliteStore::open(&fixture.sandbox.db).expect("open store");
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("RESULT_ADMITTED"),
+            "evidence must be admitted before git launch failure"
+        );
+
+        // Build a second evaluator with a non-existent git executable.
+        // Canonicalization of the executable path will fail (Infrastructure).
+        let bad_evaluator = CandidateInputEvaluator {
+            db_path: fixture.sandbox.db.clone(),
+            git_executable: fixture.sandbox.dir.join("no-such-git"),
+            snapshot_parent: fixture.sandbox.dir.join("snapshots"),
+            capture: fixture.evaluator.capture.clone(),
+            evaluator_executable_override: fixture.evaluator.evaluator_executable_override.clone(),
+        };
+
+        // revalidate_before_completion must return Err.
+        let result = bad_evaluator.revalidate_before_completion(&fixture.request);
+        assert!(
+            result.is_err(),
+            "revalidate must fail when git executable is not found"
+        );
+
+        // Status must still be RESULT_ADMITTED (no invalidation).
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("RESULT_ADMITTED"),
+            "status must never regress after infrastructure failure"
+        );
+
+        // Invalidation must be None (journaled only, not invalidated).
+        let invalidation = store
+            .candidate_operation_invalidation(execution_id.as_str(), attempt_id.as_str())
+            .expect("load invalidation");
+        assert_eq!(
+            invalidation, None,
+            "infrastructure failure must not set invalidation"
+        );
+
+        // Evidence must still be accessible for completion.
+        let evidence = store
+            .get_candidate_evidence_for_completion(execution_id.as_str(), attempt_id.as_str())
+            .expect("load evidence");
+        assert!(
+            evidence.is_some(),
+            "evidence must still be accessible after infrastructure failure"
+        );
+
+        // With the ORIGINAL evaluator, revalidate_before_completion must succeed
+        // and the status becomes COMPLETE.
+        evaluator
+            .revalidate_before_completion(&fixture.request)
+            .expect("completion revalidation succeeds with valid git");
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("COMPLETE"),
+            "status must become COMPLETE after successful revalidation"
         );
     }
 }
