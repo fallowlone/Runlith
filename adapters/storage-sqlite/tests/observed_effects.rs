@@ -10,8 +10,9 @@ use evaluation::{
 };
 use security_audit::{SecurityAuditAuthor, SecurityAuditEvent};
 use storage_sqlite::{
-    EventType, NewJournalEvent, NewSecurityAuditRecord, SecurityAuditOutcome, SecurityAuditSubject,
-    SecurityAuditSubjectKind, SqliteStore, StorageError, SUPPORTED_SCHEMA_VERSION,
+    CandidateSelectionOutcome, EventType, NewJournalEvent, NewSecurityAuditRecord,
+    SecurityAuditOutcome, SecurityAuditSubject, SecurityAuditSubjectKind, SqliteStore,
+    StorageError, SUPPORTED_SCHEMA_VERSION,
 };
 use task_domain::{Project, ProjectId, Task, TaskId};
 
@@ -1091,4 +1092,137 @@ fn cv_2_arbitrary_effect_id_cannot_be_selected_by_caller() {
     let (execution, attempt) = seed_runtime(&mut store);
     let effect = append_sample(&mut store, &execution, &attempt, "artifact:id");
     assert_eq!(effect.effect_id(), &EffectId::new("effect-1").unwrap());
+}
+
+#[test]
+fn candidate_selection_distinguishes_subject_mismatch_from_incomplete() {
+    let db = TestDb::new("candidate-selection-outcomes");
+    let mut store = db.open();
+    let (execution, attempt) = seed_runtime(&mut store);
+
+    // First record: new row inserted
+    let result = store
+        .record_candidate_selection(
+            "T-EFFECT",
+            execution.as_str(),
+            attempt.as_str(),
+            "candidate-op-1",
+            &"1".repeat(40),
+            &"3".repeat(40),
+            &format!("sha256:{}", "b".repeat(64)),
+            1,
+            &format!("sha256:{}", "c".repeat(64)),
+            "criterion-1",
+            "candidate.file-contains.v1",
+            "src/main.rs",
+            "accepted",
+            10,
+        )
+        .unwrap();
+    assert_eq!(result, CandidateSelectionOutcome::Recorded);
+
+    // Same subject while PENDING: returns Incomplete
+    let result = store
+        .record_candidate_selection(
+            "T-EFFECT",
+            execution.as_str(),
+            attempt.as_str(),
+            "candidate-op-1",
+            &"1".repeat(40),
+            &"3".repeat(40),
+            &format!("sha256:{}", "b".repeat(64)),
+            1,
+            &format!("sha256:{}", "c".repeat(64)),
+            "criterion-1",
+            "candidate.file-contains.v1",
+            "src/main.rs",
+            "accepted",
+            11,
+        )
+        .unwrap();
+    assert_eq!(result, CandidateSelectionOutcome::Incomplete);
+
+    // Different selected_commit_oid: returns SubjectMismatch
+    let result = store
+        .record_candidate_selection(
+            "T-EFFECT",
+            execution.as_str(),
+            attempt.as_str(),
+            "candidate-op-1",
+            &"1".repeat(40),
+            &"4".repeat(40), // Different
+            &format!("sha256:{}", "b".repeat(64)),
+            1,
+            &format!("sha256:{}", "c".repeat(64)),
+            "criterion-1",
+            "candidate.file-contains.v1",
+            "src/main.rs",
+            "accepted",
+            12,
+        )
+        .unwrap();
+    assert_eq!(result, CandidateSelectionOutcome::SubjectMismatch);
+
+    // Advance to RESULT_ADMITTED
+    store
+        .update_candidate_operation_status(
+            execution.as_str(),
+            attempt.as_str(),
+            "PENDING",
+            "RESULT_ADMITTED",
+            Some("admitted"),
+            13,
+        )
+        .unwrap();
+
+    // Same subject after admission: returns ReuseAdmitted
+    let result = store
+        .record_candidate_selection(
+            "T-EFFECT",
+            execution.as_str(),
+            attempt.as_str(),
+            "candidate-op-1",
+            &"1".repeat(40),
+            &"3".repeat(40),
+            &format!("sha256:{}", "b".repeat(64)),
+            1,
+            &format!("sha256:{}", "c".repeat(64)),
+            "criterion-1",
+            "candidate.file-contains.v1",
+            "src/main.rs",
+            "accepted",
+            14,
+        )
+        .unwrap();
+    assert_eq!(result, CandidateSelectionOutcome::ReuseAdmitted);
+}
+
+#[test]
+fn invalidate_without_operation_row_returns_false() {
+    let db = TestDb::new("invalidate-without-row");
+    let mut store = db.open();
+    let (execution, attempt) = seed_runtime(&mut store);
+
+    // Try to invalidate a non-existent operation row
+    let result = store.invalidate_candidate_operation(
+        execution.as_str(),
+        attempt.as_str(),
+        "TAMPERED",
+        "test-code",
+        now_millis(),
+    );
+
+    // Should return Ok(false), not an error
+    assert_eq!(
+        result.unwrap(),
+        false,
+        "invalidate should return false for non-existent row"
+    );
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
 }

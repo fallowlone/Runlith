@@ -39,7 +39,7 @@ mod workspace_store;
 pub use approval_store::{
     ApprovalCapabilityRecord, ApprovalRecord, ApprovalState, NewApprovalRecord,
 };
-pub use candidate_assessment_store::CandidateEvidence;
+pub use candidate_assessment_store::{CandidateEvidence, CandidateSelectionOutcome};
 pub use entry_store::{
     AdmittedExecutionEntry, ExecutionEntryAdmission, PlanHeadPrecondition,
     PlanningInputPrecondition, StrandedPreAttemptEntry,
