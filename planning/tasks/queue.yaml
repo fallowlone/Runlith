@@ -4352,6 +4352,59 @@ items:
       methods remain deferred. Bookkeeping is complete on this branch only;
       local merge/integration and TASK-0144 implementation are not claimed.
 
+  - id: TASK-0150
+    gate: G8
+    title: EvidenceRequirement parameter binding authority (ADR)
+    objective: >-
+      Propose who is authorized to bind exact kind-specific parameters
+      (selector/path/literal) into a Task's EvidenceRequirement revision,
+      when, and under what bounds, so ADR-0034/ADR-0035's authorized
+      candidate-input selector on an exact EvidenceRequirement revision has
+      a lawful production source.
+    scope: >-
+      ADR-only prerequisite. Specify the authority/source for
+      literal/path/selector content (product-owned catalog plus a validated
+      application binding boundary; planner remains proposal-only per
+      ADR-0029 Option A); binding timing relative to plan
+      materialization/Task authoring; new-revision-per-binding durability
+      with audit provenance and no regression for existing empty-params
+      tasks; fail-closed failure semantics matching ADR-0034 §2; and v1
+      scope limited to the catalogued candidate-input selector(s) already
+      accepted by ADR-0034/0035. Explicitly out of scope: ADR-0029's own
+      deferred planner evidence-content resolution question, any change to
+      TestMutationPolicy selection/authorization (TASK-0145/0146), and any
+      production code, schema, or dependency change. List proposed bounded
+      implementation follow-up tasks in the ADR only; do not create them in
+      this queue.
+    exit_criteria_summary: >-
+      A Proposed ADR-0036 states the binding-authority decision with
+      options, tradeoffs, and an owner-ratifiable recommendation for each of:
+      authority/source, timing, revisioning/durability, failure semantics,
+      and scope limits; documents file:line evidence for the current gap
+      (crates/task/src/requirement.rs, crates/app-services/src/
+      planning_service.rs, crates/plan/src/risk.rs,
+      crates/plan/src/validation.rs); honors INV-002, INV-008..010,
+      INV-043, INV-093, INV-113, INV-114, INV-146, INV-149..151; and is
+      linked from docs/architecture/adr/INDEX.md as Proposed. This ADR does
+      not become Accepted by this task; the owner ratifies separately after
+      independent review, as TASK-0148/TASK-0149 modeled for ADR-0034/0035.
+      YAML and task/dependency uniqueness checks and `git diff --check`
+      pass.
+    depends_on:
+      - TASK-0149
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0036-g8-evidence-requirement-parameter-binding-authority.md
+      - docs/architecture/adr/ADR-0029-planner-evidence-resolution.md
+      - docs/architecture/adr/ADR-0030-g8-observed-effect-claim-verification-contract.md
+      - docs/architecture/adr/ADR-0032-g8-test-integrity-evidence-authoring.md
+      - docs/architecture/adr/ADR-0034-g8-candidate-bound-test-execution.md
+      - docs/architecture/adr/ADR-0035-g8-immutable-git-candidate-proposal.md
+      - crates/task/src/requirement.rs
+      - crates/app-services/src/planning_service.rs
+      - crates/plan/src/risk.rs
+      - crates/plan/src/validation.rs
+
   - id: TASK-0146
     gate: G8
     title: TestMutationPolicy model and durable base binding
