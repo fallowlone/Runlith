@@ -420,8 +420,11 @@ authorization or storage error, a policy or Runner refusal, any other
 storage error, and a Task or attempt not in the evaluatable state. The
 same applies to the snapshot-write, evaluator and snapshot-removal
 launches, which are not integrity checks; the evaluator's reported result
-is still checked as an integrity signal. Admitted evidence survives a
-transient failure and an idempotent retry stays safe.
+is still checked as an integrity signal. Admitted evidence survives such
+a transient failure and an idempotent retry stays safe — except during
+the live worktree scan: there, by owner decision 2026-09-25, a storage
+or authorization failure invalidates, because the scanned names are
+attacker-controlled.
 
 The live worktree scan (freshness observation B) authorizes entry names
 selected and iterated by a filesystem scanner, not fixed trusted names:
@@ -429,11 +432,19 @@ those names are attacker-controlled. Any G6 authorization, audit schema
 failure or storage failure during that scan (including failures from
 unauditable names that cannot pass the security-audit CHECK constraints)
 is treated as a content failure and becomes an integrity signal.
-Unauditable names (e.g. paths that trim to empty) are rejected during
-capability formation itself, before any scan. Infrastructure classification
-of G6 failures applies only to checks that authorize fixed, trusted names:
-the authenticating reads of worktree pointer, linked metadata back-reference,
-and Git common-dir path.
+Unauditable names are not rejected before any scan. The product refuses
+to form a file scope the security audit could not record (`FileScope`
+rejects a root whose trimmed serialized form is empty); during the scan,
+that refusal is itself a content failure. Infrastructure classification
+of G6 failures applies only to checks that authorize fixed, trusted
+names, or a name validated before authorization: the authenticating
+reads of the worktree pointer and the Git common-dir path (fixed,
+trusted names); the linked-metadata back-reference reads
+(`worktrees/<name>/gitdir` and `commondir`), where `<name>` comes from
+the `.git` pointer and is validated as a name path under `worktrees/`
+before authorization; and the object-source metadata check
+(`validate_git_object_sources`: `objects/info/alternates`,
+`objects/info/http-alternates`, `info/grafts`, `shallow`).
 
 Owner decision
 2026-09-25, following an adversarial re-review.
