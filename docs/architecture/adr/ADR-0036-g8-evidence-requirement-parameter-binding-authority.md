@@ -1,21 +1,22 @@
 # ADR-0036 — G8 EvidenceRequirement Parameter Binding Authority
 
-Status: **Proposed** (TASK-0150; owner review pending — this ADR is not
-ratified and grants no authority until the owner accepts it)
+Status: **Accepted** (TASK-0150; owner ratified 2026-09-25)
 Gate: G8
 
-> This decision proposes who is authorized to bind exact kind-specific
+> This decision states who is authorized to bind exact kind-specific
 > parameters (`selector` / `path` / `literal`) into a Task's
 > `EvidenceRequirement` revision, when that binding may happen, and under
 > what bounds — so that ADR-0034/ADR-0035's "authorized candidate-input
 > selector on an exact EvidenceRequirement revision" has a lawful
 > production source. It reuses the name ADR-0029 gave its deferred
 > "Option B" because the owner scoped this task under that name, but this
-> proposal is **narrower**: it does not resolve evidence *content* for the
+> decision is **narrower**: it does not resolve evidence *content* for the
 > planner to read (ADR-0029's actual Option B, still unratified and
-> unaddressed here). It grants no completion authority. It does not by
-> itself amend any accepted ADR; if ratified, it would narrowly extend
-> ADR-0032/0034/0035's binding contract with a named authority source.
+> unaddressed here). It grants no completion authority. It does not itself
+> amend the text of any accepted ADR; it extends ADR-0032/0034/0035's
+> binding contract with a named authority source, and separately
+> authorizes a scoped implementation follow-up (IMPL-B) to the existing
+> V9 `check_criteria_preservation` check — see Ratified decisions below.
 
 ## Context
 
@@ -82,11 +83,11 @@ unreachable in production — not merely unimplemented.
 
 ADR-0029 accepted Option A: the planner receives only opaque
 `evidence_refs` (cycle identity and provenance), never resolved evidence
-*content*. ADR-0030 §7 named Option A's deferred sibling — "the trusted
-planning service resolves refs to bounded, classified content and passes
-that content on the [planner] request" — as a **separate, later
-question**, to be re-evaluated after TASK-0125, "so the question has a
-named home instead of none." That deferred question is about what the
+*content*. ADR-0029 itself defined Option A's deferred sibling, Option B —
+"the trusted planning service resolves refs to bounded, classified content
+and passes that content on the request" — and ADR-0030 §7 named it a
+**separate, later question**, to be re-evaluated after TASK-0125, "so the
+question has a named home instead of none." That deferred question is about what the
 **planner** is allowed to read before proposing.
 
 This ADR answers a different, narrower question: after a criterion is
@@ -94,7 +95,7 @@ already accepted (by planner proposal + V1-V9 validation, or by direct
 Task authoring), who is allowed to **write** the exact catalogued
 selector/path/literal bytes into its `EvidenceRequirement`, so a
 downstream *evaluator* — never the planner — has something lawful to
-check against. The planner in this proposal never gains read access to
+check against. The planner in this decision never gains read access to
 evidence content and never gains authorship of `params`; ADR-0029 Option
 A stands unchanged and unaffected. Calling this "Option B" (per the task
 envelope's framing) is a naming convenience carried over from the
@@ -192,7 +193,7 @@ from_requirement`'s draft consumer shape derives its
 already-accepted binding shape is out of this ADR's scope and would
 require re-litigating ADR-0034/0035 rather than filling their gap.
 
-**Proposed recommendation (owner to ratify): Option 1a.** It is the
+**Ratified decision (owner, 2026-09-25): Option 1a.** It is the
 smallest change that makes ADR-0034/0035 reachable without depending on
 ADR-0029 Option B, and it reuses the accepted `TestMutationPolicy`
 pattern instead of inventing a new authority shape.
@@ -232,7 +233,7 @@ staleness/replay rules distinct from `PlanChangeSet` revisioning
 but has no bindable params yet — indistinguishable from today's
 permanent state without an explicit "pending binding" signal.
 
-**Proposed recommendation (owner to ratify): Option 2a**, with the
+**Ratified decision (owner, 2026-09-25): Option 2a**, with the
 V9 comparison change called out explicitly as required follow-up
 implementation work (§ Implementation follow-up below), not silently
 assumed.
@@ -253,7 +254,7 @@ assumed.
   binding — a `ClaimVerification` that already referenced the old
   revision would silently point at different content.
 
-**Proposed recommendation (owner to ratify): Option 3a.** It is the only
+**Ratified decision (owner, 2026-09-25): Option 3a.** It is the only
 option consistent with ADR-0030's exact-revision binding and with "no
 regression" for tasks that never opt into candidate-input evidence.
 
@@ -268,7 +269,7 @@ regression" for tasks that never opt into candidate-input evidence.
   stand in for an owner-scoped catalog entry, contradicting INV-149's
   fail-closed requirement for unprovable mandatory restrictions.
 
-**Proposed recommendation (owner to ratify): Option 4a** — no new text
+**Ratified decision (owner, 2026-09-25): Option 4a** — no new text
 needed; this ADR only supplies the missing authority, it does not relax
 ADR-0034's existing failure semantics.
 
@@ -287,7 +288,7 @@ ADR-0034's existing failure semantics.
   for selector authorization, and lets a binder invent selectors the
   evaluator was never reviewed against.
 
-**Proposed recommendation (owner to ratify): Option 5a.**
+**Ratified decision (owner, 2026-09-25): Option 5a.**
 
 ## Consequences
 
@@ -311,11 +312,11 @@ ADR-0034's existing failure semantics.
 
 ## Migration impact
 
-This is a docs-only ADR; no schema or data migration is required. Existing Tasks with empty `EvidenceRequirement` params remain valid and continue on the existing `PendingEvaluator`/manual verification path with no rewrite or backfill. Future implementation (this ADR's IMPL follow-ups) that persists binding records or new requirement revisions must allocate the next storage migration number from accepted main at that time and must not mutate existing requirement revisions (per ADR-0030, each binding is a new revision). Rollback semantics: if binding records are ignored, tasks fall back to unverified/manual state, never `PASS`.
+This is a docs-only ADR; no schema or data migration is required. Existing Tasks with empty `EvidenceRequirement` params remain valid and continue on the existing `PendingEvaluator`/manual verification path with no rewrite or backfill. Future implementation (this ADR's IMPL follow-ups) that persists binding records or new requirement revisions must allocate the next storage migration number from accepted main at that time and must not mutate existing requirement revisions (per this ADR's Option 3a, §3, each binding is a new revision). Rollback semantics: if binding records are ignored, tasks fall back to unverified/manual state, never `PASS`.
 
 ## Relation to TASK-0144
 
-TASK-0144 implements the ADR-0035 candidate-input producer whose parameter shape (`candidate.file-contains.v1` selector, path, literal, subject binding, policy fingerprint) is fixed by accepted ADR-0034/ADR-0035, not by this ADR. This ADR decides only who may bind those values into a Task's `EvidenceRequirement` revision. Therefore TASK-0144 does not depend on this ADR; until this ADR is ratified and its implementation follow-ups land, TASK-0144's evaluator is fail-closed and unreachable for planner-materialized Tasks (they stay on the manual/pending path). Production reachability, and TASK-0125's use of candidate-input evidence, depend on this ADR's implementation follow-ups.
+TASK-0144 implements the ADR-0035 candidate-input producer whose parameter shape (`candidate.file-contains.v1` selector, path, literal, subject binding, policy fingerprint) is fixed by accepted ADR-0034/ADR-0035, not by this ADR. This ADR decides only who may bind those values into a Task's `EvidenceRequirement` revision. Therefore TASK-0144 does not depend on this ADR (TASK-0150); this ADR is now ratified, but until its implementation follow-ups (IMPL-A..D) land, TASK-0144's evaluator remains fail-closed and unreachable for planner-materialized Tasks (they stay on the manual/pending path). Production reachability, and TASK-0125's use of candidate-input evidence, depend on this ADR's implementation follow-ups.
 
 ## Security considerations
 
@@ -351,49 +352,75 @@ Task/Plan-domain data-shape and authority-boundary work only.
   block this narrower, non-privacy-sensitive prerequisite on that larger
   unresolved question.
 
-## Open questions for the owner
+## Ratified decisions
 
-1. Does the trusted control surface for operator-authored binding (§1a)
-   reuse the same "fresh interactive platform user-presence" authority
-   ADR-0033 defines for B1 review, or is a lighter authority sufficient
-   because binding selects among a closed catalog rather than rendering
-   an independent verdict?
-2. Should the catalog (§1a) live in `crates/policy` alongside
-   `TestMutationPolicy`, or in `crates/task`/`crates/plan` next to
-   `EvidenceRequirement`/`CriterionDecl`? This ADR recommends `policy`
-   for authority-ownership symmetry with `TestMutationPolicy` but defers
-   the exact crate placement to implementation review.
-3. Is Option 2a's V9 change (§2) acceptable as a follow-up inside the
-   implementation task, or does the owner want it ratified as its own
-   ADR amendment first, given it touches an already-accepted validation
-   rule?
+Owner ratification (TASK-0150, 2026-09-25) resolved the three open
+questions this ADR originally posed. No genuinely open question remains
+from that set; all traceable below as question → decision → rationale.
+
+1. **Control-surface authority for operator-authored binding (§1a).**
+   Decision (D1): operator-authored parameter binding requires the same
+   ADR-0033 B1-grade fresh interactive user-presence authority used for
+   B1 review — not a lighter authority. Rationale: binding decides what
+   counts as passing `candidate-input` completion evidence, so it carries
+   completion-adjacent authority; it therefore fails closed like B1
+   review, and any relaxation requires a later ADR, not an implementation
+   choice.
+2. **Catalog crate placement (§1a).** Decision (D2): the product-owned
+   closed selector catalog lives in `crates/policy`, alongside
+   `TestMutationPolicy`; the catalog's fingerprint is anchored there.
+   Rationale: authority-ownership symmetry with the accepted
+   `TestMutationPolicy` precedent this ADR's catalog shape follows.
+3. **V9 preservation-check change (§2, IMPL-B).** Decision (D3): the
+   `check_criteria_preservation` change required by binding at plan
+   application/materialization (Option 2a) is authorized within this ADR
+   itself and ships as an ADR-0036 implementation follow-up (IMPL-B); it
+   does not require a separate ADR amendment. **Authorized bound:** V9
+   must treat as non-escalating (not `requirement_changed`) only a
+   non-empty `params` value produced by this ADR's authorized binding
+   boundary (§1a) for a catalogued selector (§5); any other non-empty
+   `params` source — including one that did not go through the §1a
+   boundary, or that names a selector outside the closed catalog — still
+   escalates as `requirement_changed` and fails closed. Rationale:
+   narrows the V9 change to exactly the authority this ADR grants,
+   without silently widening what V9 accepts as authorized drift.
+
+Recommendations 1a/2a/3a/4a/5a (§1–§5 above) are accepted as a package
+(D4). TASK-0144 is intentionally not made to depend on TASK-0150 (D5;
+producer shape is fixed by ADR-0034/0035, see "Relation to TASK-0144").
 
 ## Implementation follow-up (not created in the queue; proposed here only)
 
+IMPL-A..D are not created as queue tasks by this ADR; the orchestrator
+registers them separately after this ratification. Each depends on
+TASK-0150 (this ADR's ratification) and reflects the D1/D2/D3 bounds
+above.
+
 - **IMPL-A — Catalog and binding boundary.** Add the closed, versioned,
-  fingerprinted selector catalog (§1a) to `crates/policy`; add the
+  fingerprinted selector catalog (§1a) to `crates/policy` (D2); add the
   trusted application-service binding boundary that validates and
-  persists a new `EvidenceRequirement` revision with non-empty `params`.
-  Depends on: this ADR's ratification, TASK-0146 (policy model
-  precedent), TASK-0149 (ADR-0035, for the path-validation posture to
-  reuse).
+  persists a new `EvidenceRequirement` revision with non-empty `params`,
+  gated on ADR-0033 B1-grade fresh user-presence authority for
+  operator-authored binding (D1). Depends on: TASK-0150, TASK-0146
+  (policy model precedent), TASK-0149 (ADR-0035, for the
+  path-validation posture to reuse).
 - **IMPL-B — V9 preservation-check update.** Update
-  `crates/plan/src/validation.rs:478-540` so an authorized, catalog-valid
-  bound-params requirement covering a preserved parent criterion is not
-  flagged as `requirement_changed`. Depends on: IMPL-A.
+  `crates/plan/src/validation.rs:478-540` so V9 recognizes as
+  non-escalating only a bound-params requirement produced by IMPL-A's
+  binding boundary for a catalogued selector, per D3's authorized bound
+  stated above; any other non-empty-params source continues to escalate.
+  Depends on: TASK-0150, IMPL-A.
 - **IMPL-C — Operator control-surface binding UI/IPC path.** Expose §1a's
   binding operation through the trusted Runlith control surface (parallel
-  to ADR-0033's B1 review surface). Depends on: IMPL-A; may depend on
-  whichever task implements ADR-0033's trusted control-surface primitives
-  if not already available.
+  to ADR-0033's B1 review surface), enforcing D1's fresh user-presence
+  authority at the control-surface boundary. Depends on: TASK-0150,
+  IMPL-A; may depend on whichever task implements ADR-0033's trusted
+  control-surface primitives if not already available.
 - **IMPL-D — TASK-0144 integration.** Once IMPL-A lands, TASK-0144's
   evaluator consumes bound requirements through the accepted
   `CandidateSelector::from_requirement`-shaped contract (draft reference
   only; the concrete Rust shape is TASK-0144's own implementation
-  decision, not ratified here).
-
-None of IMPL-A..D are created as queue tasks by this ADR; the owner
-decomposes and schedules them after ratification.
+  decision, not ratified here). Depends on: TASK-0150, IMPL-A.
 
 ## References
 
