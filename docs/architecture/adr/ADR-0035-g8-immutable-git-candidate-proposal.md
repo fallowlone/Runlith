@@ -299,6 +299,41 @@ candidate-compiled tests requires a separately specified and ratified method.
 - APFS privileged snapshotting is unselected. No implementation, migration,
   dependency, or completion-authority change is authorized here.
 
+## Amendment 2026-09-25: Seatbelt ancestor metadata for candidate launches
+
+**Why needed.** Absolute-path resolution (`getcwd()`/`realpath()`), which a
+candidate-input Runner launch performs when positioning its CWD via
+`chdir` or resolving a linked Git worktree's `commondir` back-reference,
+walks every ancestor directory of the path being resolved. A macOS
+Seatbelt `subpath` grant covers only the given path and its descendants,
+never its ancestors, so a workspace or root several directories under a
+narrow allowed subtree failed closed with a misleading "Operation not
+permitted" even though the launch never reads outside its granted scope.
+
+**Exact grant.** `file-read-metadata` and `file-test-existence` only
+(stat/existence, never directory listing or file data) on the exact
+ancestor chain of the launch's workspace and filesystem roots, each
+emitted as an individual `literal` rule — never `subpath` or a pattern —
+after rejecting any source path containing a `..`/`.` component or a
+doubled separator. The filesystem root `/` itself yields no literal.
+
+**Candidate launches only.** The grant is owned by a typed,
+construction-time attribute (`RunnerLaunchPurpose` /
+`MacOsSeatbeltRunner::with_candidate_ancestor_metadata_grant`) that only
+`bins/agentd/src/execution.rs`'s trusted composition sets, only for the
+Git-read, snapshot-write, and evaluator-read-only candidate-input Runner
+operations. It defaults to absent (fail closed) and is never derived
+from caller, IPC, or per-launch input. Provider/tool launches never
+receive it and keep exactly the pre-amendment Seatbelt profile and
+behavior.
+
+Owner ratified 2026-09-25. This amendment narrows and documents a
+detail of the read-only Git plumbing plan's enforcement already
+authorized by this ADR's "Scoped G6 operation plans" and by ADR-0026's
+G6 Seatbelt authority surface; it grants no new filesystem data or
+listing access beyond what those sections already authorize, and no
+completion authority.
+
 ## References
 
 - ADR-0018 — independent evaluation and completion authority.
