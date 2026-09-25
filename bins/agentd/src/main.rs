@@ -22,6 +22,12 @@ async fn main() -> ExitCode {
     }
     if args
         .first()
+        .is_some_and(|arg| arg == "__candidate-snapshot-remove")
+    {
+        return candidate_snapshot_remove(&args[1..]);
+    }
+    if args
+        .first()
         .is_some_and(|arg| arg == "__candidate-evaluate")
     {
         return candidate_evaluate(&args[1..]);
@@ -89,6 +95,23 @@ fn candidate_snapshot_write(args: &[String]) -> ExitCode {
     };
     match effect_capture_local::materialize_candidate_snapshot(parent, &args[1], &files) {
         Ok(_) => ExitCode::SUCCESS,
+        Err(_) => ExitCode::FAILURE,
+    }
+}
+
+fn candidate_snapshot_remove(args: &[String]) -> ExitCode {
+    if args.len() != 2
+        || !args[1].starts_with("candidate-")
+        || args[1].len() > 96
+        || !args[1]
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return ExitCode::FAILURE;
+    }
+    match effect_capture_local::remove_candidate_snapshot(std::path::Path::new(&args[0]), &args[1])
+    {
+        Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::FAILURE,
     }
 }

@@ -25,6 +25,15 @@ CREATE TABLE candidate_input_assessments (
     checkpoints TEXT NOT NULL CHECK (length(checkpoints) > 0 AND length(checkpoints) <= 65536),
     integrity_outcome TEXT NOT NULL CHECK (integrity_outcome IN ('INTACT','MISMATCH')),
     started_at_ms INTEGER NOT NULL CHECK (started_at_ms >= 0),
-    completed_at_ms INTEGER NOT NULL CHECK (completed_at_ms >= started_at_ms)
+    completed_at_ms INTEGER NOT NULL CHECK (completed_at_ms >= started_at_ms),
+    deletions TEXT NOT NULL CHECK (length(deletions) <= 4194304),
+    invocation_descriptor_version INTEGER NOT NULL CHECK (invocation_descriptor_version = 1),
+    invocation_descriptor_sha256 TEXT NOT NULL CHECK (invocation_descriptor_sha256 GLOB 'sha256:*' AND length(invocation_descriptor_sha256) = 71),
+    evaluator_executable TEXT NOT NULL CHECK (length(evaluator_executable) BETWEEN 1 AND 4096),
+    toolchain_ref TEXT NOT NULL CHECK (length(toolchain_ref) BETWEEN 1 AND 1024),
+    runner_backend TEXT NOT NULL CHECK (length(runner_backend) BETWEEN 1 AND 256),
+    runner_plan_sha256 TEXT NOT NULL CHECK (runner_plan_sha256 GLOB 'sha256:*' AND length(runner_plan_sha256) = 71),
+    runner_enforced_axes INTEGER NOT NULL CHECK (runner_enforced_axes BETWEEN 3 AND 7),
+    runner_env_isolated INTEGER NOT NULL CHECK (runner_env_isolated = 1)
 );
 CREATE INDEX candidate_input_assessments_task_idx ON candidate_input_assessments(task_id, execution_id, attempt_id, completed_at_ms);

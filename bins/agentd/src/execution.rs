@@ -760,6 +760,15 @@ fn prepare_candidate_process(
 
 struct CandidateProcessOutput {
     stdout: Vec<u8>,
+    runner: CandidateRunnerReceipt,
+}
+
+struct CandidateRunnerReceipt {
+    operation_id: String,
+    backend: String,
+    plan_sha256: String,
+    enforced_axes: u8,
+    environment_isolated: bool,
 }
 
 #[derive(Clone)]
@@ -914,6 +923,14 @@ impl CandidateInputEvaluator {
             gitdir: &linked_gitdir,
             roots: vec![root.clone(), anchor.canonical_commondir().to_path_buf()],
         };
+        let git_version = self.git_output(&git_context, &["--version"], 128)?;
+        let git_version = std::str::from_utf8(&git_version)
+            .map_err(|_| "candidate Git version is not UTF-8".to_owned())?
+            .strip_suffix('\n')
+            .ok_or_else(|| "candidate Git version is incomplete".to_owned())?;
+        if !git_version.starts_with("git version ") || git_version.len() > 128 {
+            return Err("candidate Git version is unsupported".to_owned());
+        }
         let object_format =
             self.git_output(&git_context, &["rev-parse", "--show-object-format"], 64)?;
         let object_format = std::str::from_utf8(&object_format)
@@ -1016,6 +1033,13 @@ impl CandidateInputEvaluator {
         let snapshot_input = encode_snapshot_files(&candidate.files)?;
         let snapshot_writer = std::env::current_exe()
             .map_err(|_| "agentd evaluator executable unavailable".to_owned())?;
+        let evaluator_executable = snapshot_writer
+            .canonicalize()
+            .map_err(|_| "agentd evaluator executable cannot be canonicalized".to_owned())?;
+        let evaluator_executable_ref = evaluator_executable
+            .to_str()
+            .ok_or_else(|| "agentd evaluator executable path is unsupported".to_owned())?
+            .to_owned();
         let snapshot_path = self
             .snapshot_parent
             .join("candidate-snapshots")
@@ -1027,14 +1051,14 @@ impl CandidateInputEvaluator {
                 task_id: request.task_id.as_str().to_owned(),
                 execution_id: request.execution_id.as_str().to_owned(),
                 attempt_id: request.attempt_id.as_str().to_owned(),
-                invocation_id: invocation_id.clone(),
+                invocation_id: format!("{invocation_id}.snapshot-write"),
                 workspace: self.snapshot_parent.clone(),
                 filesystem_roots: vec![self.snapshot_parent.clone()],
                 executable: snapshot_writer,
                 args: vec![
                     "__candidate-snapshot-write".into(),
                     self.snapshot_parent.as_os_str().into(),
-                    snapshot_name.into(),
+                    snapshot_name.clone().into(),
                 ],
                 input: snapshot_input,
                 support_read: vec![self.snapshot_parent.clone()],
@@ -1045,8 +1069,6 @@ impl CandidateInputEvaluator {
         let selector = requirements
             .first()
             .ok_or_else(|| "candidate selector missing".to_owned())?;
-        let evaluator_executable = std::env::current_exe()
-            .map_err(|_| "agentd evaluator executable unavailable".to_owned())?;
         let output = run_candidate_process(
             &self.db_path,
             CandidateProcessRequest {
@@ -1054,10 +1076,10 @@ impl CandidateInputEvaluator {
                 task_id: request.task_id.as_str().to_owned(),
                 execution_id: request.execution_id.as_str().to_owned(),
                 attempt_id: request.attempt_id.as_str().to_owned(),
-                invocation_id: invocation_id.clone(),
+                invocation_id: format!("{invocation_id}.evaluator"),
                 workspace: self.snapshot_parent.clone(),
                 filesystem_roots: vec![snapshot_path.clone()],
-                executable: evaluator_executable,
+                executable: evaluator_executable.clone(),
                 args: vec![
                     "__candidate-evaluate".into(),
                     snapshot_path.as_os_str().into(),
@@ -1074,6 +1096,28 @@ impl CandidateInputEvaluator {
         )?;
         let result = parse_candidate_result(&output.stdout, &candidate.manifest.sha256)?;
         validate_candidate_result(&result, &candidate, selector)?;
+        run_candidate_process(
+            &self.db_path,
+            CandidateProcessRequest {
+                operation: CandidateG6Operation::SnapshotWrite,
+                task_id: request.task_id.as_str().to_owned(),
+                execution_id: request.execution_id.as_str().to_owned(),
+                attempt_id: request.attempt_id.as_str().to_owned(),
+                invocation_id: format!("{invocation_id}.snapshot-remove"),
+                workspace: self.snapshot_parent.clone(),
+                filesystem_roots: vec![self.snapshot_parent.clone()],
+                executable: evaluator_executable.clone(),
+                args: vec![
+                    "__candidate-snapshot-remove".into(),
+                    self.snapshot_parent.as_os_str().into(),
+                    snapshot_name.into(),
+                ],
+                input: Vec::new(),
+                support_read: vec![self.snapshot_parent.clone()],
+                support_write: vec![self.snapshot_parent.clone()],
+                max_stdout: 0,
+            },
+        )?;
         for phase in [
             evaluation::CandidateCheckpointPhase::AfterEvaluation,
             evaluation::CandidateCheckpointPhase::ResultAdmission,
@@ -1093,7 +1137,7 @@ impl CandidateInputEvaluator {
         if checkpoints.iter().any(|checkpoint| !checkpoint.matched) {
             return Err("candidate inputs changed during evaluation".to_owned());
         }
-        let assessment = evaluation::CandidateIntegrityAssessment {
+        let mut assessment = evaluation::CandidateIntegrityAssessment {
             task_id: request.task_id.as_str().to_owned(),
             execution_id: request.execution_id.as_str().to_owned(),
             attempt_id: request.attempt_id.as_str().to_owned(),
@@ -1107,19 +1151,37 @@ impl CandidateInputEvaluator {
             selector_literal: selector.literal.clone(),
             invocation_id: invocation_id.clone(),
             evaluator_ref: "runlith.agentd.candidate-evaluator.v1".to_owned(),
-            runtime_ref: format!("agentd:{}", env!("CARGO_PKG_VERSION")),
-            enforcement_ref: "G6+Runner:filesystem.process.execute.no-network.v1".to_owned(),
+            runtime_ref: format!(
+                "agentd:{};target={}-{}",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ),
+            enforcement_ref: output.runner.operation_id,
+            invocation_descriptor_version: 1,
+            invocation_descriptor_sha256: String::new(),
+            evaluator_executable: evaluator_executable_ref,
+            toolchain_ref: git_version.to_owned(),
+            runner_backend: output.runner.backend,
+            runner_plan_sha256: output.runner.plan_sha256,
+            runner_enforced_axes: output.runner.enforced_axes,
+            runner_env_isolated: output.runner.environment_isolated,
             base_commit_oid: base_candidate.commit_oid,
             base_tree_oid: base_candidate.tree_oid,
-            base_manifest_sha256: base_candidate.manifest.sha256,
+            base_manifest_sha256: base_candidate.manifest.sha256.clone(),
             candidate_commit_oid: candidate.commit_oid.clone(),
             candidate_tree_oid: candidate.tree_oid.clone(),
             candidate_manifest_sha256: candidate.manifest.sha256.clone(),
+            deletions: evaluation::CandidateDeletion::between(
+                &base_candidate.manifest,
+                &candidate.manifest,
+            ),
             checkpoints,
             outcome: evaluation::CandidateIntegrityOutcome::Intact,
             started_at_ms,
             completed_at_ms,
         };
+        assessment.refresh_invocation_descriptor_digest();
         assessment
             .validate()
             .map_err(|error| format!("candidate assessment invalid: {error}"))?;
@@ -1160,7 +1222,10 @@ impl CandidateInputEvaluator {
         let mut store = storage_sqlite::SqliteStore::open(&self.db_path)
             .map_err(|error| format!("open candidate completion store: {error}"))?;
         let evidence = store
-            .get_candidate_evidence(request.execution_id.as_str(), request.attempt_id.as_str())
+            .get_candidate_evidence_for_completion(
+                request.execution_id.as_str(),
+                request.attempt_id.as_str(),
+            )
             .map_err(|error| format!("load candidate completion evidence: {error}"))?
             .ok_or_else(|| "candidate completion evidence is unavailable".to_owned())?;
         let assessment = evidence.integrity;
@@ -1567,12 +1632,27 @@ fn run_candidate_process(
     const MAX_STDERR: u64 = 64 * 1024;
     const TIMEOUT: Duration = Duration::from_secs(30);
     let prepared = prepare_candidate_process(db_path, &request)?;
+    let operation_id = prepared.operation.operation_id.clone();
     let program = request.executable.as_os_str().to_owned();
     let workspace = request.workspace.clone();
     let args = request.args;
     let input = request.input;
     let max_stdout = request.max_stdout;
     let output = prepared.invoke(|launch| {
+        let backend = launch.backend();
+        let axes = launch.enforced_axes();
+        let runner = CandidateRunnerReceipt {
+            operation_id,
+            backend: format!(
+                "{}:{:?}:{:?}",
+                backend.name, backend.runner, backend.platform
+            ),
+            plan_sha256: candidate_runner_plan_digest(launch.plan()),
+            enforced_axes: u8::from(axes.requires(runner::IsolationAxis::Filesystem))
+                | (u8::from(axes.requires(runner::IsolationAxis::Network)) << 1)
+                | (u8::from(axes.requires(runner::IsolationAxis::Process)) << 2),
+            environment_isolated: launch.environment_isolated(),
+        };
         let command = launch
             .bind(runner::CommandSpec::new(program, args))
             .map_err(|error| format!("Runner refused candidate command: {error}"))?;
@@ -1643,9 +1723,45 @@ fn run_candidate_process(
         {
             return Err("candidate process returned unsupported output or status".to_owned());
         }
-        Ok(CandidateProcessOutput { stdout })
+        Ok(CandidateProcessOutput { stdout, runner })
     })?;
     output
+}
+
+fn candidate_runner_plan_digest(plan: &runner::IsolationPlan) -> String {
+    fn add(bytes: &mut Vec<u8>, value: &[u8]) {
+        bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(value);
+    }
+    let mut canonical = b"runlith:candidate-runner-plan:v1\0".to_vec();
+    add(&mut canonical, plan.workspace().as_bytes());
+    add(&mut canonical, plan.launch_executable().as_str().as_bytes());
+    for root in plan.filesystem_read_roots() {
+        add(&mut canonical, root.as_os_str().as_encoded_bytes());
+    }
+    canonical.push(0xff);
+    for root in plan.filesystem_write_roots() {
+        add(&mut canonical, root.as_os_str().as_encoded_bytes());
+    }
+    canonical.push(0xfe);
+    for executable in plan.process_executables() {
+        add(&mut canonical, executable.as_str().as_bytes());
+    }
+    canonical.push(0xfd);
+    for destination in plan.network_destinations() {
+        add(&mut canonical, destination.as_str().as_bytes());
+    }
+    let required = plan.requirements().axes();
+    canonical.extend_from_slice(&[
+        u8::from(required.requires(runner::IsolationAxis::Filesystem)),
+        u8::from(required.requires(runner::IsolationAxis::Network)),
+        u8::from(required.requires(runner::IsolationAxis::Process)),
+    ]);
+    for (name, value) in plan.environment().vars() {
+        add(&mut canonical, name.as_encoded_bytes());
+        add(&mut canonical, value.as_encoded_bytes());
+    }
+    evaluation::candidate_sha256(&canonical)
 }
 
 fn now_millis() -> u64 {
@@ -4799,10 +4915,43 @@ mod tests {
 
     #[test]
     fn governed_git_batch_launch_forwards_requested_oids_on_stdin() {
-        let sandbox = Sandbox::named("candidate-git-batch-stdin");
+        let git_executable = candidate_test_git_executable();
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "runlith-agentd-exec-candidate-git-batch-stdin-{id}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(dir.join("db")).expect("sandbox db dir");
+        let db = dir.join("db").join("state.sqlite3");
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).expect("sandbox repo dir");
+        let init = std::process::Command::new(&git_executable)
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .output()
+            .expect("fixture Git init");
+        assert!(init.status.success(), "fixture Git init failed");
+        let commit = std::process::Command::new(&git_executable)
+            .args([
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .current_dir(&repo)
+            .output()
+            .expect("fixture Git commit");
+        assert!(commit.status.success(), "fixture Git commit failed");
+        let sandbox = Sandbox { dir, db, repo };
         seed_ready(&sandbox.db, "P-CANDIDATE-GIT", "T-CANDIDATE-GIT");
-        let _composition = sandbox.composition(None);
-        let oid = std::process::Command::new("git")
+        let oid = std::process::Command::new(&git_executable)
             .args(["-C", sandbox.repo.to_str().unwrap(), "rev-parse", "HEAD"])
             .output()
             .expect("fixture Git rev-parse");
@@ -4810,15 +4959,6 @@ mod tests {
         let oid = String::from_utf8(oid.stdout).unwrap().trim().to_owned();
         let mut input = oid.as_bytes().to_vec();
         input.push(b'\n');
-        let git_executable = std::env::var_os("PATH")
-            .and_then(|path| {
-                std::env::split_paths(&path)
-                    .map(|directory| directory.join("git"))
-                    .find(|path| path.is_file())
-            })
-            .expect("Git is present on PATH")
-            .canonicalize()
-            .expect("Git executable canonicalizes");
         let output = run_candidate_process(
             &sandbox.db,
             CandidateProcessRequest {
@@ -4848,6 +4988,22 @@ mod tests {
         let objects = parse_git_batch(&output.stdout, &[oid]).expect("framed commit response");
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0].1, "commit");
+    }
+
+    fn candidate_test_git_executable() -> PathBuf {
+        #[cfg(target_os = "macos")]
+        let selected = PathBuf::from("/Library/Developer/CommandLineTools/usr/bin/git");
+        #[cfg(not(target_os = "macos"))]
+        let selected = std::env::var_os("PATH")
+            .and_then(|path| {
+                std::env::split_paths(&path)
+                    .map(|directory| directory.join("git"))
+                    .find(|path| path.is_file())
+            })
+            .expect("Git is present on PATH");
+        let selected = selected.canonicalize().expect("fixture Git canonicalizes");
+        assert!(selected.is_file(), "fixture Git is a regular file");
+        selected
     }
 
     #[test]

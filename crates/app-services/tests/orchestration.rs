@@ -174,6 +174,39 @@ fn ids(execution: &str, attempt: &str) -> OrchestrationIds {
     }
 }
 
+struct CompletionBoundaryEvaluator {
+    db_path: PathBuf,
+    revalidated: std::sync::atomic::AtomicBool,
+}
+
+impl EvaluationPort for CompletionBoundaryEvaluator {
+    fn evaluate(
+        &self,
+        _request: &app_services::EvaluationRequest,
+    ) -> evaluation::EvaluationResult<app_services::EvaluationVerdict> {
+        Ok(app_services::EvaluationVerdict::Verified)
+    }
+
+    fn revalidate_before_completion(
+        &self,
+        request: &app_services::EvaluationRequest,
+    ) -> evaluation::EvaluationResult<()> {
+        let tasks = TaskService::open(&self.db_path, FixedClock(FIXED_MILLIS))
+            .map_err(|error| evaluation::EvaluationError::new(error.to_string()))?;
+        let task = tasks
+            .get_task(&request.task_id)
+            .map_err(|error| evaluation::EvaluationError::new(error.to_string()))?
+            .ok_or_else(|| evaluation::EvaluationError::new("task disappeared"))?;
+        if task.state() != TaskState::Verifying {
+            return Err(evaluation::EvaluationError::new(
+                "completion revalidation did not run while task was VERIFYING",
+            ));
+        }
+        self.revalidated.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 fn is_runtime_event(event_type: EventType) -> bool {
     matches!(
         event_type,
@@ -256,6 +289,35 @@ fn verified_end_to_end_flow_survives_db_reopen() {
             event.fact.provenance
         );
     }
+}
+
+#[test]
+fn production_orchestration_revalidates_before_verification_succeeded() {
+    let db = TestDb::new("completion-revalidation-order");
+    let mut service = db.orchestration();
+    let task_id = seed_ready(&mut service, "P-COMPLETION", "T-COMPLETION");
+    let evaluator = CompletionBoundaryEvaluator {
+        db_path: db.path.clone(),
+        revalidated: std::sync::atomic::AtomicBool::new(false),
+    };
+
+    let outcome = service
+        .schedule(
+            &task_id,
+            ids("E-COMPLETION", "A-COMPLETION"),
+            &FakeExecutor::for_scenario(FakeScenario::Success),
+            &evaluator,
+        )
+        .expect("verified production flow");
+    assert!(matches!(
+        outcome,
+        OrchestrationOutcome::ExecutionSucceededAndVerified { .. }
+    ));
+    assert!(evaluator.revalidated.load(Ordering::SeqCst));
+    assert_eq!(
+        service.tasks().get_task(&task_id).unwrap().unwrap().state(),
+        TaskState::Completed
+    );
 }
 
 // -- rejected path -----------------------------------------------------------

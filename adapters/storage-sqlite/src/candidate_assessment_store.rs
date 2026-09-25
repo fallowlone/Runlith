@@ -1,10 +1,11 @@
 use evaluation::{
-    candidate_sha256, subject_fingerprint, CandidateCheckpointPhase, CandidateFreshnessCheckpoint,
-    CandidateIntegrityAssessment, CandidateIntegrityOutcome, CaptureAuthority, EffectId,
-    EffectKind, EffectPayload, EffectProvenance, EffectSubjectRef, ObservedEffect,
-    SubjectFingerprint,
+    candidate_sha256, subject_fingerprint, CandidateCheckpointPhase, CandidateDeletion,
+    CandidateFreshnessCheckpoint, CandidateIntegrityAssessment, CandidateIntegrityOutcome,
+    CaptureAuthority, EffectId, EffectKind, EffectPayload, EffectProvenance, EffectSubjectRef,
+    ObservedEffect, SubjectFingerprint,
 };
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use security_audit::{SecurityAuditEvent, SecurityAuditOutcome, SecurityAuditSubjectKind};
 
 use crate::{StorageError, StorageResult};
 
@@ -19,6 +20,26 @@ impl crate::SqliteStore {
         &self,
         execution_id: &str,
         attempt_id: &str,
+    ) -> StorageResult<Option<CandidateEvidence>> {
+        self.load_candidate_evidence(execution_id, attempt_id, true)
+    }
+
+    /// Completion-only product hook. It admits the result after the four
+    /// pre-completion freshness checkpoints; the public reuse getter above
+    /// remains gated on a durable matching Completion checkpoint.
+    pub fn get_candidate_evidence_for_completion(
+        &self,
+        execution_id: &str,
+        attempt_id: &str,
+    ) -> StorageResult<Option<CandidateEvidence>> {
+        self.load_candidate_evidence(execution_id, attempt_id, false)
+    }
+
+    fn load_candidate_evidence(
+        &self,
+        execution_id: &str,
+        attempt_id: &str,
+        require_completion: bool,
     ) -> StorageResult<Option<CandidateEvidence>> {
         let row: Option<String> = self
             .connection()
@@ -43,11 +64,24 @@ impl crate::SqliteStore {
             .ok_or_else(|| {
                 StorageError::Corrupt("candidate integrity assessment is missing".into())
             })?;
-        if !integrity.checkpoints.iter().any(|checkpoint| {
-            checkpoint.phase == CandidateCheckpointPhase::Completion && checkpoint.matched
-        }) {
+        let required_phases = [
+            CandidateCheckpointPhase::Selection,
+            CandidateCheckpointPhase::BeforeEvaluation,
+            CandidateCheckpointPhase::AfterEvaluation,
+            CandidateCheckpointPhase::ResultAdmission,
+        ];
+        if required_phases.iter().any(|phase| {
+            !integrity
+                .checkpoints
+                .iter()
+                .any(|checkpoint| checkpoint.phase == *phase && checkpoint.matched)
+        }) || (require_completion
+            && !integrity.checkpoints.iter().any(|checkpoint| {
+                checkpoint.phase == CandidateCheckpointPhase::Completion && checkpoint.matched
+            }))
+        {
             return Err(StorageError::Corrupt(
-                "candidate evidence has no durable completion checkpoint".to_owned(),
+                "candidate evidence is missing a required freshness checkpoint".to_owned(),
             ));
         }
         let lineage_task: Option<String> = self
@@ -79,6 +113,27 @@ impl crate::SqliteStore {
         {
             return Err(StorageError::Corrupt(
                 "candidate effect and integrity assessment disagree".to_owned(),
+            ));
+        }
+        let enforcement_audit = self
+            .list_security_audit_by_correlation(&integrity.enforcement_ref)?
+            .into_iter()
+            .any(|record| {
+                let fact = record.fact;
+                fact.event == SecurityAuditEvent::IsolationEnforcement
+                    && fact.outcome == Some(SecurityAuditOutcome::Enforced)
+                    && fact.operation_id.as_deref() == Some(integrity.enforcement_ref.as_str())
+                    && fact.task_id.as_deref() == Some(integrity.task_id.as_str())
+                    && fact.execution_id.as_deref() == Some(integrity.execution_id.as_str())
+                    && fact.attempt_id.as_deref() == Some(integrity.attempt_id.as_str())
+                    && fact.subject.as_ref().is_some_and(|subject| {
+                        subject.kind == SecurityAuditSubjectKind::RunnerBackend
+                            && subject.id == integrity.runner_backend
+                    })
+            });
+        if !enforcement_audit {
+            return Err(StorageError::Corrupt(
+                "candidate invocation has no matching durable Runner enforcement record".into(),
             ));
         }
         Ok(Some(CandidateEvidence { effect, integrity }))
@@ -192,6 +247,15 @@ impl crate::SqliteStore {
             String,
             i64,
             i64,
+            String,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
         );
         let row: Option<Row> = self
             .connection()
@@ -202,7 +266,10 @@ impl crate::SqliteStore {
                     evaluator_ref, runtime_ref, enforcement_ref, base_commit_oid,
                     base_tree_oid, base_manifest_sha256, candidate_commit_oid,
                     candidate_tree_oid, candidate_manifest_sha256, checkpoints,
-                    integrity_outcome, started_at_ms, completed_at_ms
+                    integrity_outcome, started_at_ms, completed_at_ms, deletions,
+                    invocation_descriptor_version, invocation_descriptor_sha256,
+                    evaluator_executable, toolchain_ref, runner_backend,
+                    runner_plan_sha256, runner_enforced_axes, runner_env_isolated
              FROM candidate_input_assessments WHERE execution_id = ?1 AND attempt_id = ?2
              ORDER BY completed_at_ms DESC, assessment_id DESC LIMIT 1",
                 params![execution_id, attempt_id],
@@ -231,6 +298,15 @@ impl crate::SqliteStore {
                         row.get(20)?,
                         row.get(21)?,
                         row.get(22)?,
+                        row.get(23)?,
+                        row.get(24)?,
+                        row.get(25)?,
+                        row.get(26)?,
+                        row.get(27)?,
+                        row.get(28)?,
+                        row.get(29)?,
+                        row.get(30)?,
+                        row.get(31)?,
                     ))
                 },
             )
@@ -259,6 +335,15 @@ impl crate::SqliteStore {
             outcome,
             started_at_ms,
             completed_at_ms,
+            deletions,
+            invocation_descriptor_version,
+            invocation_descriptor_sha256,
+            evaluator_executable,
+            toolchain_ref,
+            runner_backend,
+            runner_plan_sha256,
+            runner_enforced_axes,
+            runner_env_isolated,
         )) = row
         else {
             return Ok(None);
@@ -269,6 +354,19 @@ impl crate::SqliteStore {
             .map_err(|_| StorageError::Corrupt("invalid candidate start time".into()))?;
         let completed_at_ms = u64::try_from(completed_at_ms)
             .map_err(|_| StorageError::Corrupt("invalid candidate completion time".into()))?;
+        let invocation_descriptor_version = u32::try_from(invocation_descriptor_version)
+            .map_err(|_| StorageError::Corrupt("invalid candidate descriptor version".into()))?;
+        let runner_enforced_axes = u8::try_from(runner_enforced_axes)
+            .map_err(|_| StorageError::Corrupt("invalid candidate Runner axes".into()))?;
+        let runner_env_isolated = match runner_env_isolated {
+            0 => false,
+            1 => true,
+            _ => {
+                return Err(StorageError::Corrupt(
+                    "invalid Runner env isolation flag".into(),
+                ))
+            }
+        };
         let outcome = match outcome.as_str() {
             "INTACT" => CandidateIntegrityOutcome::Intact,
             "MISMATCH" => CandidateIntegrityOutcome::Mismatch,
@@ -290,12 +388,21 @@ impl crate::SqliteStore {
             evaluator_ref,
             runtime_ref,
             enforcement_ref,
+            invocation_descriptor_version,
+            invocation_descriptor_sha256,
+            evaluator_executable,
+            toolchain_ref,
+            runner_backend,
+            runner_plan_sha256,
+            runner_enforced_axes,
+            runner_env_isolated,
             base_commit_oid,
             base_tree_oid,
             base_manifest_sha256,
             candidate_commit_oid,
             candidate_tree_oid,
             candidate_manifest_sha256,
+            deletions: decode_deletions(&deletions)?,
             checkpoints: decode_checkpoints(&checkpoints)?,
             outcome,
             started_at_ms,
@@ -334,7 +441,22 @@ impl crate::SqliteStore {
                 .iter()
                 .any(|item| item.phase == checkpoint.phase);
             let invalid_phase_order = match checkpoint.phase {
-                CandidateCheckpointPhase::Completion => duplicate_phase,
+                CandidateCheckpointPhase::Completion => {
+                    duplicate_phase
+                        || [
+                            CandidateCheckpointPhase::Selection,
+                            CandidateCheckpointPhase::BeforeEvaluation,
+                            CandidateCheckpointPhase::AfterEvaluation,
+                            CandidateCheckpointPhase::ResultAdmission,
+                        ]
+                        .iter()
+                        .any(|phase| {
+                            !assessment
+                                .checkpoints
+                                .iter()
+                                .any(|item| item.phase == *phase && item.matched)
+                        })
+                }
                 CandidateCheckpointPhase::RestartReuse => !assessment
                     .checkpoints
                     .iter()
@@ -383,12 +505,13 @@ fn candidate_result_fingerprint(
 ) -> Result<SubjectFingerprint, evaluation::EffectError> {
     let config = candidate_sha256(
         format!(
-            "{}\0{}\0{}\0{}\0{}",
+            "{}\0{}\0{}\0{}\0{}\0{}",
             assessment.requirement_revision,
             assessment.policy_fingerprint,
             assessment.selector,
             assessment.selector_path,
             assessment.selector_literal,
+            assessment.invocation_descriptor_sha256,
         )
         .as_bytes(),
     );
@@ -452,11 +575,15 @@ fn insert_assessment(
             criterion_id, selector, selector_path, selector_literal, invocation_id, evaluator_ref, runtime_ref,
             enforcement_ref, base_commit_oid, base_tree_oid, base_manifest_sha256,
             candidate_commit_oid, candidate_tree_oid, candidate_manifest_sha256,
-            checkpoints, integrity_outcome, started_at_ms, completed_at_ms
+            checkpoints, integrity_outcome, started_at_ms, completed_at_ms, deletions,
+            invocation_descriptor_version, invocation_descriptor_sha256,
+            evaluator_executable, toolchain_ref, runner_backend, runner_plan_sha256,
+            runner_enforced_axes, runner_env_isolated
          ) VALUES (
             'candidate-assessment-' || lower(hex(randomblob(16))), ?1, ?2, ?3, ?4,
             ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-            ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26
+            ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29,
+            ?30, ?31, ?32, ?33, ?34, ?35
          )",
             params![
                 effect_id.as_str(),
@@ -485,10 +612,86 @@ fn insert_assessment(
                 outcome,
                 assessment.started_at_ms as i64,
                 assessment.completed_at_ms as i64,
+                encode_deletions(&assessment.deletions),
+                assessment.invocation_descriptor_version,
+                assessment.invocation_descriptor_sha256,
+                assessment.evaluator_executable,
+                assessment.toolchain_ref,
+                assessment.runner_backend,
+                assessment.runner_plan_sha256,
+                assessment.runner_enforced_axes,
+                i64::from(assessment.runner_env_isolated),
             ],
         )
         .map_err(|error| crate::error::map_constraint(error, "store candidate assessment"))?;
     Ok(())
+}
+
+fn encode_deletions(deletions: &[CandidateDeletion]) -> String {
+    use std::fmt::Write;
+    let mut encoded = String::from("candidate-deletions/v1\n");
+    for deletion in deletions {
+        for byte in &deletion.path {
+            let _ = write!(encoded, "{byte:02x}");
+        }
+        let _ = writeln!(
+            encoded,
+            "|{:o}|{}",
+            deletion.base_mode, deletion.base_blob_sha256
+        );
+    }
+    encoded
+}
+
+fn decode_deletions(value: &str) -> StorageResult<Vec<CandidateDeletion>> {
+    let body = value
+        .strip_prefix("candidate-deletions/v1\n")
+        .ok_or_else(|| {
+            StorageError::Corrupt("candidate deletion manifest version is invalid".to_owned())
+        })?;
+    let mut deletions = Vec::new();
+    for line in body.lines() {
+        let mut fields = line.split('|');
+        let path_hex = fields.next().unwrap_or_default();
+        let mode = fields.next().unwrap_or_default();
+        let blob_digest = fields.next().unwrap_or_default();
+        if fields.next().is_some()
+            || path_hex.is_empty()
+            || !path_hex.len().is_multiple_of(2)
+            || !path_hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(StorageError::Corrupt(
+                "candidate deletion manifest entry is malformed".to_owned(),
+            ));
+        }
+        let path = path_hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let value = std::str::from_utf8(pair).map_err(|_| {
+                    StorageError::Corrupt("candidate deletion path is malformed".to_owned())
+                })?;
+                u8::from_str_radix(value, 16).map_err(|_| {
+                    StorageError::Corrupt("candidate deletion path is malformed".to_owned())
+                })
+            })
+            .collect::<StorageResult<Vec<_>>>()?;
+        let base_mode = u32::from_str_radix(mode, 8)
+            .map_err(|_| StorageError::Corrupt("candidate deletion mode is invalid".to_owned()))?;
+        deletions.push(CandidateDeletion {
+            path,
+            base_mode,
+            base_blob_sha256: blob_digest.to_owned(),
+        });
+    }
+    if encode_deletions(&deletions) != value {
+        return Err(StorageError::Corrupt(
+            "candidate deletion manifest is not canonical".to_owned(),
+        ));
+    }
+    Ok(deletions)
 }
 
 fn encode_checkpoints(checkpoints: &[CandidateFreshnessCheckpoint]) -> String {

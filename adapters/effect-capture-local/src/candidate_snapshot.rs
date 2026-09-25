@@ -41,6 +41,7 @@ mod macos {
     const O_NOFOLLOW: c_int = 0x0100;
     const O_DIRECTORY: c_int = 0x100000;
     const O_CLOEXEC: c_int = 0x1000000;
+    const AT_REMOVEDIR: c_int = 0x80;
 
     #[repr(C, packed(4))]
     struct Dirent {
@@ -55,6 +56,7 @@ mod macos {
     unsafe extern "C" {
         fn openat(dirfd: c_int, path: *const c_char, flags: c_int, ...) -> c_int;
         fn mkdirat(dirfd: c_int, path: *const c_char, mode: u16) -> c_int;
+        fn unlinkat(dirfd: c_int, path: *const c_char, flags: c_int) -> c_int;
         fn dup(fd: c_int) -> c_int;
         fn fdopendir(fd: c_int) -> *mut c_void;
         fn readdir(directory: *mut c_void) -> *const Dirent;
@@ -213,6 +215,75 @@ mod macos {
             directories,
             git_pointer,
         })
+    }
+
+    pub(super) fn remove(parent: &Path, name: &str) -> Result<(), evaluation::EffectError> {
+        validate_component(name)?;
+        let parent = parent
+            .canonicalize()
+            .map_err(|_| failed("snapshot parent is unavailable"))?;
+        let parent_file = open_directory(&parent)?;
+        let snapshots = open_child_directory(&parent_file, "candidate-snapshots")?;
+        let root = open_child_directory(&snapshots, name)?;
+        remove_contents(&root)?;
+        let name = component(name)?;
+        if unsafe { unlinkat(snapshots.as_raw_fd(), name.as_ptr(), AT_REMOVEDIR) } != 0 {
+            return Err(failed("candidate snapshot removal failed"));
+        }
+        snapshots
+            .sync_all()
+            .map_err(|_| failed("candidate snapshot removal sync failed"))
+    }
+
+    fn remove_contents(directory: &File) -> Result<(), evaluation::EffectError> {
+        directory
+            .set_permissions(Permissions::from_mode(0o700))
+            .map_err(|_| failed("candidate snapshot directory removal refused"))?;
+        for name in read_directory_names(directory, b".", None)? {
+            let component_text = name
+                .to_str()
+                .ok_or_else(|| failed("candidate snapshot entry name is unsupported"))?;
+            validate_component(component_text)?;
+            let component = component(component_text)?;
+            let child_fd = unsafe {
+                openat(
+                    directory.as_raw_fd(),
+                    component.as_ptr(),
+                    O_RDONLY | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC,
+                )
+            };
+            if child_fd >= 0 {
+                let child = unsafe { File::from_raw_fd(child_fd) };
+                remove_contents(&child)?;
+                if unsafe { unlinkat(directory.as_raw_fd(), component.as_ptr(), AT_REMOVEDIR) } != 0
+                {
+                    return Err(failed("candidate snapshot directory removal failed"));
+                }
+                continue;
+            }
+            let file_fd = unsafe {
+                openat(
+                    directory.as_raw_fd(),
+                    component.as_ptr(),
+                    O_RDONLY | O_NOFOLLOW | O_CLOEXEC,
+                )
+            };
+            if file_fd < 0 {
+                return Err(failed("candidate snapshot contains unsupported entry"));
+            }
+            let file = unsafe { File::from_raw_fd(file_fd) };
+            if !file
+                .metadata()
+                .map_err(|_| failed("candidate snapshot entry metadata unavailable"))?
+                .is_file()
+            {
+                return Err(failed("candidate snapshot contains unsupported entry"));
+            }
+            if unsafe { unlinkat(directory.as_raw_fd(), component.as_ptr(), 0) } != 0 {
+                return Err(failed("candidate snapshot file removal failed"));
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn scan_live_worktree(
@@ -743,6 +814,21 @@ pub fn read_candidate_snapshot(root: &Path) -> Result<CandidateSnapshot, evaluat
     macos::read(root)
 }
 
+#[cfg(target_os = "macos")]
+pub fn remove_candidate_snapshot(parent: &Path, name: &str) -> Result<(), evaluation::EffectError> {
+    macos::remove(parent, name)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn remove_candidate_snapshot(
+    _parent: &Path,
+    _name: &str,
+) -> Result<(), evaluation::EffectError> {
+    Err(evaluation::EffectError::Unsupported(
+        "descriptor-safe candidate snapshot removal is unsupported on this platform",
+    ))
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn read_candidate_snapshot(_root: &Path) -> Result<CandidateSnapshot, evaluation::EffectError> {
     Err(evaluation::EffectError::Unsupported(
@@ -864,6 +950,42 @@ mod tests {
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))
             .expect("enable snapshot cleanup");
         std::fs::remove_dir_all(parent).expect("remove isolated snapshot test root");
+    }
+
+    #[test]
+    fn snapshot_removal_is_descriptor_relative_and_refuses_symlink_roots() {
+        use std::os::unix::fs::symlink;
+
+        let parent = std::env::temp_dir().join(format!(
+            "runlith-candidate-snapshot-remove-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&parent).expect("create isolated snapshot parent");
+        let files = vec![CandidateFile {
+            path: b"nested/input.txt".to_vec(),
+            mode: 0o100644,
+            git_oid: None,
+            bytes: b"sealed".to_vec(),
+        }];
+        let root = materialize_candidate_snapshot(&parent, "candidate-remove-ok", &files)
+            .expect("materialize snapshot");
+        remove_candidate_snapshot(&parent, "candidate-remove-ok")
+            .expect("remove snapshot through descriptor walk");
+        assert!(!root.exists());
+
+        let outside = parent.join("outside");
+        std::fs::create_dir(&outside).expect("outside directory");
+        std::fs::write(outside.join("keep"), b"preserve").expect("outside sentinel");
+        let snapshots = parent.join("candidate-snapshots");
+        assert!(
+            snapshots.is_dir(),
+            "snapshot container remains after removal"
+        );
+        symlink(&outside, snapshots.join("candidate-remove-link")).expect("snapshot symlink");
+        assert!(remove_candidate_snapshot(&parent, "candidate-remove-link").is_err());
+        assert_eq!(std::fs::read(outside.join("keep")).unwrap(), b"preserve");
+        std::fs::remove_dir_all(parent).expect("remove isolated snapshot parent");
     }
 
     #[test]
