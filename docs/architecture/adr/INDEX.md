@@ -40,5 +40,6 @@
 | [ADR-0033](./ADR-0033-g8-independent-test-mutation-review-authority.md) | G8 independent test-mutation review authority | Accepted | CV-9, reviewer identity, scoped test/check mutation |
 | [ADR-0034](./ADR-0034-g8-candidate-bound-test-execution.md) | G8 candidate-bound governed test execution | Accepted | candidate snapshot, exact test artifact, governed test evidence |
 | [ADR-0035](./ADR-0035-g8-immutable-git-candidate-proposal.md) | G8 immutable Git candidate input | Accepted | commit/tree subject, verified blobs, candidate-input freshness |
+| [ADR-0036](./ADR-0036-g8-evidence-requirement-parameter-binding-authority.md) | G8 EvidenceRequirement parameter binding authority | Accepted | evidence requirement params, candidate-input selector authority, binding boundary |
 
 Coverage register (not an ADR): [COVERAGE.md](./COVERAGE.md).

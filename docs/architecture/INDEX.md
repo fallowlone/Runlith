@@ -47,6 +47,7 @@ Evaluation / completion-authority work
 → adr/ADR-0032-g8-test-integrity-evidence-authoring.md
 → adr/ADR-0034-g8-candidate-bound-test-execution.md
 → adr/ADR-0035-g8-immutable-git-candidate-proposal.md
+→ adr/ADR-0036-g8-evidence-requirement-parameter-binding-authority.md
 
 ADR governance / activation / coverage
 → adr/ADR-0019-gate-scoped-adr-activation.md
