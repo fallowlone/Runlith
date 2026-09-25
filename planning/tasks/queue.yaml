@@ -8,9 +8,9 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0149
+completed_through: TASK-0150
 current_gate: G8
-gate_status: IN_PROGRESS  # G7 closed by TASK-0120; G8 bookkeeping through TASK-0149, independent gate closure remains pending
+gate_status: IN_PROGRESS  # G7 closed by TASK-0120; G8 bookkeeping through TASK-0150, independent gate closure remains pending
 
 items:
   - id: TASK-0012
@@ -4351,6 +4351,85 @@ items:
       Mutable-worktree, compiled-test, and unsupported repository-feature
       methods remain deferred. Bookkeeping is complete on this branch only;
       local merge/integration and TASK-0144 implementation are not claimed.
+
+  - id: TASK-0150
+    gate: G8
+    title: EvidenceRequirement parameter binding authority (ADR)
+    objective: >-
+      Propose who is authorized to bind exact kind-specific parameters
+      (selector/path/literal) into a Task's EvidenceRequirement revision,
+      when, and under what bounds, so ADR-0034/ADR-0035's authorized
+      candidate-input selector on an exact EvidenceRequirement revision has
+      a lawful production source.
+    scope: >-
+      ADR-only prerequisite. Specify the authority/source for
+      literal/path/selector content (product-owned catalog plus a validated
+      application binding boundary; planner remains proposal-only per
+      ADR-0029 Option A); binding timing relative to plan
+      materialization/Task authoring; new-revision-per-binding durability
+      with audit provenance and no regression for existing empty-params
+      tasks; fail-closed failure semantics matching ADR-0034 §2; and v1
+      scope limited to the catalogued candidate-input selector(s) already
+      accepted by ADR-0034/0035. Explicitly out of scope: ADR-0029's own
+      deferred planner evidence-content resolution question, any change to
+      TestMutationPolicy selection/authorization (TASK-0145/0146), and any
+      production code, schema, or dependency change. List proposed bounded
+      implementation follow-up tasks in the ADR only; do not create them in
+      this queue. TASK-0144 is intentionally not dependent on TASK-0150
+      (producer shape fixed by ADR-0034/0035); see ADR-0036 "Relation to
+      TASK-0144".
+    exit_criteria_summary: >-
+      ADR-0036 is Accepted and linked, after owner ratification 2026-09-25
+      following independent architecture/security review PASS of exact
+      pre-acceptance commit 48f793ede6a5b9ae5f722b16a0bdddbee99e4434 of the
+      binding-authority decision covering authority/source, timing,
+      revisioning/durability, failure semantics, and scope limits (recorded
+      as D1-D5 in the ADR's "Ratified decisions"); documents file:line
+      evidence for the current gap (crates/task/src/requirement.rs,
+      crates/app-services/src/planning_service.rs, crates/plan/src/risk.rs,
+      crates/plan/src/validation.rs); honors INV-002, INV-008..010,
+      INV-043, INV-093, INV-113, INV-114, INV-146, INV-149..151; and is
+      linked from docs/architecture/adr/INDEX.md as Accepted. TASK-0150 is
+      complete on this branch; this outcome does not claim local merge or
+      integration into main, does not create IMPL-A..D in this queue (the
+      orchestrator registers them separately), and does not mark TASK-0144
+      complete. YAML and task/dependency uniqueness checks and
+      `git diff --check` pass.
+    depends_on:
+      - TASK-0149
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0036-g8-evidence-requirement-parameter-binding-authority.md
+      - docs/architecture/adr/ADR-0029-planner-evidence-resolution.md
+      - docs/architecture/adr/ADR-0030-g8-observed-effect-claim-verification-contract.md
+      - docs/architecture/adr/ADR-0032-g8-test-integrity-evidence-authoring.md
+      - docs/architecture/adr/ADR-0034-g8-candidate-bound-test-execution.md
+      - docs/architecture/adr/ADR-0035-g8-immutable-git-candidate-proposal.md
+      - crates/task/src/requirement.rs
+      - crates/app-services/src/planning_service.rs
+      - crates/plan/src/risk.rs
+      - crates/plan/src/validation.rs
+    outcome: >-
+      ADR-0036 ACCEPTED after owner ratification 2026-09-25 following
+      independent architecture/security review PASS of exact pre-acceptance
+      commit 48f793ede6a5b9ae5f722b16a0bdddbee99e4434. Ratified:
+      operator-authored parameter binding requires ADR-0033 B1-grade fresh
+      interactive user-presence authority, fail-closed (D1); the
+      product-owned closed selector catalog lives in crates/policy
+      alongside TestMutationPolicy, fingerprint anchored there (D2); the
+      V9 check_criteria_preservation change required by binding at plan
+      application/materialization (Option 2a) is authorized within
+      ADR-0036 itself as implementation follow-up IMPL-B, bound to only
+      params produced by the ADR-0036 §1a binding boundary for a
+      catalogued §5 selector, with any other non-empty params source still
+      escalating as requirement_changed / failing closed, and ships without
+      a separate ADR amendment (D3). Recommendations 1a/2a/3a/4a/5a
+      accepted as a package (D4); TASK-0144 remains intentionally
+      independent of TASK-0150 (D5). IMPL-A..D are listed in the ADR only
+      and are not created in this queue; the orchestrator registers them
+      separately. Bookkeeping is complete on this branch only; local
+      merge/integration and TASK-0144/IMPL-A..D implementation are not
+      claimed.
 
   - id: TASK-0146
     gate: G8
