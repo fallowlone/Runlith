@@ -233,6 +233,14 @@ impl CheckError {
     fn infra(msg: impl Into<String>) -> Self {
         Self::Infrastructure(msg.into())
     }
+
+    /// Extract the message, converting both variants to String.
+    /// Used for launching snapshot/evaluator processes which are not integrity checks.
+    fn into_message(self) -> String {
+        match self {
+            Self::Content(msg) | Self::Infrastructure(msg) => msg,
+        }
+    }
 }
 
 impl From<String> for CheckError {
@@ -263,15 +271,6 @@ impl CandidateError {
 impl From<String> for CandidateError {
     fn from(msg: String) -> Self {
         Self::Other(msg)
-    }
-}
-
-impl From<CheckError> for CandidateError {
-    fn from(err: CheckError) -> Self {
-        match err {
-            CheckError::Content(msg) => Self::Integrity(msg),
-            CheckError::Infrastructure(msg) => Self::Other(msg),
-        }
     }
 }
 
@@ -1600,7 +1599,8 @@ impl CandidateInputEvaluator {
             },
         ) {
             let _ = remove_snapshot();
-            return Err(e.into());
+            // Snapshot-write is not an integrity check; failure is journaled only.
+            return Err(CandidateError::Other(e.into_message()));
         }
 
         let output = run_candidate_process(
@@ -1638,8 +1638,9 @@ impl CandidateInputEvaluator {
             Ok(output) => output,
             Err(e) => {
                 // Error path: best-effort removal, return original error
+                // Evaluator launch is not an integrity check; failure is journaled only.
                 let _ = remove_snapshot();
-                return Err(e.into());
+                return Err(CandidateError::Other(e.into_message()));
             }
         };
 
@@ -1670,8 +1671,8 @@ impl CandidateInputEvaluator {
                 .unwrap_err());
         }
 
-        // Success path: removal error is fatal
-        remove_snapshot()?;
+        // Success path: removal error is fatal. This is not an integrity check.
+        remove_snapshot().map_err(|e| CandidateError::Other(e.into_message()))?;
         for phase in [
             evaluation::CandidateCheckpointPhase::AfterEvaluation,
             evaluation::CandidateCheckpointPhase::ResultAdmission,
@@ -7593,6 +7594,20 @@ mod tests {
         // CheckError::infra(..) is Infrastructure.
         let err = CheckError::infra("infrastructure message");
         assert!(matches!(err, CheckError::Infrastructure(_)));
+    }
+
+    #[test]
+    fn check_error_never_becomes_integrity_without_recording() {
+        // Compile-time documentation: the From<CheckError> for CandidateError impl
+        // was removed on purpose so that only integrity() can produce
+        // CandidateError::Integrity. This test verifies the into_message() helper
+        // correctly extracts messages from both CheckError variants without
+        // converting to Integrity.
+        let content_err: CheckError = "content failure".to_owned().into();
+        assert_eq!(content_err.into_message(), "content failure");
+
+        let infra_err = CheckError::infra("infrastructure failure");
+        assert_eq!(infra_err.into_message(), "infrastructure failure");
     }
 
     #[cfg(target_os = "macos")]
