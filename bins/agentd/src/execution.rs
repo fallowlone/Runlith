@@ -5928,15 +5928,47 @@ mod tests {
         );
         assert_eq!(recomputed.tree_oid, evidence.integrity.candidate_tree_oid);
 
-        // Re-evaluation on RESULT_ADMITTED must still report "no verdict":
-        // the Task is VERIFYING (not Completed), so a re-entry (e.g. after
-        // a restart while the operation is still RESULT_ADMITTED) must again
-        // return an error from the production composition, not replay the
-        // original evidence as a fresh verdict.
-        let replay = fresh_evaluator.evaluate(&request);
+        // The production composition must report no verdict on replay: the
+        // raw CandidateInputEvaluator idempotently re-reports an admitted
+        // verdict (R2); the no-verdict contract belongs to ProductionEvaluator.
+        let production = ProductionEvaluator::Candidate(fresh_evaluator);
+        let replay = production.evaluate(&request);
         assert!(
             replay.is_err(),
-            "re-evaluating during VERIFYING state must return no verdict (RESULT_ADMITTED state reuse)"
+            "production evaluator must return no verdict on RESULT_ADMITTED replay"
+        );
+        let err = replay.unwrap_err();
+        let err_msg = err.detail();
+        assert!(
+            err_msg.contains("completion awaits claim verification"),
+            "error must cite the completion verification gate, got: {err_msg}"
+        );
+
+        // Verify the replay leaves status, invalidation, and checkpoints unchanged.
+        let fresh_store = storage_sqlite::SqliteStore::open(&sandbox.db).expect("re-open store");
+        assert_eq!(
+            fresh_store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("RESULT_ADMITTED"),
+            "replay must not change operation status"
+        );
+        assert_eq!(
+            fresh_store
+                .candidate_operation_invalidation(execution_id.as_str(), attempt_id.as_str())
+                .unwrap(),
+            None,
+            "replay must not record invalidation"
+        );
+        let replayed_evidence = fresh_store
+            .get_candidate_evidence_for_completion(execution_id.as_str(), attempt_id.as_str())
+            .unwrap()
+            .expect("evidence must still exist after replay");
+        assert_eq!(
+            replayed_evidence.integrity.checkpoints.len(),
+            4,
+            "replay must not append checkpoints"
         );
     }
 
