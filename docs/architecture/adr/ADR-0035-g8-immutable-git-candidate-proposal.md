@@ -334,6 +334,40 @@ G6 Seatbelt authority surface; it grants no new filesystem data or
 listing access beyond what those sections already authorize, and no
 completion authority.
 
+## Amendment 2026-09-25: pinned Git executable for candidate-input reads
+
+**Why needed.** Candidate git-read launches resolved the Git executable
+from `PATH`, which may select a package-manager build such as Homebrew
+Git. Such a build loads dynamic libraries from its own prefix; under the
+candidate Seatbelt profile dyld cannot read them and the process aborts
+(observed: `Library not loaded: /opt/homebrew/opt/pcre2/lib/libpcre2-8.0.dylib`,
+SIGABRT). A `PATH`-resolved Git is also not the "pinned, trusted Git
+plumbing path" required by this ADR's "Git object source constraints".
+
+**Exact selection.** On macOS, candidate-input Git resolves only from
+this ordered list of Apple toolchain locations:
+`/Library/Developer/CommandLineTools/usr/bin/git`, then
+`/Applications/Xcode.app/Contents/Developer/usr/bin/git`. It never uses
+`PATH` or the `/usr/bin/git` xcrun shim, which depends on xcode-select
+state and caches outside the Seatbelt scope. A candidate is accepted only
+if it exists, canonicalizes to a regular file, and its canonical path
+equals its parent directory's canonical path joined with its file name, so
+a symlink redirecting the executable elsewhere is rejected. If no candidate
+qualifies, resolution fails closed with a path-free error; there is no
+fallback to `PATH` and no sandbox widening.
+
+On non-macOS platforms, candidate-input Git reads are unsupported, and
+the resolver falls back to the existing `resolve_git_executable()` PATH
+behavior since the candidate Seatbelt restriction does not apply there.
+
+**Scope.** The pinned Git executable is used only for candidate-input
+Git-read operations under `resolve_candidate_git_executable()`. Provider
+and workspace Git operations continue using the prior
+`resolve_git_executable()` PATH-based resolution, unchanged.
+
+Owner ratified 2026-09-25. Grants no new filesystem, process or
+completion authority.
+
 ## References
 
 - ADR-0018 — independent evaluation and completion authority.
