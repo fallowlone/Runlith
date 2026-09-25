@@ -45,6 +45,9 @@ pub const CHILD_ENV_ALLOWLIST: &[&str] = &[
     "LANG",
     "LC_ALL",
     "LC_CTYPE",
+    // Git-only system-config suppression. Composition sets the literal value
+    // for governed repository reads; ambient values are never inherited.
+    "GIT_CONFIG_NOSYSTEM",
     // Provider runtime redirection (explicit private directories).
     "XDG_CONFIG_HOME",
     "XDG_DATA_HOME",

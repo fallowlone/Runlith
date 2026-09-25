@@ -721,7 +721,15 @@ fn prepare_candidate_process(
     };
     let operation_record = PrivilegedOperation::from_policy_request(&launch.request);
     let requirements = IsolationRequirements::new(true, true, false);
-    let environment = ChildEnvironment::empty();
+    let environment = if request.operation == CandidateG6Operation::GitRead {
+        ChildEnvironment::from_explicit([(
+            std::ffi::OsString::from("GIT_CONFIG_NOSYSTEM"),
+            std::ffi::OsString::from("1"),
+        )])
+        .map_err(|error| format!("candidate Git environment is invalid: {error}"))?
+    } else {
+        ChildEnvironment::empty()
+    };
     let backend =
         production_runner_backend(request.support_read.clone(), request.support_write.clone())?;
     let spec = ProcessSecuritySpec::new(
@@ -787,9 +795,22 @@ struct CandidateFreshnessRequest<'a> {
     started_at_ms: u64,
 }
 
+struct CandidateGitContext<'a> {
+    request: &'a EvaluationRequest,
+    invocation_id: &'a str,
+    workspace: &'a Path,
+    gitdir: &'a Path,
+    roots: Vec<PathBuf>,
+}
+
 impl EvaluationPort for CandidateInputEvaluator {
     fn evaluate(&self, request: &EvaluationRequest) -> EvaluationResult<EvaluationVerdict> {
         self.evaluate_candidate(request)
+            .map_err(evaluation::EvaluationError::new)
+    }
+
+    fn revalidate_before_completion(&self, request: &EvaluationRequest) -> EvaluationResult<()> {
+        self.revalidate_candidate_completion(request)
             .map_err(evaluation::EvaluationError::new)
     }
 }
@@ -876,48 +897,39 @@ impl CandidateInputEvaluator {
             .map_err(|error| format!("load trusted Git anchor: {error}"))?
             .ok_or_else(|| "candidate workspace has no trusted Git anchor".to_owned())?;
         let root = PathBuf::from(lease.worktree_ref());
-        let object_format = self.git_output(
+        let selected_pointer =
+            read_authorized_worktree_pointer(&self.db_path, request, &invocation_id, &root)?;
+        let linked_gitdir = authenticated_worktree_gitdir(
+            &self.db_path,
             request,
             &invocation_id,
             &root,
-            &["rev-parse", "--show-object-format"],
-            vec![root.clone(), anchor.canonical_commondir().to_path_buf()],
-            64,
+            &selected_pointer,
+            &anchor,
         )?;
+        let git_context = CandidateGitContext {
+            request,
+            invocation_id: &invocation_id,
+            workspace: anchor.canonical_commondir(),
+            gitdir: &linked_gitdir,
+            roots: vec![root.clone(), anchor.canonical_commondir().to_path_buf()],
+        };
+        let object_format =
+            self.git_output(&git_context, &["rev-parse", "--show-object-format"], 64)?;
         let object_format = std::str::from_utf8(&object_format)
             .map_err(|_| "Git object format output is unsupported".to_owned())?
             .strip_suffix('\n')
             .ok_or_else(|| "Git object format output is incomplete".to_owned())?;
         let object_format = evaluation::GitObjectFormat::from_repository_format(object_format)
             .map_err(|error| format!("unsupported Git object format: {error}"))?;
-        let head = self.git_output(
-            request,
-            &invocation_id,
-            &root,
-            &["rev-parse", "--verify", "HEAD^{commit}"],
-            vec![root.clone(), anchor.canonical_commondir().to_path_buf()],
-            128,
-        )?;
+        let head = self.git_output(&git_context, &["rev-parse", "--verify", "HEAD"], 128)?;
         let candidate_oid = std::str::from_utf8(&head)
             .map_err(|_| "candidate HEAD is not UTF-8".to_owned())?
             .strip_suffix('\n')
             .ok_or_else(|| "candidate HEAD output is incomplete".to_owned())?;
-        let candidate = self.verify_commit(
-            request,
-            &invocation_id,
-            &root,
-            &anchor,
-            candidate_oid,
-            object_format,
-        )?;
-        let base_candidate = self.verify_commit(
-            request,
-            &invocation_id,
-            &root,
-            &anchor,
-            &base.base_revision,
-            object_format,
-        )?;
+        let candidate = self.verify_commit(&git_context, candidate_oid, object_format)?;
+        let base_candidate =
+            self.verify_commit(&git_context, &base.base_revision, object_format)?;
         if let Some(evidence) = store
             .get_candidate_evidence(request.execution_id.as_str(), request.attempt_id.as_str())
             .map_err(|error| format!("load prior candidate evidence: {error}"))?
@@ -1061,6 +1073,7 @@ impl CandidateInputEvaluator {
             },
         )?;
         let result = parse_candidate_result(&output.stdout, &candidate.manifest.sha256)?;
+        validate_candidate_result(&result, &candidate, selector)?;
         for phase in [
             evaluation::CandidateCheckpointPhase::AfterEvaluation,
             evaluation::CandidateCheckpointPhase::ResultAdmission,
@@ -1136,28 +1149,6 @@ impl CandidateInputEvaluator {
                 request.attempt_id.clone(),
             )
             .map_err(|error| format!("persist trusted candidate result before verdict: {error}"))?;
-        let completion_checkpoint = self.freshness_checkpoint(CandidateFreshnessRequest {
-            request,
-            invocation_id: &invocation_id,
-            root: &root,
-            anchor: &anchor,
-            candidate: &candidate,
-            format: object_format,
-            phase: evaluation::CandidateCheckpointPhase::Completion,
-            started_at_ms,
-        })?;
-        if !completion_checkpoint.matched {
-            return Err("candidate inputs changed after durable result admission".to_owned());
-        }
-        let mut completion_store = storage_sqlite::SqliteStore::open(&self.db_path)
-            .map_err(|error| format!("open candidate completion store: {error}"))?;
-        completion_store
-            .append_candidate_checkpoint(
-                request.execution_id.as_str(),
-                request.attempt_id.as_str(),
-                &completion_checkpoint,
-            )
-            .map_err(|error| format!("persist candidate completion checkpoint: {error}"))?;
         Ok(if result.failed == 0 {
             EvaluationVerdict::Verified
         } else {
@@ -1165,16 +1156,140 @@ impl CandidateInputEvaluator {
         })
     }
 
+    fn revalidate_candidate_completion(&self, request: &EvaluationRequest) -> Result<(), String> {
+        let mut store = storage_sqlite::SqliteStore::open(&self.db_path)
+            .map_err(|error| format!("open candidate completion store: {error}"))?;
+        let evidence = store
+            .get_candidate_evidence(request.execution_id.as_str(), request.attempt_id.as_str())
+            .map_err(|error| format!("load candidate completion evidence: {error}"))?
+            .ok_or_else(|| "candidate completion evidence is unavailable".to_owned())?;
+        let assessment = evidence.integrity;
+        let task = store
+            .get_task(&request.task_id)
+            .map_err(|error| format!("load candidate completion task: {error}"))?
+            .ok_or_else(|| "candidate completion task is unavailable".to_owned())?;
+        if task.state() != TaskState::Verifying
+            || assessment.task_id != request.task_id.as_str()
+            || assessment.execution_id != request.execution_id.as_str()
+            || assessment.attempt_id != request.attempt_id.as_str()
+        {
+            return Err("candidate completion lineage or Task state changed".to_owned());
+        }
+        let selector = task
+            .evidence_requirements()
+            .iter()
+            .filter(|requirement| requirement.required)
+            .map(evaluation::CandidateSelector::from_requirement)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("candidate completion requirement is stale: {error}"))?;
+        if selector.len() != 1
+            || selector[0].requirement_revision != assessment.requirement_revision
+            || selector[0].criterion_id != assessment.criterion_id
+            || selector[0].selector != assessment.selector
+            || selector[0].path != assessment.selector_path
+            || selector[0].literal != assessment.selector_literal
+        {
+            return Err("candidate completion requirement binding changed".to_owned());
+        }
+        let base = store
+            .get_evaluated_policy_base(request.execution_id.as_str())
+            .map_err(|error| format!("load candidate completion policy: {error}"))?
+            .ok_or_else(|| "candidate completion policy is unavailable".to_owned())?;
+        if base.policy.revision() != assessment.policy_revision
+            || base.policy.fingerprint() != assessment.policy_fingerprint
+        {
+            return Err("candidate completion policy binding changed".to_owned());
+        }
+        let lease = store
+            .get_workspace_for_execution(&request.execution_id)
+            .map_err(|error| format!("load candidate completion workspace: {error}"))?
+            .ok_or_else(|| "candidate completion workspace is unavailable".to_owned())?;
+        let anchor = store
+            .get_trusted_anchor(lease.id())
+            .map_err(|error| format!("load candidate completion Git anchor: {error}"))?
+            .ok_or_else(|| "candidate completion Git anchor is unavailable".to_owned())?;
+        let root = PathBuf::from(lease.worktree_ref());
+        let pointer = read_authorized_worktree_pointer(
+            &self.db_path,
+            request,
+            &assessment.invocation_id,
+            &root,
+        )?;
+        let linked_gitdir = authenticated_worktree_gitdir(
+            &self.db_path,
+            request,
+            &assessment.invocation_id,
+            &root,
+            &pointer,
+            &anchor,
+        )?;
+        let format = evaluation::GitObjectFormat::from_oid(&assessment.candidate_commit_oid)
+            .map_err(|error| format!("candidate completion object format invalid: {error}"))?;
+        let git_context = CandidateGitContext {
+            request,
+            invocation_id: &assessment.invocation_id,
+            workspace: anchor.canonical_commondir(),
+            gitdir: &linked_gitdir,
+            roots: vec![root.clone(), anchor.canonical_commondir().to_path_buf()],
+        };
+        let candidate =
+            self.verify_commit(&git_context, &assessment.candidate_commit_oid, format)?;
+        if candidate.manifest.sha256 != assessment.candidate_manifest_sha256
+            || candidate.tree_oid != assessment.candidate_tree_oid
+        {
+            return Err("candidate completion immutable subject changed".to_owned());
+        }
+        let checkpoint = self.freshness_checkpoint(CandidateFreshnessRequest {
+            request,
+            invocation_id: &assessment.invocation_id,
+            root: &root,
+            anchor: &anchor,
+            candidate: &candidate,
+            format,
+            phase: evaluation::CandidateCheckpointPhase::Completion,
+            started_at_ms: assessment.started_at_ms,
+        })?;
+        if !checkpoint.matched {
+            return Err("candidate inputs changed before Task completion".to_owned());
+        }
+        store
+            .append_candidate_checkpoint(
+                request.execution_id.as_str(),
+                request.attempt_id.as_str(),
+                &checkpoint,
+            )
+            .map_err(|error| format!("persist candidate completion checkpoint: {error}"))
+    }
+
     fn git_output(
         &self,
-        request: &EvaluationRequest,
-        invocation_id: &str,
-        workspace: &Path,
+        context: &CandidateGitContext<'_>,
         args: &[&str],
-        roots: Vec<PathBuf>,
         max_stdout: u64,
     ) -> Result<Vec<u8>, String> {
-        let mut process_args = vec!["-C".into(), workspace.as_os_str().into()];
+        self.git_output_with_input(context, args, Vec::new(), max_stdout)
+    }
+
+    fn git_output_with_input(
+        &self,
+        context: &CandidateGitContext<'_>,
+        args: &[&str],
+        input: Vec<u8>,
+        max_stdout: u64,
+    ) -> Result<Vec<u8>, String> {
+        let request = context.request;
+        let invocation_id = context.invocation_id;
+        let workspace = context.workspace;
+        let gitdir = context.gitdir;
+        let roots = context.roots.clone();
+        let mut process_args = vec![
+            "-C".into(),
+            workspace.as_os_str().into(),
+            "--git-dir".into(),
+            gitdir.as_os_str().into(),
+            "--no-replace-objects".into(),
+            "--no-lazy-fetch".into(),
+        ];
         process_args.extend(args.iter().map(std::ffi::OsString::from));
         Ok(run_candidate_process(
             &self.db_path,
@@ -1191,8 +1306,8 @@ impl CandidateInputEvaluator {
                 filesystem_roots: roots.clone(),
                 executable: self.git_executable.clone(),
                 args: process_args,
-                input: Vec::new(),
-                support_read: roots,
+                input,
+                support_read: roots.clone(),
                 support_write: Vec::new(),
                 max_stdout,
             },
@@ -1202,10 +1317,7 @@ impl CandidateInputEvaluator {
 
     fn verify_commit(
         &self,
-        request: &EvaluationRequest,
-        invocation_id: &str,
-        root: &Path,
-        anchor: &workspace::TrustedCommonGit,
+        context: &CandidateGitContext<'_>,
         commit_oid: &str,
         format: evaluation::GitObjectFormat,
     ) -> Result<evaluation::VerifiedCandidate, String> {
@@ -1216,20 +1328,10 @@ impl CandidateInputEvaluator {
                 input.push(b'\n');
             }
             let output = self
-                .git_output(
-                    request,
-                    invocation_id,
-                    root,
-                    &[
-                        "--no-replace-objects",
-                        "--no-lazy-fetch",
-                        "cat-file",
-                        "--batch",
-                    ],
-                    vec![
-                        root.to_path_buf(),
-                        anchor.canonical_commondir().to_path_buf(),
-                    ],
+                .git_output_with_input(
+                    context,
+                    &["cat-file", "--batch"],
+                    input,
                     evaluation::MAX_CANDIDATE_BLOB_BYTES + 64 * 1024 * 1024,
                 )
                 .map_err(|_| evaluation::CandidateError::MissingObject)?;
@@ -1252,6 +1354,16 @@ impl CandidateInputEvaluator {
             phase,
             started_at_ms,
         } = freshness;
+        let pointer_before =
+            read_authorized_worktree_pointer(&self.db_path, request, invocation_id, root)?;
+        let authenticated_gitdir = authenticated_worktree_gitdir(
+            &self.db_path,
+            request,
+            invocation_id,
+            root,
+            &pointer_before,
+            anchor,
+        )?;
         let canonical_root = root
             .canonicalize()
             .map_err(|_| "leased candidate worktree is unavailable".to_owned())?;
@@ -1262,36 +1374,28 @@ impl CandidateInputEvaluator {
             root.to_path_buf(),
             anchor.canonical_commondir().to_path_buf(),
         ];
-        let head = self.git_output(
+        let git_context = CandidateGitContext {
             request,
             invocation_id,
-            root,
-            &["rev-parse", "--verify", "HEAD^{commit}"],
-            roots.clone(),
-            128,
-        )?;
+            workspace: anchor.canonical_commondir(),
+            gitdir: &authenticated_gitdir,
+            roots: roots.clone(),
+        };
+        let head = self.git_output(&git_context, &["rev-parse", "--verify", "HEAD"], 128)?;
         let index = self.git_output(
-            request,
-            invocation_id,
-            root,
+            &git_context,
             &["ls-files", "--stage", "-z"],
-            roots.clone(),
             16 * 1024 * 1024,
         )?;
         let common = self.git_output(
-            request,
-            invocation_id,
-            root,
+            &git_context,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-            roots,
             4096,
         )?;
         let common_path = std::str::from_utf8(&common)
             .map_err(|_| "Git common directory is invalid".to_owned())?
             .trim_end_matches('\n');
-        let common_path = PathBuf::from(common_path)
-            .canonicalize()
-            .map_err(|_| "Git common directory unavailable".to_owned())?;
+        let common_path = PathBuf::from(common_path);
         let mut descriptor_authority =
             G6SecurityService::open(&self.db_path, app_services::SystemClock)
                 .map_err(|error| format!("G6 descriptor read authority unavailable: {error}"))?;
@@ -1392,23 +1496,47 @@ impl CandidateInputEvaluator {
                 }
             }
         };
+        let pointer_before_scan =
+            read_authorized_worktree_pointer(&self.db_path, request, invocation_id, root)?;
+        let authenticated_before_scan = authenticated_worktree_gitdir(
+            &self.db_path,
+            request,
+            invocation_id,
+            root,
+            &pointer_before_scan,
+            anchor,
+        )?;
         let scan = effect_capture_local::scan_live_worktree(root, &mut authorize_descriptor)
             .map_err(|error| format!("live worktree scan failed: {error}"))?;
+        let pointer_after =
+            read_authorized_worktree_pointer(&self.db_path, request, invocation_id, root)?;
+        let authenticated_after = authenticated_worktree_gitdir(
+            &self.db_path,
+            request,
+            invocation_id,
+            root,
+            &pointer_after,
+            anchor,
+        )?;
         let live_manifest = evaluation::CandidateManifest::from_files(&scan.files)
             .map_err(|error| error.to_string())?;
         let dirs_match = scan.directories == manifest_directories(&candidate.manifest.entries);
         let head_matches =
             std::str::from_utf8(&head).is_ok_and(|value| value.trim_end() == candidate.commit_oid);
         let index_matches = index_matches_candidate(&index, candidate);
-        let pointer_matches = scan
-            .git_pointer
-            .as_deref()
-            .is_some_and(|pointer| validate_worktree_pointer(root, pointer, anchor));
+        let pointer_matches = pointer_before_scan == pointer_before
+            && scan.git_pointer.as_deref() == Some(pointer_before_scan.as_slice())
+            && pointer_after == pointer_before_scan
+            && authenticated_before_scan == authenticated_gitdir
+            && authenticated_after == authenticated_gitdir;
         let metadata = [
             head.as_slice(),
             index.as_slice(),
             common.as_slice(),
-            scan.git_pointer.as_deref().unwrap_or_default(),
+            pointer_before.as_slice(),
+            pointer_before_scan.as_slice(),
+            pointer_after.as_slice(),
+            authenticated_gitdir.as_os_str().as_encoded_bytes(),
         ]
         .concat();
         let git_metadata_fingerprint = evaluation::candidate_sha256(&metadata);
@@ -1602,6 +1730,23 @@ fn parse_candidate_result(
     Ok(result)
 }
 
+fn validate_candidate_result(
+    result: &evaluation::CandidateTestResult,
+    candidate: &evaluation::VerifiedCandidate,
+    requirement: &evaluation::CandidateSelector,
+) -> Result<(), String> {
+    let expected = evaluation::CandidateTestResult::file_contains(
+        &candidate.files,
+        &requirement.path,
+        &requirement.literal,
+    )
+    .map_err(|error| format!("candidate result could not be recomputed: {error}"))?;
+    if result != &expected {
+        return Err("candidate evaluator result differs from selected immutable bytes".to_owned());
+    }
+    Ok(())
+}
+
 fn parse_git_batch(
     bytes: &[u8],
     requested: &[String],
@@ -1697,75 +1842,254 @@ fn manifest_directories(entries: &[evaluation::CandidateManifestEntry]) -> Vec<V
     directories.into_iter().collect()
 }
 
-fn validate_worktree_pointer(
+fn authenticated_worktree_gitdir(
+    db_path: &Path,
+    request: &EvaluationRequest,
+    invocation_id: &str,
     root: &Path,
     pointer: &[u8],
     anchor: &workspace::TrustedCommonGit,
-) -> bool {
-    let Ok(text) = std::str::from_utf8(pointer) else {
-        return false;
-    };
-    let Some(raw_gitdir) = text
+) -> Result<PathBuf, String> {
+    let text = std::str::from_utf8(pointer)
+        .map_err(|_| "linked worktree pointer is not UTF-8".to_owned())?;
+    let raw_gitdir = text
         .strip_prefix("gitdir: ")
         .and_then(|text| text.strip_suffix('\n'))
-    else {
-        return false;
-    };
-    let raw_gitdir = PathBuf::from(raw_gitdir);
-    let gitdir = if raw_gitdir.is_absolute() {
-        raw_gitdir
-    } else {
-        root.join(raw_gitdir)
-    };
-    let Ok(gitdir) = gitdir.canonicalize() else {
-        return false;
-    };
-    let gitdir_file = gitdir.join("gitdir");
-    let commondir_file = gitdir.join("commondir");
-    let Ok(gitdir_meta) = std::fs::symlink_metadata(&gitdir_file) else {
-        return false;
-    };
-    let Ok(common_meta) = std::fs::symlink_metadata(&commondir_file) else {
-        return false;
-    };
-    if !gitdir_meta.is_file()
-        || gitdir_meta.file_type().is_symlink()
-        || !common_meta.is_file()
-        || common_meta.file_type().is_symlink()
-    {
-        return false;
+        .ok_or_else(|| "linked worktree pointer framing is invalid".to_owned())?;
+    if raw_gitdir.contains('\n') || raw_gitdir.contains('\0') {
+        return Err("linked worktree pointer contains unsupported bytes".to_owned());
     }
-    let Ok(backref) = std::fs::read_to_string(gitdir_file) else {
-        return false;
+    let gitdir = lexical_absolute(root, Path::new(raw_gitdir))?;
+    let worktrees_root = anchor.canonical_commondir().join("worktrees");
+    let relative = gitdir
+        .strip_prefix(&worktrees_root)
+        .map_err(|_| "linked Git metadata escapes the trusted common directory".to_owned())?;
+    if relative.as_os_str().is_empty() {
+        return Err("linked Git metadata directory is ambiguous".to_owned());
+    }
+    let relative_bytes = relative
+        .to_str()
+        .ok_or_else(|| "linked Git metadata path is not UTF-8".to_owned())?
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    let common = anchor
+        .canonical_commondir()
+        .to_str()
+        .ok_or_else(|| "trusted common directory is not UTF-8".to_owned())?
+        .to_owned();
+    let capability = Capability::FilesystemRead(
+        FileScope::new(&common, ".").map_err(|error| format!("linked metadata scope: {error}"))?,
+    );
+    let policy_request = PolicyRequest::new(
+        format!(
+            "{invocation_id}.linked-metadata:{}",
+            NEXT_CANDIDATE_OPERATION.fetch_add(1, Ordering::Relaxed)
+        ),
+        "candidate-linked-worktree-metadata",
+        RequestOrigin::new(
+            request.task_id.as_str(),
+            Some(request.execution_id.as_str().to_owned()),
+            Some(request.attempt_id.as_str().to_owned()),
+        )
+        .map_err(|error| format!("linked metadata origin: {error}"))?,
+        RequestedCapabilities::new(vec![capability.clone()]),
+    )
+    .map_err(|error| format!("linked metadata request: {error}"))?;
+    let policy = CompiledPolicy::compile(vec![PolicyRule::new(
+        "builtin.candidate.linked-metadata",
+        "authenticated_linked_worktree_metadata",
+        PolicyLayer::BuiltInHard,
+        PolicyOutcome::Allow,
+        capability.clone(),
+    )
+    .map_err(|error| format!("linked metadata rule: {error}"))?])
+    .map_err(|error| format!("linked metadata policy: {error}"))?;
+    let mut security = G6SecurityService::open(db_path, app_services::SystemClock)
+        .map_err(|error| format!("linked metadata G6 unavailable: {error}"))?;
+    let parent = EffectiveCapabilities::new(vec![capability]);
+    let effective = match security
+        .authorize(&policy_request, &parent, &policy, u64::MAX)
+        .map_err(|error| format!("linked metadata G6 authorization failed: {error}"))?
+    {
+        G6Authorization::Authorized { effective, .. } => effective,
+        G6Authorization::ApprovalRequired { .. } | G6Authorization::Denied { .. } => {
+            return Err("G6 denied linked metadata access".to_owned());
+        }
     };
-    let Ok(common) = std::fs::read_to_string(commondir_file) else {
-        return false;
+    let mut authorize = |path: &[u8], operation| {
+        let path = std::str::from_utf8(path)
+            .map_err(|_| evaluation::EffectError::CaptureFailed("linked metadata path invalid"))?;
+        let operation_name = match operation {
+            effect_capture_local::DescriptorReadOperation::OpenDirectory => "open-directory",
+            effect_capture_local::DescriptorReadOperation::ReadDirectory => "read-directory",
+            effect_capture_local::DescriptorReadOperation::Metadata => "metadata",
+            effect_capture_local::DescriptorReadOperation::OpenFile => "open-file",
+            effect_capture_local::DescriptorReadOperation::ReadFile => "read-file",
+        };
+        let capability =
+            Capability::FilesystemRead(FileScope::new(&common, path).map_err(|_| {
+                evaluation::EffectError::CaptureFailed("linked metadata scope invalid")
+            })?);
+        let request = PolicyRequest::new(
+            format!(
+                "{invocation_id}.linked-metadata.{}.{}",
+                NEXT_CANDIDATE_OPERATION.fetch_add(1, Ordering::Relaxed),
+                operation_name
+            ),
+            "candidate-linked-worktree-metadata",
+            RequestOrigin::new(
+                request.task_id.as_str(),
+                Some(request.execution_id.as_str().to_owned()),
+                Some(request.attempt_id.as_str().to_owned()),
+            )
+            .map_err(|_| {
+                evaluation::EffectError::CaptureFailed("linked metadata origin invalid")
+            })?,
+            RequestedCapabilities::new(vec![capability]),
+        )
+        .map_err(|_| evaluation::EffectError::CaptureFailed("linked metadata request invalid"))?;
+        security
+            .authorize_filesystem_read(&request, &effective, common.clone(), path)
+            .map_err(|_| {
+                evaluation::EffectError::CaptureFailed("G6 denied linked metadata operation")
+            })?;
+        Ok(())
     };
-    let backref = PathBuf::from(backref.trim());
-    let backref = if backref.is_absolute() {
-        backref
+    let gitdir_file = effect_capture_local::read_linked_metadata_file(
+        anchor.canonical_commondir(),
+        format!("{relative_bytes}/gitdir").as_bytes(),
+        &mut authorize,
+    )
+    .map_err(|error| format!("linked worktree back-reference read failed: {error}"))?;
+    let commondir_file = effect_capture_local::read_linked_metadata_file(
+        anchor.canonical_commondir(),
+        format!("{relative_bytes}/commondir").as_bytes(),
+        &mut authorize,
+    )
+    .map_err(|error| format!("linked worktree common-dir read failed: {error}"))?;
+    let backref = std::str::from_utf8(&gitdir_file)
+        .map_err(|_| "linked worktree back-reference is invalid".to_owned())?
+        .strip_suffix('\n')
+        .ok_or_else(|| "linked worktree back-reference framing is invalid".to_owned())?;
+    let common_ref = std::str::from_utf8(&commondir_file)
+        .map_err(|_| "linked worktree common-dir reference is invalid".to_owned())?
+        .strip_suffix('\n')
+        .ok_or_else(|| "linked worktree common-dir framing is invalid".to_owned())?;
+    if lexical_absolute(&gitdir, Path::new(backref))? != root.join(".git")
+        || lexical_absolute(&gitdir, Path::new(common_ref))? != anchor.canonical_commondir()
+    {
+        return Err("linked worktree metadata does not authenticate the root pointer".to_owned());
+    }
+    Ok(gitdir)
+}
+
+fn read_authorized_worktree_pointer(
+    db_path: &Path,
+    request: &EvaluationRequest,
+    invocation_id: &str,
+    root: &Path,
+) -> Result<Vec<u8>, String> {
+    let workspace = root
+        .to_str()
+        .ok_or_else(|| "candidate worktree root is not UTF-8".to_owned())?
+        .to_owned();
+    let capability = Capability::FilesystemRead(
+        FileScope::new(&workspace, ".")
+            .map_err(|error| format!("candidate pointer root scope: {error}"))?,
+    );
+    let policy_request = PolicyRequest::new(
+        format!(
+            "{invocation_id}.pointer-root:{}",
+            NEXT_CANDIDATE_OPERATION.fetch_add(1, Ordering::Relaxed)
+        ),
+        "candidate-live-worktree-pointer",
+        RequestOrigin::new(
+            request.task_id.as_str(),
+            Some(request.execution_id.as_str().to_owned()),
+            Some(request.attempt_id.as_str().to_owned()),
+        )
+        .map_err(|error| format!("candidate pointer origin: {error}"))?,
+        RequestedCapabilities::new(vec![capability.clone()]),
+    )
+    .map_err(|error| format!("candidate pointer request: {error}"))?;
+    let policy = CompiledPolicy::compile(vec![PolicyRule::new(
+        "builtin.candidate.worktree-pointer",
+        "accepted_candidate_git_read_scope",
+        PolicyLayer::BuiltInHard,
+        PolicyOutcome::Allow,
+        capability.clone(),
+    )
+    .map_err(|error| format!("candidate pointer rule: {error}"))?])
+    .map_err(|error| format!("candidate pointer policy: {error}"))?;
+    let mut security = G6SecurityService::open(db_path, app_services::SystemClock)
+        .map_err(|error| format!("candidate pointer G6 unavailable: {error}"))?;
+    let parent = EffectiveCapabilities::new(vec![capability]);
+    let effective = match security
+        .authorize(&policy_request, &parent, &policy, u64::MAX)
+        .map_err(|error| format!("candidate pointer G6 authorization failed: {error}"))?
+    {
+        G6Authorization::Authorized { effective, .. } => effective,
+        G6Authorization::ApprovalRequired { .. } | G6Authorization::Denied { .. } => {
+            return Err("G6 denied candidate worktree pointer read".to_owned());
+        }
+    };
+    let mut authorize = |path: &[u8], operation| {
+        let path = std::str::from_utf8(path)
+            .map_err(|_| evaluation::EffectError::CaptureFailed("pointer path invalid"))?;
+        let capability = Capability::FilesystemRead(
+            FileScope::new(&workspace, path)
+                .map_err(|_| evaluation::EffectError::CaptureFailed("pointer scope invalid"))?,
+        );
+        let request = PolicyRequest::new(
+            format!(
+                "{invocation_id}.pointer.{}",
+                NEXT_CANDIDATE_OPERATION.fetch_add(1, Ordering::Relaxed)
+            ),
+            "candidate-live-worktree-pointer",
+            RequestOrigin::new(
+                request.task_id.as_str(),
+                Some(request.execution_id.as_str().to_owned()),
+                Some(request.attempt_id.as_str().to_owned()),
+            )
+            .map_err(|_| evaluation::EffectError::CaptureFailed("pointer origin invalid"))?,
+            RequestedCapabilities::new(vec![capability]),
+        )
+        .map_err(|_| evaluation::EffectError::CaptureFailed("pointer request invalid"))?;
+        let _operation = operation;
+        security
+            .authorize_filesystem_read(&request, &effective, workspace.clone(), path)
+            .map_err(|_| {
+                evaluation::EffectError::CaptureFailed("G6 denied worktree pointer operation")
+            })?;
+        Ok(())
+    };
+    effect_capture_local::read_worktree_git_pointer(root, &mut authorize)
+        .map_err(|error| format!("authorized worktree pointer read failed: {error}"))
+}
+
+fn lexical_absolute(base: &Path, path: &Path) -> Result<PathBuf, String> {
+    let source = if path.is_absolute() {
+        path.to_path_buf()
     } else {
-        gitdir.join(backref)
+        base.join(path)
     };
-    let Ok(backref) = backref.canonicalize() else {
-        return false;
-    };
-    let dot_git = root.join(".git");
-    let Ok(dot_git) = dot_git.canonicalize() else {
-        return false;
-    };
-    let common = PathBuf::from(common.trim());
-    let common = if common.is_absolute() {
-        common
-    } else {
-        gitdir.join(common)
-    };
-    let Ok(common) = common.canonicalize() else {
-        return false;
-    };
-    backref == dot_git
-        && common == anchor.canonical_commondir()
-        && gitdir.starts_with(anchor.canonical_commondir().join("worktrees"))
+    let mut normalized = PathBuf::new();
+    for component in source.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err("linked metadata path escapes filesystem root".to_owned());
+                }
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+    if !normalized.is_absolute() {
+        return Err("linked metadata path is not absolute".to_owned());
+    }
+    Ok(normalized)
 }
 
 impl scheduler::ExecutionPort for SecuredClaudeExecutor {
@@ -4474,18 +4798,91 @@ mod tests {
     }
 
     #[test]
+    fn governed_git_batch_launch_forwards_requested_oids_on_stdin() {
+        let sandbox = Sandbox::named("candidate-git-batch-stdin");
+        seed_ready(&sandbox.db, "P-CANDIDATE-GIT", "T-CANDIDATE-GIT");
+        let _composition = sandbox.composition(None);
+        let oid = std::process::Command::new("git")
+            .args(["-C", sandbox.repo.to_str().unwrap(), "rev-parse", "HEAD"])
+            .output()
+            .expect("fixture Git rev-parse");
+        assert!(oid.status.success());
+        let oid = String::from_utf8(oid.stdout).unwrap().trim().to_owned();
+        let mut input = oid.as_bytes().to_vec();
+        input.push(b'\n');
+        let git_executable = std::env::var_os("PATH")
+            .and_then(|path| {
+                std::env::split_paths(&path)
+                    .map(|directory| directory.join("git"))
+                    .find(|path| path.is_file())
+            })
+            .expect("Git is present on PATH")
+            .canonicalize()
+            .expect("Git executable canonicalizes");
+        let output = run_candidate_process(
+            &sandbox.db,
+            CandidateProcessRequest {
+                operation: CandidateG6Operation::GitRead,
+                task_id: "T-CANDIDATE-GIT".to_owned(),
+                execution_id: "E-CANDIDATE-GIT".to_owned(),
+                attempt_id: "A-CANDIDATE-GIT".to_owned(),
+                invocation_id: "candidate-git-batch-stdin-test".to_owned(),
+                workspace: sandbox.repo.clone(),
+                filesystem_roots: vec![sandbox.repo.clone()],
+                executable: git_executable,
+                args: vec![
+                    "-C".into(),
+                    sandbox.repo.as_os_str().into(),
+                    "--no-replace-objects".into(),
+                    "--no-lazy-fetch".into(),
+                    "cat-file".into(),
+                    "--batch".into(),
+                ],
+                input,
+                support_read: vec![sandbox.repo.clone()],
+                support_write: Vec::new(),
+                max_stdout: 1024 * 1024,
+            },
+        )
+        .expect("G6 and Runner governed batch process");
+        let objects = parse_git_batch(&output.stdout, &[oid]).expect("framed commit response");
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].1, "commit");
+    }
+
+    #[test]
     fn candidate_result_parser_requires_exact_manifest_and_one_outcome() {
         let manifest = format!("sha256:{}", "a".repeat(64));
         let result = format!(
             "candidate-test-result/v1\nselector=candidate.file-contains.v1\nmanifest={manifest}\npassed=1\nfailed=0\nskipped=0\nresult=sha256:{}\n",
             "b".repeat(64)
         );
-        assert_eq!(
-            parse_candidate_result(result.as_bytes(), &manifest)
-                .unwrap()
-                .passed,
-            1
-        );
+        let parsed = parse_candidate_result(result.as_bytes(), &manifest).unwrap();
+        let candidate = evaluation::VerifiedCandidate {
+            commit_oid: "a".repeat(40),
+            tree_oid: "c".repeat(40),
+            manifest: evaluation::CandidateManifest {
+                version: 1,
+                entries: vec![],
+                sha256: manifest.clone(),
+                total_bytes: 0,
+            },
+            files: vec![evaluation::CandidateFile {
+                path: b"README.md".to_vec(),
+                mode: 0o100644,
+                git_oid: None,
+                bytes: b"expected literal".to_vec(),
+            }],
+        };
+        let requirement = evaluation::CandidateSelector {
+            criterion_id: "criterion-1".to_owned(),
+            selector: "candidate.file-contains.v1".to_owned(),
+            path: "README.md".to_owned(),
+            literal: "expected literal".to_owned(),
+            requirement_revision:
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned(),
+        };
+        assert!(validate_candidate_result(&parsed, &candidate, &requirement).is_err());
         assert!(
             parse_candidate_result(result.as_bytes(), &format!("sha256:{}", "c".repeat(64)))
                 .is_err()

@@ -717,24 +717,30 @@ impl<C: Clock> OrchestrationService<C> {
                 self.tasks.begin_verification(task_id)?;
 
                 // -- independent verdict (the executor never judges) ---------
-                let verdict = evaluator
-                    .evaluate(&EvaluationRequest {
-                        task_id: task_id.clone(),
-                        execution_id: execution_id.clone(),
-                        attempt_id: attempt_id.clone(),
-                        summary,
-                        evidence_ref,
-                    })
-                    .map_err(|error| {
-                        // No verdict reached: the Task stays VERIFYING
-                        // (durable) with its evidence intact. Reported, never
-                        // retried inside this cycle.
-                        ServiceError::Storage(StorageError::ConstraintViolation(format!(
-                            "independent evaluation produced no verdict: {error}"
-                        )))
-                    })?;
+                let evaluation_request = EvaluationRequest {
+                    task_id: task_id.clone(),
+                    execution_id: execution_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    summary,
+                    evidence_ref,
+                };
+                let verdict = evaluator.evaluate(&evaluation_request).map_err(|error| {
+                    // No verdict reached: the Task stays VERIFYING
+                    // (durable) with its evidence intact. Reported, never
+                    // retried inside this cycle.
+                    ServiceError::Storage(StorageError::ConstraintViolation(format!(
+                        "independent evaluation produced no verdict: {error}"
+                    )))
+                })?;
                 match verdict {
                     EvaluationVerdict::Verified => {
+                        evaluator
+                            .revalidate_before_completion(&evaluation_request)
+                            .map_err(|error| {
+                                ServiceError::Storage(StorageError::ConstraintViolation(format!(
+                                    "completion freshness revalidation failed: {error}"
+                                )))
+                            })?;
                         self.tasks.verification_succeeded(
                             task_id,
                             "VERIFIED via independent evaluation",

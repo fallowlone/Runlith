@@ -4,8 +4,8 @@
 mod candidate_snapshot;
 
 pub use candidate_snapshot::{
-    materialize_candidate_snapshot, read_candidate_snapshot, scan_live_worktree, CandidateSnapshot,
-    DescriptorReadOperation,
+    materialize_candidate_snapshot, read_candidate_snapshot, read_linked_metadata_file,
+    read_worktree_git_pointer, scan_live_worktree, CandidateSnapshot, DescriptorReadOperation,
 };
 
 use evaluation::{

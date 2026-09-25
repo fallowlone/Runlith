@@ -14,4 +14,11 @@ pub trait EvaluationPort {
     /// verdict was reached (the Task stays VERIFYING); only `Rejected`
     /// routes to retry.
     fn evaluate(&self, request: &EvaluationRequest) -> EvaluationResult<EvaluationVerdict>;
+
+    /// Revalidates any evaluator-specific freshness conditions immediately
+    /// before the orchestration service applies a `Verified` verdict.
+    /// Evaluators without a deferred completion condition need no extra step.
+    fn revalidate_before_completion(&self, _request: &EvaluationRequest) -> EvaluationResult<()> {
+        Ok(())
+    }
 }

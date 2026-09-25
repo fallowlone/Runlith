@@ -222,10 +222,14 @@ mod macos {
             DescriptorReadOperation,
         ) -> Result<(), evaluation::EffectError>,
     ) -> Result<CandidateSnapshot, evaluation::EffectError> {
-        let root = root
+        authorize(b".", DescriptorReadOperation::OpenDirectory)?;
+        let authorized_root = root;
+        let root = authorized_root
             .canonicalize()
             .map_err(|_| failed("linked worktree is unavailable"))?;
-        authorize(b".", DescriptorReadOperation::OpenDirectory)?;
+        if root != authorized_root {
+            return Err(failed("linked worktree path changed during authorization"));
+        }
         let root_file = open_directory(&root)?;
         let mut files = Vec::new();
         let mut directories = Vec::new();
@@ -252,6 +256,131 @@ mod macos {
             directories,
             git_pointer,
         })
+    }
+
+    pub(super) fn read_worktree_git_pointer(
+        root: &Path,
+        authorize: &mut impl FnMut(
+            &[u8],
+            DescriptorReadOperation,
+        ) -> Result<(), evaluation::EffectError>,
+    ) -> Result<Vec<u8>, evaluation::EffectError> {
+        authorize(b".", DescriptorReadOperation::OpenDirectory)?;
+        let authorized_root = root;
+        let root = authorized_root
+            .canonicalize()
+            .map_err(|_| failed("linked worktree is unavailable"))?;
+        if root != authorized_root {
+            return Err(failed("linked worktree path changed during authorization"));
+        }
+        let root_file = open_directory(&root)?;
+        authorize(b".git", DescriptorReadOperation::OpenFile)?;
+        let name = CString::new(".git").expect("static component");
+        let fd = unsafe {
+            openat(
+                root_file.as_raw_fd(),
+                name.as_ptr(),
+                O_RDONLY | O_NOFOLLOW | O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(failed("linked worktree .git pointer is unavailable"));
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        authorize(b".git", DescriptorReadOperation::Metadata)?;
+        if !file
+            .metadata()
+            .map_err(|_| failed("linked worktree .git pointer metadata unavailable"))?
+            .is_file()
+        {
+            return Err(failed("linked worktree .git entry is not a pointer file"));
+        }
+        let mut bytes = Vec::new();
+        read_authorized(&file, b".git", authorize, 4097, &mut bytes)?;
+        if bytes.is_empty() || bytes.len() > 4096 {
+            return Err(failed("linked worktree .git pointer has invalid size"));
+        }
+        Ok(bytes)
+    }
+
+    pub(super) fn read_linked_metadata_file(
+        common_dir: &Path,
+        relative_path: &[u8],
+        authorize: &mut impl FnMut(
+            &[u8],
+            DescriptorReadOperation,
+        ) -> Result<(), evaluation::EffectError>,
+    ) -> Result<Vec<u8>, evaluation::EffectError> {
+        validate_name_path(relative_path)?;
+        authorize(b".", DescriptorReadOperation::OpenDirectory)?;
+        let authorized_root = common_dir;
+        let root = authorized_root
+            .canonicalize()
+            .map_err(|_| failed("trusted common Git directory is unavailable"))?;
+        if root != authorized_root {
+            return Err(failed("trusted common Git directory changed"));
+        }
+        let root_file = open_directory(&root)?;
+        let parts = relative_path
+            .split(|byte| *byte == b'/')
+            .collect::<Vec<_>>();
+        let mut current = root_file;
+        let mut prefix = Vec::new();
+        for part in &parts[..parts.len() - 1] {
+            if !prefix.is_empty() {
+                prefix.push(b'/');
+            }
+            prefix.extend_from_slice(part);
+            authorize(&prefix, DescriptorReadOperation::OpenDirectory)?;
+            let name = std::str::from_utf8(part)
+                .map_err(|_| failed("linked metadata path is unsupported"))?;
+            current = open_child_directory(&current, name)?;
+            authorize(&prefix, DescriptorReadOperation::Metadata)?;
+            if !current
+                .metadata()
+                .map_err(|_| failed("linked metadata directory metadata unavailable"))?
+                .is_dir()
+            {
+                return Err(failed("linked metadata path is not a directory"));
+            }
+        }
+        let leaf = parts
+            .last()
+            .ok_or_else(|| failed("linked metadata path is empty"))?;
+        if !prefix.is_empty() {
+            prefix.push(b'/');
+        }
+        prefix.extend_from_slice(leaf);
+        authorize(&prefix, DescriptorReadOperation::OpenFile)?;
+        let leaf = component(
+            std::str::from_utf8(leaf)
+                .map_err(|_| failed("linked metadata filename is unsupported"))?,
+        )?;
+        let fd = unsafe {
+            openat(
+                current.as_raw_fd(),
+                leaf.as_ptr(),
+                O_RDONLY | O_NOFOLLOW | O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(failed("linked metadata file open failed"));
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        authorize(&prefix, DescriptorReadOperation::Metadata)?;
+        if !file
+            .metadata()
+            .map_err(|_| failed("linked metadata file metadata unavailable"))?
+            .is_file()
+        {
+            return Err(failed("linked metadata entry is not a regular file"));
+        }
+        let mut bytes = Vec::new();
+        read_authorized(&file, &prefix, authorize, 4097, &mut bytes)?;
+        if bytes.is_empty() || bytes.len() > 4096 {
+            return Err(failed("linked metadata file size is invalid"));
+        }
+        Ok(bytes)
     }
 
     struct WalkState<'a> {
@@ -629,6 +758,44 @@ pub fn scan_live_worktree(
     macos::scan_live_worktree(root, authorize)
 }
 
+#[cfg(target_os = "macos")]
+pub fn read_worktree_git_pointer(
+    root: &Path,
+    authorize: &mut impl FnMut(&[u8], DescriptorReadOperation) -> Result<(), evaluation::EffectError>,
+) -> Result<Vec<u8>, evaluation::EffectError> {
+    macos::read_worktree_git_pointer(root, authorize)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn read_worktree_git_pointer(
+    _root: &Path,
+    _authorize: &mut impl FnMut(&[u8], DescriptorReadOperation) -> Result<(), evaluation::EffectError>,
+) -> Result<Vec<u8>, evaluation::EffectError> {
+    Err(evaluation::EffectError::Unsupported(
+        "descriptor-safe worktree pointer reads are unsupported",
+    ))
+}
+
+#[cfg(target_os = "macos")]
+pub fn read_linked_metadata_file(
+    common_dir: &Path,
+    relative_path: &[u8],
+    authorize: &mut impl FnMut(&[u8], DescriptorReadOperation) -> Result<(), evaluation::EffectError>,
+) -> Result<Vec<u8>, evaluation::EffectError> {
+    macos::read_linked_metadata_file(common_dir, relative_path, authorize)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn read_linked_metadata_file(
+    _common_dir: &Path,
+    _relative_path: &[u8],
+    _authorize: &mut impl FnMut(&[u8], DescriptorReadOperation) -> Result<(), evaluation::EffectError>,
+) -> Result<Vec<u8>, evaluation::EffectError> {
+    Err(evaluation::EffectError::Unsupported(
+        "descriptor-safe linked metadata reads are unsupported",
+    ))
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn scan_live_worktree(
     _root: &Path,
@@ -707,6 +874,7 @@ mod tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir(&root).expect("create isolated worktree root");
+        let root = root.canonicalize().expect("canonicalize worktree root");
         std::fs::write(root.join(".git"), b"gitdir: .git/worktrees/task\n")
             .expect("create linked worktree pointer fixture");
         std::fs::create_dir_all(root.join("src")).expect("create source directory");
@@ -745,5 +913,53 @@ mod tests {
         };
         assert!(scan_live_worktree(&root, &mut deny).is_err());
         std::fs::remove_dir_all(root).expect("remove isolated worktree root");
+    }
+
+    #[test]
+    fn linked_git_metadata_reads_are_descriptor_scoped_and_detect_pointer_changes() {
+        let base = std::env::temp_dir().join(format!(
+            "runlith-linked-metadata-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&base).expect("create linked metadata test root");
+        let base = base.canonicalize().expect("canonicalize test root");
+        let root = base.join("worktree");
+        let common = base.join("common");
+        let gitdir = common.join("worktrees/task");
+        std::fs::create_dir_all(&root).expect("create worktree");
+        std::fs::create_dir_all(&gitdir).expect("create linked metadata");
+        let pointer = format!("gitdir: {}\n", gitdir.display());
+        std::fs::write(root.join(".git"), pointer.as_bytes()).expect("write worktree pointer");
+        std::fs::write(
+            gitdir.join("gitdir"),
+            root.join(".git").to_string_lossy().as_bytes(),
+        )
+        .expect("write linked back-reference");
+        std::fs::write(gitdir.join("commondir"), b"../..\n").expect("write common reference");
+
+        let mut allow = |_: &[u8], _: DescriptorReadOperation| Ok(());
+        let before = read_worktree_git_pointer(&root, &mut allow).expect("read initial pointer");
+        let backref = read_linked_metadata_file(&common, b"worktrees/task/gitdir", &mut allow)
+            .expect("descriptor-read linked back-reference");
+        assert_eq!(
+            String::from_utf8_lossy(&backref),
+            root.join(".git").to_string_lossy()
+        );
+
+        std::fs::write(root.join(".git"), b"gitdir: changed\n").expect("tamper pointer");
+        let after = read_worktree_git_pointer(&root, &mut allow).expect("read changed pointer");
+        assert_ne!(
+            before, after,
+            "paired observations must detect pointer mutation"
+        );
+
+        std::fs::remove_file(gitdir.join("commondir")).expect("remove regular metadata file");
+        std::os::unix::fs::symlink("../../outside", gitdir.join("commondir"))
+            .expect("replace metadata with symlink");
+        assert!(
+            read_linked_metadata_file(&common, b"worktrees/task/commondir", &mut allow,).is_err()
+        );
+        std::fs::remove_dir_all(base).expect("remove linked metadata test tree");
     }
 }
