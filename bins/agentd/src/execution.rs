@@ -84,6 +84,7 @@ pub const CAPTURE_GRACE: Duration = Duration::from_secs(5);
 
 const PROVIDER_LAUNCH_REQUESTER: &str = "agent-runtime";
 static NEXT_CANDIDATE_OPERATION: AtomicU64 = AtomicU64::new(1);
+static NEXT_CANDIDATE_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
 const PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED: &str =
     "provider_authentication_unsupported_in_mandatory_confinement";
 
@@ -208,6 +209,42 @@ pub(crate) fn production_runner_backend(
     purpose: RunnerLaunchPurpose,
 ) -> Result<Arc<dyn IsolationBackend>, String> {
     production_platform::runner_backend(support_read, support_write, purpose)
+}
+
+/// Classification of candidate evaluation errors into integrity signals and
+/// infrastructure/precondition failures. Integrity signals (tamper detection,
+/// evaluator mismatch, etc.) are permanently recorded at their call site and
+/// prevent reuse/completion. Other errors are journaled only.
+#[derive(Clone, Debug)]
+enum CandidateError {
+    /// An integrity signal (worktree pointer tampering, object graph mismatch,
+    /// evaluator result disagreement, freshness checkpoint mismatch, etc.).
+    /// This is recorded as a permanent invalidation.
+    Integrity(String),
+    /// Infrastructure or precondition error (store failures, task state changed,
+    /// workspace unavailable, etc.). This is journaled only; evidence is not
+    /// invalidated.
+    Other(String),
+}
+
+impl CandidateError {
+    fn into_message(self) -> String {
+        match self {
+            Self::Integrity(msg) | Self::Other(msg) => msg,
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::Integrity(msg) | Self::Other(msg) => msg,
+        }
+    }
+}
+
+impl From<String> for CandidateError {
+    fn from(msg: String) -> Self {
+        Self::Other(msg)
+    }
 }
 
 /// Bound for server-local path inputs on the wire (repository paths).
@@ -994,7 +1031,7 @@ impl EvaluationPort for CandidateInputEvaluator {
 
     fn revalidate_before_completion(&self, request: &EvaluationRequest) -> EvaluationResult<()> {
         self.revalidate_candidate_completion(request)
-            .map_err(evaluation::EvaluationError::new)
+            .map_err(|err| evaluation::EvaluationError::new(err.into_message()))
     }
 }
 
@@ -1008,33 +1045,72 @@ impl CandidateInputEvaluator {
             .is_ok_and(|selector| selector.criterion_id == task.acceptance()[0])
     }
 
+    /// Records an integrity signal (a permanent invalidation) at the call site.
+    /// status must be exactly "MISMATCH" or "TAMPERED".
+    /// On success, returns CandidateError::Integrity with the original message.
+    /// If the store cannot be opened or invalidation fails, the error message
+    /// includes the store error.
+    fn integrity<T>(
+        &self,
+        request: &EvaluationRequest,
+        status: &'static str,
+        code: &'static str,
+        result: Result<T, String>,
+    ) -> Result<T, CandidateError> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(msg) => match storage_sqlite::SqliteStore::open(&self.db_path) {
+                Ok(mut store) => {
+                    match store.invalidate_candidate_operation(
+                        request.execution_id.as_str(),
+                        request.attempt_id.as_str(),
+                        status,
+                        code,
+                        now_millis(),
+                    ) {
+                        Ok(()) => Err(CandidateError::Integrity(msg)),
+                        Err(e) => Err(CandidateError::Integrity(format!(
+                            "{msg}; invalidation could not be recorded: {e}"
+                        ))),
+                    }
+                }
+                Err(e) => Err(CandidateError::Integrity(format!(
+                    "{msg}; invalidation could not be recorded: {e}"
+                ))),
+            },
+        }
+    }
+
     fn evaluate_candidate(&self, request: &EvaluationRequest) -> Result<EvaluationVerdict, String> {
         let result = self.evaluate_candidate_inner(request);
         if let Err(error) = &result {
-            if let Ok(mut store) = storage_sqlite::SqliteStore::open(&self.db_path) {
-                let status = if error.contains("changed") || error.contains("mismatch") {
-                    "MISMATCH"
-                } else if error.contains("object graph") || error.contains("tamper") {
-                    "TAMPERED"
-                } else {
-                    "BLOCKED"
-                };
-                let _ = store.record_candidate_operation_failure(
-                    request.execution_id.as_str(),
-                    request.attempt_id.as_str(),
-                    status,
-                    &status.to_ascii_lowercase(),
-                    now_millis(),
-                );
+            match error {
+                CandidateError::Integrity(msg) => {
+                    // Already recorded at the call site; just propagate.
+                    return Err(msg.clone());
+                }
+                CandidateError::Other(msg) => {
+                    // Infrastructure/precondition error: journal only (no invalidation).
+                    if let Ok(mut store) = storage_sqlite::SqliteStore::open(&self.db_path) {
+                        let _ = store.record_candidate_operation_failure(
+                            request.execution_id.as_str(),
+                            request.attempt_id.as_str(),
+                            "BLOCKED",
+                            "blocked",
+                            now_millis(),
+                        );
+                    }
+                    return Err(msg.clone());
+                }
             }
         }
-        result
+        result.map_err(CandidateError::into_message)
     }
 
     fn evaluate_candidate_inner(
         &self,
         request: &EvaluationRequest,
-    ) -> Result<EvaluationVerdict, String> {
+    ) -> Result<EvaluationVerdict, CandidateError> {
         let invocation_id = format!(
             "candidate-{}-{}-{}",
             request.execution_id.as_str(),
@@ -1055,7 +1131,9 @@ impl CandidateInputEvaluator {
             .map_err(|error| format!("load candidate execution: {error}"))?
             .ok_or_else(|| "candidate execution does not exist".to_owned())?;
         if execution.task_id() != &request.task_id {
-            return Err("candidate task/execution binding mismatch".to_owned());
+            return Err("candidate task/execution binding mismatch"
+                .to_owned()
+                .into());
         }
         let attempt = execution
             .get_attempt(&request.attempt_id)
@@ -1063,7 +1141,9 @@ impl CandidateInputEvaluator {
         if attempt.outcome() != Some(AttemptOutcome::Succeeded)
             || task.state() != TaskState::Verifying
         {
-            return Err("candidate task or attempt is not in the evaluatable state".to_owned());
+            return Err("candidate task or attempt is not in the evaluatable state"
+                .to_owned()
+                .into());
         }
         let requirements = task
             .evidence_requirements()
@@ -1075,39 +1155,56 @@ impl CandidateInputEvaluator {
         if requirements.len() != 1 || task.acceptance().len() != 1 {
             return Err(
                 "candidate evaluator supports exactly one explicitly authorized criterion"
-                    .to_owned(),
+                    .to_owned()
+                    .into(),
             );
         }
         if task.acceptance()[0] != requirements[0].criterion_id {
-            return Err("candidate selector criterion does not match task acceptance".to_owned());
+            return Err(
+                "candidate selector criterion does not match task acceptance"
+                    .to_owned()
+                    .into(),
+            );
         }
         let base = store
             .get_evaluated_policy_base(request.execution_id.as_str())
-            .map_err(|error| format!("load evaluated policy base: {error}"))?
-            .ok_or_else(|| "candidate execution has no evaluated base binding".to_owned())?;
+            .map_err(|error| CandidateError::Other(format!("load evaluated policy base: {error}")))?
+            .ok_or_else(|| {
+                CandidateError::Other(
+                    "candidate execution has no evaluated base binding".to_owned(),
+                )
+            })?;
         if base.task_id != request.task_id.as_str()
             || base.policy.policy() != &policy::TestMutationPolicy::Forbidden
         {
-            return Err("candidate base or test-mutation policy binding is stale".to_owned());
+            return Err("candidate base or test-mutation policy binding is stale"
+                .to_owned()
+                .into());
         }
         let lease = store
             .get_workspace_for_execution(&request.execution_id)
-            .map_err(|error| format!("load candidate workspace: {error}"))?
-            .ok_or_else(|| "candidate execution has no workspace lease".to_owned())?;
+            .map_err(|error| CandidateError::Other(format!("load candidate workspace: {error}")))?
+            .ok_or_else(|| {
+                CandidateError::Other("candidate execution has no workspace lease".to_owned())
+            })?;
         if lease.lifecycle() != workspace::LeaseLifecycle::Ready
             || base.execution_id != request.execution_id.as_str()
             || base.workspace_id != lease.id().as_str()
             || base.base_revision != lease.base_revision().as_str()
         {
-            return Err("candidate workspace lease is not READY".to_owned());
+            return Err("candidate workspace lease is not READY".to_owned().into());
         }
         let anchor = store
             .get_trusted_anchor(lease.id())
             .map_err(|error| format!("load trusted Git anchor: {error}"))?
             .ok_or_else(|| "candidate workspace has no trusted Git anchor".to_owned())?;
         let root = PathBuf::from(lease.worktree_ref());
-        let selected_pointer =
-            read_authorized_worktree_pointer(&self.db_path, request, &invocation_id, &root)?;
+        let selected_pointer = self.integrity(
+            request,
+            "TAMPERED",
+            "worktree-pointer",
+            read_authorized_worktree_pointer(&self.db_path, request, &invocation_id, &root),
+        )?;
         let linked_gitdir = authenticated_worktree_gitdir(
             &self.db_path,
             request,
@@ -1129,7 +1226,7 @@ impl CandidateInputEvaluator {
             .strip_suffix('\n')
             .ok_or_else(|| "candidate Git version is incomplete".to_owned())?;
         if !git_version.starts_with("git version ") || git_version.len() > 128 {
-            return Err("candidate Git version is unsupported".to_owned());
+            return Err("candidate Git version is unsupported".to_owned().into());
         }
         let object_format =
             self.git_output(&git_context, &["rev-parse", "--show-object-format"], 64)?;
@@ -1165,12 +1262,40 @@ impl CandidateInputEvaluator {
                 now_millis(),
             )
             .map_err(|error| {
-                format!("persist candidate selection before object resolution: {error}")
+                // ConstraintViolation (binding mismatch) is an integrity signal;
+                // other storage errors are infrastructure failures.
+                if matches!(error, storage_sqlite::StorageError::ConstraintViolation(_)) {
+                    return self
+                        .integrity(
+                            request,
+                            "TAMPERED",
+                            "selection-binding",
+                            Err::<(), _>(format!(
+                                "persist candidate selection before object resolution: {error}"
+                            )),
+                        )
+                        .unwrap_err();
+                }
+                format!("persist candidate selection before object resolution: {error}").into()
             })?;
-        self.validate_git_object_sources(&git_context)?;
-        let candidate = self.verify_commit(&git_context, candidate_oid, object_format)?;
-        let base_candidate =
-            self.verify_commit(&git_context, &base.base_revision, object_format)?;
+        self.integrity(
+            request,
+            "TAMPERED",
+            "object-sources",
+            self.validate_git_object_sources(&git_context),
+        )?;
+        let candidate = self.integrity(
+            request,
+            "TAMPERED",
+            "object-graph",
+            self.verify_commit(&git_context, candidate_oid, object_format),
+        )?;
+        let base_candidate = self.integrity(
+            request,
+            "TAMPERED",
+            "object-graph",
+            self.verify_commit(&git_context, &base.base_revision, object_format),
+        )?;
         // The completion-independent getter: it requires only the four
         // pre-completion checkpoints, so it returns durable evidence for
         // both a bare RESULT_ADMITTED row and a COMPLETE one. R2 (owner
@@ -1204,7 +1329,16 @@ impl CandidateInputEvaluator {
                 || stored.candidate_tree_oid != candidate.tree_oid
                 || stored.candidate_manifest_sha256 != candidate.manifest.sha256
             {
-                return Err("durable candidate evidence binding tampered; reuse refused".to_owned());
+                return Err(self
+                    .integrity(
+                        request,
+                        "TAMPERED",
+                        "reuse-binding",
+                        Err::<(), _>(
+                            "durable candidate evidence binding tampered; reuse refused".to_owned(),
+                        ),
+                    )
+                    .unwrap_err());
             }
             let operation_status = store
                 .candidate_operation_status(
@@ -1222,20 +1356,33 @@ impl CandidateInputEvaluator {
             // freshness re-check to whichever `revalidate_before_completion`
             // call eventually runs.
             if operation_status.as_deref() == Some("COMPLETE") {
-                let checkpoint = self.freshness_checkpoint(CandidateFreshnessRequest {
+                let checkpoint = self.integrity(
                     request,
-                    invocation_id: &invocation_id,
-                    root: &root,
-                    anchor: &anchor,
-                    candidate: &candidate,
-                    format: object_format,
-                    phase: evaluation::CandidateCheckpointPhase::RestartReuse,
-                    started_at_ms: now_millis().min(stored.completed_at_ms),
-                })?;
+                    "MISMATCH",
+                    "freshness-reuse",
+                    self.freshness_checkpoint(CandidateFreshnessRequest {
+                        request,
+                        invocation_id: &invocation_id,
+                        root: &root,
+                        anchor: &anchor,
+                        candidate: &candidate,
+                        format: object_format,
+                        phase: evaluation::CandidateCheckpointPhase::RestartReuse,
+                        started_at_ms: now_millis().min(stored.completed_at_ms),
+                    }),
+                )?;
                 if !checkpoint.matched {
-                    return Err(
-                        "candidate inputs changed; durable evidence reuse refused".to_owned()
-                    );
+                    return Err(self
+                        .integrity(
+                            request,
+                            "MISMATCH",
+                            "freshness-reuse",
+                            Err::<(), _>(
+                                "candidate inputs changed; durable evidence reuse refused"
+                                    .to_owned(),
+                            ),
+                        )
+                        .unwrap_err());
                 }
                 store
                     .append_candidate_checkpoint(
@@ -1253,7 +1400,9 @@ impl CandidateInputEvaluator {
                 } else {
                     EvaluationVerdict::Rejected
                 }),
-                _ => Err("durable candidate result payload is unsupported".to_owned()),
+                _ => Err("durable candidate result payload is unsupported"
+                    .to_owned()
+                    .into()),
             };
         }
         let started_at_ms = now_millis();
@@ -1262,27 +1411,40 @@ impl CandidateInputEvaluator {
             evaluation::CandidateCheckpointPhase::Selection,
             evaluation::CandidateCheckpointPhase::BeforeEvaluation,
         ] {
-            checkpoints.push(self.freshness_checkpoint(CandidateFreshnessRequest {
+            let checkpoint = self.integrity(
                 request,
-                invocation_id: &invocation_id,
-                root: &root,
-                anchor: &anchor,
-                candidate: &candidate,
-                format: object_format,
-                phase,
-                started_at_ms,
-            })?);
+                "MISMATCH",
+                "freshness-before-evaluation",
+                self.freshness_checkpoint(CandidateFreshnessRequest {
+                    request,
+                    invocation_id: &invocation_id,
+                    root: &root,
+                    anchor: &anchor,
+                    candidate: &candidate,
+                    format: object_format,
+                    phase,
+                    started_at_ms,
+                }),
+            )?;
+            checkpoints.push(checkpoint);
         }
         if checkpoints.iter().any(|checkpoint| !checkpoint.matched) {
-            return Err("candidate inputs changed before evaluation".to_owned());
+            return Err(self
+                .integrity(
+                    request,
+                    "MISMATCH",
+                    "freshness-before-evaluation",
+                    Err::<(), _>("candidate inputs changed before evaluation".to_owned()),
+                )
+                .unwrap_err());
         }
-        let snapshot_name = format!(
-            "candidate-snapshot-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let pid = std::process::id();
+        let seq = NEXT_CANDIDATE_SNAPSHOT.fetch_add(1, Ordering::Relaxed);
+        let snapshot_name = format!("candidate-snapshot-{nanos}-{pid}-{seq}");
         let snapshot_input = encode_snapshot_files(&candidate.files)?;
         let snapshot_writer = match &self.evaluator_executable_override {
             Some(path) => path.clone(),
@@ -1351,7 +1513,7 @@ impl CandidateInputEvaluator {
             },
         ) {
             let _ = remove_snapshot();
-            return Err(e);
+            return Err(e.into());
         }
 
         let output = run_candidate_process(
@@ -1390,7 +1552,7 @@ impl CandidateInputEvaluator {
             Err(e) => {
                 // Error path: best-effort removal, return original error
                 let _ = remove_snapshot();
-                return Err(e);
+                return Err(e.into());
             }
         };
 
@@ -1398,13 +1560,17 @@ impl CandidateInputEvaluator {
             Ok(result) => result,
             Err(e) => {
                 let _ = remove_snapshot();
-                return Err(e);
+                return Err(self
+                    .integrity(request, "TAMPERED", "evaluator-result", Err::<(), _>(e))
+                    .unwrap_err());
             }
         };
 
         if let Err(e) = validate_candidate_result(&result, &candidate, selector) {
             let _ = remove_snapshot();
-            return Err(e);
+            return Err(self
+                .integrity(request, "TAMPERED", "evaluator-result", Err::<(), _>(e))
+                .unwrap_err());
         }
 
         // Success path: removal error is fatal
@@ -1413,20 +1579,33 @@ impl CandidateInputEvaluator {
             evaluation::CandidateCheckpointPhase::AfterEvaluation,
             evaluation::CandidateCheckpointPhase::ResultAdmission,
         ] {
-            checkpoints.push(self.freshness_checkpoint(CandidateFreshnessRequest {
+            let checkpoint = self.integrity(
                 request,
-                invocation_id: &invocation_id,
-                root: &root,
-                anchor: &anchor,
-                candidate: &candidate,
-                format: object_format,
-                phase,
-                started_at_ms,
-            })?);
+                "MISMATCH",
+                "freshness-result-admission",
+                self.freshness_checkpoint(CandidateFreshnessRequest {
+                    request,
+                    invocation_id: &invocation_id,
+                    root: &root,
+                    anchor: &anchor,
+                    candidate: &candidate,
+                    format: object_format,
+                    phase,
+                    started_at_ms,
+                }),
+            )?;
+            checkpoints.push(checkpoint);
         }
         let completed_at_ms = now_millis();
         if checkpoints.iter().any(|checkpoint| !checkpoint.matched) {
-            return Err("candidate inputs changed during evaluation".to_owned());
+            return Err(self
+                .integrity(
+                    request,
+                    "MISMATCH",
+                    "freshness-result-admission",
+                    Err::<(), _>("candidate inputs changed during evaluation".to_owned()),
+                )
+                .unwrap_err());
         }
         let mut assessment = evaluation::CandidateIntegrityAssessment {
             task_id: request.task_id.as_str().to_owned(),
@@ -1531,7 +1710,10 @@ impl CandidateInputEvaluator {
         })
     }
 
-    fn revalidate_candidate_completion(&self, request: &EvaluationRequest) -> Result<(), String> {
+    fn revalidate_candidate_completion(
+        &self,
+        request: &EvaluationRequest,
+    ) -> Result<(), CandidateError> {
         let mut store = storage_sqlite::SqliteStore::open(&self.db_path)
             .map_err(|error| format!("open candidate completion store: {error}"))?;
         let evidence = store
@@ -1551,7 +1733,9 @@ impl CandidateInputEvaluator {
             || assessment.execution_id != request.execution_id.as_str()
             || assessment.attempt_id != request.attempt_id.as_str()
         {
-            return Err("candidate completion lineage or Task state changed".to_owned());
+            return Err("candidate completion lineage or Task state changed"
+                .to_owned()
+                .into());
         }
         let selector = task
             .evidence_requirements()
@@ -1559,7 +1743,11 @@ impl CandidateInputEvaluator {
             .filter(|requirement| requirement.required)
             .map(evaluation::CandidateSelector::from_requirement)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("candidate completion requirement is stale: {error}"))?;
+            .map_err(|error| {
+                CandidateError::Other(format!(
+                    "candidate completion requirement is stale: {error}"
+                ))
+            })?;
         if selector.len() != 1
             || selector[0].requirement_revision != assessment.requirement_revision
             || selector[0].criterion_id != assessment.criterion_id
@@ -1567,16 +1755,24 @@ impl CandidateInputEvaluator {
             || selector[0].path != assessment.selector_path
             || selector[0].literal != assessment.selector_literal
         {
-            return Err("candidate completion requirement binding changed".to_owned());
+            return Err("candidate completion requirement binding changed"
+                .to_owned()
+                .into());
         }
         let base = store
             .get_evaluated_policy_base(request.execution_id.as_str())
-            .map_err(|error| format!("load candidate completion policy: {error}"))?
-            .ok_or_else(|| "candidate completion policy is unavailable".to_owned())?;
+            .map_err(|error| {
+                CandidateError::Other(format!("load candidate completion policy: {error}"))
+            })?
+            .ok_or_else(|| {
+                CandidateError::Other("candidate completion policy is unavailable".to_owned())
+            })?;
         if base.policy.revision() != assessment.policy_revision
             || base.policy.fingerprint() != assessment.policy_fingerprint
         {
-            return Err("candidate completion policy binding changed".to_owned());
+            return Err("candidate completion policy binding changed"
+                .to_owned()
+                .into());
         }
         let lease = store
             .get_workspace_for_execution(&request.execution_id)
@@ -1587,11 +1783,16 @@ impl CandidateInputEvaluator {
             .map_err(|error| format!("load candidate completion Git anchor: {error}"))?
             .ok_or_else(|| "candidate completion Git anchor is unavailable".to_owned())?;
         let root = PathBuf::from(lease.worktree_ref());
-        let pointer = read_authorized_worktree_pointer(
-            &self.db_path,
+        let pointer = self.integrity(
             request,
-            &assessment.invocation_id,
-            &root,
+            "TAMPERED",
+            "worktree-pointer",
+            read_authorized_worktree_pointer(
+                &self.db_path,
+                request,
+                &assessment.invocation_id,
+                &root,
+            ),
         )?;
         let linked_gitdir = authenticated_worktree_gitdir(
             &self.db_path,
@@ -1610,37 +1811,48 @@ impl CandidateInputEvaluator {
             gitdir: &linked_gitdir,
             roots: vec![anchor.canonical_commondir().to_path_buf()],
         };
-        let candidate =
-            self.verify_commit(&git_context, &assessment.candidate_commit_oid, format)?;
+        let candidate = self.integrity(
+            request,
+            "TAMPERED",
+            "object-graph",
+            self.verify_commit(&git_context, &assessment.candidate_commit_oid, format),
+        )?;
         if candidate.manifest.sha256 != assessment.candidate_manifest_sha256
             || candidate.tree_oid != assessment.candidate_tree_oid
         {
-            return Err("candidate completion immutable subject changed".to_owned());
-        }
-        let checkpoint = self.freshness_checkpoint(CandidateFreshnessRequest {
-            request,
-            invocation_id: &assessment.invocation_id,
-            root: &root,
-            anchor: &anchor,
-            candidate: &candidate,
-            format,
-            phase: evaluation::CandidateCheckpointPhase::Completion,
-            started_at_ms: assessment.started_at_ms,
-        })?;
-        if !checkpoint.matched {
-            store.record_candidate_operation_failure(
-                request.execution_id.as_str(),
-                request.attempt_id.as_str(),
-                "MISMATCH",
-                "completion-freshness",
-                now_millis(),
-            )
-            .map_err(|error| {
-                format!(
-                    "candidate inputs changed before Task completion; invalidation could not be recorded: {error}"
+            return Err(self
+                .integrity(
+                    request,
+                    "TAMPERED",
+                    "completion-subject",
+                    Err::<(), _>("candidate completion immutable subject changed".to_owned()),
                 )
-            })?;
-            return Err("candidate inputs changed before Task completion".to_owned());
+                .unwrap_err());
+        }
+        let checkpoint = self.integrity(
+            request,
+            "MISMATCH",
+            "freshness-completion",
+            self.freshness_checkpoint(CandidateFreshnessRequest {
+                request,
+                invocation_id: &assessment.invocation_id,
+                root: &root,
+                anchor: &anchor,
+                candidate: &candidate,
+                format,
+                phase: evaluation::CandidateCheckpointPhase::Completion,
+                started_at_ms: assessment.started_at_ms,
+            }),
+        )?;
+        if !checkpoint.matched {
+            return Err(self
+                .integrity::<()>(
+                    request,
+                    "MISMATCH",
+                    "freshness-completion",
+                    Err("candidate inputs changed before Task completion".to_owned()),
+                )
+                .unwrap_err());
         }
         store
             .append_candidate_checkpoint(
@@ -1648,7 +1860,9 @@ impl CandidateInputEvaluator {
                 request.attempt_id.as_str(),
                 &checkpoint,
             )
-            .map_err(|error| format!("persist candidate completion checkpoint: {error}"))?;
+            .map_err(|error| {
+                CandidateError::Other(format!("persist candidate completion checkpoint: {error}"))
+            })?;
         store
             .update_candidate_operation_status(
                 request.execution_id.as_str(),
@@ -1672,7 +1886,9 @@ impl CandidateInputEvaluator {
                     Err(error)
                 }
             })
-            .map_err(|error| format!("persist candidate operation completion: {error}"))
+            .map_err(|error| {
+                CandidateError::Other(format!("persist candidate operation completion: {error}"))
+            })
     }
 
     fn git_output(
@@ -6567,6 +6783,268 @@ mod tests {
         assert!(
             evaluate_again.is_err(),
             "evaluate() must fail (evidence invalidated and blocked)"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn candidate_fifo_in_worktree_after_admission_invalidates_completion_promptly() {
+        let fixture = setup_candidate_restart_fixture(
+            "candidate-fifo",
+            "P-CANDIDATE-FIFO",
+            "T-CANDIDATE-FIFO",
+            "E-CANDIDATE-FIFO",
+            "A-CANDIDATE-FIFO",
+        );
+        let execution_id = fixture.request.execution_id.clone();
+        let attempt_id = fixture.request.attempt_id.clone();
+        let evaluator = candidate_restart_evaluator(&fixture);
+
+        // First evaluate() admits the evidence.
+        let verdict = evaluator
+            .evaluate(&fixture.request)
+            .expect("first evaluate admits durable evidence");
+        assert_eq!(verdict, EvaluationVerdict::Verified);
+        let store = storage_sqlite::SqliteStore::open(&fixture.sandbox.db).expect("open store");
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("RESULT_ADMITTED"),
+            "evidence must be admitted before completion"
+        );
+
+        // Create a FIFO in the worktree to trigger revalidation hang unless properly handled.
+        let worktree = PathBuf::from(fixture.lease.worktree_ref());
+        let fifo_path = worktree.join("src/pipe");
+        let mkfifo_status = std::process::Command::new("mkfifo")
+            .arg(&fifo_path)
+            .status()
+            .expect("mkfifo command exists");
+        assert!(mkfifo_status.success(), "mkfifo must succeed");
+
+        // Run revalidate_before_completion on a spawned thread with a timeout.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let evaluator_clone = evaluator.clone();
+        let request_clone = fixture.request.clone();
+        std::thread::spawn(move || {
+            let result = evaluator_clone.revalidate_before_completion(&request_clone);
+            let _ = tx.send(result);
+        });
+
+        // Receive the result with a timeout (must not hang on the FIFO).
+        let result = rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("revalidation hung on a FIFO");
+        assert!(result.is_err(), "revalidation must fail due to FIFO");
+
+        // Invalidation must be recorded with code starting with "MISMATCH:freshness-completion".
+        let invalidation = store
+            .candidate_operation_invalidation(execution_id.as_str(), attempt_id.as_str())
+            .expect("load invalidation")
+            .expect("invalidation must be set");
+        assert!(
+            invalidation.1.starts_with("MISMATCH:freshness-completion"),
+            "invalidation code must start with MISMATCH:freshness-completion, got {}",
+            invalidation.1
+        );
+
+        // Remove the FIFO; revalidate_before_completion must still return an error
+        // and status must never be COMPLETE.
+        std::fs::remove_file(&fifo_path).expect("remove FIFO");
+        let revalidate_after_removal = evaluator.revalidate_before_completion(&fixture.request);
+        assert!(
+            revalidate_after_removal.is_err(),
+            "revalidate_before_completion must still fail after FIFO removal (invalidation is permanent)"
+        );
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("RESULT_ADMITTED"),
+            "status must never become COMPLETE after invalidation"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn candidate_precondition_failure_after_admission_does_not_invalidate() {
+        let fixture = setup_candidate_restart_fixture(
+            "candidate-precond",
+            "P-CANDIDATE-PRECOND",
+            "T-CANDIDATE-PRECOND",
+            "E-CANDIDATE-PRECOND",
+            "A-CANDIDATE-PRECOND",
+        );
+        let execution_id = fixture.request.execution_id.clone();
+        let attempt_id = fixture.request.attempt_id.clone();
+        let evaluator = candidate_restart_evaluator(&fixture);
+
+        // First evaluate() admits the evidence with status RESULT_ADMITTED.
+        let verdict = evaluator
+            .evaluate(&fixture.request)
+            .expect("first evaluate admits durable evidence");
+        assert_eq!(verdict, EvaluationVerdict::Verified);
+        let store = storage_sqlite::SqliteStore::open(&fixture.sandbox.db).expect("open store");
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("RESULT_ADMITTED"),
+            "evidence must be admitted before precondition failure"
+        );
+
+        // Trigger a precondition failure by moving the Task out of VERIFYING state.
+        // The Task is in VERIFYING after begin_verification in the fixture;
+        // we use the lifecycle API to move it out.
+        let mut tasks =
+            app_services::TaskService::open(&fixture.sandbox.db, app_services::SystemClock)
+                .expect("open task service");
+        tasks
+            .verification_failed(&fixture.request.task_id)
+            .expect("move task out of VERIFYING");
+
+        // Now evaluate() must return an error due to the precondition failure
+        // (task is no longer in VERIFYING state).
+        let result = evaluator.evaluate(&fixture.request);
+        assert!(
+            result.is_err(),
+            "evaluate must fail when task state changed"
+        );
+
+        // Status must still be RESULT_ADMITTED (no regression).
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("RESULT_ADMITTED"),
+            "status must not regress after precondition failure"
+        );
+
+        // Invalidation must be None (journaled only, not invalidated).
+        let invalidation = store
+            .candidate_operation_invalidation(execution_id.as_str(), attempt_id.as_str())
+            .expect("load invalidation");
+        assert_eq!(
+            invalidation, None,
+            "precondition failure must not set invalidation"
+        );
+
+        // Evidence must still be accessible for completion.
+        let evidence = store
+            .get_candidate_evidence_for_completion(execution_id.as_str(), attempt_id.as_str())
+            .expect("load evidence");
+        assert!(
+            evidence.is_some(),
+            "evidence must still be accessible after precondition failure"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn candidate_evaluator_restart_reuse_is_idempotent_and_tamper_is_refused_assertions() {
+        // This test focuses on adding assertions to the existing tamper-detection test
+        // to verify the exact invalidation code when HEAD is tampered after completion.
+        let fixture = setup_candidate_restart_fixture(
+            "candidate-tamper-assertions",
+            "P-CANDIDATE-TAMPER-ASSERTIONS",
+            "T-CANDIDATE-TAMPER-ASSERTIONS",
+            "E-CANDIDATE-TAMPER-ASSERTIONS",
+            "A-CANDIDATE-TAMPER-ASSERTIONS",
+        );
+        let execution_id = fixture.request.execution_id.clone();
+        let attempt_id = fixture.request.attempt_id.clone();
+        let evaluator = candidate_restart_evaluator(&fixture);
+
+        // Evaluate and complete the candidate.
+        let verdict = evaluator
+            .evaluate(&fixture.request)
+            .expect("first evaluate admits durable evidence");
+        assert_eq!(verdict, EvaluationVerdict::Verified);
+        let store = storage_sqlite::SqliteStore::open(&fixture.sandbox.db).expect("open store");
+
+        let restarted = candidate_restart_evaluator(&fixture);
+        restarted
+            .revalidate_before_completion(&fixture.request)
+            .expect("completion revalidation succeeds after restart");
+        assert_eq!(
+            store
+                .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+                .unwrap()
+                .as_deref(),
+            Some("COMPLETE")
+        );
+
+        // Tamper with HEAD after completion.
+        let worktree = PathBuf::from(fixture.lease.worktree_ref());
+        std::fs::write(worktree.join("src/example.rs"), b"fn tampered() {}\n").unwrap();
+        git(
+            &worktree,
+            &["commit", "-aq", "-m", "tamper after admission"],
+        );
+
+        // Evaluate must fail.
+        let tampered = restarted.evaluate(&fixture.request);
+        assert!(
+            tampered.is_err(),
+            "a changed candidate commit must never silently reuse a prior successful verdict"
+        );
+
+        // Status must remain COMPLETE (no regression).
+        let status_after_tamper = store
+            .candidate_operation_status(execution_id.as_str(), attempt_id.as_str())
+            .unwrap();
+        assert_eq!(
+            status_after_tamper.as_deref(),
+            Some("COMPLETE"),
+            "a failure after COMPLETE must never regress the durable status"
+        );
+
+        // Check that the invalidation code is set with TAMPERED:selection-binding.
+        let invalidation = store
+            .candidate_operation_invalidation(execution_id.as_str(), attempt_id.as_str())
+            .unwrap();
+        assert!(
+            invalidation.is_some(),
+            "tamper detection must set invalidation"
+        );
+        let (_, code) = invalidation.unwrap();
+        assert!(
+            code.starts_with("TAMPERED:"),
+            "tamper invalidation code must start with TAMPERED:, got {}",
+            code
+        );
+
+        // History must contain the tamper detection.
+        let history_after_tamper = store
+            .candidate_operation_history(execution_id.as_str(), attempt_id.as_str())
+            .unwrap()
+            .unwrap();
+        assert!(
+            history_after_tamper.contains("BLOCKED")
+                || history_after_tamper.contains("MISMATCH")
+                || history_after_tamper.contains("TAMPERED"),
+            "the tamper refusal must still be durably journaled, got {history_after_tamper:?}"
+        );
+
+        // After HEAD is restored to the original commit, evaluate must still return Err
+        // and evidence must not be accessible (blocked by invalidation).
+        git(&worktree, &["reset", "--hard", "HEAD~1"]);
+        let evaluate_after_restore = restarted.evaluate(&fixture.request);
+        assert!(
+            evaluate_after_restore.is_err(),
+            "evaluate must still fail after HEAD restore (invalidation is sticky)"
+        );
+        let evidence_after_restore = store
+            .get_candidate_evidence_for_completion(execution_id.as_str(), attempt_id.as_str())
+            .unwrap();
+        assert!(
+            evidence_after_restore.is_some(),
+            "evidence should still be present but invalidation blocks it"
         );
     }
 

@@ -192,21 +192,15 @@ impl crate::SqliteStore {
         Ok(())
     }
 
-    /// Journals a failure without ever regressing a successful terminal-ish
-    /// state. R2 (owner review 2026-09-25, MAJOR): this used to run an
-    /// unconditional `UPDATE`, so a failure classified from *any* later
-    /// call — including one racing or following a already-admitted
-    /// subject — could downgrade a durable `RESULT_ADMITTED` or `COMPLETE`
-    /// row. The `status`/`detail_code` columns now only change when the
-    /// row is not already in one of those two states (a single atomic
-    /// `UPDATE ... CASE` compares the row's own current status, so this is
-    /// compare-and-swap safe under concurrent callers without needing an
-    /// `expected` parameter); `status_history` is still always appended so
-    /// the failure is durably journaled either way. TASK-0144: additionally,
-    /// for every failure (pre- or post-admission), `invalidated_at_ms` and
-    /// `invalidation_code` are set once and then become immutable (sticky
-    /// trigger). This makes the evidence stale/blocked and prevents reuse or
-    /// completion, regardless of status.
+    /// Journals a failure to status_history without changing status or invalidating.
+    /// R2 (owner review 2026-09-25, MAJOR): this used to run an unconditional
+    /// `UPDATE`, so a failure classified from *any* later call — including one
+    /// racing or following an already-admitted subject — could downgrade a durable
+    /// `RESULT_ADMITTED` or `COMPLETE` row. Infrastructure and precondition errors
+    /// are journaled only; they must NOT invalidate, so admitted evidence survives
+    /// a transient failure and replay stays safe. TASK-0144: for integrity-signal
+    /// failures, use `invalidate_candidate_operation` instead to permanently block
+    /// reuse and completion.
     pub fn record_candidate_operation_failure(
         &mut self,
         execution_id: &str,
@@ -226,15 +220,53 @@ impl crate::SqliteStore {
                     status = CASE WHEN status IN ('RESULT_ADMITTED','COMPLETE') THEN status ELSE ?1 END,
                     detail_code = CASE WHEN status IN ('RESULT_ADMITTED','COMPLETE') THEN detail_code ELSE ?2 END,
                     updated_at_ms = ?3,
-                    invalidated_at_ms = COALESCE(invalidated_at_ms, ?3),
-                    invalidation_code = COALESCE(invalidation_code, ?7),
                     status_history = status_history || char(10) || ?6
              WHERE execution_id = ?4 AND attempt_id = ?5",
-            params![status, detail_code, now_ms, execution_id, attempt_id, format!("{status}:{detail_code}:{now_ms}"), format!("{status}:{detail_code}")],
+            params![status, detail_code, now_ms, execution_id, attempt_id, format!("{status}:{detail_code}:{now_ms}")],
         )?;
         if changed != 1 {
             return Err(StorageError::ConstraintViolation(
                 "candidate operation failure record is unavailable".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Permanently invalidates candidate evidence with a MISMATCH or TAMPERED status.
+    /// This records an integrity signal at the call site and prevents reuse or
+    /// completion. Sets invalidated_at_ms and invalidation_code once (sticky),
+    /// appends to status_history, and updates status/detail_code with the same
+    /// CASE protection for admitted/complete rows as other terminal-state updates.
+    /// status must be exactly "MISMATCH" or "TAMPERED"; else returns ConstraintViolation.
+    pub fn invalidate_candidate_operation(
+        &mut self,
+        execution_id: &str,
+        attempt_id: &str,
+        status: &str,
+        detail_code: &str,
+        now_ms: u64,
+    ) -> StorageResult<()> {
+        if !matches!(status, "MISMATCH" | "TAMPERED") {
+            return Err(StorageError::ConstraintViolation(
+                "invalidate_candidate_operation requires status MISMATCH or TAMPERED".into(),
+            ));
+        }
+        let now_ms = now_ms.min(i64::MAX as u64) as i64;
+        let invalidation_code = format!("{status}:{detail_code}");
+        let changed = self.connection().execute(
+            "UPDATE candidate_input_operations SET
+                    status = CASE WHEN status IN ('RESULT_ADMITTED','COMPLETE') THEN status ELSE ?1 END,
+                    detail_code = CASE WHEN status IN ('RESULT_ADMITTED','COMPLETE') THEN detail_code ELSE ?2 END,
+                    updated_at_ms = ?3,
+                    invalidated_at_ms = COALESCE(invalidated_at_ms, ?3),
+                    invalidation_code = COALESCE(invalidation_code, ?7),
+                    status_history = status_history || char(10) || ?6
+             WHERE execution_id = ?4 AND attempt_id = ?5",
+            params![status, detail_code, now_ms, execution_id, attempt_id, format!("{status}:{detail_code}:{now_ms}"), invalidation_code],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::ConstraintViolation(
+                "candidate operation record is unavailable".into(),
             ));
         }
         Ok(())

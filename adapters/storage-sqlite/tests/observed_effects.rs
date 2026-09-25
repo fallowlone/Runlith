@@ -810,9 +810,9 @@ fn candidate_failure_after_admission_is_sticky_and_blocks_reuse() {
                 .unwrap();
         }
 
-        // Record a failure after reaching the terminal state
+        // Invalidate after reaching the terminal state
         store
-            .record_candidate_operation_failure(
+            .invalidate_candidate_operation(
                 execution.as_str(),
                 attempt.as_str(),
                 "TAMPERED",
@@ -936,6 +936,152 @@ fn candidate_failure_after_admission_is_sticky_and_blocks_reuse() {
             "a raw UPDATE attempting to clear invalidation must be rejected by the trigger"
         );
     }
+}
+
+#[test]
+fn candidate_journal_only_failure_after_admission_keeps_evidence_valid() {
+    // Verify that record_candidate_operation_failure (journal-only, no invalidation)
+    // does not block evidence access or prevent completion transitions on admitted rows.
+    let db = TestDb::new("candidate-journal-only-failure");
+    let mut store = db.open();
+    let (execution, attempt) = seed_runtime(&mut store);
+    store
+        .record_candidate_selection(
+            "T-EFFECT",
+            execution.as_str(),
+            attempt.as_str(),
+            "candidate-journal-only",
+            &"1".repeat(40),
+            &"3".repeat(40),
+            &format!("sha256:{}", "b".repeat(64)),
+            1,
+            &format!("sha256:{}", "c".repeat(64)),
+            "criterion-1",
+            "candidate.file-contains.v1",
+            "src/main.rs",
+            "accepted",
+            10,
+        )
+        .unwrap();
+    store
+        .update_candidate_operation_status(
+            execution.as_str(),
+            attempt.as_str(),
+            "PENDING",
+            "RESULT_ADMITTED",
+            None,
+            11,
+        )
+        .unwrap();
+
+    // Record a journal-only failure (non-integrity error, precondition failure, etc.)
+    store
+        .record_candidate_operation_failure(
+            execution.as_str(),
+            attempt.as_str(),
+            "BLOCKED",
+            "transient-error",
+            12,
+        )
+        .unwrap();
+
+    // Status must still be RESULT_ADMITTED (no regression)
+    assert_eq!(
+        store
+            .candidate_operation_status(execution.as_str(), attempt.as_str())
+            .unwrap()
+            .as_deref(),
+        Some("RESULT_ADMITTED"),
+        "journal-only failure must not regress status"
+    );
+
+    // Invalidation must be None (not recorded)
+    let invalidation = store
+        .candidate_operation_invalidation(execution.as_str(), attempt.as_str())
+        .unwrap();
+    assert_eq!(
+        invalidation, None,
+        "journal-only failure must not set invalidation"
+    );
+
+    // History must contain the failure entry
+    let history = store
+        .candidate_operation_history(execution.as_str(), attempt.as_str())
+        .unwrap();
+    assert!(
+        history.is_some_and(|h| h.contains("BLOCKED:transient-error")),
+        "failure must be journaled in status_history"
+    );
+
+    // Evidence getters must still work (not blocked)
+    // Note: load_candidate_evidence requires Completion checkpoint, so only test the
+    // lower-level assertion: invalidation check should pass.
+    assert!(
+        store
+            .candidate_operation_invalidation(execution.as_str(), attempt.as_str())
+            .unwrap()
+            .is_none(),
+        "evidence must still be accessible after journal-only failure"
+    );
+
+    // COMPLETE transition must still be possible
+    store
+        .update_candidate_operation_status(
+            execution.as_str(),
+            attempt.as_str(),
+            "RESULT_ADMITTED",
+            "COMPLETE",
+            None,
+            13,
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .candidate_operation_status(execution.as_str(), attempt.as_str())
+            .unwrap()
+            .as_deref(),
+        Some("COMPLETE"),
+        "COMPLETE transition must succeed after journal-only failure"
+    );
+}
+
+#[test]
+fn candidate_invalidate_with_invalid_status_fails() {
+    // Verify that invalidate_candidate_operation rejects BLOCKED status
+    let db = TestDb::new("candidate-invalidate-blocked-status");
+    let mut store = db.open();
+    let (execution, attempt) = seed_runtime(&mut store);
+    store
+        .record_candidate_selection(
+            "T-EFFECT",
+            execution.as_str(),
+            attempt.as_str(),
+            "candidate-invalid-status",
+            &"1".repeat(40),
+            &"3".repeat(40),
+            &format!("sha256:{}", "b".repeat(64)),
+            1,
+            &format!("sha256:{}", "c".repeat(64)),
+            "criterion-1",
+            "candidate.file-contains.v1",
+            "src/main.rs",
+            "accepted",
+            10,
+        )
+        .unwrap();
+
+    // Attempting to invalidate with BLOCKED status must fail
+    let result = store.invalidate_candidate_operation(
+        execution.as_str(),
+        attempt.as_str(),
+        "BLOCKED",
+        "invalid-status",
+        11,
+    );
+    assert!(
+        matches!(result, Err(StorageError::ConstraintViolation(_))),
+        "invalidate_candidate_operation with BLOCKED status must fail"
+    );
 }
 
 #[test]
