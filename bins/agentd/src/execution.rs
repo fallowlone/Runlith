@@ -2224,9 +2224,13 @@ impl CandidateInputEvaluator {
                     evaluation::EffectError::CaptureFailed("G6 denied metadata access")
                 })? {
                 G6Authorization::Authorized { .. } => Ok(()),
-                G6Authorization::ApprovalRequired { .. } | G6Authorization::Denied { .. } => Err(
-                    evaluation::EffectError::CaptureFailed("G6 denied metadata access"),
-                ),
+                G6Authorization::ApprovalRequired { .. } | G6Authorization::Denied { .. } => {
+                    *infra_error.borrow_mut() =
+                        Some("G6 denied candidate object-source read".to_owned());
+                    Err(evaluation::EffectError::CaptureFailed(
+                        "G6 denied metadata access",
+                    ))
+                }
             }
         };
         for relative in [
@@ -2267,6 +2271,7 @@ impl CandidateInputEvaluator {
         &self,
         freshness: CandidateFreshnessRequest<'_>,
     ) -> Result<evaluation::CandidateFreshnessCheckpoint, CheckError> {
+        use std::cell::RefCell;
         let CandidateFreshnessRequest {
             request,
             invocation_id,
@@ -2374,9 +2379,7 @@ impl CandidateInputEvaluator {
             })? {
             G6Authorization::Authorized { effective, .. } => effective,
             G6Authorization::ApprovalRequired { .. } | G6Authorization::Denied { .. } => {
-                return Err(CheckError::infra(
-                    "G6 denied candidate linked-metadata read",
-                ));
+                return Err(CheckError::infra("G6 denied candidate worktree root read"));
             }
         };
         // Scanned worktree entry names are attacker-controlled. Any G6 authorization
@@ -2384,6 +2387,7 @@ impl CandidateInputEvaluator {
         // names) is treated as a content failure so the scan invalidates, not a transient
         // infrastructure issue. This prevents tamper + unauditable-name from reaching
         // COMPLETE without invalidation (TASK-0144, owner decision 2026-09-25).
+        let scan_detail: RefCell<Option<String>> = RefCell::new(None);
         let mut authorize_descriptor = |relative_path: &[u8], operation| {
             let relative_path = std::str::from_utf8(relative_path).map_err(|_| {
                 evaluation::EffectError::CaptureFailed(
@@ -2428,10 +2432,13 @@ impl CandidateInputEvaluator {
                     workspace_root.clone(),
                     relative_path,
                 )
-                .map_err(|_e| {
+                .map_err(|e| {
                     // G6 failures during live worktree scan are content failures: the name
                     // may be unauditable (e.g., all-spaces) or policy-denied. Neither is
-                    // transient infrastructure. Do not set infra_error_freshness.
+                    // transient infrastructure, so no infrastructure error cell is set here;
+                    // the G6 error text is kept in `scan_detail` so it still reaches the
+                    // CheckError::Content message built below instead of being discarded.
+                    *scan_detail.borrow_mut() = Some(e.to_string());
                     evaluation::EffectError::CaptureFailed(
                         "G6 denied candidate descriptor filesystem read",
                     )
@@ -2462,10 +2469,14 @@ impl CandidateInputEvaluator {
             Err(e) => {
                 // Live worktree scan failures during authorize_descriptor are content failures
                 // (scanned names are attacker-controlled, including any G6 failures or
-                // unauditable names). No infrastructure error cell is maintained for the scan.
-                return Err(CheckError::Content(format!(
-                    "live worktree scan failed: {e}"
-                )));
+                // unauditable names). No infrastructure error cell is maintained for the scan;
+                // any captured G6 error text is folded into the Content message instead.
+                return Err(CheckError::Content(match scan_detail.into_inner() {
+                    Some(detail) => {
+                        format!("live worktree scan failed: {e} ({detail})")
+                    }
+                    None => format!("live worktree scan failed: {e}"),
+                }));
             }
         };
         let pointer_after =
