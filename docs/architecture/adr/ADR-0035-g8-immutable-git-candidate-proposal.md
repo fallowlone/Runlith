@@ -368,6 +368,47 @@ and workspace Git operations continue using the prior
 Owner ratified 2026-09-25. Grants no new filesystem, process or
 completion authority.
 
+## Amendment 2026-09-25: evidence-only production evaluation and permanent invalidation
+
+**Why needed.** An independent adversarial review of TASK-0144 found
+(a) the production composition turned a candidate-input check into a Task
+completion (or failure) verdict, although TASK-0144's scope records typed
+integrity and capture statuses, not completion verdicts, and adds no
+completion authority; completion belongs to TASK-0125 claim verification
+(ADR-0032); and (b) a tamper or freshness mismatch detected after result
+admission was only journaled, so the evidence could still be read, reused,
+checkpointed and completed, contrary to this ADR ("a detected mismatch
+makes evidence stale/blocked and cannot produce or reuse a successful
+TEST_SUITE_RESULT").
+
+**Evidence-only production evaluation.** The production candidate-input
+evaluation durably admits bound evidence (operation status RESULT_ADMITTED
+with its Selection, BeforeEvaluation, AfterEvaluation and ResultAdmission
+checkpoints) and then reports no verdict, so the Task remains VERIFYING.
+Passing or failing the selector check is recorded in the evidence, never
+applied to the Task. The Completion freshness checkpoint and the
+RESULT_ADMITTED → COMPLETE transition remain available only to a future
+completion-stage caller (TASK-0125), which must invoke them before any
+completion.
+
+**Permanent invalidation.** Operation status stays monotonic (it never
+regresses from RESULT_ADMITTED or COMPLETE). Any recorded failure additionally
+sets a permanent invalidation (time and code) on the operation, enforced by
+a database trigger that forbids changing or clearing it. Every evidence and
+integrity-assessment read, checkpoint append and COMPLETE transition refuses
+an invalidated operation. A failed Completion or restart-reuse freshness
+check, or a reuse binding mismatch, records such an invalidation; if it
+cannot be recorded, the operation fails with an error instead of silently
+continuing.
+
+**Special files.** Descriptor-relative reads open entries non-blocking, so a
+FIFO or other special file in the worktree, in linked metadata, or in place
+of `.git` makes the check stale promptly instead of blocking it.
+
+Owner ratified 2026-09-25. Narrows authority: removes completion verdicts
+from TASK-0144's production path and grants no new filesystem, process or
+completion authority.
+
 ## References
 
 - ADR-0018 — independent evaluation and completion authority.

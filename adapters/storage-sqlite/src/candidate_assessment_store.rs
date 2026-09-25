@@ -54,6 +54,29 @@ impl crate::SqliteStore {
         ).optional()?)
     }
 
+    /// Returns the invalidation timestamp and code if the operation is invalidated,
+    /// None if it is still valid.
+    pub fn candidate_operation_invalidation(
+        &self,
+        execution_id: &str,
+        attempt_id: &str,
+    ) -> StorageResult<Option<(u64, String)>> {
+        match self.connection().query_row(
+            "SELECT invalidated_at_ms, invalidation_code FROM candidate_input_operations WHERE execution_id = ?1 AND attempt_id = ?2",
+            params![execution_id, attempt_id],
+            |row| {
+                let invalidated_at_ms: Option<i64> = row.get(0)?;
+                let invalidation_code: Option<String> = row.get(1)?;
+                Ok((invalidated_at_ms, invalidation_code))
+            },
+        ) {
+            Ok((Some(ms), Some(code))) => Ok(Some((u64::try_from(ms).unwrap_or(0), code))),
+            Ok(_) => Ok(None),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Durably binds the selected subject before object graph resolution. An
     /// interrupted PENDING operation is intentionally ambiguous and cannot
     /// be silently replayed; only a fully admitted/completed identical
@@ -150,10 +173,18 @@ impl crate::SqliteStore {
         let changed = self.connection().execute(
             "UPDATE candidate_input_operations SET status = ?1, detail_code = ?2, updated_at_ms = ?3,
                     status_history = status_history || char(10) || ?7
-             WHERE execution_id = ?4 AND attempt_id = ?5 AND status = ?6",
+             WHERE execution_id = ?4 AND attempt_id = ?5 AND status = ?6 AND invalidated_at_ms IS NULL",
             params![status, detail_code, now_ms.min(i64::MAX as u64) as i64, execution_id, attempt_id, expected, format!("{status}:{detail_code:?}:{}", now_ms)],
         )?;
         if changed != 1 {
+            // Check if the row is invalidated to provide a better error message
+            if let Some((_, code)) =
+                self.candidate_operation_invalidation(execution_id, attempt_id)?
+            {
+                return Err(StorageError::ConstraintViolation(format!(
+                    "candidate evidence invalidated: {code}"
+                )));
+            }
             return Err(StorageError::ConstraintViolation(
                 "candidate operation status transition is stale or ambiguous".into(),
             ));
@@ -171,7 +202,11 @@ impl crate::SqliteStore {
     /// `UPDATE ... CASE` compares the row's own current status, so this is
     /// compare-and-swap safe under concurrent callers without needing an
     /// `expected` parameter); `status_history` is still always appended so
-    /// the failure is durably journaled either way.
+    /// the failure is durably journaled either way. TASK-0144: additionally,
+    /// for every failure (pre- or post-admission), `invalidated_at_ms` and
+    /// `invalidation_code` are set once and then become immutable (sticky
+    /// trigger). This makes the evidence stale/blocked and prevents reuse or
+    /// completion, regardless of status.
     pub fn record_candidate_operation_failure(
         &mut self,
         execution_id: &str,
@@ -191,9 +226,11 @@ impl crate::SqliteStore {
                     status = CASE WHEN status IN ('RESULT_ADMITTED','COMPLETE') THEN status ELSE ?1 END,
                     detail_code = CASE WHEN status IN ('RESULT_ADMITTED','COMPLETE') THEN detail_code ELSE ?2 END,
                     updated_at_ms = ?3,
+                    invalidated_at_ms = COALESCE(invalidated_at_ms, ?3),
+                    invalidation_code = COALESCE(invalidation_code, ?7),
                     status_history = status_history || char(10) || ?6
              WHERE execution_id = ?4 AND attempt_id = ?5",
-            params![status, detail_code, now_ms, execution_id, attempt_id, format!("{status}:{detail_code}:{now_ms}")],
+            params![status, detail_code, now_ms, execution_id, attempt_id, format!("{status}:{detail_code}:{now_ms}"), format!("{status}:{detail_code}")],
         )?;
         if changed != 1 {
             return Err(StorageError::ConstraintViolation(
@@ -228,6 +265,12 @@ impl crate::SqliteStore {
         attempt_id: &str,
         require_completion: bool,
     ) -> StorageResult<Option<CandidateEvidence>> {
+        // Check if the operation is invalidated before attempting to load evidence
+        if let Some((_, code)) = self.candidate_operation_invalidation(execution_id, attempt_id)? {
+            return Err(StorageError::ConstraintViolation(format!(
+                "candidate evidence invalidated: {code}"
+            )));
+        }
         let row: Option<String> = self
             .connection()
             .query_row(
@@ -410,6 +453,12 @@ impl crate::SqliteStore {
         execution_id: &str,
         attempt_id: &str,
     ) -> StorageResult<Option<CandidateIntegrityAssessment>> {
+        // Check if the operation is invalidated before attempting to load assessment
+        if let Some((_, code)) = self.candidate_operation_invalidation(execution_id, attempt_id)? {
+            return Err(StorageError::ConstraintViolation(format!(
+                "candidate evidence invalidated: {code}"
+            )));
+        }
         type Row = (
             String,
             String,
@@ -617,6 +666,12 @@ impl crate::SqliteStore {
                 "candidate admission requires a matching completion or restart checkpoint"
                     .to_owned(),
             ));
+        }
+        // Check if the operation is invalidated before attempting to append checkpoint
+        if let Some((_, code)) = self.candidate_operation_invalidation(execution_id, attempt_id)? {
+            return Err(StorageError::ConstraintViolation(format!(
+                "candidate evidence invalidated: {code}"
+            )));
         }
         self.connection_mut().execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {
