@@ -3,6 +3,10 @@
 Status: **Proposed** (TASK-0153; awaiting owner ratification after independent review)
 Gate: cross-gate (governance)
 
+ADR-0037 is reserved for TASK-0152 (confined Claude provider authentication),
+being drafted on branch `claude/adr-0037-provider-confinement-7qvn2z`; it is
+unrelated to this ADR's licensing decision.
+
 > Changes the repository default license from PolyForm Shield 1.0.0 to
 > PolyForm Noncommercial 1.0.0: free use becomes noncommercial-use-only (all
 > features included), any commercial use requires a separately executed
@@ -20,51 +24,72 @@ noncompete restriction on providing a *competing* product. It does not
 require payment for internal commercial use that does not compete with the
 licensor's own offering. That does not meet the owner's goal: the owner wants
 **all** commercial use of the product, by any individual or company of any
-size, to require a paid commercial license, while noncommercial use (personal,
-evaluation, and use by noncommercial organizations) remains free with the
-full feature set.
+size, to require a paid commercial license, while noncommercial use (personal
+use without any anticipated commercial application, and use by noncommercial
+organizations) remains free with the full feature set. Evaluation for
+commercial adoption is commercial use, not personal use; see Open questions
+for whether a separate commercial evaluation/trial license should be offered
+(none exists today).
 
 Today's monetization strategy (`AI_ENGINEERING_OS_MONETIZATION_AND_PLUGIN_ECOSYSTEM.md`
 §3) also gates *features* by tier (Community vs. Pro/Teams/Enterprise)
-independently of Shield. Under the new decision, tiers stop gating features
-for noncommercial users; the paid tiers become the commercial-use licensing
-path itself, plus organizational/governance capabilities for Teams/Enterprise.
+independently of Shield. Under the new decision, tiers stop gating **software
+features** for noncommercial users: every software feature in the licensed
+product — including team/organizational/governance features — is available
+to all noncommercial users, including noncommercial organizations. What the
+paid tiers sell is (a) the commercial-use license itself, and (b) separately
+contracted services (support, SLAs, rollout assistance) and hosted/cloud
+add-ons, neither of which are software features granted by the license.
 
 The owner separately wants future eligibility for AI-vendor open-source
 maintainer programs (e.g. Claude for Open Source, Codex for Open Source).
+Eligibility is decided by each program, not asserted here.
 **Judgement/secondary-source, not independently verified by this task:** a
 secondary source states such programs require an OSI-approved license.
 Anthropic's program page (read 2026-09-25, orchestrator-verified) lists
 adoption thresholds (500+ dependent repos, or 200k+ monthly downloads, or 20+
-external contributors in 12 months, or OpenSSF criticality ≥ 0.4) but that
+external contributors in 12 months, or OpenSSF criticality ≥ 0.4); that list
+is non-exhaustive — the same page also describes maintainer/contributor-based
+tracks (e.g. 100+ merged pull requests to repositories the applicant does not
+own, or being a core contributor of a recognized foundation project). That
 page is about adoption thresholds, not license approval itself; the
 OSI-approval requirement is carried here as an unverified secondary claim.
-Either way, PolyForm Noncommercial is not an OSI-approved license, so the
-Runlith core cannot be "open source" under this decision regardless of
-adoption metrics.
+PolyForm Noncommercial is not an OSI-approved license, and a
+noncommercial-only core is, at best, unlikely to qualify as an "open-source
+project" for such a program — a judgement, not a verified program ruling.
 
 ## Decision
 
 **D1 — Default license.** The repository default license becomes
 [PolyForm Noncommercial 1.0.0](https://github.com/polyformproject/polyform-licenses/blob/1.0.0/PolyForm-Noncommercial-1.0.0.md),
 replacing PolyForm Shield 1.0.0. `LICENSE` is a byte-identical copy (verified
-by `sha256sum`, see Verification below), with no `Required Notice:` line
-added — the licensor identity is an open question (see Open questions).
+by `sha256sum`, see Verification below). The licensor is Artem Hrechuk, a
+natural person, not a legal entity; the root `NOTICE` file (new, plain text)
+carries the plain-text line beginning `Required Notice:` that the license's
+Notices clause requires recipients to also receive, and must be redistributed
+together with the software for that reason (see References). Whether a
+verbatim, unamended adoption of PolyForm Noncommercial 1.0.0 remains the
+final license choice is itself open — see Open questions,
+"Government-institution use and the noncommercial-organization exclusion."
 
 **D2 — Permitted free use, exactly per license text.** Free use is limited to
 the license's own permitted purposes: any noncommercial purpose; personal use
-for research, experiment, testing, personal study, private entertainment,
-hobby projects, amateur pursuits or religious observance without any
-anticipated commercial application; and use by a charitable organization,
-educational institution, public research organization, public safety or
-health organization, environmental protection organization, or government
-institution, **regardless of the source of funding or obligations resulting
-from that funding.** This ADR does not narrow that text: a publicly funded
-university or a government agency's use is free under this decision exactly
-as the license states, even though it is a consequence some readers might not
-expect from a "noncommercial" label. Any exclusion of a category the license
-text itself would treat as noncommercial-organization use is out of scope for
-a verbatim PolyForm adoption (see Open questions).
+for research, experiment, and testing for the benefit of public knowledge,
+personal study, private entertainment, hobby projects, amateur pursuits or
+religious observance without any anticipated commercial application; and use
+by a charitable organization, educational institution, public research
+organization, public safety or health organization, environmental protection
+organization, or government institution, **regardless of the source of
+funding or obligations resulting from that funding.** As drafted, this ADR
+does not narrow that text: a publicly funded university or a government
+agency's use would be free under a verbatim adoption exactly as the license
+states, even though it is a consequence some readers might not expect from a
+"noncommercial" label. **This is now contested and unresolved:** the owner
+wants government-institution use to require payment, which a verbatim
+PolyForm Noncommercial adoption cannot express — see Open questions,
+"Government-institution use and the noncommercial-organization exclusion."
+Until that is resolved, D2 as stated is the current Proposed text, not a
+ratified position.
 
 **D3 — Commercial use requires a paid license; no feature gating for
 noncommercial users.** Any commercial use of the product — by an individual
@@ -72,10 +97,15 @@ commercial user (e.g. a freelancer) or a company of any size, including
 ordinary internal business use — requires a separately executed commercial
 license from the licensor. That commercial license is what Pro Local, Pro
 Subscription, Teams and Enterprise sell; it is not an additional feature
-unlock layered on top of a free "Community" feature set. Noncommercial users
-(Community tier) get all product features under the free license; tiers stop
-gating functionality for noncommercial users. No commercial license or EULA
-is executed as of this ADR.
+unlock layered on top of a free "Community" feature set. Every software
+feature in the licensed product — including team/organizational/governance
+features — is available to all noncommercial users, including noncommercial
+organizations (Community tier); tiers stop gating functionality for
+noncommercial users. What is paid is (a) the commercial-use license itself,
+required for any commercial use, and (b) separately contracted services such
+as support, SLAs, rollout assistance and hosted/cloud add-ons, which are not
+software features granted by the license. No commercial license or EULA is
+executed as of this ADR.
 
 **D4 — Source-available, never open source.** The core must always be
 described as "source-available." It must never be described as "open
@@ -101,31 +131,49 @@ no-network-dependency, no-exfiltration commitments — an enforcement mechanism
 that silently phones home or requires an account for core local functionality
 would contradict ADR-0014 and is not pre-approved by this decision.
 
-**D7 — Contributor terms.** A CLA is required before accepting the first
-external contribution; a DCO alone is not sufficient and is not treated as an
-additional grant of commercial relicensing rights. No CLA is established by
-this ADR; drafting one is a follow-up (see Migration impact).
+**D7 — Contributor terms.** Before accepting substantial external
+contributions, establish contributor terms sufficient for the intended
+noncommercial/commercial licensing model, e.g. an appropriate CLA; a DCO
+alone is not an additional grant of commercial relicensing rights. No CLA is
+established by this ADR; drafting one is a follow-up (see Migration impact).
 
 **D8 — Transition.** The GitHub repository (`fallowlone/Runlith`) is private;
-git history shows no external human contributors (authors are the owner plus
-AI-agent co-authored commits — 66 of 181 commits, verified 2026-09-26), so no
-third-party Shield licensee is known to exist from public distribution of
-this repository. This ADR does not attempt to retroactively alter any grant:
-if any copy of this repository was already distributed under PolyForm Shield
-to a third party before this change, that copy's Shield grant is unaffected
-by this decision; the license change applies going forward to the repository
-default as of ratification.
+git history as of `69b2221` (181 commits) shows no external human
+contributors: authors are the owner (147 commits, across two owner
+identities), `Claude <noreply@anthropic.com>` (33 commits) and `Runlith
+Orchestrator` (1 commit); 66 of 181 commits carry a Claude co-author trailer,
+and 68 of 181 commits involve AI authorship or co-authorship (orchestrator-
+verified 2026-09-26). Trailer counts measure commit attribution, not the
+share of AI-generated code. No third-party Shield licensee is known to exist
+from public distribution of this repository. This ADR does not attempt to
+retroactively alter any grant: if any copy of this repository was already
+distributed under PolyForm Shield to a third party before this change, that
+copy's Shield grant is unaffected by this decision; the license change
+applies going forward to the repository default as of ratification.
 
-**D9 — Hosted/cloud add-on constraints.** Any future hosted/cloud add-on
-built on a Claude-based provider integration (e.g. relay, hosted model
-capacity, remote workers) must respect Anthropic's Commercial Terms as stated
-on its legal/compliance page (read 2026-09-25): Commercial Terms are required
-to run Claude Code in a product or hosted sandbox; each end user must
+**Merge sequencing.** The LICENSE/NOTICE change described by this ADR takes
+effect only when the branch carrying it is merged into the repository
+default branch. Merge happens only together with, or after, owner
+ratification of this ADR; this ADR being Proposed and its files existing on
+a branch is not itself a license change. `planning/tasks/queue.yaml`'s
+TASK-0153 `exit_criteria_summary` records the same gate (see Migration
+impact).
+
+**D9 — Hosted/cloud add-on constraints.** Anthropic's legal/compliance page
+(read 2026-09-25) states that preinstalling or running Claude Code in a
+product or service requires Commercial Terms, that each end user must
 authenticate with their own credential (API key, subscription or third-party
-credential); the operator may not pay for, resell or intermediate Claude
-usage; and the operator may not collect, store or intermediate Claude.ai
-credentials. This is a recorded external constraint, not a Runlith licensing
-term, and does not itself change this ADR's decisions D1–D8.
+credential), and that the operator may not pay for, resell or intermediate
+Claude usage — **unless Anthropic and the operator have mutually agreed
+otherwise.** Separately, and generally for developers (not limited to
+preinstalled/hosted products), the same page bans collecting, storing or
+intermediating Claude.ai credentials or session tokens. **Judgement, not a
+verified requirement:** whether and how these conditions would apply to a
+future Runlith hosted/cloud add-on built on a Claude-based provider
+integration (e.g. relay, hosted model capacity, remote workers) is this ADR's
+own inference from the source page, not something the source states about
+Runlith specifically. This is a recorded external constraint, not a Runlith
+licensing term, and does not itself change this ADR's decisions D1–D8.
 
 ## Alternatives considered
 
@@ -167,13 +215,17 @@ term, and does not itself change this ADR's decisions D1–D8.
 - Any individual freelancer or company using Runlith commercially must obtain
   a paid commercial license; there is no free commercial-use tier at any
   company size, unlike Shield or Small Business.
-- Noncommercial adoption (personal, academic, nonprofit, government) is
-  maximally easy: full features, free, license text alone is sufficient.
-- The Runlith core is permanently ineligible for OSI-scoped/open-source-only
-  program benefits (e.g. AI-vendor open-source maintainer programs) unless
-  the license changes again in the future; only separately scoped Apache-2.0
-  components (Plugin SDK, schemas, examples) can pursue that path, and only
-  if those components independently earn adoption.
+- Noncommercial adoption (personal, academic, charitable-organization,
+  government) is maximally easy under the current Proposed text: full
+  features, free, license text alone is sufficient — but government-use
+  eligibility is itself an open, contested question (see Open questions).
+- Eligibility for OSI-scoped/open-source-only program benefits (e.g.
+  AI-vendor open-source maintainer programs) is decided by each program.
+  PolyForm Noncommercial is not an OSI-approved license, so a
+  noncommercial-only core is, at best, unlikely to qualify while it carries
+  this license; only separately scoped Apache-2.0 components (Plugin SDK,
+  schemas, examples) can pursue that path independently, and only if those
+  components independently earn adoption.
 - The monetization doc's tier semantics change: Community stops being a
   feature-limited free trial and becomes the full-featured noncommercial-use
   license; Pro/Teams/Enterprise become the commercial-use licensing vehicle,
@@ -206,9 +258,10 @@ Cargo manifest changes are made here. Follow-up work required before this
 decision is fully realized, none of it authorized to happen automatically by
 this ADR:
 
-- Add `license = "PolyForm-Noncommercial-1.0.0"` (or the SPDX-recognized
-  equivalent identifier once one exists) to workspace Cargo manifests; no
-  workspace crate currently declares a `license` field, verified 2026-09-26.
+- Add `license = "PolyForm-Noncommercial-1.0.0"` — this identifier exists on
+  the SPDX License List (SPDX is not the same as OSI approval; the license is
+  not OSI-approved) — to workspace Cargo manifests; no workspace crate
+  currently declares a `license` field, verified 2026-09-26.
 - Draft an actual commercial license/EULA with qualified legal counsel; none
   exists today, and this ADR does not create one.
 - Draft and adopt a CLA before accepting the first external contribution
@@ -229,29 +282,78 @@ this ADR:
   `AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md` for license-related
   wording that may need to follow this decision once ratified; both files
   are outside this task's allowed file list and are not edited here.
+- Reconcile sections of `AI_ENGINEERING_OS_MONETIZATION_AND_PLUGIN_ECOSYSTEM.md`
+  that still reflect the pre-ADR-0038 model and were not in this task's
+  allowed edit scope: §5 "Community rights concept" (~line 1205, lists
+  "evaluation" as a potential free/community right), §6 "Commercial use of
+  the product should remain allowed" (~line 1228), §7/§12/§33 (PolyForm
+  Shield recommendations/ranking, ~lines 1251, 1322, 1795), and §34 "Critical
+  unresolved questions" Q1/Q2 (~lines 1826-1827, which ask whether commercial
+  internal/small-company use should be free — already answered "no" by this
+  ADR). Also reconcile
+  `AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md` §86 "Monetization
+  strategy" → "Community — Free" (~line 4058), which predates this decision.
+  A follow-up reconciliation task should update or annotate all of these;
+  none of them are edited by this ADR or this task.
+- Merge sequencing: this ADR's LICENSE/NOTICE change takes effect only when
+  merged into the repository default branch, and merge happens only together
+  with or after owner ratification of this ADR (see D8 "Merge sequencing").
+  `planning/tasks/queue.yaml`'s TASK-0153 `exit_criteria_summary` records the
+  same merge gate.
 
 ## Open questions for ratification
 
-- **Licensor identity for a `Required Notice:` line.** PolyForm Noncommercial
-  supports an optional `Required Notice:` line naming the licensor. This ADR
-  deliberately does not add one; the owner must decide the licensor's legal
-  name (individual vs. an entity not yet formed) before one is added.
+- **Licensor identity for a `Required Notice:` line — Resolved.** The
+  licensor is Artem Hrechuk, a natural person (no legal entity). The root
+  `NOTICE` file carries `Required Notice: Copyright 2026 Artem Hrechuk
+  (https://github.com/fallowlone)` (see D1, References).
 - **Exact commercial terms.** Price, contract form, and whether Pro
   Local/Subscription/Teams/Enterprise purchase terms are drafted as one
   commercial license or several, remain undecided; §3 of the monetization
   doc keeps its prices as hypotheses.
-- **Whether any noncommercial-organization category should be excluded.**
-  D2 adopts the PolyForm text verbatim, including its unconditional
-  "regardless of funding" language for educational/government/public-research
-  use. If the owner later wants to exclude a category the verbatim text would
-  treat as free (e.g. a large publicly funded lab), that requires a custom
-  license variant, not a verbatim PolyForm adoption, and would need its own
-  ADR amendment.
+- **Government-institution use and the noncommercial-organization
+  exclusion — OPEN, reopened.** D2 as drafted adopts the PolyForm
+  Noncommercial text verbatim, including its unconditional "regardless of
+  funding" language, which makes use by a government institution free. The
+  owner now wants government-institution use to require payment (i.e. to be
+  treated as requiring a commercial license), which is incompatible with a
+  verbatim, unamended adoption of PolyForm Noncommercial 1.0.0: the license's
+  Noncommercial Organizations clause grants government-institution use
+  unconditionally, and this ADR does not have authority to silently narrow
+  licensed text. Expressing the owner's intent would require either a custom
+  license variant/amendment carving government institutions out of the
+  Noncommercial Organizations clause, or selecting a different base license
+  entirely — both are a bigger change than this task's scope, are not
+  decided here, and require their own ADR amendment or replacement before
+  ratification. Until resolved, D1/D2's verbatim-adoption text should be
+  read as the current Proposed draft, not a settled position.
+- **Freelancer/contractor working for a noncommercial organization.**
+  PolyForm's text does not expressly resolve whether a paid contractor or
+  freelancer building software for a government/educational/charitable
+  institution is using the software "for" that institution (free, if the
+  institution's use is itself a permitted purpose) or for the contractor's
+  own commercial activity (requiring a commercial license). The owner's
+  stated position: freelancers and contractors pay for commercial use,
+  including when the work is performed for a government, educational or
+  charitable institution — the contractor's own use is treated as
+  commercial regardless of the institution's noncommercial status. This
+  position is recorded here as the owner's intent for future ADR/LICENSING.md
+  wording; it is not yet reflected in `LICENSING.md`, which does not state a
+  position on this question.
+- **Commercial evaluation/trial license.** No separate commercial
+  evaluation or trial license exists today. Evaluating the product for an
+  intended commercial adoption is commercial use, not a permitted
+  noncommercial purpose, under a verbatim PolyForm Noncommercial adoption;
+  whether the owner wants to offer a separate, explicitly scoped commercial
+  evaluation/trial license (e.g. a time-boxed free trial for prospective
+  commercial customers) is open and not decided by this ADR.
 
 ## References
 
 - [LICENSE](../../../LICENSE) — PolyForm Noncommercial 1.0.0, verbatim
   (sha256: `c0ea4a896d2c8c394b29f9427589996db826cd501c512279ff0ed3ef48fabbe5`).
+- [NOTICE](../../../NOTICE) — new root file; carries the license's required
+  plain-text `Required Notice:` line naming the licensor (D1).
 - [LICENSING.md](../../../LICENSING.md) — repository licensing boundaries.
 - [README.md](../../../README.md) — License section.
 - [AI_ENGINEERING_OS_MONETIZATION_AND_PLUGIN_ECOSYSTEM.md](../../../AI_ENGINEERING_OS_MONETIZATION_AND_PLUGIN_ECOSYSTEM.md)
@@ -261,6 +363,10 @@ this ADR:
 - PolyForm Noncommercial 1.0.0 upstream text:
   <https://github.com/polyformproject/polyform-licenses/blob/1.0.0/PolyForm-Noncommercial-1.0.0.md>
   and <https://polyformproject.org/licenses/noncommercial/1.0.0>.
+- SPDX License List entry for `PolyForm-Noncommercial-1.0.0`:
+  <https://spdx.org/licenses/PolyForm-Noncommercial-1.0.0.html> — listed on
+  SPDX; not OSI-approved (SPDX listing and OSI approval are different
+  things).
 - PolyForm Shield 1.0.0 (current, being replaced):
   <https://polyformproject.org/licenses/shield/1.0.0>.
 - Anthropic legal & compliance page (read 2026-09-25):

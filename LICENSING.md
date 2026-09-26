@@ -25,19 +25,24 @@ PolyForm Noncommercial grants free use only for permitted purposes, exactly as
 its text defines them:
 
 - any noncommercial purpose;
-- personal use for research, experiment, testing, personal study, private
-  entertainment, hobby projects, amateur pursuits or religious observance,
-  without any anticipated commercial application;
+- personal use for research, experiment, and testing for the benefit of public knowledge,
+  personal study, private entertainment, hobby projects, amateur pursuits or
+  religious observance, without any anticipated commercial application;
 - use by a charitable organization, educational institution, public research
   organization, public safety or health organization, environmental
   protection organization, or government institution — regardless of the
   source of funding or obligations resulting from that funding. This means
   government and education use is free even when publicly funded or under
-  grant obligations, as long as the use itself is not commercial.
+  grant obligations.
 
-Noncommercial users get the full product: tiers no longer gate features for
-noncommercial use. Read the license text in [LICENSE](LICENSE) for the exact
-boundaries; this page only summarizes it.
+Noncommercial users get the full product: every software feature — including
+team/organizational/governance features — is available to all noncommercial
+users, including noncommercial organizations; tiers no longer gate features
+for noncommercial use. What is paid is (a) the commercial-use license itself
+for commercial users, and (b) separately contracted services such as support,
+SLAs, rollout assistance and hosted/cloud add-ons, which are not software
+features granted by the license. Read the license text in [LICENSE](LICENSE)
+for the exact boundaries; this page only summarizes it.
 
 ## Commercial use requires a paid license
 
@@ -51,9 +56,9 @@ not a permitted purpose under [LICENSE](LICENSE).
 This repository does not yet contain an executed or counsel-approved
 commercial license or EULA. This page is not one, and no price, term or legal
 entity is fixed by it. To ask about a commercial license, contact the
-licensor; no contact address is established yet — this is a placeholder
-pending the owner's decision on licensor identity and contact channel, not an
-invented one.
+licensor (Artem Hrechuk, see [NOTICE](NOTICE)); no contact address is
+established yet — this is a placeholder pending the owner's decision on a
+contact channel, not an invented one.
 
 ## No enforcement in the product
 
@@ -82,16 +87,20 @@ actual purchase agreement, which does not yet exist.
 
 ## Open-source-program eligibility
 
-PolyForm Noncommercial is not an OSI-approved license, so the Runlith core is
-not eligible for AI-vendor open-source maintainer programs (for example
-Claude for Open Source or Codex for Open Source) while it carries this
-license. The owner's recorded direction is to pursue that eligibility only
-through separately scoped, genuinely independent components released under
-an OSI license — the Apache-2.0 direction below for a future Plugin SDK,
-public schemas and examples — each of which must earn its own adoption. The
-Runlith core itself is not expected to become OSI open source under this
-decision, and must not be marketed as "open source" regardless of any
-component's eligibility.
+Eligibility for AI-vendor open-source maintainer programs (for example
+Claude for Open Source or Codex for Open Source) is decided by each program,
+not by this document. PolyForm Noncommercial is not an OSI-approved license;
+program pages reviewed for ADR-0038 describe adoption-based criteria, and a
+secondary source claims an OSI-license requirement (not independently
+verified). A noncommercial-only core is, at best, unlikely to qualify as an
+"open-source project" for such a program — a judgement, not a program ruling.
+The owner's recorded direction is to pursue that eligibility only through
+separately scoped, genuinely independent components released under an OSI
+license — the Apache-2.0 direction below for a future Plugin SDK, public
+schemas and examples — each of which must earn its own adoption. The Runlith
+core itself is not expected to become OSI open source under this decision,
+and must not be marketed as "open source" regardless of any component's
+eligibility.
 
 ## Plugin SDK and Apache-2.0
 
@@ -114,10 +123,10 @@ ecosystem.
 ## Contributions, trademarks and release readiness
 
 Before accepting substantial external contributions, establish contributor
-terms sufficient for the intended Community and commercial licensing model.
-A Developer Certificate of Origin (DCO) alone should not be treated as an
-additional grant of commercial relicensing rights; a CLA is required before
-accepting the first external contribution. No CLA is established here.
+terms sufficient for the intended noncommercial/commercial licensing model,
+e.g. an appropriate CLA. A Developer Certificate of Origin (DCO) alone is not
+an additional grant of commercial relicensing rights. No CLA is established
+here.
 
 Source-code availability does not imply permission to claim official Runlith
 endorsement. A separate trademark policy remains to be established; this page
@@ -130,11 +139,20 @@ AI-assisted authorship in this repository (see ADR-0038's migration impact
 and open questions). Adding the standard license text is not evidence that
 those release checks have been completed.
 
+## Effective date
+
+This LICENSE/NOTICE change takes effect only once it is merged into the
+repository default branch, and merge happens only together with or after
+owner ratification of ADR-0038. Until then, this page and NOTICE describe a
+Proposed decision, not the license terms already in effect.
+
 ## License source
 
 `LICENSE` is an unmodified copy of
 [PolyForm Noncommercial 1.0.0 from the PolyForm project](https://github.com/polyformproject/polyform-licenses/blob/1.0.0/PolyForm-Noncommercial-1.0.0.md).
 Examples of notices inside that standard text are examples, not Runlith's
-copyright notices; this page deliberately does not add a `Required Notice:`
-line, since the licensor identity is an open question for owner ratification
-(see ADR-0038, "Open questions for ratification").
+copyright notices. The root [NOTICE](NOTICE) file carries the plain-text line
+beginning `Required Notice:` that the license's Notices clause requires
+recipients to also receive; NOTICE must be redistributed together with the
+software for that reason. The licensor is Artem Hrechuk, as stated in
+NOTICE.
