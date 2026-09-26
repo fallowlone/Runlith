@@ -595,12 +595,23 @@ production Rust gateway as normative rules, not optional polish.
   and fails with a typed provider-authentication condition — never a retry
   of the same request, never a retry with a different credential or class,
   never a fallback around D14's refusal. This is deliberately stricter
-  than the child's own retry behavior: round-4 owner operation observed
-  the CLI itself retry a real-shaped but invalid credential 9 times
-  (visible via the forwarded `x-stainless-retry-count` header, itself in
-  the D15 allowlist) before giving up — the gateway must not wait out the
-  child's own retry budget. Total forwards per attempt remain bounded
-  regardless (D9; `MAX_FORWARDED_REQUESTS = 32`, `owner_proxy_probe.py:191`).
+  than the child's own observed behavior: the implementer agent's own
+  end-to-end test against a real-API-key-shaped but invalid dummy
+  credential (not owner-run), reproduced independently a day apart
+  (2026-09-25 and 2026-09-26, both at script sha256
+  `ae3b4208e586b1a529b4df7055d27943b3522cda6cdb91e5a8efe0b7519ec37b`),
+  recorded the CLI child issuing exactly 9 forwarded requests and receiving
+  9 real `401` responses before the harness's own 120s timeout cut it off
+  without the child ever exiting
+  (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:567-687`,
+  "Agent-run end-to-end invalid-credential test (round 4)"). **Why the CLI
+  retried 9 times is not established** — that section explicitly states no
+  header value (including `x-stainless-retry-count`) was ever captured,
+  only header names, so the retry's cause is an open question, not a
+  claimed mechanism; what is observed is only the count and outcome. The
+  gateway must not wait out whatever the child's own retry budget turns
+  out to be. Total forwards per attempt remain bounded regardless (D9;
+  `MAX_FORWARDED_REQUESTS = 32`, `owner_proxy_probe.py:191`).
 - **D19.** No credential value ever appears in an error, log line, panic/
   crash message, `Debug`/`Display` output, crash report, or Security Audit
   record — only classified failure reasons and counts, matching the
@@ -624,13 +635,33 @@ production Rust gateway as normative rules, not optional polish.
   environment variable, or clipboard-persisted value — only a masked,
   hidden prompt entered twice and compared, matching
   `provision_keychain_item.py`'s `getpass.getpass` pattern (`:128-130`)
-  and its refusal to run on any credential-shaped argv element. The
-  Keychain item's ACL trusts only the code-signed `agentd` binary, so
-  `agentd` needs no repeated OS prompt while any other same-user process
-  triggers one — stricter than the probe tooling's own "trust no
-  application" precedent (`-T ""`, `:172-186`), since the probe itself is
-  not a code-signed production binary. Service names are fixed by
-  credential class, never typed by the owner (`SERVICE_NAME`, `:38-41`).
+  and its refusal to run on any credential-shaped argv element. Service
+  names are fixed by credential class, never typed by the owner
+  (`SERVICE_NAME`, `:38-41`).
+
+  **ACL trade-off, stated explicitly rather than as a simple "stricter."**
+  `provision_keychain_item.py` stores the owner's real item with `-T ""`
+  (`:172-186`) — no application is trusted, so *every* read, including
+  `agentd`'s own, prompts the owner for approval. Production instead names
+  exactly one trusted application: the code-signed `agentd` binary. That
+  is **looser** than `-T ""` by precisely that one binary — `agentd` reads
+  silently where the probe's item would still prompt — and **tighter**
+  than the ACL Keychain assigns by default when no `-T` is given at all
+  (which trusts whichever tool created the item, not necessarily the one
+  that should read it later). D22 is therefore a deliberate three-way
+  choice (default-trusts-creator ⊃ agentd-only ⊃ `-T ""`), not a strictly
+  tighter version of the probe's own posture.
+
+  **Code-signing identity caveat.** macOS binds a named-application trust
+  entry to the binary's code-signing identity/designated requirement, not
+  to a file path. An ad-hoc-signed or unsigned development build changes
+  identity on every rebuild, so a production implementation must either
+  fail closed with a typed error when the running binary's identity does
+  not match the ACL entry, or re-prompt the owner — it must never silently
+  widen the ACL (e.g., to a wildcard, or by re-trusting whatever binary
+  happens to be running) to work around a development-build identity
+  mismatch. See "Open questions" for the case this ADR does not itself
+  settle.
 
 ## Provider neutrality
 
@@ -970,6 +1001,12 @@ separately after ratification. Each depends on this ADR's ratification
   macOS Seatbelt compilation is evidenced here; any other backend must
   implement or fail closed on the new scope, per D11, before a
   gateway-backed launch is reachable on that platform.
+- **Keychain ACL identity for development builds (D22).** An unsigned or
+  ad-hoc-signed development build of `agentd` does not have the stable
+  code-signing identity a named-application ACL entry binds to, so D22's
+  fail-closed-or-re-prompt rule has no ratified answer here for local
+  development workflows specifically — only the production constraint
+  (never silently widen the ACL) is settled.
 
 ## References
 
@@ -977,9 +1014,10 @@ separately after ratification. Each depends on this ADR's ratification
   capability ablation, rejected remediation (Option C).
 - `docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md` — R0-R8, Option B
   probe design, round-4 hardening (C1-C10), "Owner commands", "Owner
-  real-credential receipts" (lines 520-565), "Owner-run positive probe
-  (Option A) — WITHDRAWN, never run" (lines 681-698), "What this does NOT
-  prove".
+  real-credential receipts" (lines 520-565), "Agent-run end-to-end
+  invalid-credential test (round 4)" (lines 567-687), "Owner-run positive
+  probe (Option A) — WITHDRAWN, never run" (lines 803-820), "What this does
+  NOT prove".
 - `docs/development/task0152-probes/owner_proxy_probe.py` — probed
   mechanics D1-D21 formalize; `:187` (`ALLOWED_QUERY_STRINGS`), `:190-192`
   (body/count/timeout limits), `:227-241` (`FORWARD_HEADER_ALLOWLIST`),
