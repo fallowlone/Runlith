@@ -5,3 +5,9 @@
 /.jevrouter/
 /.claude/
 /CLAUDE.md
+# TASK-0154: stray local-tool/session artifacts that must never be tracked
+# again (agent plan snapshots, a stray SQLite left by another project's
+# tooling, and a support dir that held an accidentally committed secret).
+/.zcode/
+/Support/
+data/sessions.db

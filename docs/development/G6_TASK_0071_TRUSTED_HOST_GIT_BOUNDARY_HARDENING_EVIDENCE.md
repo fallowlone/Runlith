@@ -25,7 +25,7 @@ commits `4128e7b`, `06b33dc`, and `edd5749`.
 
 | Field | Value |
 | --- | --- |
-| Worktree | `/Users/artemmac/dev/runlith-task0071` |
+| Worktree | `~/dev/runlith-task0071` |
 | Branch | `task-0071-g6-trusted-host-git-boundary-hardening` |
 | Vulnerable baseline | `e9009a8f7ca8db8230232c3a647dd6950cdfc3cf` |
 | Current committed HEAD at re-review | `edd574914bab25236c49db9cec548a8a931825f6` |
@@ -120,7 +120,7 @@ advancing completion/version state.
 
 | Field | Value |
 | --- | --- |
-| Worktree | `/Users/artemmac/dev/runlith-task0071` |
+| Worktree | `~/dev/runlith-task0071` |
 | Branch | `task-0071-g6-trusted-host-git-boundary-hardening` |
 | Starting HEAD | `e9009a8f7ca8db8230232c3a647dd6950cdfc3cf` |
 | Initial TASK-0071 commit | `4128e7bfd58bf8c67a0a042ab26d3c694e28f96c` (superseded on this branch by the self-review remediation) |

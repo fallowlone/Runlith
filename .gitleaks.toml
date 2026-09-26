@@ -1,0 +1,8 @@
+[extend]
+useDefault = true
+
+[[rules]]
+id = "nvidia-api-key"
+description = "NVIDIA API key (nvapi- prefixed secret, e.g. NVIDIA NIM/build.nvidia.com)"
+regex = '''nvapi-[A-Za-z0-9_-]{60,}'''
+keywords = ["nvapi-"]

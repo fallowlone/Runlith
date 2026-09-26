@@ -25,7 +25,7 @@ input. This is fail-closed, but the contract conflict remains unresolved.
 | --- | --- |
 | Source main | `8054852735b6cb75b1f4db17728c9922f8b42132` |
 | Audit branch | `task-0115-g7-final-closure-reaudit` |
-| Audit worktree | `/Users/artemmac/dev/runlith-task0115` |
+| Audit worktree | `~/dev/runlith-task0115` |
 | Host | macOS 27.0 (26A428), arm64 |
 | Rust | `rustc 1.95.0` / `cargo 1.95.0` |
 | Real provider | Claude Code 2.1.278 |
