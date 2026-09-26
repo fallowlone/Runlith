@@ -4736,3 +4736,45 @@ items:
     references:
       - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
       - docs/development/G7_TASK_0112_PROVIDER_AUTH_DIAGNOSIS.md
+
+  # Cross-gate governance: repository licensing/product-monetization decision,
+  # not scoped to any single implementation gate.
+  - id: TASK-0153
+    gate: G8
+    title: Propose open-source-only repository licensing (ADR-0038)
+    objective: >-
+      Draft ADR-0038 (Proposed) changing the repository default license from
+      Apache Shield 1.0.0 to Apache open-source 1.0.0 so that free use
+      is open-source-use-only with all features included, any commercial
+      use requires a separately executed commercial license, and the core is
+      described as open source, never open source; apply the
+      corresponding LICENSE, LICENSE, README.md, monetization-doc and
+      ADR-index changes, all pending owner ratification.
+    scope: >-
+      Docs/licensing/governance only; no code, no product/version.toml, no
+      Cargo manifest change. LICENSE replaced with a byte-identical Apache
+      open-source 1.0.0 copy; LICENSE rewritten for the new model;
+      README.md License section updated; targeted edits to
+      AI_ENGINEERING_OS_MONETIZATION_AND_PLUGIN_ECOSYSTEM.md §2.1, §2.2, §3
+      tier table and §3.1-§3.3 wording only; new
+      docs/architecture/adr/ADR-0038-product-licensing-open-source.md; ADR
+      index updated with a Proposed row. No license-enforcement or
+      phone-home mechanism is authorized (ADR-0014 preserved).
+    exit_criteria_summary: >-
+      ADR-0038 exists, contains at minimum Context/Decision/Alternatives/
+      Consequences/Security impact/Migration impact per AGENT.md §11, and
+      remains Status Proposed; LICENSE is byte-identical to upstream
+      Apache open-source 1.0.0; LICENSE, README.md and the
+      monetization doc's targeted sections are consistent with the
+      open-source-only model; ADR-0038 is linked from
+      docs/architecture/adr/INDEX.md; owner ratification after independent
+      architecture/governance review PASS is required before any status
+      changes to Accepted or before product/version.toml, Cargo manifest
+      license metadata, a commercial license/EULA, a CLA, or a trademark
+      policy are adopted.
+    depends_on: []
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0038-product-licensing-open-source.md
+      - LICENSE
+      - AI_ENGINEERING_OS_MONETIZATION_AND_PLUGIN_ECOSYSTEM.md
