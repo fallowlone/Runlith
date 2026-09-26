@@ -31,6 +31,7 @@ import hmac
 import os
 import pwd
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -366,10 +367,14 @@ def main():
         print("refusing: could not determine whether an item already exists", file=sys.stderr)
         sys.exit(2)
     if exists:
+        # Round 7 (K3): print the ACTUAL account name this tool resolved
+        # (via pwd.getpwuid) rather than the literal string "$USER" -- on
+        # a host where $USER differs from the passwd entry (or is unset),
+        # a copy-pasted "$USER" would target the wrong account, or none.
         print(
             "refusing: an item for this service/account already exists -- its ACL is "
             "NOT reset by re-adding over it. Delete it first, then re-run this tool:\n"
-            f'  security delete-generic-password -a "$USER" -s {service}',
+            f"  security delete-generic-password -a {shlex.quote(account)} -s {shlex.quote(service)}",
             file=sys.stderr,
         )
         sys.exit(2)
