@@ -6,6 +6,16 @@
 > preconditions below, but must not run the export/push commands in this
 > file, create a GitHub repository, or push to one.
 
+**The existing private repository must never be switched to public
+directly** (for example via the GitHub repository visibility toggle in
+Settings). Its git history contains, permanently, the four revoked NVIDIA
+API keys committed at `56b8a68` in plaintext, and every commit before that
+point carries no `LICENSE` at all while every commit from `56b8a68` onward
+up to the ADR-0038 branch carries the PolyForm Shield 1.0.0 `LICENSE` (see
+Section 5 for the full history). Publication happens only by exporting a
+fresh, history-less tree (Section 4) into a brand-new repository; the
+private `fallowlone/Runlith` repository itself stays private, permanently.
+
 ## 1. Purpose
 
 Publishing Runlith turns a private, source-available repository into a
@@ -19,39 +29,53 @@ internet. Do it deliberately, not as a side effect of another task.
 
 Do not proceed to Section 3 until every item below is checked.
 
-- [ ] **ADR-0038 is merged to the repository default branch (`main`).** As of
-      this writing that merge has not happened; ADR-0038 was ratified on the
-      task branch at commit `c040b6d`. Publishing before merge would publish
-      a tree still carrying the old PolyForm Shield `LICENSE`, which
-      contradicts the owner's ratified decision.
-- [ ] **The NVIDIA API keys are revoked.** Four `nvapi-`-prefixed keys were
+- [x] **ADR-0038 is merged to the repository default branch (`main`).**
+      ADR-0038 (Business Source License 1.1) merged to `main` via commit
+      `c040b6d` (PR #10). This task's own publication-readiness hygiene
+      (TASK-0154) subsequently merged to `main` via commit `2779b70`
+      (PR #11). `main`'s `LICENSE` file now carries BSL 1.1, not the earlier
+      PolyForm Shield text.
+- [x] **The NVIDIA API keys are revoked.** Four `nvapi-`-prefixed keys were
       committed in `Support/openvidia/proxy_config.json` at commit
       `56b8a68`. Removing the file from the tree (TASK-0154) does **not**
       remove it from history, and this runbook does not rewrite history (see
-      Section 4). The keys must be revoked by the owner at the NVIDIA
-      provider before publication, regardless of what this runbook does to
-      the tree. This is an owner action; an agent must never be asked to
-      confirm key validity, since doing so would require reading the secret.
-- [ ] **`gitleaks dir` on the export tree, with this repository's
-      `.gitleaks.toml`, returns 0 findings.** Run the command in Section 5.2
-      against the *exported* tree (not the live history) and confirm a clean
-      result before pushing.
+      Section 9). The owner confirmed revocation of all four keys with the
+      NVIDIA provider on 2026-09-26. This was an owner action; an agent was
+      never asked to confirm key validity, since doing so would require
+      reading the secret.
+- [ ] **`gitleaks dir` and `gitleaks git` on the export, with this
+      repository's `.gitleaks.toml`, both return 0 findings.** Run the
+      commands in Section 4.3 against the freshly exported tree (not the
+      live history of this private repository) and confirm a clean result
+      before pushing.
 - [ ] **No `/Users/...` (or other contributor-machine) absolute paths remain
-      in tracked files.** `git grep -n -I "/Users/"` returns nothing.
+      in tracked files.** `git grep -n -I -E '/Users/[A-Za-z0-9_]'` returns
+      nothing.
 - [ ] **`CONTRIBUTING.md` and `SECURITY.md` are present** at the repository
       root and describe the current (no external-PR, BSL, private-vuln-report)
       posture.
+- [ ] **Qualified legal review of the Additional Use Grant wording,
+      copyright ownership and the copyright status of any AI-assisted
+      authorship in this repository has been obtained — or the owner has
+      explicitly accepted the risk of publishing without it and updated
+      `LICENSING.md` accordingly.** [`LICENSING.md`](../../LICENSING.md)
+      ("Contributions, trademarks and release readiness") already calls for
+      exactly this review before public distribution; this precondition
+      operationalizes that existing requirement rather than adding a new
+      one. This is an owner decision that an agent cannot complete or waive
+      on the owner's behalf.
 
 ## 3. Why a new repository with no history
 
 Publishing the *existing* git history, even after removing the stray files
 from the working tree, would publish every earlier commit as-is: every
-commit before the ADR-0038 merge carries the **PolyForm Shield 1.0.0**
-`LICENSE` in effect at that commit, not BSL 1.1, and that grant cannot be
-revoked retroactively once published (ADR-0038 D8: "this ADR does not
-attempt to retroactively alter any grant"); and commit `56b8a68` contains
-the four now-revoked NVIDIA API keys in plaintext, permanently, in that
-commit's blob, regardless of what later commits do.
+commit from `56b8a68` up to the ADR-0038 branch carries the **PolyForm
+Shield 1.0.0** `LICENSE` in effect at that commit, not BSL 1.1, and that
+grant cannot be revoked retroactively once published (ADR-0038 D8: "this ADR
+does not attempt to retroactively alter any grant"); and commit `56b8a68`
+contains the four now-revoked NVIDIA API keys in plaintext, permanently, in
+that commit's blob, regardless of what later commits do. See Section 5 for
+the complete license-history timeline.
 
 The chosen alternative is to **export the current `main` tree only, with no
 history**, into a brand-new repository whose first commit is the export
@@ -70,12 +94,17 @@ commands copy-pasteable).
 
 ### 4.1 Export the current tree, no history
 
-Create a clean archive of the exact tree that will become the public
-repository's first commit:
+Create a fresh, empty directory with `mktemp -d` rather than a fixed path
+such as `/tmp/runlith-public-export` — a fixed path may already exist from a
+previous run and may already contain a `.git` directory or leftover files,
+which would silently contaminate the export. Then archive the exact tree
+that will become the public repository's first commit into that fresh
+directory:
 
 ```sh
-git archive --format=tar HEAD | (mkdir -p /tmp/runlith-public-export && tar -x -C /tmp/runlith-public-export)
-cd /tmp/runlith-public-export
+RUNLITH_EXPORT_DIR="$(mktemp -d)"
+git archive --format=tar HEAD | tar -x -C "$RUNLITH_EXPORT_DIR"
+cd "$RUNLITH_EXPORT_DIR"
 git init
 ```
 
@@ -97,36 +126,85 @@ this repository) the version identifier (`product/version.toml`) and
 today's date as that version's **first public distribution date** — see
 Section 6.
 
-### 4.3 Create the new public GitHub repository and push
+### 4.3 Verify the export before pushing
+
+Run every check below against the freshly committed export from 4.2, while
+still inside `$RUNLITH_EXPORT_DIR`, before doing anything in Section 4.4. If
+any check fails, stop, do not push, fix the underlying cause in the source
+tree that `main` was exported from (not just this export directory), and
+restart from Section 4.1.
+
+Confirm the export really has exactly one commit, with no leftover history
+from a previous run of this runbook:
+
+```sh
+git rev-list --count HEAD
+```
+
+Expected: `1`.
+
+Confirm the exported tree carries none of the tracked secrets this
+repository's `.gitleaks.toml` knows to look for, scanning both the export's
+own (single-commit) history and its working tree:
+
+```sh
+gitleaks git . --config .gitleaks.toml --redact
+```
+
+Expected: no leaks reported.
+
+```sh
+gitleaks dir . --config .gitleaks.toml --redact
+```
+
+Expected: no leaks reported.
+
+Confirm no contributor-machine absolute path remains:
+
+```sh
+git grep -n -I -E '/Users/[A-Za-z0-9_]'
+```
+
+Expected: no output.
+
+Confirm every commit in the export carries only the `noreply` identity set
+in 4.2, never a personal email address:
+
+```sh
+git log --format='%an <%ae>'
+```
+
+Expected: a single line, repeated once per commit, showing only the
+`<login>` and `<login>@users.noreply.github.com` identity configured above.
+
+### 4.4 Create the new public GitHub repository and push
 
 Create the new repository through the GitHub UI or `gh repo create`
 (public, no README/license/gitignore auto-generated, since the export
-already has them), then:
+already has them), then, still inside `$RUNLITH_EXPORT_DIR`:
 
 ```sh
 git remote add origin <new-repository-git-url>
 git push -u origin HEAD:main
 ```
 
-## 5. Verification (run before and after 4.3)
+## 5. License history and post-push confirmation
 
-No personal paths:
+License history, for reference when reasoning about what publishing the
+full history would expose (Section 3): commits before `56b8a68` carry no
+`LICENSE` file at all; `56b8a68` onward carries **PolyForm Shield 1.0.0**;
+on the ADR-0038 topic branch, `69b2221` briefly carried a PolyForm
+Noncommercial draft, superseded at `b534030` and onward on that branch by
+**Business Source License 1.1**; `main` itself switched from Shield to BSL
+1.1 only at the merge commit `c040b6d`. The conclusion from Section 3 is
+unaffected by these details: do not publish the existing history.
 
-```sh
-git grep -n -I "/Users/"
-```
-
-Expected: no output.
-
-Secret scan of the export tree, using this repository's own
-`.gitleaks.toml` (it is a root dotfile, already carried into the export):
-
-```sh
-gitleaks dir /tmp/runlith-public-export --config /tmp/runlith-public-export/.gitleaks.toml --redact --no-banner
-```
-
-Expected: `no leaks found`. If anything is found, stop, do not push, and
-investigate before retrying.
+After the push in Section 4.4 completes, clone the new public repository
+into another fresh `mktemp -d` directory and re-run every check from
+Section 4.3 (rev-list count, `gitleaks git`, `gitleaks dir`, the `/Users/`
+grep, and the commit-identity log) against that clone. This confirms the
+push transported exactly what was verified pre-push, with nothing added or
+changed in transit.
 
 ## 6. Version / Change Date bookkeeping
 
@@ -157,6 +235,12 @@ task gives it a durable home.
   workflow to protect is decided.
 - **Actions**: confirm Actions are enabled for the new repository (Settings
   → Actions → General).
+- **Discussions** (Settings → General → Features → "Discussions"):
+  `CONTRIBUTING.md` ("Issues and discussions") already invites discussion
+  via GitHub Discussions alongside Issues, so enable it on the new public
+  repository to match; if the owner decides against hosting Discussions,
+  update `CONTRIBUTING.md` to stop inviting them instead of leaving the
+  feature disabled but promised.
 
 GitHub Actions minutes on **standard GitHub-hosted runners are free (not
 metered against a paid quota) for public repositories**; source:
