@@ -487,9 +487,10 @@ command:
 - **C8** — rejects request-smuggling-shaped input (a `Transfer-Encoding`
   header, more than one `Content-Length` header or a non-numeric one, or a
   declared body over 8 MiB) before ever reading a body; caps forwarded
-  requests at 32 per run; the local server is single-threaded, never
-  reuses a just-closed address, binds only `127.0.0.1:0`, and gives every
-  accepted connection a 30s socket timeout.
+  requests at 32 per run; never reuses a just-closed address; gives every
+  accepted connection a 30s socket timeout. (Its original "single-threaded"
+  wording is corrected in round 7, K3 — see "Round 7" below for the actual
+  concurrency model.)
 - **C9** — disables core dumps for its own process
   (`RLIMIT_CORE = (0, 0)`) so a crash can never leave a credential-bearing
   core file on disk.
@@ -539,14 +540,27 @@ records what changed, fixed rather than merely noted:
   script executes, before `ssl`/`http.server`/`urllib.request` are even
   imported, and it refuses outright rather than continuing, printing only
   the violating variable NAMES.
-- **T2b — whole-request deadline.** A review measured a 43s stall from a
-  client trickling a request body 1 byte every 1.5s: each individual
-  socket read completes well within the existing 30s per-operation
-  timeout, so that timeout alone never fires, yet the single-threaded
-  server is held the whole time. A `signal.alarm`-based 10s deadline now
-  runs from connection accept through headers+body fully read (never
-  through response writing), on top of the unchanged 30s per-operation
-  timeout.
+- **T2b — whole-request deadline (mechanism replaced in round 7, K1 —
+  see below).** A review measured a 43s stall from a client trickling a
+  request body 1 byte every 1.5s: each individual socket read completes
+  well within the existing 30s per-operation timeout, so that timeout
+  alone never fires, yet the connection's own handling thread is held the
+  whole time. Round 6 attempted to fix this with a `signal.alarm`-based
+  10s deadline running from connection accept through headers+body fully
+  read. **That round-6 mechanism was itself defective and never actually
+  bounded anything**: two independent reviews in round 7 showed Python
+  only ever invokes a signal handler on the main thread, regardless of
+  which thread calls `signal.alarm` or is blocked — so during a real run
+  the alarm fired wherever the MAIN thread happened to be (inside
+  `subprocess.run`, waiting for the confined child), aborting that
+  unrelated work instead of bounding the stalled connection. The round-6
+  dry-self-check for this "passed" only because, in dry mode, the alarm
+  happened to interrupt the *test's own* main-thread `recv()` — not
+  because the server enforced anything. Round 7 (K1) removes
+  `signal.alarm` entirely and enforces the same 10s deadline with a
+  per-connection `threading.Timer` watchdog that force-closes only that
+  one connection's own socket, from inside that connection's own
+  dedicated handling thread — see "Round 7" below.
 - **T2c — loopback squatting / dual-stack bind.** The orchestrator
   verified, and this task's own credential-free "L1 loopback admission"
   measurement (below) confirms in detail, that Seatbelt's
@@ -575,6 +589,131 @@ records what changed, fixed rather than merely noted:
   truncated (12 hex char) SHA-256 prefix is recorded now, tagged
   `path:`/`query:` so the two rejection reasons stay distinguishable in
   aggregate counts without the content ever being stored or printed.
+
+### Round 7 hardening (K1-K3, review remediation 2)
+
+Both re-reviews independently reproduced the same defect in round 6's
+whole-request-deadline mechanism; the orchestrator confirmed it from
+source before this round began.
+
+**K1 — the round-6 deadline never actually bounded a connection; fixed.**
+`signal.alarm` was set inside the connection-handling thread on the
+(incorrect) assumption that request handling always ran on the main
+thread. It did not — this script already ran two listener threads in
+round 6, one per address family (`127.0.0.1` and `[::1]`) — and Python
+only ever invokes a signal handler on the main thread, regardless of
+which thread calls `signal.alarm` or is blocked. During a real run this
+meant the alarm fired wherever the MAIN thread happened to be — inside
+`subprocess.run`, waiting for the confined child — **aborting that
+unrelated work instead of bounding the stalled connection**. The round-6
+`check_whole_request_deadline` dry-self-check "passed" for the wrong
+reason: in dry mode there is no confined-child `subprocess.run` running
+concurrently, so the alarm instead interrupted the *test's own*
+main-thread `recv()` inside the slow client it drove — which looked like
+a pass without the server having enforced anything on its own connection
+thread at all.
+
+Fix, verified directly (not just asserted):
+
+1. `signal.alarm` removed entirely.
+2. Concurrency model changed from one-thread-per-listener to one
+   short-lived thread per accepted connection
+   (`socketserver.ThreadingMixIn`), bounded by a shared
+   `MAX_CONCURRENT_CONNECTIONS = 4` admission cap — **total across both**
+   the `127.0.0.1` and `[::1]` listeners, not 4 each — checked atomically
+   in `ProxyServer.verify_request` before any handler thread is spawned.
+   An excess connection is accepted at the TCP level (the peer sees
+   connect-then-close, never a refused connection) and closed
+   immediately, counted (`connection_limit_rejected`), never processed.
+3. The 10s whole-request deadline is now enforced by a per-connection
+   `threading.Timer` watchdog, started in that connection's own handling
+   thread, that force-closes only that one connection's own socket at the
+   deadline — touching no other connection and never the main thread.
+4. The dry-self-check was rewritten so the slow client runs in a WORKER
+   thread while the check's own code busy-loops on the main thread and
+   asserts it was never interrupted, in addition to asserting the
+   server-held time is within the deadline (±margin). A separate,
+   out-of-repo scratch test (below) proves the concrete failure mode
+   directly: a real `subprocess.run` on the main thread, running
+   concurrently with a slow connection whose deadline fires mid-way,
+   completes its full duration uninterrupted.
+
+**Scratch verification (outside the repo, `python3 -B`, not part of this
+task's committed tooling — a direct reproduction of the exact failure
+mode K1 describes):**
+
+```text
+$ python3 -B - <<'EOF'
+[a worker thread drives a slow/stalled client against the proxy's
+ /v1/messages while the "main thread" runs subprocess.run(["/bin/sleep",
+ "13"]) -- longer than the 10s connection deadline]
+EOF
+main-thread subprocess.run(sleep 13) returncode: 0 elapsed: 13.1
+```
+
+`returncode: 0` and `elapsed: ~13.1s` (not aborted early at ~10s) proves
+the main thread's own blocking work is never touched by the connection's
+deadline, even while that deadline fires concurrently on a different
+connection's thread — the exact property `signal.alarm` could not
+provide.
+
+**K2 — does the CLI send its credential on `HEAD /api/hello`? NO,
+confirmed by evidence already in this document.** R6/R7/R8's stub request
+logs (above) show, in every credential mode measured (`ANTHROPIC_API_KEY`,
+`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`):
+`HEAD /api/hello` carrying **no auth headers** at all, followed only then
+by `POST /v1/messages?beta=true` carrying the credential header. This is
+the CLI's own choice, not something this proxy could influence — the same
+non-credentialed `HEAD /api/hello` shape appears even in the R6
+no-credential-variant row, where the CLI reaches `/api/hello`
+successfully and only refuses afterward, at the point it would need a
+credential for `/v1/messages`.
+
+Per the owner's decision (2026-09-26, ADR-0020 exception plus narrowing
+for other-UID local attackers): since the CLI itself never sends a
+credential to `/api/hello`, requiring the placeholder there would gain no
+additional secrecy (the CLI would simply fail a request it never
+populates a credential for) while adding a failure mode the CLI does not
+expect. `/api/hello` continues to answer unconditionally, with no
+placeholder check.
+
+**Residual this leaves, stated precisely**: any OTHER local process,
+running as a different UID on the same host, that discovers this
+ephemeral port can reach `HEAD /api/hello` (learning only "something is
+listening on this port," nothing else) and can attempt the same
+request-flood or slow-trickle abuse K1's deadline and connection cap
+already bound (at most `MAX_CONCURRENT_CONNECTIONS` connections held at
+once, each for at most `REQUEST_DEADLINE_SECONDS`). Such a process
+**cannot obtain the real credential** through this path: `/api/hello`
+never forwards anything and never holds or echoes the credential in any
+response, and the one path that does forward (`POST /v1/messages`)
+requires the exact per-run random placeholder in the credential header,
+which an other-UID attacker has no way to know (it is generated fresh in
+this process's memory, never written to disk, never logged, never a
+predictable value).
+
+**K3 — documentation-accuracy nits:**
+
+- `provision_keychain_item.py`'s existing-item refusal now prints the
+  ACTUAL resolved account name (`pwd.getpwuid(os.getuid()).pw_name`), not
+  the literal string `"$USER"` — a host where `$USER` differs from (or is
+  unset relative to) the passwd entry would otherwise have produced a
+  copy-pasteable command that targeted the wrong account or none.
+- T2b's text above now states plainly that the round-6 deadline mechanism
+  was ineffective and describes the actual round-7 fix, rather than
+  presenting `signal.alarm` as if it had worked.
+- Every "single-threaded" / "exactly one \[connection\] in flight" claim
+  in this document and in `owner_proxy_probe.py` is corrected to describe
+  the actual round-7 concurrency model: one thread per accepted
+  connection, capped at `MAX_CONCURRENT_CONNECTIONS = 4` total across the
+  two listeners.
+- This document does not claim `owner_proxy_probe.py` pins an explicit
+  root CA store. It does not: `_build_opener` uses
+  `ssl.create_default_context()`, which loads the platform's default
+  verify paths, with only the TLS *minimum version* pinned to 1.2 and the
+  ambient environment-variable override surface refused outright (C3/T2a)
+  — certificate/hostname verification itself is the Python/OpenSSL
+  default, unchanged.
 
 ### Owner commands (round 4 — supersedes the manual `security` form)
 

@@ -71,12 +71,18 @@ credential; the trusted host does):
      A defensive assertion confirms the outgoing request's host is exactly
      `api.anthropic.com` immediately before the real credential is
      attached. At most 32 requests are ever forwarded in one run (round 4,
-     C8); the local proxy is single-threaded, and every accepted
-     connection gets a 30s per-operation socket timeout plus a 10s
-     whole-request deadline from accept through headers+body fully read
-     (round 6, T2b -- an independent review measured that the 30s
-     per-operation timeout alone does not bound a slow byte-at-a-time
-     trickle, since each individual read completes well within it).
+     C8). Concurrency model (round 7, K1 -- corrects an earlier "single-
+     threaded" claim that was already stale once step 6's dual-stack bind
+     existed): one short-lived thread per accepted connection, bounded by
+     a shared cap of `MAX_CONCURRENT_CONNECTIONS` (4) total across BOTH
+     listeners -- never per-listener -- with excess connections accepted
+     at the TCP level and closed immediately, counted, never processed.
+     Every accepted-and-admitted connection gets a 30s per-operation
+     socket timeout plus a 10s whole-request deadline from accept through
+     headers+body fully read, enforced by a `threading.Timer` watchdog
+     that runs inside THAT connection's own thread and force-closes only
+     that connection's own socket (round 6, T2b; the enforcement mechanism
+     was rewritten in round 7, K1 -- see below).
      Bound to BOTH `127.0.0.1:<port>` and `[::1]:<port>` (the SAME port,
      round 6, T2c -- Seatbelt's `(remote tcp "localhost:P")` was measured
      to admit both; see the evidence doc's "L1 loopback admission" row),
@@ -139,8 +145,10 @@ script now:
     explicit query-string allowlist -- C7;
   - rejects request-smuggling-shaped input (Transfer-Encoding, duplicate/
     non-numeric Content-Length, oversized body) before ever reading a
-    body, caps forwarded requests at 32 per run, runs single-threaded,
-    and uses a 30s per-connection socket timeout -- C8;
+    body, caps forwarded requests at 32 per run, and uses a 30s
+    per-connection socket timeout -- C8 (its "runs single-threaded" claim
+    was corrected in round 7, K3 -- see the concurrency model described in
+    step 6 above and the K1 bullet below);
   - disables core dumps for its own process (`RLIMIT_CORE = 0,0`) so a
     crash can never leave a credential-bearing core file on disk -- C9;
   - accepts `--keychain PATH` to target an explicit keychain file (used
@@ -156,10 +164,26 @@ merely noted):
     bullet above (this replaces round 4's "strip and continue" policy for
     these names, since a review showed stripping after `ssl` is imported
     is too late for `OPENSSL_CONF` specifically) -- T2a;
-  - a 10s whole-request deadline (`signal.alarm`, single-threaded so the
-    handler always runs on the main thread) from connection accept
-    through headers+body fully read, on top of the existing 30s
-    per-operation socket timeout -- see step 6 above -- T2b;
+  - a 10s whole-request deadline from connection accept through
+    headers+body fully read, on top of the existing 30s per-operation
+    socket timeout -- see step 6 above -- T2b. **Round 7 (K1) fixed a
+    defect two independent reviews found in this round-6 mechanism**:
+    it originally used `signal.alarm`, on the (incorrect) assumption that
+    request handling always ran on the main thread. It did not (this
+    script already ran two listener threads even in round 6, one per
+    address family) -- and Python only ever invokes a signal handler on
+    the main thread regardless of which thread called `signal.alarm` or
+    is blocked, so the alarm bounded nothing about the connection thread
+    and instead fired wherever the MAIN thread happened to be (during a
+    real run, inside `subprocess.run` waiting for the confined child,
+    aborting that unrelated work). The round-6 dry-self-check for this
+    "passed" only because, in dry mode, the alarm happened to interrupt
+    the *test's own* main-thread `recv()` -- not because the server
+    enforced anything. Fixed by removing `signal.alarm` entirely and
+    enforcing the deadline with a per-connection `threading.Timer`
+    watchdog that force-closes only that one connection's own socket,
+    from inside that connection's own handling thread -- see K1 below for
+    the concurrency-model change this fix depends on;
   - binds `[::1]:<port>` (the same port as `127.0.0.1:<port>`) with the
     same handler and shared state, refusing to start if that bind fails,
     and accepts connections only from loopback peers regardless of which
@@ -169,6 +193,49 @@ merely noted):
     child-supplied path -- only a truncated SHA-256 prefix, tagged
     `path:`/`query:` -- since that path is data the confined child
     controls, not this trusted host's own data -- T2d.
+
+Round 7 hardening (K1: two independent reviews reproduced the same
+`signal.alarm` defect above; K2: an owner decision on the `/api/hello`
+credential question; K3: documentation-accuracy nits):
+
+  - **K1**: the deadline mechanism fix described above required a
+    concurrency-model change to work correctly: connections are now
+    handled one short-lived thread per connection
+    (`socketserver.ThreadingMixIn`), not one thread per listener, bounded
+    by a shared `MAX_CONCURRENT_CONNECTIONS` (4) admission cap enforced
+    in `ProxyServer.verify_request` -- total across BOTH the `127.0.0.1`
+    and `[::1]` listeners, checked atomically before any handler thread
+    is even spawned. An excess connection is accepted at the TCP level
+    (so the peer sees connect-then-close, never a refused connection) and
+    closed immediately, counted (`connection_limit_rejected`), never
+    processed. This is what makes the per-connection `threading.Timer`
+    watchdog the right primitive: each connection's deadline now lives
+    entirely inside its own dedicated thread.
+  - **K2**: whether `HEAD /api/hello` requires the placeholder credential
+    is an owner decision (2026-09-26, ADR-0020 exception plus narrowing
+    for other-uid local attackers) resting on an empirical fact this
+    task already measured: R6/R7/R8's stub logs show the CLI never sends
+    a credential header on `HEAD /api/hello`, in any of the three
+    credential modes (see the evidence doc). Since the CLI itself proves
+    it does not need a credential for this request, `/api/hello`
+    continues to answer unconditionally -- requiring a placeholder there
+    would gain no additional secrecy (the CLI would simply never provide
+    one) while adding a failure mode the CLI does not expect. The
+    residual this leaves, documented precisely in the evidence doc: any
+    other-UID local process that discovers this port can reach
+    `/api/hello` (learns nothing but "something is listening") and can
+    attempt the same request-flood/slow-trickle abuse K1 already bounds
+    (deadline + connection cap) -- but cannot obtain the real credential,
+    which only ever leaves this process as one outbound TLS header value
+    to `api.anthropic.com`, never in any local response.
+  - **K3**: assorted documentation-accuracy fixes -- see the evidence doc
+    and `provision_keychain_item.py` for the specifics (the existing-item
+    refusal hint now prints the actual resolved account name, not the
+    literal string `$USER`; stale "single-threaded"/"exactly one in
+    flight" wording corrected per K1 above; no claim of an explicitly
+    pinned root CA store -- TLS certificate verification uses the
+    platform's default verify paths, only the ambient env-var override
+    surface is refused, see C3/T2a).
 
 Env-var hygiene for the confined child: the launch uses
 `subprocess.Popen(argv, env=<explicit dict>)`, which passes the
@@ -236,8 +303,8 @@ import json
 import re
 import secrets
 import shutil
-import signal
 import socket
+import socketserver
 import ssl
 import subprocess
 import tempfile
@@ -277,10 +344,42 @@ CLIENT_SOCKET_TIMEOUT = 30
 # the per-recv() idle timeout above. An independent review measured a
 # 43s stall from a client trickling the body 1 byte every 1.5s: each
 # individual recv() completes well within CLIENT_SOCKET_TIMEOUT, so that
-# per-operation timeout never fires, yet the single-threaded server is
-# held the whole time. `signal.alarm` bounds the WALL-CLOCK total
-# regardless of how the slowness is spread across individual reads.
+# per-operation timeout never fires, yet the connection's own handling
+# thread is held the whole time.
+#
+# Round 7 (K1) FIX to a round-6 defect two independent reviews caught:
+# the deadline was originally enforced with `signal.alarm`, set inside
+# the connection-handling thread. Python only ever invokes a signal
+# handler ON THE MAIN THREAD, regardless of which thread called
+# `signal.alarm` or which thread is blocked -- so the alarm did not bound
+# the connection thread at all; instead, during a real run, it fired
+# while the MAIN thread was blocked in `subprocess.run` waiting for the
+# confined child, aborting that unrelated work instead. (The old
+# `check_whole_request_deadline` dry-self-check "passed" only because,
+# in dry mode, the alarm happened to interrupt the *test's own*
+# main-thread `recv()` -- not because the server enforced anything on
+# its own connection thread.)
+#
+# The fix removes `signal.alarm` entirely and enforces the deadline with
+# a per-connection `threading.Timer` watchdog (`ProxyHandler.
+# handle_one_request`) that force-closes THAT connection's own socket at
+# the deadline -- from inside whichever thread is actually handling that
+# connection, never touching the main thread or any other connection's
+# thread. See also `MAX_CONCURRENT_CONNECTIONS` below: connections are
+# now handled one-thread-per-connection (bounded), not one-thread-per-
+# listener, which is what makes a *per-connection* watchdog the right
+# primitive (a per-listener watchdog would still conflate multiple
+# connections on the same listener).
 REQUEST_DEADLINE_SECONDS = 10
+
+# Round 7 (K1): bounded concurrent-connection limit, shared across BOTH
+# the IPv4 and IPv6 listeners (SharedState.active_connections, guarded by
+# SharedState.conn_lock) -- an admission check in `ProxyServer.
+# verify_request`, before any handler thread is even spawned. Excess
+# connections are accepted at the TCP level (so the peer sees a clean
+# connect-then-close, not a refused connection) and closed immediately,
+# counted, and never processed.
+MAX_CONCURRENT_CONNECTIONS = 4
 
 # The real token prefix (`s`+`k`+`-`+`a`+`n`+`t`+`-`, joined) never
 # appears as one contiguous literal anywhere in this file's source text (a
@@ -491,17 +590,6 @@ def _validate_credential_shape(mode, value):
     return bool(remainder) and bool(_SHAPE_CHARSET.fullmatch(remainder))
 
 
-class _RequestDeadlineExceeded(Exception):
-    """Raised by the SIGALRM handler; never carries any request data in
-    its own message, so even an unhandled instance of this (there should
-    never be one -- see `ProxyHandler.handle_one_request`) prints only a
-    class name via C6's exception-class-name-only policy."""
-
-
-def _alarm_handler(signum, frame):
-    raise _RequestDeadlineExceeded()
-
-
 def _hash_path_for_logging(raw_path):
     """Round 6 (T2d): a child-supplied path is data the confined child
     controls, not this trusted host's own data -- recording it verbatim
@@ -525,6 +613,7 @@ class Counters:
         self.dropped_header_names = set()
         self.forwarded = 0
         self.upstream_status = []
+        self.connection_limit_rejected = 0  # round 7, K1
 
     def snapshot(self):
         with self.lock:
@@ -537,6 +626,7 @@ class Counters:
                 "dropped_header_names": sorted(self.dropped_header_names),
                 "forwarded": self.forwarded,
                 "upstream_status": list(self.upstream_status),
+                "connection_limit_rejected": self.connection_limit_rejected,
             }
 
 
@@ -545,7 +635,9 @@ class SharedState:
     T2c) -- both bind the SAME port and run the SAME handler class, so
     setting `.real_credential` once (after the self-check passes) must be
     visible to whichever socket actually receives the confined child's
-    connection."""
+    connection. `conn_lock`/`active_connections` (round 7, K1) are ALSO
+    shared here for the same reason: the concurrent-connection cap is
+    total across both listeners, not per-listener."""
 
     def __init__(self, mode, placeholder, real_credential, counters):
         self.mode = mode
@@ -553,6 +645,8 @@ class SharedState:
         self.real_credential = real_credential  # None until the real run needs it
         self.cred_header = CRED_HEADER[mode]
         self.counters = counters
+        self.conn_lock = threading.Lock()
+        self.active_connections = 0
 
 
 def _is_loopback_peer(address_tuple):
@@ -566,22 +660,56 @@ def _is_loopback_peer(address_tuple):
     return False
 
 
-class ProxyServer(http.server.HTTPServer):
-    # C8: single-threaded (plain HTTPServer, not ThreadingHTTPServer),
-    # never reuse a just-closed address, bind loopback-only via the addr
-    # tuple main() constructs this with.
+class ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    # Round 7 (K1): one short-lived thread per accepted connection
+    # (`ThreadingMixIn`), bounded by the shared `MAX_CONCURRENT_CONNECTIONS`
+    # admission check in `verify_request` below -- replacing round 4-6's
+    # one-thread-per-LISTENER design, which two independent reviews showed
+    # made a *listener-wide* deadline mechanism (there, `signal.alarm`)
+    # unable to bound any *individual* connection correctly. A dedicated
+    # thread per connection is what makes a *per-connection*
+    # `threading.Timer` watchdog (see `ProxyHandler.handle_one_request`)
+    # the right fit: each connection's own deadline lives entirely inside
+    # its own thread, touching no other connection and never the main
+    # thread. `daemon_threads = True` so a stuck connection thread can
+    # never block process exit. Never reuse a just-closed address; bind
+    # loopback-only via the addr tuple main() constructs this with.
     allow_reuse_address = False
+    daemon_threads = True
 
     def __init__(self, addr, handler_cls, state):
         super().__init__(addr, handler_cls)
         self.state = state
 
     def verify_request(self, request, client_address):
-        # Round 6 (T2c): accept only loopback peers, even though this
-        # server only ever binds a loopback address itself -- a second,
-        # independent gate in case anything about the binding or routing
-        # environment ever surprises us.
-        return _is_loopback_peer(client_address)
+        # Loopback-peer check (round 6, T2c) -- a second, independent
+        # gate on top of binding only loopback addresses, in case
+        # anything about the binding/routing environment ever surprises
+        # us -- AND the round-7 (K1) concurrent-connection admission
+        # check, atomically, before any handler thread is spawned for
+        # this connection. `state.active_connections` is shared with the
+        # sibling (v4/v6) server instance, so the cap is total across
+        # both, not per-listener.
+        if not _is_loopback_peer(client_address):
+            return False
+        with self.state.conn_lock:
+            if self.state.active_connections >= MAX_CONCURRENT_CONNECTIONS:
+                with self.state.counters.lock:
+                    self.state.counters.connection_limit_rejected += 1
+                return False
+            self.state.active_connections += 1
+        return True
+
+    def close_request(self, request):
+        # Called exactly once per accepted-and-admitted connection,
+        # regardless of success/failure, in whichever thread handled it --
+        # the correct single place to release the admission slot
+        # `verify_request` claimed.
+        try:
+            super().close_request(request)
+        finally:
+            with self.state.conn_lock:
+                self.state.active_connections = max(0, self.state.active_connections - 1)
 
     def handle_error(self, request, client_address):
         # C6: the default socketserver.handle_error prints a full
@@ -604,24 +732,48 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # silence default stderr logging
         pass
 
-    # -- whole-request deadline (round 6, T2b) -----------------------------
+    # -- whole-request deadline (round 6, T2b; fixed round 7, K1) ----------
     def handle_one_request(self):
-        # Covers from connection accept (well, from the start of parsing
-        # this one request -- `handle()`'s loop calls this once per
-        # request on a connection, and this proxy always sends
-        # `Connection: close`, so there is exactly one) through whatever
-        # point `_dispatch` calls `_cancel_deadline()` -- i.e. through
-        # headers+body being fully read, never through response writing.
-        signal.alarm(REQUEST_DEADLINE_SECONDS)
+        # A `threading.Timer` watchdog, started fresh for THIS connection
+        # in THIS connection's own handler thread (see `ProxyServer`'s
+        # `ThreadingMixIn` above -- one thread per connection). At the
+        # deadline, the watchdog force-closes THIS connection's own
+        # socket from its own timer thread, unblocking whatever read was
+        # in progress with an OSError that naturally terminates this
+        # connection's processing -- never touching any other connection,
+        # never touching the main thread. This replaces the round-6
+        # `signal.alarm` mechanism, which two independent reviews showed
+        # cannot bound a specific thread at all (Python only ever invokes
+        # a signal handler on the main thread).
+        # Covers from connection accept through whatever point `_dispatch`
+        # calls `_cancel_deadline()` -- i.e. through headers+body being
+        # fully read, never through response writing.
+        watchdog = threading.Timer(REQUEST_DEADLINE_SECONDS, self._deadline_watchdog)
+        watchdog.daemon = True
+        self._deadline_timer = watchdog
+        watchdog.start()
         try:
             super().handle_one_request()
-        except _RequestDeadlineExceeded:
-            self.close_connection = True
         finally:
-            signal.alarm(0)
+            watchdog.cancel()
+
+    def _deadline_watchdog(self):
+        # Runs in the Timer's own thread, not this connection's handler
+        # thread -- exactly why this works regardless of what the handler
+        # thread is currently blocked on.
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self.connection.close()
+        except OSError:
+            pass
 
     def _cancel_deadline(self):
-        signal.alarm(0)
+        timer = getattr(self, "_deadline_timer", None)
+        if timer is not None:
+            timer.cancel()
 
     # -- local responses -----------------------------------------------
     def _send_local(self, code):
@@ -901,38 +1053,104 @@ def run_self_check(state, port):
 
 
 def _check_whole_request_deadline(port):
-    """Round 6 (T2b): sends headers declaring a body, then only ever
-    sends ONE byte of it and stops -- the exact shape of stall an
-    independent review measured holding this server for 43s (1 byte
-    trickled every 1.5s never trips the per-recv() idle timeout, since
-    each individual read completes quickly). Asserts the server closes
-    the connection at, not before and not long after, the whole-request
-    deadline -- proving the fix without literally waiting out a 43s-shaped
-    attack."""
-    lines = [
-        f"POST {ALLOWED_FORWARD_PATH} HTTP/1.1",
-        f"Host: 127.0.0.1:{port}",
-        "Content-Length: 50",
-        "Connection: close",
-        "",
-        "",
-    ]
-    payload = "\r\n".join(lines).encode("utf-8")
-    start = time.monotonic()
+    """Round 6 (T2b), rewritten round 7 (K1) to actually prove what it
+    claims: a slow client (trickles a request body 1 byte, then stops --
+    the exact shape of stall an independent review measured holding the
+    round-6 server for 43s, since each individual read completes quickly
+    and never trips the per-recv() idle timeout) runs entirely in a
+    WORKER thread, never the main thread -- because the round-6 defect
+    (`signal.alarm` set in the wrong thread) would have made this exact
+    test pass for the WRONG reason if the slow client were run on the
+    main thread and the deadline were (incorrectly) signal-based: the
+    alarm would fire and interrupt the test's OWN main-thread `recv()`
+    rather than proving the SERVER enforced anything. This version
+    additionally busy-checks the main thread for any sign of
+    interruption while the worker runs, and only counts a pass if the
+    main thread was never disturbed AND the server-held time is within
+    the deadline (plus a small margin)."""
+    result = {"got_eof": False, "elapsed": None}
+
+    def slow_client():
+        lines = [
+            f"POST {ALLOWED_FORWARD_PATH} HTTP/1.1",
+            f"Host: 127.0.0.1:{port}",
+            "Content-Length: 50",
+            "Connection: close",
+            "",
+            "",
+        ]
+        payload = "\r\n".join(lines).encode("utf-8")
+        start = time.monotonic()
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=REQUEST_DEADLINE_SECONDS + 15) as sock:
+                sock.sendall(payload)
+                sock.sendall(b"x")  # exactly 1 of the declared 50 body bytes, then nothing more
+                while True:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        result["got_eof"] = True
+                        break
+        except Exception:
+            result["got_eof"] = True
+        result["elapsed"] = time.monotonic() - start
+
+    worker = threading.Thread(target=slow_client)
+    worker.start()
+    main_thread_interrupted = False
+    main_thread_iterations = 0
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=REQUEST_DEADLINE_SECONDS + 15) as sock:
-            sock.sendall(payload)
-            sock.sendall(b"x")  # exactly 1 of the declared 50 body bytes, then nothing more
-            got_eof = False
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    got_eof = True
-                    break
+        # Ordinary main-thread work, concurrently with the worker's slow
+        # client -- if anything on the main thread (this loop, unrelated
+        # to any connection) ever raised unexpectedly, that would be
+        # exactly the round-6 defect's symptom (a signal misdelivered to
+        # the main thread interrupting work that has nothing to do with
+        # the slow connection).
+        while worker.is_alive():
+            time.sleep(0.5)
+            main_thread_iterations += 1
+    except BaseException:
+        main_thread_interrupted = True
+    worker.join(timeout=5)
+    ok = (
+        result["got_eof"]
+        and not main_thread_interrupted
+        and main_thread_iterations > 0
+        and (REQUEST_DEADLINE_SECONDS - 2) <= (result["elapsed"] or 0) <= (REQUEST_DEADLINE_SECONDS + 10)
+    )
+    return ok
+
+
+def _check_connection_limit(port):
+    """Round 7 (K1): opens `MAX_CONCURRENT_CONNECTIONS` idle connections
+    (each one blocks the server's `verify_request`-admitted, per-
+    connection thread waiting for a request line that never arrives,
+    until this test closes it or the whole-request deadline fires) and
+    then one more -- the `(MAX_CONCURRENT_CONNECTIONS + 1)`-th -- which
+    must be accepted at the raw TCP level (so the peer sees connect-then-
+    close, not a refused connection) but closed by the server immediately
+    with no data at all, since `verify_request` should refuse it before
+    any handler thread is spawned."""
+    holders = []
+    try:
+        for _ in range(MAX_CONCURRENT_CONNECTIONS):
+            holders.append(socket.create_connection(("127.0.0.1", port), timeout=5))
+        time.sleep(0.3)  # let the server's admission bookkeeping settle
+        extra = socket.create_connection(("127.0.0.1", port), timeout=5)
+        try:
+            extra.settimeout(3)
+            data = extra.recv(16)
+            rejected_immediately = data == b""
+        finally:
+            extra.close()
+        return rejected_immediately
     except Exception:
-        got_eof = True
-    elapsed = time.monotonic() - start
-    return got_eof and (REQUEST_DEADLINE_SECONDS - 2) <= elapsed <= (REQUEST_DEADLINE_SECONDS + 10)
+        return False
+    finally:
+        for sock_obj in holders:
+            try:
+                sock_obj.close()
+            except OSError:
+                pass
 
 
 def _raw_http_request(port, method, path, extra_headers, body, send_declared_length_only=False):
@@ -1170,9 +1388,15 @@ def _extended_dry_checks(state, port):
     path_not_leaked = not any(DISALLOWED_PATH_MARKER in entry for entry in recorded_paths)
     print(f"check_disallowed_path_not_recorded_raw={'pass' if path_not_leaked else 'fail'}")
 
-    # T2b: whole-request deadline against a slow-trickled body.
+    # T2b/K1: whole-request deadline against a slow-trickled body, with
+    # the slow client on a worker thread and the main thread's own
+    # uninterrupted execution asserted.
     deadline_ok = _check_whole_request_deadline(port)
     print(f"check_whole_request_deadline={'pass' if deadline_ok else 'fail'}")
+
+    # K1: bounded concurrent-connection limit.
+    limit_ok = _check_connection_limit(port)
+    print(f"check_connection_limit={'pass' if limit_ok else 'fail'}")
 
     poison = "A" * (_HIGH_ENTROPY_MIN_LEN + 5)
     proc = subprocess.run(
@@ -1245,11 +1469,6 @@ def _real_main():
 
     _c4_verify_integrity()
 
-    # T2b: install the SIGALRM handler once, process-wide. Safe here
-    # because the server is single-threaded and request handling always
-    # happens on the main thread (signal handlers only ever fire there).
-    signal.signal(signal.SIGALRM, _alarm_handler)
-
     placeholder = secrets.token_urlsafe(32)
     counters = Counters()
     state = SharedState(args.mode, placeholder, None, counters)
@@ -1292,6 +1511,7 @@ def _real_main():
             print(f"local_400={counts['local_400']}")
             print(f"local_413={counts['local_413']}")
             print(f"forwarded={counts['forwarded']}")
+            print(f"connection_limit_rejected={counts['connection_limit_rejected']}")
             return
 
         claude_exec = find_claude_exec()
@@ -1329,6 +1549,7 @@ def _real_main():
         print(f"local_413={counts['local_413']}")
         print(f"forwarded={counts['forwarded']}")
         print(f"upstream_status_codes={counts['upstream_status']}")
+        print(f"connection_limit_rejected={counts['connection_limit_rejected']}")
         if counts["dropped_header_names"]:
             print(f"dropped_header_names={counts['dropped_header_names']}")
     finally:
