@@ -4875,7 +4875,7 @@ items:
     exit_criteria_summary: >-
       Support/openvidia/proxy_config.json, data/sessions.db and
       .zcode/plans/*.md are absent from the tracked tree and ignored going
-      forward; `git grep -n -I "/Users/"` returns nothing; CONTRIBUTING.md
+      forward; `git grep -n -I -E '/Users/[A-Za-z0-9_]'` returns nothing; CONTRIBUTING.md
       states BSL 1.1 source-available status and that external PRs are not
       accepted pending contributor terms (ADR-0038 D7); SECURITY.md
       describes private vulnerability reporting only, no public issues, no
