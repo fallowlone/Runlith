@@ -318,8 +318,7 @@ invocation by the implementer). Design, in the order it executes:
    production-shaped profile from `gen_profile.sh` with the network rule
    replaced by "this proxy's local port only", a fresh empty
    `HOME`/`CLAUDE_CONFIG_DIR` under this run's own temp directory, and no
-   host `~/.claude` support-read — same pattern as R5 and
-   `owner_positive_probe.sh`.
+   host `~/.claude` support-read — same pattern as R5.
 5. The proxy allowlists exactly two request shapes from the child:
    `HEAD`/`GET /api/hello` (answered locally, no forward) and
    `POST /v1/messages` with any query string (forwarded only if the
@@ -367,12 +366,77 @@ invocation by the implementer). Design, in the order it executes:
    `ProxyHandler` the 302 (with its `Location` header) was relayed to the
    test client unchanged, counted as `forwarded=1`,
    `upstream_status=[302]`.
-   Default TLS verification is unchanged (no custom `SSLContext`).
+   As of round 4 (C3), the opener's TLS handling is no longer the bare
+   default: `SSL_CERT_FILE`/`SSL_CERT_DIR`/`*_CA_BUNDLE` are stripped from
+   this process's own environment before the opener is built, and an
+   explicit `ssl.create_default_context()` pinned to a TLS minimum of 1.2
+   is passed via `HTTPSHandler(context=...)` — certificate/hostname
+   verification itself is still the Python default (full chain and
+   hostname checks), only the minimum protocol version and the ambient
+   CA-override surface are now pinned/removed rather than left to
+   whatever the process environment happened to contain.
 7. Prints ONLY: CLI version, mode, child exit status, marker
    present/absent, a classified failure reason, and integer counts
    (`local_401`, `local_403` + its rejected paths, `forwarded`, and the
    list of upstream HTTP status codes). Never a header value, a body, or
    any account/org/request identifier.
+
+### Round 4 hardening (C1-C10)
+
+Triggered by an operator mistake: on 2026-09-25 the owner ran the round-2/3
+manual `security add-generic-password ... -s <service> ... -w` one-time
+setup and typed a real OAuth token into the `-s` argument by mistake,
+exposing it in shell argv/history/chat (revocation scheduled by the owner
+for 2026-09-26). Round 4 fixes the class of mistake, not only that one
+command:
+
+- **C1** — refuses to even start if ANY argv element looks like it could
+  be a credential (starts with the real token-prefix shape, or is a
+  40+-character high-entropy-shaped run). Checked before argument parsing,
+  so a poisoned value is never echoed back in an argparse error either.
+- **C2** — refuses unless run as `python3 -I` (isolated interpreter).
+- **C3** — strips `SSL_CERT_FILE`/`SSL_CERT_DIR`/`*_CA_BUNDLE` from its own
+  environment and builds an explicit `ssl.create_default_context()` pinned
+  to TLS ≥ 1.2 before any TLS connection (see the updated step 6 note,
+  above).
+- **C4** — refuses unless this exact script file is tracked and
+  byte-identical to `HEAD` (`git hash-object` compared to the tracked
+  blob) and `docs/development/task0152-probes` has no uncommitted
+  changes, printing `script_commit=`/`script_sha256=` so the owner can
+  compare against the commit they reviewed. This is a tripwire for an
+  **unnoticed** working-copy change between review and execution — it is
+  **not** a defense against an attacker who can already rewrite this very
+  check; a maliciously modified copy could simply remove or lie about it.
+- **C5** — validates the Keychain-read credential's shape (mode-specific
+  prefix + charset) before ever using it; on mismatch prints only
+  `"refusing: credential shape does not match mode"`, never any detail
+  about what was actually read.
+- **C6** — no value can reach stderr: `ProxyServer.handle_error` and the
+  top-level handler print only an exception's class name, never its
+  message (which could embed a header or credential value); a
+  header-validation failure while relaying a response drops just that one
+  header instead of raising with its value in the exception text.
+- **C7** — forwards only an explicit header-NAME allowlist and an explicit
+  query-string allowlist (see the updated steps 5-6, above); every other
+  header name is dropped and counted (names only, never values).
+- **C8** — rejects request-smuggling-shaped input (a `Transfer-Encoding`
+  header, more than one `Content-Length` header or a non-numeric one, or a
+  declared body over 8 MiB) before ever reading a body; caps forwarded
+  requests at 32 per run; the local server is single-threaded, never
+  reuses a just-closed address, binds only `127.0.0.1:0`, and gives every
+  accepted connection a 30s socket timeout.
+- **C9** — disables core dumps for its own process
+  (`RLIMIT_CORE = (0, 0)`) so a crash can never leave a credential-bearing
+  core file on disk.
+- **C10** — accepts `--keychain PATH` to target an explicit keychain file,
+  used only by this task's own temp-keychain tests; the owner's normal use
+  leaves it unset and reads the default keychain.
+
+`--dry-self-check` (both modes) now runs an extended suite exercising
+every one of the above local-rejection paths plus the C1/C2 gates (the
+latter two via a subprocess of the script itself, since they are checked
+before any server exists), printing one `check_<name>=pass|fail` line per
+assertion — see "Verification" below for the actual output.
 
 **Env-var hygiene for the confined child**: the launch uses
 `subprocess.Popen(argv, env=<explicit dict>)`, which passes the
@@ -394,30 +458,43 @@ local variable) and dropped as soon as the child has run; this is a
 best-effort scope reduction, not a wipe guarantee, and is stated as such
 in the script's own docstring.
 
-### Owner commands
+### Owner commands (round 4 — supersedes the manual `security` form)
 
-One-time setup (owner runs both, on the host, not run by this task; `-w`
-as the LAST argument makes `security` prompt interactively so the value
-never appears in argv or shell history):
+Round 2/3 documented a manual `security add-generic-password ... -w`
+one-time setup here. That manual form is **removed**: on 2026-09-25 the
+owner ran it and, in a moment of manual command-line entry, typed a real
+OAuth token into the `-s` (service name) argument instead of letting `-w`
+prompt for it — the token landed in shell argv, shell history, and chat
+(revocation scheduled by the owner for 2026-09-26). Round 4 fixes the
+*class* of mistake, not just that symptom:
+[`task0152-probes/provision_keychain_item.py`](task0152-probes/provision_keychain_item.py)
+never asks the owner to type a service name (it derives one from `mode`)
+or a secret (only a masked `getpass` prompt, entered twice, stored via
+`security -i` fed over stdin so the secret never touches any argv at
+all). See "Option B probe" above for the full round-4 hardening.
+
+One-time setup (owner runs both, on the host, not run by this task):
 
 ```bash
-# API-key mode credential
-security add-generic-password -a "$USER" -s "runlith-task0152-owner-anthropic-api-key" -w
-
-# OAuth mode credential: the owner generates this themselves with
-# `claude setup-token` in their own terminal (this task never runs that
-# command, never sees the token, and never asks for it) and pastes the
-# resulting token ONLY at the `security` prompt below, never on a command
-# line.
-security add-generic-password -a "$USER" -s "runlith-task0152-owner-oauth-token" -w
+python3 -I task0152-probes/provision_keychain_item.py api-key
+python3 -I task0152-probes/provision_keychain_item.py oauth
 ```
+
+(For the OAuth item, the owner generates the token themselves with
+`claude setup-token` in their own terminal — this task never runs that
+command, never sees the token, and never asks for it — and enters it only
+at `provision_keychain_item.py`'s masked prompt.)
 
 Then, per mode:
 
 ```bash
-python3 task0152-probes/owner_proxy_probe.py api-key --service runlith-task0152-owner-anthropic-api-key
-python3 task0152-probes/owner_proxy_probe.py oauth   --service runlith-task0152-owner-oauth-token
+python3 -I task0152-probes/owner_proxy_probe.py api-key
+python3 -I task0152-probes/owner_proxy_probe.py oauth
 ```
+
+(`--service` is no longer required — it defaults from `mode` to the same
+name `provision_keychain_item.py` stores under. Both commands now require
+`-I` — see C2 below.)
 
 ### What a pass proves, and does not prove
 
@@ -439,6 +516,53 @@ the R8 "no token-refresh observed" caveat above); that the proxy's minimal
 path allowlist (`/api/hello`, `/v1/messages`) covers every path a future
 CLI version might need; or that this exact Python implementation is what
 ships — it is a probe proving the mechanism's shape, not production code.
+
+## Owner real-credential receipts
+
+Measured by the **owner** (not this task's implementer, per its
+no-credential-read constraint) on **2026-09-25**, CLI `2.1.281`, running
+`owner_proxy_probe.py` at commit `9787690` (the pre-round-4 script — round
+4's C1-C10 hardening had not yet landed at the time these two runs were
+made). Both modes:
+
+| field | value |
+| --- | --- |
+| `self_check_pass` | `True` |
+| `self_check_status` | `401` |
+| `child_exit` | `0` |
+| `marker_present` | `True` |
+| `failure_class` | `success` |
+| `local_401` | `1` (the pre-flight self-check) |
+| `local_403` | `0` |
+| `forwarded` | `1` |
+| `upstream_status_codes` | `[200]` |
+
+Both runs (api-key mode and OAuth mode) produced this identical result
+shape: the negative self-check correctly rejected a wrong placeholder
+locally before any real work, and the one legitimate forwarded request
+reached the real Anthropic API and returned a real `200`.
+
+The OAuth token used for the OAuth-mode run was exposed by an operator
+error during the round-2/3 manual Keychain setup (a real token typed into
+a command's `-s` argument instead of `-w`'s interactive prompt) — the
+owner has scheduled revocation of that token for 2026-09-26. This receipt
+stands as evidence of a real, working round trip because it was measured
+**before** that revocation; it does not imply the exposed token remains
+valid or usable after 2026-09-26, and no token value, account identifier,
+or org identifier is recorded anywhere in this document or this task's
+artifacts. This exposure is also the direct trigger for round 4's
+hardening (above) and for withdrawing the manual `security
+add-generic-password ... -w` instructions in favor of
+`provision_keychain_item.py`.
+
+What this receipt proves and does not prove is exactly the "What a pass
+proves, and does not prove" subsection above — it is one instance of that
+same pass, with a real credential instead of a synthetic one, measured
+against the pre-round-4 script. It does not by itself prove the round-4
+hardened script (C1-C10) behaves identically against a real credential;
+round 4's own verification (below) exercises the hardening's local-only
+rejection paths via `--dry-self-check`, which never touches Keychain or
+upstream.
 
 ## Capability and compatibility notes (read-only; input to the ADR)
 
@@ -494,13 +618,17 @@ touched by this document.
 
 ## What this does NOT prove
 
-- **No real-credential success.** Every automated probe used a dummy
-  credential; R2-R5's "honoured" verdict rests on reaching a genuine `401`
-  from the real Anthropic API, which proves the variable is read and
-  transmitted, not that a *valid* credential would complete a session under
-  this profile. [`owner_positive_probe.sh`](task0152-probes/owner_positive_probe.sh)
-  is written for the owner to run with a real credential and closes this
-  gap; it was not run as part of this task (see below).
+- **No real-credential success for R2-R5 (Option A candidate variables).**
+  Every automated probe used a dummy credential; R2-R5's "honoured"
+  verdict rests on reaching a genuine `401` from the real Anthropic API,
+  which proves the variable is read and transmitted, not that a *valid*
+  credential would complete a session under that exact profile
+  (`*:443` egress, real credential inside the sandbox). The tool that
+  would have closed this specific gap, `owner_positive_probe.sh`, is
+  withdrawn as of round 4 (Option A rejected — see "Owner-run positive
+  probe (Option A)" below) and was never run. This gap is not closed for
+  Option A and is now moot: Option B's real-credential success (below)
+  is the mechanism ADR-0037 selects.
 - **The stub is not the real Anthropic API.** R6/R7 prove the CLI can be
   redirected to an arbitrary HTTP base URL and complete a full
   non-interactive round trip through it with internet access removed from
@@ -537,64 +665,50 @@ touched by this document.
   `ANTHROPIC_ORGANIZATION_ID`) and cloud-provider variants
   (`CLAUDE_CODE_USE_BEDROCK`/Vertex/Foundry-family) named by `strings` are
   candidate, unproven — no fixture for those paths exists in this task.
-- **Option B was not run against a real credential or the real Anthropic
-  API.** `owner_proxy_probe.py`'s own mechanics (routing, rejection,
-  header rewrite, streaming) were exercised directly in-process against
-  synthetic requests, and its argument validation and negative self-check
-  were exercised end-to-end via `--dry-self-check` (which never touches
-  Keychain and never contacts upstream). What was **not** exercised: a
-  real forwarded request reaching the real Anthropic API and returning a
-  real 2xx, a real OAuth token's actual shape (only R8's dummy-credential
-  header-shape measurement stands in for it), and any multi-request or
-  long-lived-session behavior. This is the same class of gap
-  `owner_positive_probe.sh` has for Option A — the owner closes it by
-  running the script themselves.
+- **Option B has now been run once against a real credential and the real
+  Anthropic API** (both modes — see "Owner real-credential receipts"
+  below), closing most of the "no real-credential success" gap this
+  bullet used to describe. What remains **not** exercised even after that
+  run: any multi-request or long-lived-session behavior (both receipts
+  are a single marker-prompt turn each), concurrent load on the proxy, and
+  round 4's hardening (C1-C10) running end-to-end against a *real*
+  credential — the receipts recorded here predate round 4 (they were
+  measured against the pre-round-4 script at commit `9787690`); round 4's
+  own `--dry-self-check` suite (below) exercises the hardening itself
+  without a real credential, and this document does not claim the
+  hardened script was re-run against a real credential.
 
-## Owner-run positive probe
+## Owner-run positive probe (Option A) — WITHDRAWN, never run
 
-[`task0152-probes/owner_positive_probe.sh`](task0152-probes/owner_positive_probe.sh)
-is written but was **not run** by this task (per its constraints: no login,
-no Keychain read). It:
+`task0152-probes/owner_positive_probe.sh` (Option A: inject the real
+credential directly into the confined sandbox) was written in round 2/3
+but is **withdrawn as of round 4** and has been deleted from this
+directory. It is not part of the evidence this document offers.
 
-1. reads a Keychain generic-password item the owner creates themselves, on
-   the host, outside any sandbox;
-2. injects it into a confined child via only a TASK-0152-proven-honoured
-   variable name (hardcoded allowlist: `ANTHROPIC_API_KEY`,
-   `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN` — refuses any other
-   name without touching Keychain), with a fresh empty `HOME` and
-   `CLAUDE_CONFIG_DIR` under the run's own `mktemp` directory and no
-   support-read grant on any host `~/.claude`/`~/.claude.json` (same
-   pattern as probe row R5), so a pass proves the mechanism needs no
-   pre-existing host session state;
-3. runs the same production-shaped profile and marker prompt;
-4. prints only CLI version, exit status, marker present/absent, and a
-   classified failure reason — never the credential value, never raw
-   provider output. The credential value is never placed in the argv of
-   any process: the launch clears every inherited exported variable with
-   the `unset` builtin, re-`export`s only the allowlisted names (builtins
-   never appear as a separate `ps`-visible argv), and `exec`s
-   `sandbox-exec` directly rather than routing the credential through
-   `env NAME=value cmd`, whose own argv would otherwise be briefly
-   `ps`-visible.
+Why: Option A's confined child runs under the production-shaped profile's
+network rule, which is `*:443` (unrestricted outbound HTTPS) — the same
+scope TASK-0112 measured as the only one the current Runner backend can
+compile for a real production launch. That means the real credential
+would sit inside a sandbox that can reach *any* HTTPS host on port 443,
+not only `api.anthropic.com` — a materially larger blast radius than
+Option B, where the confined child never holds the real credential at all
+and can reach nothing but the trusted host's own loopback proxy. Option A
+is rejected on that basis; ADR-0037 selects Option B (the local proxy,
+below). This document keeps the note here rather than deleting all trace
+of Option A so the reasoning for rejecting it stays visible.
 
-One-time setup the owner runs themselves (not run by this task). `-w` is
-given as the LAST argument with no value, so `security` itself prompts
-interactively for the password data and reads it directly from the
-terminal — this avoids both exposure paths a naive command would have: the
-value never appears as a `security` argv element (visible to any `ps`
-observer while the command runs) and it is never captured into a shell
-variable or typed as part of the command line (so it cannot land in shell
-history either):
+## Owner-run positive probe (Option B) — see "Option B probe" above
 
-```bash
-security add-generic-password -a "$USER" -s "runlith-task0152-owner-claude-key" -w
-```
-
-(`security` prints its own `password data for new item:` prompt; type the
-credential value there.)
-
-Then: `bash task0152-probes/owner_positive_probe.sh ANTHROPIC_API_KEY
-runlith-task0152-owner-claude-key`.
+The credential-bearing probe this document supports is
+[`task0152-probes/owner_proxy_probe.py`](task0152-probes/owner_proxy_probe.py),
+provisioned via
+[`task0152-probes/provision_keychain_item.py`](task0152-probes/provision_keychain_item.py).
+Full design: "Option B probe" above (including "Round 4 hardening
+(C1-C10)" and "Owner commands"). One real run's sanitized output: "Owner
+real-credential receipts" above. This section exists only so the
+now-deleted "Owner-run positive probe (Option A)" heading (immediately
+above) has a same-named Option B counterpart for anyone scanning headings
+top to bottom.
 
 ## Evidence provenance
 
@@ -640,5 +754,23 @@ Round 2 additionally:
 - [`task0152-probes/owner_proxy_probe.py`](task0152-probes/owner_proxy_probe.py)
   for the Option B probe design
 
-No credential material, Keychain contents, or `security` command output
-was ever read. No interactive login or `setup-token` flow was invoked.
+Round 4 additionally:
+
+- [`task0152-probes/provision_keychain_item.py`](task0152-probes/provision_keychain_item.py)
+  (new — Keychain provisioning helper, replacing the manual `security
+  add-generic-password ... -w` instructions)
+- `task0152-probes/owner_positive_probe.sh` deleted (Option A withdrawn —
+  see "Owner-run positive probe (Option A)" above)
+- `owner_proxy_probe.py` hardened (C1-C10 — see "Round 4 hardening" above)
+- the "Owner real-credential receipts" section above records the owner's
+  own measurement from their real Keychain credential, run by the owner,
+  not by this task's implementer
+
+By this task's implementer (this document's author): no credential
+material, Keychain contents, or `security` command output was ever read,
+and no `security` command was ever invoked against anything other than a
+throwaway temp keychain created solely for testing. No interactive login
+or `setup-token` flow was invoked. The one real-credential run recorded
+above was performed by the owner, separately, with their own Keychain
+item, and only its sanitized console output (the table above) was
+transcribed into this document.
