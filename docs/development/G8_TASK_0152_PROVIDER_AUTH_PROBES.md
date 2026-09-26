@@ -564,6 +564,128 @@ round 4's own verification (below) exercises the hardening's local-only
 rejection paths via `--dry-self-check`, which never touches Keychain or
 upstream.
 
+## Agent-run end-to-end invalid-credential test (round 4)
+
+Run by **this task's implementer agent** (not the owner), as part of round
+4's verification, against a throwaway temp keychain holding a dummy,
+obviously-fake, real-API-key-**shaped** value — never a real credential,
+never the owner's Keychain. Re-run once more in round 5 on a fresh temp
+keychain to confirm stability; both runs are reported below in full,
+unedited.
+
+### Setup
+
+- Round 4 run: measured 2026-09-25.
+- Round 5 confirmation run: measured 2026-09-26.
+- CLI: `2.1.281 (Claude Code)`, both runs.
+- Script commit: `08b27d5` (round 4 run) / `93b1b83` (round 5 run) —
+  `owner_proxy_probe.py` itself is byte-identical across both
+  (`script_sha256=ae3b4208e586b1a529b4df7055d27943b3522cda6cdb91e5a8efe0b7519ec37b`
+  both times; the round-5 HEAD only added ADR content elsewhere).
+- A throwaway temp keychain (`security create-keychain -p <dummy>
+  <temp-keychain>`, unlocked with the same dummy password) held ONE test
+  item: service `runlith-task0152-test-dummy`, account `e2etest`, value a
+  dummy string shaped like a real API key
+  (the real Anthropic API-key prefix shape followed by an obviously-fake
+  dummy suffix — never a real credential), stored with:
+
+  ```text
+  security -i <<< 'add-generic-password -U -A -a e2etest -s runlith-task0152-test-dummy -w "<dummy>" "<temp-keychain>"'
+  ```
+
+  This test item used **`-A`** (allow any application to read it without a
+  GUI approval prompt), not `provision_keychain_item.py`'s `-T ""` (no
+  trusted application at all). That is a deliberate, test-only difference,
+  not a relaxation of the owner-facing design: `-T ""` is correct and
+  unchanged for the owner's real item (every read must be explicitly
+  approved), but a fully-automated, unattended test run cannot click
+  through a GUI approval dialog, and this item's value was a fixed dummy
+  string a test harness generates and discards, never a real secret with
+  any accruing value from being readable. Using `-A` here only relaxes
+  Keychain ACL policy for a throwaway file created and deleted within the
+  same test run, never the owner's real keychain or a real credential.
+- Command run, both times (`<temp-keychain>` = the throwaway keychain's
+  path, `<dummy>` = the throwaway test credential's value — neither is a
+  real path or a real credential, and neither is recorded anywhere in this
+  document):
+
+  ```text
+  python3 -I owner_proxy_probe.py api-key --keychain <temp-keychain> --service runlith-task0152-test-dummy --account e2etest
+  ```
+
+  Run against `https://api.anthropic.com` for real (this is precisely what
+  the script forwards a validated request to — see "Option B probe" —
+  there is no stub involved in this test, unlike R6/R7/R8).
+
+### Results (both runs, identical)
+
+| field | round 4 run (2026-09-25) | round 5 confirmation run (2026-09-26) |
+| --- | --- | --- |
+| `child_exit` | `None` | `None` |
+| `marker_present` | `False` | `False` |
+| `failure_class` | `harness_error` | `harness_error` |
+| `local_401` | `1` (the pre-flight self-check) | `1` |
+| `local_403` | `0` | `0` |
+| `forwarded` | `9` | `9` |
+| `upstream_status_codes` | `[401, 401, 401, 401, 401, 401, 401, 401, 401]` | `[401, 401, 401, 401, 401, 401, 401, 401, 401]` |
+| `dropped_header_names` | `['Accept-Encoding', 'Connection', 'Content-Length', 'X-Claude-Code-Session-Id', 'anthropic-dangerous-direct-browser-access']` | identical |
+
+`child_exit=None` / `failure_class=harness_error` here is `owner_proxy_probe.py`'s
+own `launch_confined_child`'s internal 120s `subprocess.run(..., timeout=120)`
+firing (`subprocess.TimeoutExpired`) — the confined CLI child was still
+retrying when the harness's own timeout cut it off, not a crash or a
+security failure. The count is stable: both runs, independently prepared
+(fresh temp keychain, fresh dummy value, a day apart), produced exactly 9
+forwarded requests and exactly 9 upstream `401` responses, no more and no
+fewer.
+
+### What this proves
+
+- The bad (dummy, real-API-key-shaped) credential **never succeeded**, in
+  9 consecutive real round trips to the real Anthropic API — every single
+  attempt was rejected with a genuine `401`, none returned a 2xx, and none
+  caused the local proxy to forward anything but the exact credential
+  header the script's design specifies.
+- The header allowlist (C7) worked exactly as designed under real load:
+  `dropped_header_names` shows precisely the five names the design
+  excludes (`Accept-Encoding`, `Connection`, `Content-Length` — hop-by-hop/
+  recomputed, not meaningful to forward as sent — `X-Claude-Code-Session-Id`
+  — a session identifier, deliberately excluded — and
+  `anthropic-dangerous-direct-browser-access` — changes trust semantics,
+  never asked for), consistently across 9 real requests, not just a single
+  synthetic one.
+- No redirect was followed and no host other than `api.anthropic.com` was
+  ever contacted: all 9 `upstream_status_codes` entries are real HTTP
+  status integers from actual completed round trips (not connection
+  errors, not `0`, which is this script's own sentinel for a forward that
+  failed before getting any HTTP response at all — see `_forward`'s
+  `except Exception` branch) — a redirect or an off-target host would
+  either surface as that `0` sentinel or as a status this script's opener
+  cannot have gotten from anywhere but the one asserted host, since
+  `_forward` refuses to attach the credential to any request whose host
+  is not exactly `api.anthropic.com` (see "Option B probe", step 6) and
+  its opener never follows a redirect at all (see `_NoRedirect`).
+  `MAX_FORWARDED_REQUESTS = 32` was never reached (9 < 32), so the cap
+  itself was not exercised by this test.
+
+### What this does NOT prove
+
+**Why the CLI retried 9 times is not established by this test.** This
+script records header **names**, never header **values** (by design —
+see C7/C6) — including for `x-stainless-retry-count`, which R8 (round 2)
+proved the CLI sends but whose actual value was never captured in this
+test, in R8, or anywhere else in this task's artifacts. No other evidence
+of the retry cause (timing analysis, an intercepted retry-count value, a
+CLI changelog entry, etc.) was gathered. What is directly observed: 9
+forwarded requests, 9 real `401` responses, a total wall-clock duration
+exceeding the harness's 120s child timeout. What is not established: why
+9 specifically, whether the count would differ for a differently-shaped
+invalid credential (round 2/3's non-key-shaped dummy strings produced a
+single fast `401` against the same real API, not this repeated pattern —
+see R2/R3/R4/R5 above), or whether the CLI's retry behavior is configurable
+or version-dependent. This is stated as an open question, not resolved
+here.
+
 ## Capability and compatibility notes (read-only; input to the ADR)
 
 **`ProviderEnvironment` would not pass any of the honoured variables
