@@ -4764,17 +4764,26 @@ items:
       ADR-0038 exists, contains at minimum Context/Decision/Alternatives/
       Consequences/Security impact/Migration impact per AGENT.md §11, and
       remains Status Proposed; LICENSE is byte-identical to upstream
-      Apache open-source 1.0.0; LICENSE, README.md and the
-      monetization doc's targeted sections are consistent with the
-      open-source-only model; ADR-0038 is linked from
-      docs/architecture/adr/INDEX.md; owner ratification after independent
-      architecture/governance review PASS is required before any status
-      changes to Accepted or before product/version.toml, Cargo manifest
-      license metadata, a commercial license/EULA, a CLA, or a trademark
-      policy are adopted.
+      Apache open-source 1.0.0; NOTICE carries the required plain-text
+      `Required Notice:` line; LICENSE, README.md and the monetization
+      doc's targeted sections are consistent with the open-source-only
+      model; ADR-0038 is linked from docs/architecture/adr/INDEX.md; owner
+      ratification after independent architecture/governance review PASS is
+      required before any status changes to Accepted; merging the
+      LICENSE/NOTICE change into the repository default branch is gated on,
+      and happens only together with or after, that ratification; and before
+      product/version.toml, Cargo manifest license metadata, a commercial
+      license/EULA, a CLA, or a trademark policy are adopted. Two open
+      questions remain unresolved and unmerged pending owner decision:
+      whether government-institution use should be excluded from the
+      open-source-organization grant (the current verbatim Apache text
+      conflicts with the owner's stated wish for government use to be paid),
+      and the freelancer/contractor-for-a-open-source-organization
+      question.
     depends_on: []
     blocked_by: []
     references:
       - docs/architecture/adr/ADR-0038-product-licensing-open-source.md
       - LICENSE
       - AI_ENGINEERING_OS_MONETIZATION_AND_PLUGIN_ECOSYSTEM.md
+      - NOTICE

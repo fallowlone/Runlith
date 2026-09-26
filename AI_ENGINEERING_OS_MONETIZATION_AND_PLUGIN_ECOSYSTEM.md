@@ -96,9 +96,10 @@ The project should distinguish three different rights:
      a separate Commercial/OEM agreement.
 ```
 
-open-source use (personal, evaluation, or by a open-source organization as
-the license defines) remains free and includes every feature; no tier gates
-functionality for open-source users. A developer or company doing any
+open-source use (personal use without any anticipated commercial
+application, or use by a open-source organization as the license defines)
+remains free and includes every feature; no tier gates functionality for
+open-source users. A developer or company doing any
 commercial use — including using AI Engineering OS to build and sell their own
 SaaS or software — needs a paid commercial license. That license does **not**
 automatically grant the right to extract the orchestration core, repackage it
@@ -136,12 +137,11 @@ the final license text, contributor terms and commercial agreements.
 
 ## 2.2 Contributor, trademark and repository licensing boundaries
 
-Before broad external contribution starts, decide how dual licensing and future
-relicensing will work. The project should choose an explicit contributor-rights
-mechanism (for example an appropriate CLA) so accepted contributions can legally
-remain compatible with both Community and Commercial licensing. A DCO alone is
-not an additional grant of commercial relicensing rights. Do not wait until
-hundreds of contributors exist before deciding.
+Before accepting substantial external contributions, establish contributor
+terms sufficient for the intended open-source/commercial licensing model —
+e.g. an appropriate CLA. A DCO alone is not an additional grant of commercial
+relicensing rights. Do not wait until hundreds of contributors exist before
+deciding.
 
 Trademark is a separate protection layer. The product/company should reserve the
 right to control the **AI Engineering OS** name, logo and implication of official
@@ -172,19 +172,22 @@ experience.
 
 | Tier | Commercial model | Product role |
 | --- | --- | --- |
-| **Community** | Free for open-source use (per [LICENSE](LICENSE)); all features | Useful local-first entry point for open-source users: personal use, evaluation, and use by open-source organizations (charities, educational institutions, public research, public safety/health, environmental, government), with the full feature set. |
+| **Community** | Free for open-source use (per [LICENSE](LICENSE)); all features | Useful local-first entry point for open-source users: personal use without any anticipated commercial application, and use by open-source organizations (charitable organizations, educational institutions, public research, public safety/health, environmental, government), with the full feature set. |
 | **Pro Local** | Perpetual commercial-use license + 12 months of updates | Primary individual commercial-user offer (e.g. a freelancer or any individual doing commercial work): the same full control plane and orchestration, licensed for commercial use, without a required subscription. |
 | **Pro Subscription** | Monthly/annual commercial-use license | Alternative to the perpetual purchase for individual commercial users who prefer predictable recurring billing and continuous updates. |
 | **Teams** | Per-user subscription | Commercial-use licensing plus shared engineering workflows, team policy, shared registries, governance, collaboration and organizational visibility for organizations. |
 | **Enterprise** | Annual contract | Commercial-use licensing plus SSO/SCIM, private registry, advanced policy/audit, on-prem/air-gapped options, support and compliance-oriented controls for organizations. |
 | **Cloud Add-ons** | Usage-based and/or fixed add-on subscription | Optional services such as encrypted sync, remote workers/runners, managed browsers, storage or hosted infrastructure. |
 
-Tiers no longer gate features for open-source users: Community, under
-Apache open-source 1.0.0, includes the full feature set for permitted
-open-source purposes. What Pro/Teams/Enterprise sell to an individual or
-organization doing **any** commercial use is the required commercial license
-itself, plus the organizational/collaboration/governance capabilities listed
-for Teams and Enterprise. See
+Tiers no longer gate software features for open-source users: Community,
+under Apache open-source 1.0.0, includes the full feature set — including
+the team/organizational/governance capabilities listed for Teams and
+Enterprise — for any permitted open-source purpose, including use by
+open-source organizations. What Pro/Teams/Enterprise sell to an individual
+or organization doing **any** commercial use is (a) the required
+commercial-use license itself, and (b) separately contracted services such as
+support, SLAs, rollout assistance and hosted/cloud add-ons, which are not
+software features granted by the license. See
 [ADR-0038](docs/architecture/adr/ADR-0038-product-licensing-open-source.md)
 (Proposed, pending owner ratification).
 
@@ -198,7 +201,6 @@ ecosystem.
 Expected direction:
 
 - local `agentd` and CLI/control-plane basics;
-- single-user operation;
 - core provider connections through user-owned credentials/subscriptions;
 - the full task/orchestration feature set appropriate to the mature core at
   release, not a feature-limited subset;
@@ -256,10 +258,16 @@ create an artificial second architecture for the product.
 
 ### 3.4 Teams
 
-Teams monetizes organizational coordination and governance around the local
-runtime.
+Teams is the commercial-use license for organizations, bundled with
+organizational coordination and governance capabilities. Those
+team/organizational/governance capabilities are software features of the
+product; per the license, they are likewise available at no cost to
+open-source organizations under Community (see §3, ADR-0038 D3). What a
+Teams commercial customer pays for is the required commercial-use license
+itself, plus, where purchased, separately contracted services (support,
+rollout assistance) and hosted/cloud add-ons around this feature set.
 
-Expected paid value includes:
+The Teams commercial license is bundled with:
 
 - shared projects/workspaces where enabled;
 - team policy and approval profiles;
@@ -279,7 +287,12 @@ Initial pricing hypothesis:
 
 ### 3.5 Enterprise
 
-Enterprise monetizes governance, deployment control, integration and support.
+Enterprise is the commercial-use license for organizations, bundled with
+governance, deployment control and integration capabilities. As with Teams,
+those governance/deployment software features are likewise available at no
+cost to open-source organizations under Community; what an Enterprise
+commercial customer pays for is the required commercial-use license itself
+plus contracted support, rollout assistance and negotiated SLAs.
 
 Expected direction:
 
