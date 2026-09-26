@@ -1,64 +1,85 @@
 # Runlith licensing
 
 Runlith is **source-available**, not OSI Open Source, and must never be
-described as "open source." The repository's default license is
-[PolyForm Noncommercial 1.0.0](LICENSE). That license text governs; this page
-explains scope and product direction and does not add restrictions to or
-replace its grants.
+described as "open source." The repository's default license is the
+[Business Source License 1.1](LICENSE) (BSL, SPDX id `BUSL-1.1`). That
+license text governs; this page explains scope and product direction and
+does not add restrictions to or replace its grants.
 
 This page is product/documentation guidance, not legal advice. It records a
 Proposed decision — see
-[ADR-0038](docs/architecture/adr/ADR-0038-product-licensing-noncommercial.md)
+[ADR-0038](docs/architecture/adr/ADR-0038-product-licensing-bsl.md)
 (status: Proposed, pending owner ratification after independent review).
 Nothing here is Accepted policy until that ADR is ratified.
 
 ## Current scope
 
 Unless a file or component explicitly states otherwise, Runlith-owned code and
-documentation in this repository are offered under PolyForm Noncommercial
-1.0.0. Third-party code, dependencies and assets retain their respective
+documentation in this repository are offered under Business Source License
+1.1. Third-party code, dependencies and assets retain their respective
 licenses and notices; the root license does not relicense them.
 
-## Free use is noncommercial use only
+## Non-production use is free for everyone
 
-PolyForm Noncommercial grants free use only for permitted purposes, exactly as
-its text defines them:
+BSL's base grant — "the right to copy, modify, create derivative works,
+redistribute, and make non-production use of the Licensed Work" — is free
+for **everyone**, including every business and government body, and cannot
+be removed: the Additional Use Grant below can only add rights on top of it,
+never take rights away (see [LICENSE](LICENSE), Covenants of Licensor 2 and
+4). In practical terms: evaluating Runlith, testing it, or developing or
+debugging Runlith itself is free for anyone, with no commercial license
+required. See [ADR-0038](docs/architecture/adr/ADR-0038-product-licensing-bsl.md)
+D3a for the reasoning and for the Licensor's own (non-binding) interpretation
+of "production use" versus "non-production use."
 
-- any noncommercial purpose;
-- personal use for research, experiment, and testing for the benefit of public knowledge,
-  personal study, private entertainment, hobby projects, amateur pursuits or
-  religious observance, without any anticipated commercial application;
-- use by a charitable organization, educational institution, public research
-  organization, public safety or health organization, environmental
-  protection organization, or government institution — regardless of the
-  source of funding or obligations resulting from that funding. This means
-  government and education use is free even when publicly funded or under
-  grant obligations.
+## Free production use is limited to the Additional Use Grant
 
-Noncommercial users get the full product: every software feature — including
-team/organizational/governance features — is available to all noncommercial
-users, including noncommercial organizations; tiers no longer gate features
-for noncommercial use. What is paid is (a) the commercial-use license itself
-for commercial users, and (b) separately contracted services such as support,
-SLAs, rollout assistance and hosted/cloud add-ons, which are not software
-features granted by the license. Read the license text in [LICENSE](LICENSE)
-for the exact boundaries; this page only summarizes it.
+Production use — using Runlith to do real work, such as developing, shipping
+or operating software that you, your employer or a client relies on — is
+free without a commercial license **only** if you are:
 
-## Commercial use requires a paid license
+- **(a)** an individual using Runlith for your own personal, noncommercial
+  purposes, without any anticipated commercial application; or
+- **(b)** a charitable organization, or a privately operated,
+  non-governmental, not-for-profit educational or research institution,
+  using Runlith for its noncommercial purposes.
 
-Any commercial use of Runlith and all of its features — by an individual
-commercial user such as a freelancer, or by a company of any size, for
-internal use or otherwise — requires a separately executed commercial license
-from the licensor. PolyForm Noncommercial does not grant commercial rights;
-using the software for a commercial purpose without that separate license is
-not a permitted purpose under [LICENSE](LICENSE).
+This Additional Use Grant does **not** extend production use to: any
+business or other for-profit entity of any size; an individual acting in the
+course of commercial activity, including work performed as a freelancer or
+contractor for any client (including a client described in (b) above — the
+contractor's own use is commercial regardless of the client); or any
+government, government body or agency, or any institution owned or operated
+by a government, **including public schools and public universities**. The
+exact wording is reproduced in [LICENSE](LICENSE)'s Parameters block; this
+page only summarizes it.
+
+Everyone above the Additional Use Grant gets the full product: every
+software feature — including team/organizational/governance features — is
+available to anyone permitted to use Runlith, whether for free under
+non-production use or the Additional Use Grant, or under a paid commercial
+license; tiers do not gate functionality. What is paid is (a) the
+commercial production-use license itself, required for any production use
+outside the Additional Use Grant, and (b) separately contracted services
+such as support, SLAs, rollout assistance and hosted/cloud add-ons, which
+are not software features granted by the license.
+
+## Commercial license required for production use outside the Additional Use Grant
+
+Any production use of Runlith not covered by the Additional Use Grant above
+— by an individual commercial user such as a freelancer, by a company of any
+size for internal use or otherwise, or by any government body or
+government-operated institution (including a public school or public
+university) — requires a separately executed commercial license from the
+Licensor. BSL does not grant commercial production-use rights beyond the
+Additional Use Grant; using Runlith for production use outside that grant
+without a separate commercial license is not permitted.
 
 This repository does not yet contain an executed or counsel-approved
 commercial license or EULA. This page is not one, and no price, term or legal
 entity is fixed by it. To ask about a commercial license, contact the
-licensor (Artem Hrechuk, see [NOTICE](NOTICE)); no contact address is
-established yet — this is a placeholder pending the owner's decision on a
-contact channel, not an invented one.
+Licensor (Artem Hrechuk, see [NOTICE](NOTICE)) via
+<https://github.com/fallowlone>; no other contact channel is established.
 
 ## No enforcement in the product
 
@@ -73,33 +94,50 @@ its own accepted ADR before implementation.
 
 Pro Local, Pro Subscription, Teams and Enterprise are the product direction
 defined in the [monetization strategy](AI_ENGINEERING_OS_MONETIZATION_AND_PLUGIN_ECOSYSTEM.md).
-Under the license direction recorded here, those tiers become the commercial
-licensing path for any commercial user, not a feature-gating mechanism among
-noncommercial users. Their purchase terms and any additional commercially
-licensed components must be explicitly identified when offered. Buying a
-commercial license does not automatically grant OEM, white-label, hosted-
-resale or rebranding rights beyond what is explicitly purchased; those remain
-a separate negotiated agreement question.
+Under the license direction recorded here, those tiers are the commercial
+production-use licensing path for anyone outside the Additional Use Grant,
+not a feature-gating mechanism. Their purchase terms and any additional
+commercially licensed components must be explicitly identified when
+offered. Buying a commercial license does not automatically grant OEM,
+white-label, hosted-resale or rebranding rights beyond what is explicitly
+purchased; those remain a separate negotiated agreement question.
 
 The intended Pro Local offer is perpetual use of the last eligible version
 after its update period ends; that entitlement must be specified in the
 actual purchase agreement, which does not yet exist.
 
+## Each version converts to Apache-2.0 after four years
+
+Unlike a permanent source-available license, BSL converts: per the license's
+own Terms, each version's Additional Use Grant terminates and that version's
+rights convert to the Change License — Apache License, Version 2.0 — on its
+own Change Date, four years after that specific version was first publicly
+distributed under this License. The License "applies separately for each
+version," so each release's Change Date must be tracked independently. The
+repository is currently private, so **no Change Date clock has started for
+any version yet.** This means an older version eventually becomes free for
+everyone, including businesses and governments, once its own Change Date
+passes; the currently shipping version does not become free earlier than
+its own four-year clock. See
+[ADR-0038](docs/architecture/adr/ADR-0038-product-licensing-bsl.md) D4.
+
 ## Open-source-program eligibility
 
 Eligibility for AI-vendor open-source maintainer programs (for example
 Claude for Open Source or Codex for Open Source) is decided by each program,
-not by this document. PolyForm Noncommercial is not an OSI-approved license;
+not by this document. BSL (`BUSL-1.1`) is not an OSI-approved license;
 program pages reviewed for ADR-0038 describe adoption-based criteria, and a
 secondary source claims an OSI-license requirement (not independently
-verified). A noncommercial-only core is, at best, unlikely to qualify as an
-"open-source project" for such a program — a judgement, not a program ruling.
-The owner's recorded direction is to pursue that eligibility only through
-separately scoped, genuinely independent components released under an OSI
-license — the Apache-2.0 direction below for a future Plugin SDK, public
-schemas and examples — each of which must earn its own adoption. The Runlith
-core itself is not expected to become OSI open source under this decision,
-and must not be marketed as "open source" regardless of any component's
+verified). The Runlith core is, at best, unlikely to qualify as an
+"open-source project" for such a program while under BSL — a judgement, not
+a program ruling. Once a given version's Change Date passes, that specific
+version does become genuinely Apache-2.0 (OSI-approved), but always four
+years behind the current release. The owner's recorded direction is to
+pursue that eligibility primarily through separately scoped, genuinely
+independent components released under an OSI license — the Apache-2.0
+direction below for a future Plugin SDK, public schemas and examples — each
+of which must earn its own adoption. The Runlith core itself must not be
+marketed as "open source" regardless of any component's or older version's
 eligibility.
 
 ## Plugin SDK and Apache-2.0
@@ -116,28 +154,29 @@ An eventual SDK must carry its own license and explicit scope. Apache-2.0 for
 an SDK will not provide an alternative license for the Runlith core, and does
 not by itself make the core eligible for OSI-scoped programs. Supporting
 independent paid plugins is product strategy, not a blanket exception to the
-noncommercial-only core license. Plugin/core licensing boundaries and any
+license's Additional Use Grant. Plugin/core licensing boundaries and any
 necessary additional permissions must be settled before opening the
 ecosystem.
 
 ## Contributions, trademarks and release readiness
 
 Before accepting substantial external contributions, establish contributor
-terms sufficient for the intended noncommercial/commercial licensing model,
-e.g. an appropriate CLA. A Developer Certificate of Origin (DCO) alone is not
-an additional grant of commercial relicensing rights. No CLA is established
+terms sufficient for the intended free/commercial licensing model, e.g. an
+appropriate CLA. A Developer Certificate of Origin (DCO) alone is not an
+additional grant of commercial relicensing rights. No CLA is established
 here.
 
 Source-code availability does not imply permission to claim official Runlith
 endorsement. A separate trademark policy remains to be established; this page
 does not assert a trademark registration or invent a legal owner.
 
-Before public distribution, obtain qualified legal review of copyright
-ownership and contributor permissions, third-party notices, commercial
-agreements, plugin/trademark boundaries, and the copyright status of any
-AI-assisted authorship in this repository (see ADR-0038's migration impact
-and open questions). Adding the standard license text is not evidence that
-those release checks have been completed.
+Before public distribution, obtain qualified legal review of the Additional
+Use Grant wording (the one piece of owner-authored legal text in this
+decision), copyright ownership and contributor permissions, third-party
+notices, commercial agreements, plugin/trademark boundaries, and the
+copyright status of any AI-assisted authorship in this repository (see
+ADR-0038's migration impact and open questions). Adding the standard license
+text is not evidence that those release checks have been completed.
 
 ## Effective date
 
@@ -148,11 +187,13 @@ Proposed decision, not the license terms already in effect.
 
 ## License source
 
-`LICENSE` is an unmodified copy of
-[PolyForm Noncommercial 1.0.0 from the PolyForm project](https://github.com/polyformproject/polyform-licenses/blob/1.0.0/PolyForm-Noncommercial-1.0.0.md).
-Examples of notices inside that standard text are examples, not Runlith's
-copyright notices. The root [NOTICE](NOTICE) file carries the plain-text line
-beginning `Required Notice:` that the license's Notices clause requires
-recipients to also receive; NOTICE must be redistributed together with the
-software for that reason. The licensor is Artem Hrechuk, as stated in
-NOTICE.
+`LICENSE`'s license body (from the "Terms" heading through the Covenants of
+Licensor) is an unmodified copy of the Business Source License 1.1 text, per
+[SPDX license-list-data](https://raw.githubusercontent.com/spdx/license-list-data/main/text/BUSL-1.1.txt),
+with only the license's own permitted Parameters (Licensor, Licensed Work,
+Additional Use Grant, Change Date, Change License) filled in, laid out using
+the same Parameters-block column format used by other real-world BSL
+adopters (e.g. Terraform's `LICENSE`). The root [NOTICE](NOTICE) file carries
+plain-text copyright and licensing-summary lines; BSL itself has no
+required-notice mechanism like PolyForm's. The licensor is Artem Hrechuk, as
+stated in NOTICE.

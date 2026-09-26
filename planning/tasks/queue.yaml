@@ -4741,49 +4741,61 @@ items:
   # not scoped to any single implementation gate.
   - id: TASK-0153
     gate: G8
-    title: Propose noncommercial-only repository licensing (ADR-0038)
+    title: Propose Business Source License 1.1 repository licensing (ADR-0038)
     objective: >-
-      Draft ADR-0038 (Proposed) changing the repository default license from
-      PolyForm Shield 1.0.0 to PolyForm Noncommercial 1.0.0 so that free use
-      is noncommercial-use-only with all features included, any commercial
-      use requires a separately executed commercial license, and the core is
+      Rework ADR-0038 (Proposed) changing the repository default license from
+      PolyForm Shield 1.0.0 to Business Source License 1.1 (BSL), with an
+      Additional Use Grant limiting free production use to individuals'
+      personal noncommercial use and to charitable/privately-operated
+      not-for-profit educational or research institutions, so that any other
+      production use (any business; any government body or
+      government-operated institution, including public schools and public
+      universities; any freelancer/contractor acting commercially) requires a
+      separately executed commercial license, while non-production use
+      (evaluation, testing, development) remains free for everyone under the
+      License's own base grant; each version converts to Apache License 2.0
+      four years after its first public distribution; the core stays
       described as source-available, never open source; apply the
-      corresponding LICENSE, LICENSING.md, README.md, monetization-doc and
-      ADR-index changes, all pending owner ratification.
+      corresponding LICENSE, NOTICE, LICENSING.md, README.md, monetization-doc
+      and ADR-index changes, all pending owner ratification.
     scope: >-
       Docs/licensing/governance only; no code, no product/version.toml, no
-      Cargo manifest change. LICENSE replaced with a byte-identical PolyForm
-      Noncommercial 1.0.0 copy; LICENSING.md rewritten for the new model;
-      README.md License section updated; targeted edits to
+      Cargo manifest change. LICENSE replaced with the verbatim BSL 1.1
+      license body plus the license's own permitted Parameters; NOTICE
+      rewritten for BSL; LICENSING.md rewritten for the new model; README.md
+      License section updated; targeted edits to
       AI_ENGINEERING_OS_MONETIZATION_AND_PLUGIN_ECOSYSTEM.md §2.1, §2.2, §3
-      tier table and §3.1-§3.3 wording only; new
-      docs/architecture/adr/ADR-0038-product-licensing-noncommercial.md; ADR
-      index updated with a Proposed row. No license-enforcement or
-      phone-home mechanism is authorized (ADR-0014 preserved).
+      tier table and §3.1-§3.5 wording only; ADR renamed to
+      docs/architecture/adr/ADR-0038-product-licensing-bsl.md and rewritten
+      for BSL; ADR index updated with a Proposed row. No license-enforcement
+      or phone-home mechanism is authorized (ADR-0014 preserved).
     exit_criteria_summary: >-
-      ADR-0038 exists, contains at minimum Context/Decision/Alternatives/
-      Consequences/Security impact/Migration impact per AGENT.md §11, and
-      remains Status Proposed; LICENSE is byte-identical to upstream
-      PolyForm Noncommercial 1.0.0; NOTICE carries the required plain-text
-      `Required Notice:` line; LICENSING.md, README.md and the monetization
-      doc's targeted sections are consistent with the noncommercial-only
-      model; ADR-0038 is linked from docs/architecture/adr/INDEX.md; owner
+      ADR-0038 exists at docs/architecture/adr/ADR-0038-product-licensing-bsl.md,
+      contains at minimum Context/Decision/Alternatives/Consequences/Security
+      impact/Migration impact per AGENT.md §11, and remains Status Proposed;
+      LICENSE's license body (from "Terms" through the Covenants of Licensor)
+      is byte-identical to upstream BSL 1.1 (SPDX `BUSL-1.1`) with only the
+      permitted Parameters filled in; NOTICE carries plain-text copyright and
+      BSL licensing-summary lines; LICENSING.md, README.md and the
+      monetization doc's targeted sections are consistent with the BSL model,
+      stating plainly that non-production use is free for everyone and that
+      free production use is limited to the Additional Use Grant; ADR-0038 is
+      linked from docs/architecture/adr/INDEX.md under its new path; owner
       ratification after independent architecture/governance review PASS is
       required before any status changes to Accepted; merging the
       LICENSE/NOTICE change into the repository default branch is gated on,
       and happens only together with or after, that ratification; and before
       product/version.toml, Cargo manifest license metadata, a commercial
-      license/EULA, a CLA, or a trademark policy are adopted. Two open
-      questions remain unresolved and unmerged pending owner decision:
-      whether government-institution use should be excluded from the
-      noncommercial-organization grant (the current verbatim PolyForm text
-      conflicts with the owner's stated wish for government use to be paid),
-      and the freelancer/contractor-for-a-noncommercial-organization
-      question.
+      license/EULA, a CLA, or a trademark policy are adopted. Open questions
+      remain unresolved pending owner decision: Additional Use Grant wording
+      legal review, whether to publish a Licensor FAQ on "production use",
+      exact commercial terms/prices, and whether a government-owned but
+      independently chartered institution counts as "government" for harder
+      edge cases beyond the settled public-school/public-university case.
     depends_on: []
     blocked_by: []
     references:
-      - docs/architecture/adr/ADR-0038-product-licensing-noncommercial.md
+      - docs/architecture/adr/ADR-0038-product-licensing-bsl.md
       - LICENSING.md
       - AI_ENGINEERING_OS_MONETIZATION_AND_PLUGIN_ECOSYSTEM.md
       - NOTICE
