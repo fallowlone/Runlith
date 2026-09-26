@@ -129,8 +129,8 @@ License Grant, License Date, Apache License) filled in.
 outstanding commercial/legal work. This is open source, never described
 as OSI Open Source; unlike a permanent open source license, each
 version converts to Apache License 2.0 four years after that version's own
-first public distribution. This decision is recorded, pending owner
-ratification, in
+first public distribution. This decision is recorded (Accepted,
+owner-ratified 2026-09-26) in
 [ADR-0038](docs/architecture/adr/ADR-0038-product-licensing.md).
 
 Free production use under this license is limited to its Additional Use
@@ -175,7 +175,7 @@ Potential repository/license split once the extension contracts stabilize:
 | Surface | Likely licensing direction |
 | --- | --- |
 | Core desktop/runtime/orchestration product | Apache License, Version 2.0 repository default (free production use only per the License Grant; non-production use free for everyone; converts to Apache-2.0 per version four years after first public distribution) |
-| Any production use outside the License Grant, and any OEM/white-label rights | separate negotiated Commercial License |
+| Any production use outside the License Grant, and commercial OEM/white-label rights beyond the Apache-2.0 grants | separate negotiated Commercial License |
 | Future explicitly scoped Plugin SDK / public schemas / examples | Apache-2.0 (OSI); no current component designated |
 | Enterprise/cloud services | commercial/private as appropriate |
 | Brand/trademark | separate trademark policy |
@@ -215,7 +215,7 @@ required commercial-use license itself, and (b) separately contracted
 services such as support, SLAs, rollout assistance and hosted/cloud
 add-ons, which are not software features granted by the license. See
 [ADR-0038](docs/architecture/adr/ADR-0038-product-licensing.md)
-(Proposed, pending owner ratification).
+(Accepted, owner-ratified 2026-09-26).
 
 ### 3.1 Community
 
