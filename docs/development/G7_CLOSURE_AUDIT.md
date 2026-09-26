@@ -32,7 +32,7 @@ defects were reproduced (§5):
 
 | Field | Value |
 |---|---|
-| Worktree | `/Users/artemmac/dev/runlith-wt-0081` |
+| Worktree | `~/dev/runlith-wt-0081` |
 | Branch | `task-0081-g7-closure-audit` |
 | Audited base | `655ab03b07bef59e55b3ef31b939b13596d0897d` (main, TASK-0080; clean tree) |
 | Host | macOS 27.0 arm64, rustc/cargo 1.95.0 |

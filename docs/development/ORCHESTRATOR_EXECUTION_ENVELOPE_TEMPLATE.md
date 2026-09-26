@@ -32,7 +32,7 @@ TASK / OBJECTIVE
 <exact bounded objective>
 
 REPOSITORY IDENTITY
-- Repository: /Users/artemmac/dev/runlith
+- Repository: <repository-root>
 - Base main commit: <sha>
 - Branch: <branch>
 - Worktree: <worktree>

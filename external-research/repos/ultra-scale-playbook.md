@@ -10,7 +10,7 @@
 - **Tag/version:** no tag at reviewed HEAD. The PDF metadata reports creation on 2026-09-15; findings are bound to the Git revision above rather than to PDF generation time.
 - **Review date:** 2026-09-15
 - **License metadata:** Apache-2.0 in the Space README frontmatter.
-- **Supplied artifact:** `/Users/artemmac/Downloads/Ultra-Scale_Playbook_for_LLM_Training.pdf` (246 pages).
+- **Supplied artifact:** `~/Downloads/Ultra-Scale_Playbook_for_LLM_Training.pdf` (246 pages).
 - **Production implementation reference:** `https://github.com/huggingface/nanotron`, reviewed at `2411b022a75fb7f7561a1bb4166706da5e1b76de` (`main`, package version `0.4` in `pyproject.toml`).
 - **Educational implementation reference:** `https://github.com/huggingface/picotron`, reviewed at `59714b1bf25541dbeb6f5a721ed15f6d0768e786` (`main`).
 

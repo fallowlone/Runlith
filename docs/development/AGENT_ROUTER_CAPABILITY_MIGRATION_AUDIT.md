@@ -5,7 +5,7 @@
 **Authority:** `AGENT.md`, `ARCHITECTURE.md`, `ORCHESTRATOR.md`, `EXTERNAL_REPOSITORY_ADOPTION_RESEARCH.md` (doctrine), `docs/development/ROADMAP_AUDIT.md` (report conventions)
 **Sources audited:**
 - Runlith: local checkout at `d0d3001` (main), this worktree on branch `cline/fd038`
-- agent-router: local source-only checkout at `/Users/artemmac/dev/agent-router` (no git history; prototype-grade TypeScript, `AGENT_ROUTER_CAPABILITIES.md` as its own manifest)
+- agent-router: local source-only checkout at `~/dev/agent-router` (no git history; prototype-grade TypeScript, `AGENT_ROUTER_CAPABILITIES.md` as its own manifest)
 
 **Scope rule applied:** agent-router is treated as a *research prototype* of the same author — a source of validated design patterns and evaluation protocols, never as code to port literally. Every claimed gap below was verified semantically against current Runlith source (crate/module inspection), not by filename search.
 

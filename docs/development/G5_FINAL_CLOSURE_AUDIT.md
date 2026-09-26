@@ -475,7 +475,7 @@ duplicate fact. No state/journal split-brain was observed in any probe.
 
 `agentctl → IPC → agentd → production execution composition →
 WorkspaceService → provider-claude → real claude`. Provider:
-**Claude Code 2.1.268** at `/Users/artemmac/.local/bin/claude`; the daemon
+**Claude Code 2.1.268** at `~/.local/bin/claude`; the daemon
 resolved it from `PATH` with no test injection.
 
 **A — normal current-v2 run.** Accepted in 9.6 s. Task → `VERIFYING`.
