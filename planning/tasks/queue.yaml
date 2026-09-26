@@ -4864,7 +4864,7 @@ items:
       the stray data/sessions.db, and .zcode/plans/*.md from the tracked
       tree via `git rm`, and adds corresponding .gitignore entries; does not
       rewrite git history and does not revoke the exposed keys (owner
-      action). Replaces /Users/artemmac/... absolute paths in tracked files
+      action). Replaces absolute home-directory paths in tracked files
       with relative links or a `~/`-prefixed form, preserving evidentiary
       meaning. Adds CONTRIBUTING.md, SECURITY.md, .gitleaks.toml, and
       docs/development/PUBLICATION_RUNBOOK.md. Appends this queue entry.
