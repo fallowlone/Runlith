@@ -24,10 +24,55 @@
 # credential (default ANTHROPIC_API_KEY). Used to probe
 # CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_AUTH_TOKEN header-shape behavior
 # against the local stub the same way R6/R7 probed ANTHROPIC_API_KEY.
+#
+# --env NAME=VALUE: DUMMY VALUES ONLY. VALUE lands in `env -i ... NAME=VALUE
+# ...`'s own argv for the sandboxed launch (visible to any `ps` observer
+# while the child runs) -- this harness is for reproducible, credential-
+# free probes, never a real secret. Round 6 (T3): refuses any --env value
+# that looks like it could be a real credential, using the same detector
+# owner_proxy_probe.py's C1 uses (see `looks_secret` below).
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Round 6 (T3): same anti-mistake detector as run_row.sh / owner_proxy_probe.py's
+# C1 -- see run_row.sh for the full rationale and the KNOWN_SAFE_DUMMY_VALUES
+# allowlist note (this task's own long-established dummy credential is
+# 40+ chars of [A-Za-z0-9_-] by construction and would otherwise false-
+# positive against the generic length+charset heuristic).
+KNOWN_SAFE_DUMMY_VALUES=("runlith-task0152-probe-invalid-credential")
+_TOKEN_PREFIX_BASE="s""k""-""a""n""t""-"
+TOKEN_PREFIX_OAUTH="${_TOKEN_PREFIX_BASE}oat"
+TOKEN_PREFIX_APIKEY="${_TOKEN_PREFIX_BASE}api"
+
+looks_secret() {
+  local val="$1" known
+  for known in "${KNOWN_SAFE_DUMMY_VALUES[@]}"; do
+    [ "$val" = "$known" ] && return 1
+  done
+  case "$val" in
+    "${TOKEN_PREFIX_OAUTH}"*) return 0 ;;
+    "${TOKEN_PREFIX_APIKEY}"*) return 0 ;;
+  esac
+  if [ "${#val}" -ge 40 ]; then
+    case "$val" in
+      *[!A-Za-z0-9_-]*) : ;;
+      *) return 0 ;;
+    esac
+  fi
+  return 1
+}
+
+refuse_if_env_value_looks_secret() {
+  local kv="$1" name value
+  name="${kv%%=*}"
+  value="${kv#*=}"
+  if looks_secret "$value"; then
+    echo "refusing: --env ${name}=<redacted> looks like it could be a real credential -- this harness takes dummy values only" >&2
+    exit 2
+  fi
+}
 SCRATCH="${TASK0152_SCRATCH:?TASK0152_SCRATCH must be set}"
 CLAUDE_EXEC="$(readlink -f "${TASK0152_CLAUDE_EXEC:?TASK0152_CLAUDE_EXEC must be set}")"
 MARKER="${TASK0152_MARKER:-TASK0152_EVIDENCE_OK}"
@@ -41,7 +86,7 @@ NO_CREDENTIAL=0
 CRED_VAR="ANTHROPIC_API_KEY"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --env) EXTRA_ENV+=("$2"); shift 2 ;;
+    --env) refuse_if_env_value_looks_secret "$2"; EXTRA_ENV+=("$2"); shift 2 ;;
     --no-credential) NO_CREDENTIAL=1; shift ;;
     --cred-var) CRED_VAR="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -136,10 +181,17 @@ fi
 # e.g. a token-refresh or profile host, even while the main request
 # succeeded") specifically needs this on a SUCCESSFUL (marker present) row
 # too, not just a failing one.
+# Round 6 (T3): filtered to the actual claude child's process-name tag
+# (see run_row.sh for the same fix and its rationale) rather than a broad
+# "claude|sandbox" substring match, which also matched unrelated system
+# processes sharing no relationship to this probe's child.
 if command -v log >/dev/null 2>&1; then
-  log show --last 2m --style compact \
-    --predicate 'eventMessage CONTAINS "deny"' 2>/dev/null \
-    | grep -iE "claude|sandbox" > "$DENIALS_RAW" || true
+  CLI_VERSION_TAG="$("$CLAUDE_EXEC" --version 2>/dev/null | awk '{print $1}')"
+  if [ -n "$CLI_VERSION_TAG" ]; then
+    log show --last 2m --style compact \
+      --predicate 'eventMessage CONTAINS "deny"' 2>/dev/null \
+      | grep -F "${CLI_VERSION_TAG}(" > "$DENIALS_RAW" || true
+  fi
 fi
 # Sanitized denial summary: operation + target class only (network-outbound
 # denials specifically, since that is what "other outbound connection

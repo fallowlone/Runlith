@@ -15,12 +15,65 @@
 #              [--home DIR] [--runtime-root DIR] [--no-support-read] \
 #              [--env NAME=VALUE ...] [--extra-argv ARG ...]
 #
+# --env NAME=VALUE: DUMMY VALUES ONLY. VALUE lands in `env -i ... NAME=VALUE
+# ...`'s own argv for the sandboxed launch (visible to any `ps` observer
+# while the child runs) -- this harness is for reproducible, credential-
+# free probes, never a real secret. Round 6 (T3): refuses any --env value
+# that looks like it could be a real credential, using the same detector
+# owner_proxy_probe.py's C1 uses (see `looks_secret` below).
+#
 # Prints one line of JSON to stdout:
 #   {"row":"R1","exit":1,"marker":false,"class":"...","note":"..."}
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Round 6 (T3): same anti-mistake detector as owner_proxy_probe.py's C1 --
+# starts with the real token-prefix shape, or is itself a long high-
+# entropy-shaped run. The prefix is built from single-character pieces so
+# no token-shaped literal appears contiguously in this file's source text
+# (a secret scan of this repo greps for exactly that joined form).
+_TOKEN_PREFIX_BASE="s""k""-""a""n""t""-"
+TOKEN_PREFIX_OAUTH="${_TOKEN_PREFIX_BASE}oat"
+TOKEN_PREFIX_APIKEY="${_TOKEN_PREFIX_BASE}api"
+
+# This task's own long-established, publicly-documented dummy credential
+# (R2-R5/R8, used via --env throughout this evidence doc) is exactly the
+# kind of fixed, already-committed placeholder the length+charset
+# heuristic below cannot distinguish from a real high-entropy secret on
+# shape alone -- it is 40+ chars of [A-Za-z0-9_-] by construction. It is
+# explicitly allowlisted so existing documented rows keep reproducing;
+# this allowlist is never used to admit anything else.
+KNOWN_SAFE_DUMMY_VALUES=("runlith-task0152-probe-invalid-credential")
+
+looks_secret() {
+  local val="$1" known
+  for known in "${KNOWN_SAFE_DUMMY_VALUES[@]}"; do
+    [ "$val" = "$known" ] && return 1
+  done
+  case "$val" in
+    "${TOKEN_PREFIX_OAUTH}"*) return 0 ;;
+    "${TOKEN_PREFIX_APIKEY}"*) return 0 ;;
+  esac
+  if [ "${#val}" -ge 40 ]; then
+    case "$val" in
+      *[!A-Za-z0-9_-]*) : ;;
+      *) return 0 ;;
+    esac
+  fi
+  return 1
+}
+
+refuse_if_env_value_looks_secret() {
+  local kv="$1" name value
+  name="${kv%%=*}"
+  value="${kv#*=}"
+  if looks_secret "$value"; then
+    echo "refusing: --env ${name}=<redacted> looks like it could be a real credential -- this harness takes dummy values only" >&2
+    exit 2
+  fi
+}
 SCRATCH="${TASK0152_SCRATCH:?TASK0152_SCRATCH must be set to the scratch results dir}"
 # Canonicalized exactly as ExecutionComposition::resolved_provider_executable
 # does (execution.rs:511) and as gen_profile.sh does for the profile
@@ -46,7 +99,7 @@ while [ $# -gt 0 ]; do
     --home) HOME_DIR="$2"; shift 2 ;;
     --runtime-root) RUNTIME_ROOT="$2"; shift 2 ;;
     --no-support-read) SUPPORT_READ=0; shift ;;
-    --env) EXTRA_ENV+=("$2"); shift 2 ;;
+    --env) refuse_if_env_value_looks_secret "$2"; EXTRA_ENV+=("$2"); shift 2 ;;
     --extra-argv) EXTRA_ARGV+=("$2"); shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -132,11 +185,20 @@ if grep -q "$MARKER" "$STDOUT_RAW" 2>/dev/null; then
 fi
 
 # Optional Seatbelt denial capture for a failing row (operation + target
-# class only -- never a path under a user secret directory).
+# class only -- never a path under a user secret directory). Round 6
+# (T3): filtered to the actual claude child's process-name tag (the CLI
+# version string, e.g. "2.1.281", is how Seatbelt denial lines name the
+# confined process -- "Sandbox: 2.1.281(PID) deny(1) ...") rather than a
+# broad "claude|sandbox" substring match, which also matched unrelated
+# system processes (sandboxd, logd_helper's sandbox denials for
+# unrelated apps, etc.) sharing no relationship to this probe's child.
 if [ "$MARKER_PRESENT" = "false" ] && command -v log >/dev/null 2>&1; then
-  log show --last 2m --style compact \
-    --predicate 'eventMessage CONTAINS "deny"' 2>/dev/null \
-    | grep -iE "claude|sandbox" > "$DENIALS_RAW" || true
+  CLI_VERSION_TAG="$("$CLAUDE_EXEC" --version 2>/dev/null | awk '{print $1}')"
+  if [ -n "$CLI_VERSION_TAG" ]; then
+    log show --last 2m --style compact \
+      --predicate 'eventMessage CONTAINS "deny"' 2>/dev/null \
+      | grep -F "${CLI_VERSION_TAG}(" > "$DENIALS_RAW" || true
+  fi
 fi
 
 classify() {

@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
 """TASK-0152 -- Option B (trusted-host authenticated proxy) owner-run probe.
-NOT run by the implementer agent (per its constraints: no login, no
-Keychain read, no `security` invocation). The owner runs this manually,
-as `python3 -I owner_proxy_probe.py {api-key,oauth} [--service NAME]`.
+The OWNER runs this against their REAL Keychain item and real credential
+manually, as `python3 -I owner_proxy_probe.py {api-key,oauth}`. The
+implementer agent has run this same script during testing, but only
+against throwaway temp keychains holding dummy, obviously-fake,
+never-real credentials (see the evidence doc's "Agent-run end-to-end
+invalid-credential test" and the temp-keychain provisioning tests) --
+never against the owner's real Keychain item, never with a real
+credential, and never performing an interactive login or `setup-token`
+flow. That distinction -- real item/real credential is the owner's alone;
+temp-keychain/dummy-credential testing is this task's own verification --
+is the accurate one, not a blanket claim that the agent never ran it at
+all.
 
 Design (matches ADR-0037's Option B: the sandbox never holds the real
 credential; the trusted host does):
@@ -62,9 +71,20 @@ credential; the trusted host does):
      A defensive assertion confirms the outgoing request's host is exactly
      `api.anthropic.com` immediately before the real credential is
      attached. At most 32 requests are ever forwarded in one run (round 4,
-     C8); the local proxy is single-threaded, binds only
-     `127.0.0.1:0`, and every accepted connection gets a 30s socket
-     timeout.
+     C8); the local proxy is single-threaded, and every accepted
+     connection gets a 30s per-operation socket timeout plus a 10s
+     whole-request deadline from accept through headers+body fully read
+     (round 6, T2b -- an independent review measured that the 30s
+     per-operation timeout alone does not bound a slow byte-at-a-time
+     trickle, since each individual read completes well within it).
+     Bound to BOTH `127.0.0.1:<port>` and `[::1]:<port>` (the SAME port,
+     round 6, T2c -- Seatbelt's `(remote tcp "localhost:P")` was measured
+     to admit both; see the evidence doc's "L1 loopback admission" row),
+     refusing to start at all if the IPv6 bind fails, and accepting
+     connections only from loopback peers (127.0.0.0/8 or ::1) regardless
+     of which socket received them. Other local, non-loopback interface
+     addresses reachable on the same port remain a documented residual --
+     see the evidence doc.
   7. The confined child itself is launched by this script, under the
      production-shaped Seatbelt profile from gen_profile.sh, but with the
      network rule replaced by "outbound to this proxy's local port only"
@@ -86,9 +106,16 @@ script now:
     long high-entropy-shaped run) -- C1;
   - refuses unless run with `python3 -I` (isolated interpreter: no
     ambient `PYTHON*` env vars, no user site-packages) -- C2;
-  - strips `SSL_CERT_FILE`/`SSL_CERT_DIR`/`*_CA_BUNDLE` from its own
-    environment and builds an explicit `ssl.create_default_context()`
-    pinned to TLS >= 1.2 before making any TLS connection -- C3;
+  - refuses outright (round 6: does not merely strip and continue) if
+    `OPENSSL_CONF`, any `OPENSSL_*`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, any
+    `*_CA_BUNDLE`, or `SSLKEYLOGFILE` is present in its environment --
+    checked before `ssl`/`http.server`/`urllib.request` are even imported,
+    because an independent review measured that OpenSSL reads
+    `OPENSSL_CONF` at library-initialization time (as early as `import
+    ssl`), so scrubbing `os.environ` afterward is too late to prevent the
+    downgrade it can cause -- and builds an explicit
+    `ssl.create_default_context()` pinned to TLS >= 1.2 before making any
+    TLS connection -- C3;
   - refuses unless this exact script file is tracked and byte-identical
     to `HEAD`, and `docs/development/task0152-probes` has no uncommitted
     changes, printing `script_commit=`/`script_sha256=` so the owner can
@@ -120,6 +147,29 @@ script now:
     only by this task's own temp-keychain tests; the owner's normal use
     leaves it unset) -- C10.
 
+Round 6 hardening (independent-review findings, fixed here rather than
+merely noted):
+
+  - refuses outright on `OPENSSL_CONF`/`OPENSSL_*`/`SSL_CERT_FILE`/
+    `SSL_CERT_DIR`/`*_CA_BUNDLE`/`SSLKEYLOGFILE`, checked before any of
+    `ssl`, `http.server`, or `urllib.request` is imported -- see the C3
+    bullet above (this replaces round 4's "strip and continue" policy for
+    these names, since a review showed stripping after `ssl` is imported
+    is too late for `OPENSSL_CONF` specifically) -- T2a;
+  - a 10s whole-request deadline (`signal.alarm`, single-threaded so the
+    handler always runs on the main thread) from connection accept
+    through headers+body fully read, on top of the existing 30s
+    per-operation socket timeout -- see step 6 above -- T2b;
+  - binds `[::1]:<port>` (the same port as `127.0.0.1:<port>`) with the
+    same handler and shared state, refusing to start if that bind fails,
+    and accepts connections only from loopback peers regardless of which
+    socket received them -- see step 6 above and the evidence doc's "L1
+    loopback admission" row -- T2c;
+  - a local `403` for a disallowed path/method never records the raw
+    child-supplied path -- only a truncated SHA-256 prefix, tagged
+    `path:`/`query:` -- since that path is data the confined child
+    controls, not this trusted host's own data -- T2d.
+
 Env-var hygiene for the confined child: the launch uses
 `subprocess.Popen(argv, env=<explicit dict>)`, which passes the
 environment via the child's `envp` at exec time -- a mechanism entirely
@@ -139,21 +189,60 @@ best-effort scope reduction, not a wipe guarantee.
 Stdlib only.
 """
 
+# C3 (round 6 hardening): `import os, sys` ONLY, before anything else --
+# not even `ssl`, `http.server`, or `urllib.request` -- so the dangerous-
+# env-var check below runs before this process's OpenSSL binding has any
+# chance to read `OPENSSL_CONF` (an independent review measured that
+# OpenSSL reads that variable at library initialization time, which can
+# happen as early as `import ssl`; scrubbing `os.environ` AFTER that
+# import is too late -- the downgrade has already been read into the
+# library's own state by then). Refusing outright, rather than stripping
+# and continuing, is deliberate: an env var that can silently reconfigure
+# which CAs are trusted or how OpenSSL initializes is a fact about this
+# process's environment the owner needs to see and fix themselves, not
+# something this script should quietly paper over and proceed past.
+import os
+import sys
+
+_DANGEROUS_ENV_EXACT = ("SSL_CERT_FILE", "SSL_CERT_DIR", "SSLKEYLOGFILE")
+
+
+def _c3_refuse_if_dangerous_tls_env():
+    found = []
+    for name in os.environ:
+        if name in _DANGEROUS_ENV_EXACT:
+            found.append(name)
+        elif name.startswith("OPENSSL_"):
+            found.append(name)
+        elif name.endswith("_CA_BUNDLE"):
+            found.append(name)
+    if found:
+        print(
+            "refusing: the following environment variable(s) can alter TLS/OpenSSL "
+            "behavior before this script ever gets a chance to check for them -- "
+            "unset them and re-run: " + ", ".join(sorted(found)),
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+_c3_refuse_if_dangerous_tls_env()
+
 import argparse
 import hashlib
 import hmac
 import http.server
 import json
-import os
 import re
 import secrets
 import shutil
+import signal
 import socket
 import ssl
 import subprocess
-import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -162,13 +251,6 @@ try:
     import resource
 except ImportError:  # pragma: no cover -- resource is POSIX-only
     resource = None
-
-# C3 (part 1): strip any ambient CA-override env var as early as possible,
-# before this module's own import-time code has any chance to touch TLS.
-# Repeated defensively again in main() right before the opener is built.
-for _name in list(os.environ):
-    if _name in ("SSL_CERT_FILE", "SSL_CERT_DIR") or _name.endswith("_CA_BUNDLE"):
-        os.environ.pop(_name, None)
 
 VALID_MODES = ("api-key", "oauth")
 CRED_VAR = {"api-key": "ANTHROPIC_API_KEY", "oauth": "CLAUDE_CODE_OAUTH_TOKEN"}
@@ -190,6 +272,15 @@ HELLO_PATH = "/api/hello"
 MAX_BODY_BYTES = 8 * 1024 * 1024
 MAX_FORWARDED_REQUESTS = 32
 CLIENT_SOCKET_TIMEOUT = 30
+# Round 6 (T2b): whole-request deadline -- from connection accept through
+# completion of reading headers+body -- separate from and tighter than
+# the per-recv() idle timeout above. An independent review measured a
+# 43s stall from a client trickling the body 1 byte every 1.5s: each
+# individual recv() completes well within CLIENT_SOCKET_TIMEOUT, so that
+# per-operation timeout never fires, yet the single-threaded server is
+# held the whole time. `signal.alarm` bounds the WALL-CLOCK total
+# regardless of how the slowness is spread across individual reads.
+REQUEST_DEADLINE_SECONDS = 10
 
 # The real token prefix (`s`+`k`+`-`+`a`+`n`+`t`+`-`, joined) never
 # appears as one contiguous literal anywhere in this file's source text (a
@@ -400,6 +491,29 @@ def _validate_credential_shape(mode, value):
     return bool(remainder) and bool(_SHAPE_CHARSET.fullmatch(remainder))
 
 
+class _RequestDeadlineExceeded(Exception):
+    """Raised by the SIGALRM handler; never carries any request data in
+    its own message, so even an unhandled instance of this (there should
+    never be one -- see `ProxyHandler.handle_one_request`) prints only a
+    class name via C6's exception-class-name-only policy."""
+
+
+def _alarm_handler(signum, frame):
+    raise _RequestDeadlineExceeded()
+
+
+def _hash_path_for_logging(raw_path):
+    """Round 6 (T2d): a child-supplied path is data the confined child
+    controls, not this trusted host's own data -- recording it verbatim
+    in a durable/printed counter turns this script into an unbounded,
+    attacker-steered logging channel. A short truncated SHA-256 prefix
+    keeps distinct disallowed paths distinguishable in aggregate counts
+    (useful for noticing "the same wrong path repeatedly" vs. "many
+    different wrong paths") without ever printing or storing the raw
+    content."""
+    return hashlib.sha256(raw_path.encode("utf-8", errors="replace")).hexdigest()[:12]
+
+
 class Counters:
     def __init__(self):
         self.lock = threading.Lock()
@@ -426,19 +540,48 @@ class Counters:
             }
 
 
-class ProxyServer(http.server.HTTPServer):
-    # C8: single-threaded (plain HTTPServer, not ThreadingHTTPServer),
-    # never reuse a just-closed address, bind loopback-only via the addr
-    # tuple main() constructs this with (always ("127.0.0.1", 0)).
-    allow_reuse_address = False
+class SharedState:
+    """State shared between the IPv4 and IPv6 server instances (round 6,
+    T2c) -- both bind the SAME port and run the SAME handler class, so
+    setting `.real_credential` once (after the self-check passes) must be
+    visible to whichever socket actually receives the confined child's
+    connection."""
 
-    def __init__(self, addr, handler_cls, mode, placeholder, real_credential, counters):
-        super().__init__(addr, handler_cls)
+    def __init__(self, mode, placeholder, real_credential, counters):
         self.mode = mode
         self.placeholder = placeholder
         self.real_credential = real_credential  # None until the real run needs it
         self.cred_header = CRED_HEADER[mode]
         self.counters = counters
+
+
+def _is_loopback_peer(address_tuple):
+    """Round 6 (T2c): accept only 127.0.0.0/8 or ::1. Defense in depth on
+    top of binding only loopback addresses -- see `ProxyServer.verify_request`."""
+    host = address_tuple[0]
+    if host.startswith("127."):
+        return True
+    if host in ("::1", "0:0:0:0:0:0:0:1"):
+        return True
+    return False
+
+
+class ProxyServer(http.server.HTTPServer):
+    # C8: single-threaded (plain HTTPServer, not ThreadingHTTPServer),
+    # never reuse a just-closed address, bind loopback-only via the addr
+    # tuple main() constructs this with.
+    allow_reuse_address = False
+
+    def __init__(self, addr, handler_cls, state):
+        super().__init__(addr, handler_cls)
+        self.state = state
+
+    def verify_request(self, request, client_address):
+        # Round 6 (T2c): accept only loopback peers, even though this
+        # server only ever binds a loopback address itself -- a second,
+        # independent gate in case anything about the binding or routing
+        # environment ever surprises us.
+        return _is_loopback_peer(client_address)
 
     def handle_error(self, request, client_address):
         # C6: the default socketserver.handle_error prints a full
@@ -449,6 +592,10 @@ class ProxyServer(http.server.HTTPServer):
         print(f"internal error handling one request: {name}", file=sys.stderr)
 
 
+class ProxyServerV6(ProxyServer):
+    address_family = socket.AF_INET6
+
+
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "task0152-option-b-proxy"
@@ -457,8 +604,31 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # silence default stderr logging
         pass
 
+    # -- whole-request deadline (round 6, T2b) -----------------------------
+    def handle_one_request(self):
+        # Covers from connection accept (well, from the start of parsing
+        # this one request -- `handle()`'s loop calls this once per
+        # request on a connection, and this proxy always sends
+        # `Connection: close`, so there is exactly one) through whatever
+        # point `_dispatch` calls `_cancel_deadline()` -- i.e. through
+        # headers+body being fully read, never through response writing.
+        signal.alarm(REQUEST_DEADLINE_SECONDS)
+        try:
+            super().handle_one_request()
+        except _RequestDeadlineExceeded:
+            self.close_connection = True
+        finally:
+            signal.alarm(0)
+
+    def _cancel_deadline(self):
+        signal.alarm(0)
+
     # -- local responses -----------------------------------------------
     def _send_local(self, code):
+        # Every local-rejection path funnels through here -- the single
+        # place that cancels the whole-request deadline for all of them,
+        # since none needs to read any more of the request afterward.
+        self._cancel_deadline()
         body = json.dumps({"type": "error", "error": {"type": "local_proxy_rejection"}}).encode(
             "utf-8"
         )
@@ -473,7 +643,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             pass
 
     def _credential_ok(self):
-        value = self.headers.get(self.server.cred_header)
+        value = self.headers.get(self.server.state.cred_header)
         if value is None:
             return False
         stripped = value[7:] if value.lower().startswith("bearer ") else value
@@ -481,7 +651,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # guess the placeholder byte by byte.
         return hmac.compare_digest(
             stripped.encode("utf-8", errors="replace"),
-            self.server.placeholder.encode("utf-8"),
+            self.server.state.placeholder.encode("utf-8"),
         )
 
     # -- dispatch ---------------------------------------------------------
@@ -499,6 +669,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         query = self.path.split("?", 1)[1] if "?" in self.path else ""
 
         if self.command in ("HEAD", "GET") and base_path == HELLO_PATH:
+            self._cancel_deadline()
             self.send_response(200)
             self.send_header("Content-Length", "0")
             self.send_header("Connection", "close")
@@ -506,56 +677,68 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if not (self.command == "POST" and base_path == ALLOWED_FORWARD_PATH):
-            with self.server.counters.lock:
-                self.server.counters.local_403 += 1
-                self.server.counters.local_403_paths.append(base_path)
+            # C1/T2d: never record the raw child-supplied path -- a
+            # truncated hash keeps distinct disallowed paths
+            # distinguishable without ever printing or storing content
+            # the confined child controls.
+            with self.server.state.counters.lock:
+                self.server.state.counters.local_403 += 1
+                self.server.state.counters.local_403_paths.append(
+                    f"path:{_hash_path_for_logging(base_path)}"
+                )
             self._send_local(403)
             return
 
         # C7 (query allowlist): empty or exactly `beta=true`.
         if query not in ALLOWED_QUERY_STRINGS:
-            with self.server.counters.lock:
-                self.server.counters.local_403 += 1
-                self.server.counters.local_403_paths.append(base_path + "?<disallowed-query>")
+            with self.server.state.counters.lock:
+                self.server.state.counters.local_403 += 1
+                self.server.state.counters.local_403_paths.append(
+                    f"query:{_hash_path_for_logging(base_path + '?' + query)}"
+                )
             self._send_local(403)
             return
 
         # C8 (request-smuggling/parser hardening) -- checked before any
         # body is read, on every request shape, regardless of credential.
         if self.headers.get("Transfer-Encoding") is not None:
-            with self.server.counters.lock:
-                self.server.counters.local_400 += 1
+            with self.server.state.counters.lock:
+                self.server.state.counters.local_400 += 1
             self._send_local(400)
             return
         content_lengths = self.headers.get_all("Content-Length") or []
         if len(content_lengths) > 1:
-            with self.server.counters.lock:
-                self.server.counters.local_400 += 1
+            with self.server.state.counters.lock:
+                self.server.state.counters.local_400 += 1
             self._send_local(400)
             return
         length = 0
         if content_lengths:
             if not re.fullmatch(r"[0-9]+", content_lengths[0]):
-                with self.server.counters.lock:
-                    self.server.counters.local_400 += 1
+                with self.server.state.counters.lock:
+                    self.server.state.counters.local_400 += 1
                 self._send_local(400)
                 return
             length = int(content_lengths[0])
         if length > MAX_BODY_BYTES:
-            with self.server.counters.lock:
-                self.server.counters.local_413 += 1
+            with self.server.state.counters.lock:
+                self.server.state.counters.local_413 += 1
             self._send_local(413)
             return
 
         body = self.rfile.read(length) if length else b""
+        # The request (headers + body) is now fully read -- the deadline
+        # this specifically guards against (a slow trickle) is satisfied
+        # regardless of which branch below is taken next.
+        self._cancel_deadline()
 
         if not self._credential_ok():
-            with self.server.counters.lock:
-                self.server.counters.local_401 += 1
+            with self.server.state.counters.lock:
+                self.server.state.counters.local_401 += 1
             self._send_local(401)
             return
 
-        if self.server.real_credential is None:
+        if self.server.state.real_credential is None:
             # Dry mode / self-check-only: credential matched, but this
             # server was never given a real credential to forward with.
             # Refuse locally rather than attempting an upstream call with
@@ -563,8 +746,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_local(403)
             return
 
-        with self.server.counters.lock:
-            over_cap = self.server.counters.forwarded >= MAX_FORWARDED_REQUESTS
+        with self.server.state.counters.lock:
+            over_cap = self.server.state.counters.forwarded >= MAX_FORWARDED_REQUESTS
         if over_cap:
             self._send_local(503)
             return
@@ -584,13 +767,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             else:
                 dropped.append(name)
         if dropped:
-            with self.server.counters.lock:
-                self.server.counters.dropped_header_names.update(dropped)
+            with self.server.state.counters.lock:
+                self.server.state.counters.dropped_header_names.update(dropped)
 
-        if self.server.mode == "api-key":
-            headers["x-api-key"] = self.server.real_credential
+        if self.server.state.mode == "api-key":
+            headers["x-api-key"] = self.server.state.real_credential
         else:
-            headers["authorization"] = f"Bearer {self.server.real_credential}"
+            headers["authorization"] = f"Bearer {self.server.state.real_credential}"
         headers["Host"] = UPSTREAM_HOST
 
         url = UPSTREAM_URL + path
@@ -607,9 +790,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         except urllib.error.HTTPError as error:
             self._relay_response(error, error.code, dict(error.headers or {}))
         except Exception:
-            with self.server.counters.lock:
-                self.server.counters.forwarded += 1
-                self.server.counters.upstream_status.append(0)
+            with self.server.state.counters.lock:
+                self.server.state.counters.forwarded += 1
+                self.server.state.counters.upstream_status.append(0)
             try:
                 self.send_response(502)
                 self.send_header("Content-Length", "0")
@@ -619,9 +802,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 pass
 
     def _relay_response(self, resp_like, status, resp_headers):
-        with self.server.counters.lock:
-            self.server.counters.forwarded += 1
-            self.server.counters.upstream_status.append(status)
+        with self.server.state.counters.lock:
+            self.server.state.counters.forwarded += 1
+            self.server.state.counters.upstream_status.append(status)
         content_type = ""
         for k, v in resp_headers.items():
             if k.lower() == "content-type":
@@ -691,20 +874,20 @@ def read_keychain_credential(service, account, keychain_path=None):
     return value
 
 
-def run_self_check(server, port):
+def run_self_check(state, port):
     """Sends one request with a WRONG placeholder and asserts: local 401,
     zero upstream forwards. Never touches the real credential and never
     contacts upstream -- safe to run in dry mode."""
-    before = server.counters.snapshot()["forwarded"]
+    before = state.counters.snapshot()["forwarded"]
     wrong_value = "wrong-" + secrets.token_urlsafe(16)
-    if server.cred_header == "authorization":
+    if state.cred_header == "authorization":
         header_value = f"Bearer {wrong_value}"
     else:
         header_value = wrong_value
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}{ALLOWED_FORWARD_PATH}",
         data=b'{"model":"x","messages":[],"max_tokens":1}',
-        headers={server.cred_header: header_value, "Content-Type": "application/json"},
+        headers={state.cred_header: header_value, "Content-Type": "application/json"},
         method="POST",
     )
     try:
@@ -712,9 +895,44 @@ def run_self_check(server, port):
         status = 200  # would be unexpected -- the check below still catches it
     except urllib.error.HTTPError as error:
         status = error.code
-    after = server.counters.snapshot()["forwarded"]
+    after = state.counters.snapshot()["forwarded"]
     ok = status == 401 and after == before
     return ok, status
+
+
+def _check_whole_request_deadline(port):
+    """Round 6 (T2b): sends headers declaring a body, then only ever
+    sends ONE byte of it and stops -- the exact shape of stall an
+    independent review measured holding this server for 43s (1 byte
+    trickled every 1.5s never trips the per-recv() idle timeout, since
+    each individual read completes quickly). Asserts the server closes
+    the connection at, not before and not long after, the whole-request
+    deadline -- proving the fix without literally waiting out a 43s-shaped
+    attack."""
+    lines = [
+        f"POST {ALLOWED_FORWARD_PATH} HTTP/1.1",
+        f"Host: 127.0.0.1:{port}",
+        "Content-Length: 50",
+        "Connection: close",
+        "",
+        "",
+    ]
+    payload = "\r\n".join(lines).encode("utf-8")
+    start = time.monotonic()
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=REQUEST_DEADLINE_SECONDS + 15) as sock:
+            sock.sendall(payload)
+            sock.sendall(b"x")  # exactly 1 of the declared 50 body bytes, then nothing more
+            got_eof = False
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    got_eof = True
+                    break
+    except Exception:
+        got_eof = True
+    elapsed = time.monotonic() - start
+    return got_eof and (REQUEST_DEADLINE_SECONDS - 2) <= elapsed <= (REQUEST_DEADLINE_SECONDS + 10)
 
 
 def _raw_http_request(port, method, path, extra_headers, body, send_declared_length_only=False):
@@ -886,15 +1104,17 @@ def classify(exit_code, marker_present, stdout_text):
     return f"unclassified (exit {exit_code})"
 
 
-def _extended_dry_checks(server, port):
-    """Round 4: exercises every C7/C8 local-rejection path plus the C1/C2
-    argv and interpreter gates (via a subprocess of THIS script, since
-    those are checked before any server exists). Prints one
-    `check_<name>=pass|fail` line per assertion. Never touches Keychain or
-    contacts upstream."""
-    ok, status = run_self_check(server, port)
+def _extended_dry_checks(state, port):
+    """Round 4/6: exercises every C7/C8 local-rejection path plus the
+    C1/C2 argv and interpreter gates (via a subprocess of THIS script,
+    since those are checked before any server exists), plus round 6's
+    T2b whole-request deadline, T2a OPENSSL_CONF refusal, and T2d path-
+    hashing. Prints one `check_<name>=pass|fail` line per assertion.
+    Never touches Keychain or contacts upstream."""
+    ok, status = run_self_check(state, port)
     print(f"check_wrong_placeholder_401={'pass' if ok and status == 401 else 'fail'}")
 
+    DISALLOWED_PATH_MARKER = "/v1/models"
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}{ALLOWED_FORWARD_PATH}?not-allowed=1",
         data=b"{}",
@@ -936,13 +1156,23 @@ def _extended_dry_checks(server, port):
     )
     print(f"check_oversized_body_413={'pass' if status == 413 else 'fail'}")
 
-    req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/models", method="GET")
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{DISALLOWED_PATH_MARKER}", method="GET")
     try:
         _OPENER.open(req, timeout=10)
         status = 200
     except urllib.error.HTTPError as error:
         status = error.code
     print(f"check_disallowed_path_403={'pass' if status == 403 else 'fail'}")
+
+    # T2d: the disallowed path above must never appear verbatim in this
+    # process's own recorded counters -- only a truncated hash may.
+    recorded_paths = state.counters.snapshot()["local_403_paths"]
+    path_not_leaked = not any(DISALLOWED_PATH_MARKER in entry for entry in recorded_paths)
+    print(f"check_disallowed_path_not_recorded_raw={'pass' if path_not_leaked else 'fail'}")
+
+    # T2b: whole-request deadline against a slow-trickled body.
+    deadline_ok = _check_whole_request_deadline(port)
+    print(f"check_whole_request_deadline={'pass' if deadline_ok else 'fail'}")
 
     poison = "A" * (_HIGH_ENTROPY_MIN_LEN + 5)
     proc = subprocess.run(
@@ -961,6 +1191,19 @@ def _extended_dry_checks(server, port):
         timeout=20,
     )
     print(f"check_non_isolated_refused={'pass' if proc2.returncode != 0 else 'fail'}")
+
+    # T2a/T2e: OPENSSL_CONF (and friends) must refuse, checked before any
+    # TLS-touching import -- a subprocess with a poisoned environment.
+    poisoned_env = dict(os.environ)
+    poisoned_env["OPENSSL_CONF"] = "/dev/null"
+    proc3 = subprocess.run(
+        [sys.executable, "-I", THIS_FILE, "oauth", "--dry-self-check"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        env=poisoned_env,
+    )
+    print(f"check_openssl_conf_refused={'pass' if proc3.returncode != 0 else 'fail'}")
 
 
 def _real_main():
@@ -993,23 +1236,46 @@ def _real_main():
 
     _c9_disable_core_dumps()
 
-    for name in list(os.environ):
-        if name in ("SSL_CERT_FILE", "SSL_CERT_DIR") or name.endswith("_CA_BUNDLE"):
-            os.environ.pop(name, None)
+    # C3's dangerous-env-var check already ran at import time, before any
+    # TLS-touching module was even imported (see the top of this file) --
+    # nothing further to strip here now that the policy is "refuse", not
+    # "strip and continue".
     global _OPENER
     _OPENER = _build_opener()
 
     _c4_verify_integrity()
 
+    # T2b: install the SIGALRM handler once, process-wide. Safe here
+    # because the server is single-threaded and request handling always
+    # happens on the main thread (signal handlers only ever fire there).
+    signal.signal(signal.SIGALRM, _alarm_handler)
+
     placeholder = secrets.token_urlsafe(32)
     counters = Counters()
+    state = SharedState(args.mode, placeholder, None, counters)
 
-    server = ProxyServer(("127.0.0.1", 0), ProxyHandler, args.mode, placeholder, None, counters)
-    port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    server_v4 = ProxyServer(("127.0.0.1", 0), ProxyHandler, state)
+    port = server_v4.server_address[1]
+    # T2c: also bind [::1] on the SAME port, same handler, same shared
+    # state -- Seatbelt's `(remote tcp "localhost:P")` was measured (see
+    # the evidence doc's L1 row) to admit connections to ::1:P as well as
+    # 127.0.0.1:P, so a confined child resolving "localhost" to its IPv6
+    # loopback address must reach an equally-hardened listener, not an
+    # unbound port. Refuses to start entirely if this bind fails, rather
+    # than silently running v4-only and leaving that path unguarded.
     try:
-        ok, status = run_self_check(server, port)
+        server_v6 = ProxyServerV6(("::1", port), ProxyHandler, state)
+    except OSError as error:
+        print(f"refusing: could not bind [::1]:{port} ({type(error).__name__})", file=sys.stderr)
+        server_v4.server_close()
+        sys.exit(2)
+
+    thread_v4 = threading.Thread(target=server_v4.serve_forever, daemon=True)
+    thread_v6 = threading.Thread(target=server_v6.serve_forever, daemon=True)
+    thread_v4.start()
+    thread_v6.start()
+    try:
+        ok, status = run_self_check(state, port)
         print(f"self_check_pass={ok}")
         print(f"self_check_status={status}")
         if not ok:
@@ -1017,7 +1283,7 @@ def _real_main():
             sys.exit(1)
 
         if args.dry_self_check:
-            _extended_dry_checks(server, port)
+            _extended_dry_checks(state, port)
             counts = counters.snapshot()
             print(f"mode={args.mode}")
             print("dry_run=true")
@@ -1036,7 +1302,7 @@ def _real_main():
             real_credential = None
             print("refusing: credential shape does not match mode", file=sys.stderr)
             sys.exit(2)
-        server.real_credential = real_credential
+        state.real_credential = real_credential
         try:
             exit_code, marker_present, stdout_text = launch_confined_child(
                 args.mode, placeholder, port, claude_exec
@@ -1046,7 +1312,7 @@ def _real_main():
             # cannot be securely wiped. Drop every reference this process
             # holds as soon as the child has run.
             real_credential = None
-            server.real_credential = None
+            state.real_credential = None
 
         cls = classify(exit_code, marker_present, stdout_text)
         counts = counters.snapshot()
@@ -1066,8 +1332,10 @@ def _real_main():
         if counts["dropped_header_names"]:
             print(f"dropped_header_names={counts['dropped_header_names']}")
     finally:
-        server.shutdown()
-        server.server_close()
+        server_v4.shutdown()
+        server_v4.server_close()
+        server_v6.shutdown()
+        server_v6.server_close()
 
 
 if __name__ == "__main__":

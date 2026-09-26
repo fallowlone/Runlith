@@ -186,9 +186,16 @@ mkdir -p "$(dirname "$OUT")"
       port="${NETWORK#local:}"
       # macOS Seatbelt's `(remote tcp "HOST:PORT")` accepts only `*` or
       # `localhost` as HOST (measured: sandbox-exec rejects a literal IP
-      # with "host must be * or localhost in network address"); "localhost"
-      # resolves to the loopback interface, matching the intent (outbound
-      # to the local stub only).
+      # with "host must be * or localhost in network address"). "localhost"
+      # here does NOT admit only one single loopback interface -- round 6's
+      # "L1 loopback admission" evidence row measured that it admits BOTH
+      # 127.0.0.1:PORT and [::1]:PORT (and, on this host, other 127/8
+      # addresses too), while a non-loopback interface address and a
+      # genuinely remote host on the same port are both denied. A listener
+      # meant to receive this traffic must itself bind every address this
+      # rule admits, not just 127.0.0.1 -- see
+      # docs/development/task0152-probes/owner_proxy_probe.py's dual-stack
+      # (127.0.0.1 + [::1]) bind for the concrete fix this motivated.
       printf '(allow network-outbound\n  (remote tcp "localhost:%s"))\n' "$port"
       ;;
     none) : ;;
