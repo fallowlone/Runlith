@@ -8,7 +8,7 @@ Commit `2402ce2` recorded an initial provisional `G6_CLOSED` verdict. Supplement
 
 ## Repository identity
 
-- Worktree: `/Users/artemmac/dev/runlith-task0070`
+- Worktree: `~/dev/runlith-task0070`
 - Branch: `task-0070-independent-adversarial-g6-closure-reaudit`
 - Starting audit commit: `2402ce2966b8ae6ef8300ac5e6f6173c8bedb464`
 - Gate: `G6`

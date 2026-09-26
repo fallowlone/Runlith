@@ -1,6 +1,6 @@
 # Runlith — исследование desktop UI/UX
 
-Дата среза: **16 сентября 2026 года**; оформление завершено **17 сентября 2026 года**. Режим: read-only research. Репозиторий: /Users/artemmac/dev/runlith. HEAD: 891c36f4b30a030ee581344fb718403712c8bbf1.
+Дата среза: **16 сентября 2026 года**; оформление завершено **17 сентября 2026 года**. Режим: read-only research. Репозиторий: ~/dev/runlith. HEAD: 891c36f4b30a030ee581344fb718403712c8bbf1.
 
 Исследование предназначено для подготовки UI Product / Information Architecture contract. Это не утверждённый дизайн, frontend ADR или план реализации. TASK-0085 не создавался. Файлы репозитория не изменялись.
 
@@ -49,7 +49,7 @@ Runlith — локальный control plane инженерной работы �
 
 Task hierarchy и зависимости Plan — связанные, но разные отношения. Родительская задача не равна группе вкладок. Последовательные Attempts не являются параллельными «агентами». У Execution нет отдельного универсального durable status enum: его представление выводится из известных данных и не должно создавать новую машину состояний.
 
-Основание: [ADR-0005](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0005-task-execution-attempt-session.md), [Task Engine](/Users/artemmac/dev/runlith/docs/architecture/task-engine.md), [provider contracts](/Users/artemmac/dev/runlith/docs/architecture/providers.md), [Execution IPC](/Users/artemmac/dev/runlith/crates/ipc-contracts/proto/execution_core.proto).
+Основание: [ADR-0005](../../architecture/adr/ADR-0005-task-execution-attempt-session.md), [Task Engine](../../architecture/task-engine.md), [provider contracts](../../architecture/providers.md), [Execution IPC](../../../crates/ipc-contracts/proto/execution_core.proto).
 
 ### 2.2 Текущее положение и граница готовности
 
@@ -57,7 +57,7 @@ Task hierarchy и зависимости Plan — связанные, но ра�
 
 Есть канонические контракты независимой evaluation, однако полноценный продуктовый объём verification относится к G8. Continuity и более широкое recovery нельзя считать готовыми только потому, что они описаны в долгосрочной архитектуре. G11 остаётся отдельной будущей областью. planning/tasks/queue.yaml — governance queue, не runtime Task database.
 
-Основание: [roadmap](/Users/artemmac/dev/runlith/planning/roadmap.yaml), [queue](/Users/artemmac/dev/runlith/planning/tasks/queue.yaml:1), [version](/Users/artemmac/dev/runlith/product/version.toml), [ADR-0018](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0018-independent-evaluation.md).
+Основание: [roadmap](../../../planning/roadmap.yaml), [queue](../../../planning/tasks/queue.yaml:1), [version](../../../product/version.toml), [ADR-0018](../../architecture/adr/ADR-0018-independent-evaluation.md).
 
 ### 2.3 Жёсткие ограничения и оцениваемые гипотезы
 
@@ -73,9 +73,9 @@ Task hierarchy и зависимости Plan — связанные, но ра�
 | Mission Control, agent rosters, карточки в старых концептах | Проверять на частоту сценариев и зрелость контрактов | Гипотеза, не обязательная IA |
 | Tauri 2 + React/TypeScript/Vite, primitives-only | Учесть существующее решение до обсуждения альтернатив | Текущий архитектурный baseline |
 
-[ADR-0007](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0007-no-direct-frontend-shell.md) запрещает frontend shell/business logic. [ADR-0015](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0015-shadcn-primitives-only.md) не требует копировать shadcn dashboards. [ADR-0016](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0016-agentctl-before-complex-ui.md) устанавливает CLI-first discipline. [Architecture source of truth](/Users/artemmac/dev/runlith/AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md) содержит и обязательные ограничения, и более ранние UI-направления; последние здесь не считаются результатом пользовательского исследования.
+[ADR-0007](../../architecture/adr/ADR-0007-no-direct-frontend-shell.md) запрещает frontend shell/business logic. [ADR-0015](../../architecture/adr/ADR-0015-shadcn-primitives-only.md) не требует копировать shadcn dashboards. [ADR-0016](../../architecture/adr/ADR-0016-agentctl-before-complex-ui.md) устанавливает CLI-first discipline. [Architecture source of truth](../../../AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md) содержит и обязательные ограничения, и более ранние UI-направления; последние здесь не считаются результатом пользовательского исследования.
 
-В roadmap первый серьёзный desktop UI предшествует сравнительному UI-TECHNOLOGY-SPIKE. Поэтому предлагаемый ADR перед shell прежде всего фиксирует требования и подтверждает текущую основу; benchmark Tauri/React, Slint и GPUI остаётся последующим этапом на репрезентативной реализации. Перенос такого spike раньше потребовал бы отдельного осознанного пересмотра roadmap, который это исследование не выполняет. [Roadmap: UI milestones](/Users/artemmac/dev/runlith/planning/roadmap.yaml:142).
+В roadmap первый серьёзный desktop UI предшествует сравнительному UI-TECHNOLOGY-SPIKE. Поэтому предлагаемый ADR перед shell прежде всего фиксирует требования и подтверждает текущую основу; benchmark Tauri/React, Slint и GPUI остаётся последующим этапом на репрезентативной реализации. Перенос такого spike раньше потребовал бы отдельного осознанного пересмотра roadmap, который это исследование не выполняет. [Roadmap: UI milestones](../../../planning/roadmap.yaml:142).
 
 ### 2.4 Главные рабочие сценарии
 
@@ -105,7 +105,7 @@ Task hierarchy и зависимости Plan — связанные, но ра�
 | Provider interaction | Provider-neutral execution view | Session/transcript/steering capabilities и адресуемость сообщений |
 | Action availability | Серверные проверки операций | Представление причин недоступности и релевантных preconditions |
 
-Текущий control channel последовательный: один запрос в работе, без multiplexing/streaming/request IDs. Это ограничение нельзя незаметно превратить в поток токенов и live logs. Сначала нужен контракт доставки данных, ограничения объёма и повторного чтения. UI не должен компенсировать пробелы чтением БД, запуском Git/process commands, разбором CLI-строк или предположениями по тексту агента. Источники: [IPC](/Users/artemmac/dev/runlith/docs/architecture/ipc.md), [control proto](/Users/artemmac/dev/runlith/crates/ipc-contracts/proto/agentd_control.proto), [planning proto](/Users/artemmac/dev/runlith/crates/ipc-contracts/proto/planning_core.proto), [authoring proto](/Users/artemmac/dev/runlith/crates/ipc-contracts/proto/task_authoring_core.proto).
+Текущий control channel последовательный: один запрос в работе, без multiplexing/streaming/request IDs. Это ограничение нельзя незаметно превратить в поток токенов и live logs. Сначала нужен контракт доставки данных, ограничения объёма и повторного чтения. UI не должен компенсировать пробелы чтением БД, запуском Git/process commands, разбором CLI-строк или предположениями по тексту агента. Источники: [IPC](../../architecture/ipc.md), [control proto](../../../crates/ipc-contracts/proto/agentd_control.proto), [planning proto](../../../crates/ipc-contracts/proto/planning_core.proto), [authoring proto](../../../crates/ipc-contracts/proto/task_authoring_core.proto).
 
 ## 3. Market landscape
 
@@ -344,7 +344,7 @@ Provider Session, Policy decision, отдельный log stream и конкре
 | Recovery state | Объяснение posture и допустимых действий | Execution/Attempt, daemon observation, причина | Не новый общий enum и не универсальный Resume |
 | Background daemon activity | Служебный indicator + diagnostic detail | Connected/compatibility/freshness отдельно от Tasks | Ping доказывает отзывчивость control channel, не прогресс provider |
 
-Основания R: [Task Engine](/Users/artemmac/dev/runlith/docs/architecture/task-engine.md), [ADR-0027](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md), [ADR-0028](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md), [Workspace](/Users/artemmac/dev/runlith/docs/architecture/workspace.md), [human decision model](/Users/artemmac/dev/runlith/crates/plan/src/human_decision.rs).
+Основания R: [Task Engine](../../architecture/task-engine.md), [ADR-0027](../../architecture/adr/ADR-0027-g7-planning-orchestration-contract.md), [ADR-0028](../../architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md), [Workspace](../../architecture/workspace.md), [human decision model](../../../crates/plan/src/human_decision.rs).
 
 ### 9.3 План: список сначала, граф по необходимости
 
@@ -352,7 +352,7 @@ Default Plan view — иерархический список текущей в�
 
 Показывать выбранную branch и ближайшие зависимости. Не выводить весь проект как паутину. G7 имеет ограничители depth/fanout/branch size; это полезная верхняя граница fixture, а не основание всегда показывать максимальный граф. История ревизий должна отвечать «что изменилось и почему», а не только выдавать timestamps. Изменение criteria или scope заметнее косметического переименования.
 
-Readiness выводится отдельно от lifecycle: READY не обещает RUNNABLE. Provider-reported todo не получает визуальное обозначение accepted plan. При stale input или changed head показывается причина невозможности применить старое предложение; обновление не выполняет silent rebase. [ADR-0027](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md), [ADR-0028](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md).
+Readiness выводится отдельно от lifecycle: READY не обещает RUNNABLE. Provider-reported todo не получает визуальное обозначение accepted plan. При stale input или changed head показывается причина невозможности применить старое предложение; обновление не выполняет silent rebase. [ADR-0027](../../architecture/adr/ADR-0027-g7-planning-orchestration-contract.md), [ADR-0028](../../architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md).
 
 ### 9.4 Search, tabs и возврат в контекст
 
@@ -381,7 +381,7 @@ Command palette использует тот же способ вызова де�
 | Execution / Attempt diagnostics | Attempts, events, logs, recovery posture | Ошибка одного Attempt не перекрашивает весь Task |
 | Settings / diagnostics | Providers, policy visibility, keyboard, density, accessibility | Возможности и ограничения объяснены без frontend business rules |
 
-Task authoring не должен обещать редактирование metadata после создания: amendment TASK-0084 намеренно не добавил такой API. Если продукту нужен editable draft, сначала нужно отдельное решение о lifecycle/IPC. Сохранение незавершённой формы локально — presentation draft, а не изменение durable Task. [ADR-0028 amendment](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md:210).
+Task authoring не должен обещать редактирование metadata после создания: amendment TASK-0084 намеренно не добавил такой API. Если продукту нужен editable draft, сначала нужно отдельное решение о lifecycle/IPC. Сохранение незавершённой формы локально — presentation draft, а не изменение durable Task. [ADR-0028 amendment](../../architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md:210).
 
 | Состояние поверхности | Требование |
 |---|---|
@@ -500,7 +500,7 @@ Task authoring не должен обещать редактирование met
 | FAILED | Завершилась неудачей | Красный label; внимание по последствиям | Показать фактическую причину и разрешённые дальнейшие действия |
 | CANCELLED | Отменена | Нейтральный terminal icon | Не выдавать за failure или success |
 
-FAILED и CANCELLED присутствуют в canonical vocabulary, но это не разрешение создавать произвольные UI transitions. В текущем TaskLifecycleOp нет универсальных Fail/Cancel operations. CancelExecution не равен CancelTask. [Task model / lifecycle](/Users/artemmac/dev/runlith/docs/architecture/task-engine.md), [Task proto](/Users/artemmac/dev/runlith/crates/ipc-contracts/proto/task_core.proto).
+FAILED и CANCELLED присутствуют в canonical vocabulary, но это не разрешение создавать произвольные UI transitions. В текущем TaskLifecycleOp нет универсальных Fail/Cancel operations. CancelExecution не равен CancelTask. [Task model / lifecycle](../../architecture/task-engine.md), [Task proto](../../../crates/ipc-contracts/proto/task_core.proto).
 
 ### 12.3 Запрошенные presentation labels без изобретения domain states
 
@@ -533,7 +533,7 @@ FAILED и CANCELLED присутствуют в canonical vocabulary, но эт�
 | EvaluationVerdict | VERIFIED, REJECTED | Оценка определённого результата, не общий цвет provider |
 | Worktree lease | Allocated, Ready, CleanupPending, Removed | Lifecycle ownership отдельно от Clean/Dirty/Missing observations |
 
-PlanningRun values проверены в текущем storage implementation; их экспорт в UI ещё требует явного query contract. Expired/stale нельзя добавлять в эти enums ради удобного badge: это дополнительные признаки validity, пока backend contract не определит иначе. [Planning store](/Users/artemmac/dev/runlith/adapters/storage-sqlite/src/planning_control_store.rs), [HDR model](/Users/artemmac/dev/runlith/crates/plan/src/human_decision.rs), [G6 enforcement](/Users/artemmac/dev/runlith/docs/development/G6_APPROVAL_HUMAN_DECISION_ENFORCEMENT.md), [Evaluation verdict](/Users/artemmac/dev/runlith/crates/evaluation/src/verdict.rs).
+PlanningRun values проверены в текущем storage implementation; их экспорт в UI ещё требует явного query contract. Expired/stale нельзя добавлять в эти enums ради удобного badge: это дополнительные признаки validity, пока backend contract не определит иначе. [Planning store](../../../adapters/storage-sqlite/src/planning_control_store.rs), [HDR model](../../../crates/plan/src/human_decision.rs), [G6 enforcement](../../development/G6_APPROVAL_HUMAN_DECISION_ENFORCEMENT.md), [Evaluation verdict](../../../crates/evaluation/src/verdict.rs).
 
 ### 12.5 Attention policy как представление
 
@@ -555,7 +555,7 @@ PlanningRun values проверены в текущем storage implementation; 
 
 «Нет live background run» с открытым Attempt не означает автоматически «можно безопасно повторить». Текущий GetExecution прямо допускает stranded/concluding posture. ResumeExecution разрешён в узком admitted-before-attempt случае и сохраняет Execution и зарезервированную Attempt identity. Другие recovery сценарии требуют отдельной backend возможности.
 
-Кнопки, если доступны, должны различать: посмотреть прошлый результат; запросить отмену Execution; продолжить admitted execution; начать новую разрешённую попытку; открыть диагностику. Provider switch и restore checkpoint не выводятся из одной универсальной кнопки. После CancelExecution показать «Отмена запрошена», пока наблюдение не подтвердит outcome. [Execution IPC](/Users/artemmac/dev/runlith/crates/ipc-contracts/proto/execution_core.proto), [ADR-0025](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0025-g5-post-admission-recovery.md).
+Кнопки, если доступны, должны различать: посмотреть прошлый результат; запросить отмену Execution; продолжить admitted execution; начать новую разрешённую попытку; открыть диагностику. Provider switch и restore checkpoint не выводятся из одной универсальной кнопки. После CancelExecution показать «Отмена запрошена», пока наблюдение не подтвердит outcome. [Execution IPC](../../../crates/ipc-contracts/proto/execution_core.proto), [ADR-0025](../../architecture/adr/ADR-0025-g5-post-admission-recovery.md).
 
 Закрытие Task view или отключение IPC-клиента не должно превращаться в запрос отмены. При этом полный lifecycle работы с закрытым desktop приложением, restart/orphan handling и соответствующие системные гарантии относятся к будущему G11; их готовность не следует из текущего background RunExecution. UI specification должна отдельно описать close view, quit application и shutdown daemon.
 
@@ -598,7 +598,7 @@ Decision detail должен содержать: идентичность Task/b
 
 Рекомендация не считается предвыбранным согласием. Нельзя использовать таймер для применения выбора. После решения показывать «Решение записано» и затем «Применено», когда это подтверждено. Разные стадии не требуют двух человеческих подтверждений: один явно описанный пользовательский intent может покрывать последующие команды только в рамках согласованного backend/control contract. UI не выдумывает собственный workflow применения.
 
-Для V9 RESUME важно показать, что будет принят именно рассмотренный proposal с его identity/hash, а не заново вызван planner. Если head или authority изменились, старое решение нельзя превратить в silently rebased continuation. [Human Decision contract](/Users/artemmac/dev/runlith/crates/plan/src/human_decision.rs), [ADR-0028](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md).
+Для V9 RESUME важно показать, что будет принят именно рассмотренный proposal с его identity/hash, а не заново вызван planner. Если head или authority изменились, старое решение нельзя превратить в silently rebased continuation. [Human Decision contract](../../../crates/plan/src/human_decision.rs), [ADR-0028](../../architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md).
 
 ### 13.5 Approval
 
@@ -606,7 +606,7 @@ Operation review отвечает на пять вопросов: **что**, **
 
 Кандидат CTA: «Разрешить [операцию] один раз» — только если request действительно одноразовый; иначе название точно отражает реальную семантику. Альтернатива — «Отклонить операцию». «Continue» не объясняет scope. Отказ не обязан означать Abort Task: дальнейшую реакцию определяет backend.
 
-Просмотр evidence, выбор варианта и запись решения не должны приводить к расширению scope. После approved UI ждёт consumption/result, не повторяет решение при timeout. Для ambiguous IPC result сначала читается authoritative request. Hard DENY объясняется как отказ policy; рядом не появляется approve control. [Approval IPC](/Users/artemmac/dev/runlith/crates/ipc-contracts/proto/policy_core.proto), [G6 enforcement](/Users/artemmac/dev/runlith/docs/development/G6_APPROVAL_HUMAN_DECISION_ENFORCEMENT.md).
+Просмотр evidence, выбор варианта и запись решения не должны приводить к расширению scope. После approved UI ждёт consumption/result, не повторяет решение при timeout. Для ambiguous IPC result сначала читается authoritative request. Hard DENY объясняется как отказ policy; рядом не появляется approve control. [Approval IPC](../../../crates/ipc-contracts/proto/policy_core.proto), [G6 enforcement](../../development/G6_APPROVAL_HUMAN_DECISION_ENFORCEMENT.md).
 
 ### 13.6 Evidence как интерфейс доверия
 
@@ -842,26 +842,26 @@ D04 необходим рано: граница Human Decision/Approval влия
 
 | Источник | Что прочитано и зачем |
 |---|---|
-| [AGENT.md](/Users/artemmac/dev/runlith/AGENT.md) | Canonical authority, scope и engineering constraints |
-| [Architecture INDEX](/Users/artemmac/dev/runlith/docs/architecture/INDEX.md) | Навигация по subsystem contracts |
-| [INVARIANTS](/Users/artemmac/dev/runlith/docs/architecture/INVARIANTS.md) | Идентичность, authority, verification, planning и UI boundary |
-| [Architecture source of truth](/Users/artemmac/dev/runlith/AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md) | Цель продукта; stack/thin UI; Task; adaptive planning; UI/design-system направления; релевантные разделы, не построчное чтение всего документа |
-| [Roadmap](/Users/artemmac/dev/runlith/planning/roadmap.yaml), [Queue](/Users/artemmac/dev/runlith/planning/tasks/queue.yaml) | G7/TASK-0084, будущие gates, UI milestone; queue governance отдельно от runtime |
-| [ADR-0005](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0005-task-execution-attempt-session.md) | Task → Execution → Attempt → Session |
-| [ADR-0007](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0007-no-direct-frontend-shell.md) | Frontend boundary и недоверенные previews |
-| [ADR-0015](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0015-shadcn-primitives-only.md) | Primitives-only, отсутствие требования копировать чужой dashboard |
-| [ADR-0016](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0016-agentctl-before-complex-ui.md) | CLI-first и materialization перед UI |
-| [ADR-0018](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0018-independent-evaluation.md) | Независимая evaluation |
-| [ADR-0025](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0025-g5-post-admission-recovery.md) | Узкие recovery guarantees |
-| [ADR-0027](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md) | Plan proposal/validation/revision и vocabulary scope |
-| [ADR-0028](/Users/artemmac/dev/runlith/docs/architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md) | Input/Run/accepted Plan; freshness; TASK-0084 amendment от 16.09.2026 |
-| [IPC](/Users/artemmac/dev/runlith/docs/architecture/ipc.md), [control proto](/Users/artemmac/dev/runlith/crates/ipc-contracts/proto/agentd_control.proto) | Документированный транспорт и актуальные v0–v6 envelopes |
-| [Task proto](/Users/artemmac/dev/runlith/crates/ipc-contracts/proto/task_core.proto), [authoring proto](/Users/artemmac/dev/runlith/crates/ipc-contracts/proto/task_authoring_core.proto) | Реальные операции и read/write asymmetry |
-| [Execution proto](/Users/artemmac/dev/runlith/crates/ipc-contracts/proto/execution_core.proto) | Attempts, provider_ref, live flag, cancel/resume guarantees |
-| [Planning proto](/Users/artemmac/dev/runlith/crates/ipc-contracts/proto/planning_core.proto), [HDR proto](/Users/artemmac/dev/runlith/crates/ipc-contracts/proto/human_decision_core.proto) | Текущие operations и доступные DTO |
-| [Policy proto](/Users/artemmac/dev/runlith/crates/ipc-contracts/proto/policy_core.proto), [G6 enforcement](/Users/artemmac/dev/runlith/docs/development/G6_APPROVAL_HUMAN_DECISION_ENFORCEMENT.md) | Approval lifecycle и authority; исторический gate text не принят за текущий статус |
-| [Task Engine](/Users/artemmac/dev/runlith/docs/architecture/task-engine.md), [Providers](/Users/artemmac/dev/runlith/docs/architecture/providers.md), [Workspace](/Users/artemmac/dev/runlith/docs/architecture/workspace.md) | Subsystem semantics |
-| [HDR code](/Users/artemmac/dev/runlith/crates/plan/src/human_decision.rs), [Planning storage](/Users/artemmac/dev/runlith/adapters/storage-sqlite/src/planning_control_store.rs), [Verdict code](/Users/artemmac/dev/runlith/crates/evaluation/src/verdict.rs) | Проверка конкретных enums и lifecycle относительно prose |
+| [AGENT.md](../../../AGENT.md) | Canonical authority, scope и engineering constraints |
+| [Architecture INDEX](../../architecture/INDEX.md) | Навигация по subsystem contracts |
+| [INVARIANTS](../../architecture/INVARIANTS.md) | Идентичность, authority, verification, planning и UI boundary |
+| [Architecture source of truth](../../../AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md) | Цель продукта; stack/thin UI; Task; adaptive planning; UI/design-system направления; релевантные разделы, не построчное чтение всего документа |
+| [Roadmap](../../../planning/roadmap.yaml), [Queue](../../../planning/tasks/queue.yaml) | G7/TASK-0084, будущие gates, UI milestone; queue governance отдельно от runtime |
+| [ADR-0005](../../architecture/adr/ADR-0005-task-execution-attempt-session.md) | Task → Execution → Attempt → Session |
+| [ADR-0007](../../architecture/adr/ADR-0007-no-direct-frontend-shell.md) | Frontend boundary и недоверенные previews |
+| [ADR-0015](../../architecture/adr/ADR-0015-shadcn-primitives-only.md) | Primitives-only, отсутствие требования копировать чужой dashboard |
+| [ADR-0016](../../architecture/adr/ADR-0016-agentctl-before-complex-ui.md) | CLI-first и materialization перед UI |
+| [ADR-0018](../../architecture/adr/ADR-0018-independent-evaluation.md) | Независимая evaluation |
+| [ADR-0025](../../architecture/adr/ADR-0025-g5-post-admission-recovery.md) | Узкие recovery guarantees |
+| [ADR-0027](../../architecture/adr/ADR-0027-g7-planning-orchestration-contract.md) | Plan proposal/validation/revision и vocabulary scope |
+| [ADR-0028](../../architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md) | Input/Run/accepted Plan; freshness; TASK-0084 amendment от 16.09.2026 |
+| [IPC](../../architecture/ipc.md), [control proto](../../../crates/ipc-contracts/proto/agentd_control.proto) | Документированный транспорт и актуальные v0–v6 envelopes |
+| [Task proto](../../../crates/ipc-contracts/proto/task_core.proto), [authoring proto](../../../crates/ipc-contracts/proto/task_authoring_core.proto) | Реальные операции и read/write asymmetry |
+| [Execution proto](../../../crates/ipc-contracts/proto/execution_core.proto) | Attempts, provider_ref, live flag, cancel/resume guarantees |
+| [Planning proto](../../../crates/ipc-contracts/proto/planning_core.proto), [HDR proto](../../../crates/ipc-contracts/proto/human_decision_core.proto) | Текущие operations и доступные DTO |
+| [Policy proto](../../../crates/ipc-contracts/proto/policy_core.proto), [G6 enforcement](../../development/G6_APPROVAL_HUMAN_DECISION_ENFORCEMENT.md) | Approval lifecycle и authority; исторический gate text не принят за текущий статус |
+| [Task Engine](../../architecture/task-engine.md), [Providers](../../architecture/providers.md), [Workspace](../../architecture/workspace.md) | Subsystem semantics |
+| [HDR code](../../../crates/plan/src/human_decision.rs), [Planning storage](../../../adapters/storage-sqlite/src/planning_control_store.rs), [Verdict code](../../../crates/evaluation/src/verdict.rs) | Проверка конкретных enums и lifecycle относительно prose |
 
 Репозиторий уже содержал изменённые planning/roadmap.yaml, planning/tasks/queue.yaml и untracked PNG с концептами Runlith. Они не были созданы исследованием. PRODUCT.md и DESIGN.md, упоминаемые в части документов, не обнаружены как доступные отдельные источники. Старый PNG рассмотрен как гипотеза, не как реализованный интерфейс.
 

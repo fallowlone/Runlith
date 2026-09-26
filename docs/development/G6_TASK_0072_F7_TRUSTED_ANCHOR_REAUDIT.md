@@ -23,7 +23,7 @@ this report is reviewed.
 
 | Field | Value |
 | --- | --- |
-| Worktree | `/Users/artemmac/dev/runlith-task0071` |
+| Worktree | `~/dev/runlith-task0071` |
 | Branch | `task-0071-g6-trusted-host-git-boundary-hardening` |
 | Committed HEAD | `edd574914bab25236c49db9cec548a8a931825f6` |
 | Uncommitted tracked diff (32 files) | sha256 `350eeb0919332de397e356cc8a147f526dd45d3aaaab4cba91219861701d79a5` (5647 lines, saved by auditor at `/tmp/runlith-f7-audit-base.diff`, not in repo) |

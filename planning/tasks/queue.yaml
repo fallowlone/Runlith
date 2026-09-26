@@ -3813,7 +3813,7 @@ items:
       interface proposal, and prioritized migration roadmap without
       weakening Runlith architecture.
     scope: >-
-      Read-only audit of /Users/artemmac/dev/agent-router; durable report at
+      Read-only audit of ~/dev/agent-router; durable report at
       docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md; queue and
       roadmap entries for approved capabilities; no production code changes.
     exit_criteria_summary: >-
@@ -4842,3 +4842,58 @@ items:
       public repository. This outcome records completion on the task branch;
       integration into main is not claimed.
       - AI_ENGINEERING_OS_MONETIZATION_AND_PLUGIN_ECOSYSTEM.md
+
+  # Cross-gate governance: publication readiness, not scoped to a single
+  # implementation gate.
+  - id: TASK-0154
+    gate: G8
+    title: Publication readiness for a public Apache-2.0 1.1 repository
+    objective: >-
+      Bring the repository to a publication-ready hygiene state under the
+      Apache License, Version 2.0 direction ratified by ADR-0038: remove
+      committed secrets and stray local-tooling artifacts from the tracked
+      tree, remove personal absolute filesystem paths from tracked files,
+      add CONTRIBUTING.md and SECURITY.md reflecting the current
+      open source/no-external-PR/private-vulnerability-reporting
+      posture, add a gitleaks configuration with a rule for the exposed
+      NVIDIA key pattern, and add a runbook for the owner-executed export
+      of a new public repository with no history.
+    scope: >-
+      Docs/repo-hygiene only; no product code. Removes
+      Support/openvidia/proxy_config.json (contained real NVIDIA API keys),
+      the stray data/sessions.db, and .zcode/plans/*.md from the tracked
+      tree via `git rm`, and adds corresponding .gitignore entries; does not
+      rewrite git history and does not revoke the exposed keys (owner
+      action). Replaces /Users/artemmac/... absolute paths in tracked files
+      with relative links or a `~/`-prefixed form, preserving evidentiary
+      meaning. Adds CONTRIBUTING.md, SECURITY.md, .gitleaks.toml, and
+      docs/development/PUBLICATION_RUNBOOK.md. Appends this queue entry.
+      Does not merge ADR-0038 to main, does not create a GitHub repository,
+      and does not push anywhere.
+    exit_criteria_summary: >-
+      Support/openvidia/proxy_config.json, data/sessions.db and
+      .zcode/plans/*.md are absent from the tracked tree and ignored going
+      forward; `git grep -n -I "/Users/"` returns nothing; CONTRIBUTING.md
+      states Apache-2.0 1.1 open source status and that external PRs are not
+      accepted pending contributor terms (ADR-0038 D7); SECURITY.md
+      describes private vulnerability reporting only, no public issues, no
+      bounty, latest `main` only; .gitleaks.toml extends the default gitleaks
+      config with an `nvidia-api-key` rule; `gitleaks git` against history
+      still finds exactly the 4 known nvapi- findings at commit 56b8a68
+      (history is not rewritten), while `gitleaks dir` against the working
+      tree after this task's removals finds 0; docs/development/
+      PUBLICATION_RUNBOOK.md documents preconditions, the no-history export
+      rationale, owner-executed export/push steps, License Date version
+      bookkeeping, post-push GitHub settings, and a trademark self-check,
+      marked owner-executed and not run by agents.
+    depends_on:
+      - TASK-0153
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0038-product-licensing.md
+      - LICENSE
+      - LICENSE
+      - CONTRIBUTING.md
+      - SECURITY.md
+      - .gitleaks.toml
+      - docs/development/PUBLICATION_RUNBOOK.md
