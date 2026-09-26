@@ -4868,12 +4868,14 @@ items:
       with relative links or a `~/`-prefixed form, preserving evidentiary
       meaning. Adds CONTRIBUTING.md, SECURITY.md, .gitleaks.toml, and
       docs/development/PUBLICATION_RUNBOOK.md. Appends this queue entry.
-      Does not merge ADR-0038 to main, does not create a GitHub repository,
-      and does not push anywhere.
+      Does not itself perform any merge to main (ADR-0038 merged separately
+      via PR #10 at c040b6d, and this task's own hygiene commits merged via
+      PR #11 at 2779b70), does not create a GitHub repository, and does not
+      push anywhere.
     exit_criteria_summary: >-
       Support/openvidia/proxy_config.json, data/sessions.db and
       .zcode/plans/*.md are absent from the tracked tree and ignored going
-      forward; `git grep -n -I "/Users/"` returns nothing; CONTRIBUTING.md
+      forward; `git grep -n -I -E '/Users/[A-Za-z0-9_]'` returns nothing; CONTRIBUTING.md
       states Apache-2.0 1.1 open source status and that external PRs are not
       accepted pending contributor terms (ADR-0038 D7); SECURITY.md
       describes private vulnerability reporting only, no public issues, no

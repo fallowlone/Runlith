@@ -57,7 +57,7 @@ Task hierarchy и зависимости Plan — связанные, но ра�
 
 Есть канонические контракты независимой evaluation, однако полноценный продуктовый объём verification относится к G8. Continuity и более широкое recovery нельзя считать готовыми только потому, что они описаны в долгосрочной архитектуре. G11 остаётся отдельной будущей областью. planning/tasks/queue.yaml — governance queue, не runtime Task database.
 
-Основание: [roadmap](../../../planning/roadmap.yaml), [queue](../../../planning/tasks/queue.yaml:1), [version](../../../product/version.toml), [ADR-0018](../../architecture/adr/ADR-0018-independent-evaluation.md).
+Основание: [roadmap](../../../planning/roadmap.yaml), [queue](../../../planning/tasks/queue.yaml), [version](../../../product/version.toml), [ADR-0018](../../architecture/adr/ADR-0018-independent-evaluation.md).
 
 ### 2.3 Жёсткие ограничения и оцениваемые гипотезы
 
@@ -75,7 +75,7 @@ Task hierarchy и зависимости Plan — связанные, но ра�
 
 [ADR-0007](../../architecture/adr/ADR-0007-no-direct-frontend-shell.md) запрещает frontend shell/business logic. [ADR-0015](../../architecture/adr/ADR-0015-shadcn-primitives-only.md) не требует копировать shadcn dashboards. [ADR-0016](../../architecture/adr/ADR-0016-agentctl-before-complex-ui.md) устанавливает CLI-first discipline. [Architecture source of truth](../../../AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md) содержит и обязательные ограничения, и более ранние UI-направления; последние здесь не считаются результатом пользовательского исследования.
 
-В roadmap первый серьёзный desktop UI предшествует сравнительному UI-TECHNOLOGY-SPIKE. Поэтому предлагаемый ADR перед shell прежде всего фиксирует требования и подтверждает текущую основу; benchmark Tauri/React, Slint и GPUI остаётся последующим этапом на репрезентативной реализации. Перенос такого spike раньше потребовал бы отдельного осознанного пересмотра roadmap, который это исследование не выполняет. [Roadmap: UI milestones](../../../planning/roadmap.yaml:142).
+В roadmap первый серьёзный desktop UI предшествует сравнительному UI-TECHNOLOGY-SPIKE. Поэтому предлагаемый ADR перед shell прежде всего фиксирует требования и подтверждает текущую основу; benchmark Tauri/React, Slint и GPUI остаётся последующим этапом на репрезентативной реализации. Перенос такого spike раньше потребовал бы отдельного осознанного пересмотра roadmap, который это исследование не выполняет. [Roadmap: UI milestones (line 142)](../../../planning/roadmap.yaml).
 
 ### 2.4 Главные рабочие сценарии
 
@@ -381,7 +381,7 @@ Command palette использует тот же способ вызова де�
 | Execution / Attempt diagnostics | Attempts, events, logs, recovery posture | Ошибка одного Attempt не перекрашивает весь Task |
 | Settings / diagnostics | Providers, policy visibility, keyboard, density, accessibility | Возможности и ограничения объяснены без frontend business rules |
 
-Task authoring не должен обещать редактирование metadata после создания: amendment TASK-0084 намеренно не добавил такой API. Если продукту нужен editable draft, сначала нужно отдельное решение о lifecycle/IPC. Сохранение незавершённой формы локально — presentation draft, а не изменение durable Task. [ADR-0028 amendment](../../architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md:210).
+Task authoring не должен обещать редактирование metadata после создания: amendment TASK-0084 намеренно не добавил такой API. Если продукту нужен editable draft, сначала нужно отдельное решение о lifecycle/IPC. Сохранение незавершённой формы локально — presentation draft, а не изменение durable Task. [ADR-0028 amendment (line 210)](../../architecture/adr/ADR-0028-g7-planning-input-run-and-execution-fencing.md).
 
 | Состояние поверхности | Требование |
 |---|---|
