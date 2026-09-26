@@ -29,6 +29,7 @@ import argparse
 import getpass
 import hmac
 import os
+import pwd
 import re
 import subprocess
 import sys
@@ -111,6 +112,26 @@ def _quote_for_security(value):
     return f'"{escaped}"'
 
 
+_UNSAFE_CHARS = re.compile(r'[\x00-\x1f\x7f"\\]')
+
+
+def _reject_unsafe_for_security_line(label, value):
+    """Round 6 (T1b): fixes a `security -i` command-injection path.
+    `_quote_for_security` escapes `\\` and `"`, but a value containing a
+    raw newline or other control character could still terminate the one
+    intended command line early and start a second, attacker-chosen
+    `security` command on the next line -- `security -i` reads one command
+    per line, so a value crossing a line boundary is a real injection
+    surface, not merely a display nuisance. Refuses before any such value
+    is ever assembled into the command line at all."""
+    if _UNSAFE_CHARS.search(value):
+        print(
+            f"refusing: {label} contains a control character, quote, or backslash",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
 def _validate_shape(mode, value):
     prefix = TOKEN_PREFIX[mode]
     if not value.startswith(prefix):
@@ -168,16 +189,42 @@ def _clear_clipboard_if_matches(value):
             pass
 
 
+def _item_exists(account, service, keychain_path):
+    """Round 6 (T1a): metadata-only existence check -- `find-generic-password`
+    WITHOUT `-w`, which searches and reports on the item's non-secret
+    attributes only and does not request the confidential password data,
+    so it does not trigger the ACL's owner-approval prompt (verified
+    against a throwaway temp keychain; see the evidence doc's ACL
+    excerpt). Returns True/False/None (None = the check itself could not
+    be completed, e.g. `security` failed to run at all -- treated as "may
+    exist" by the caller, i.e. fails closed toward refusing to add-and-
+    reset an ACL)."""
+    argv = ["/usr/bin/security", "find-generic-password", "-a", account, "-s", service]
+    if keychain_path:
+        argv.append(keychain_path)
+    try:
+        completed = subprocess.run(argv, capture_output=True, text=True, timeout=15, check=False)
+    except Exception:
+        return None
+    return completed.returncode == 0
+
+
 def _store_via_security_interactive(account, service, value, keychain_path):
     """Stores the item via `security -i` fed over stdin. The ONLY argv for
     the `security` subprocess is `["/usr/bin/security", "-i"]` -- no
-    account, service, or secret ever appears in any argv. `-T ""` grants
-    no application trusted access, so every later read prompts the owner
-    for approval (verified separately by `_dump_acl_has_no_trusted_apps`
+    account, service, or secret ever appears in any argv. No `-U` (round 6,
+    T1a: re-adding over an existing item does not reset that item's ACL,
+    so this function is only ever called after `_item_exists` has already
+    confirmed there is nothing to silently update). `-T ""` grants no
+    application trusted access, so every later read prompts the owner for
+    approval (verified separately by `_dump_acl_has_no_trusted_apps`
     against a throwaway temp keychain, never the owner's real one)."""
+    for label, val in (("account", account), ("service", service)):
+        _reject_unsafe_for_security_line(label, val)
+    if keychain_path:
+        _reject_unsafe_for_security_line("keychain path", keychain_path)
     parts = [
         "add-generic-password",
-        "-U",
         "-a",
         _quote_for_security(account),
         "-s",
@@ -220,7 +267,16 @@ def _dump_acl_has_no_trusted_apps(keychain_path, account, service):
     owner's real/login keychain -- callers must guarantee that). Uses
     `security dump-keychain -a <path>` (attributes/ACL only, never `-d`)
     and returns True if the item's ACL grants no trusted application.
-    Prints nothing from the dump itself."""
+    Prints nothing from the dump itself.
+
+    Round 6 (T1c) hardening: rather than a single global substring search
+    (which could match the wrong item's ACL block in a keychain holding
+    more than one item), this splits the dump into per-item blocks on each
+    `keychain: ` line -- present once per item even within one keychain
+    file -- and requires EXACTLY ONE block containing BOTH this service's
+    AND this account's attribute markers before drawing any conclusion.
+    An ambiguous result (zero or more than one matching block) returns
+    `None` rather than guessing."""
     try:
         completed = subprocess.run(
             ["/usr/bin/security", "dump-keychain", "-a", keychain_path],
@@ -232,23 +288,39 @@ def _dump_acl_has_no_trusted_apps(keychain_path, account, service):
         return None
     if completed.returncode != 0:
         return None
-    # Parse only structurally: find this item's ACL block and check it has
-    # no application-trust entries. The raw dump is never printed.
     text = completed.stdout
-    marker = f'"svce"<blob>="{service}"'
-    idx = text.find(marker)
-    if idx == -1:
+    blocks = re.split(r"(?=^keychain: )", text, flags=re.MULTILINE)
+    svce_marker = f'"svce"<blob>="{service}"'
+    acct_marker = f'"acct"<blob>="{account}"'
+    matches = [block for block in blocks if svce_marker in block and acct_marker in block]
+    if len(matches) != 1:
         return None
-    # Look at the ACL section that follows this item's attribute block, up
-    # to the next "keychain:" item boundary.
-    next_idx = text.find("\nkeychain:", idx)
-    segment = text[idx: next_idx if next_idx != -1 else len(text)]
-    # A trusted application entry in `security`'s dump format appears as a
-    # path-bearing "application: " or "group: " line for that ACL entry.
-    # No trusted app at all (our -T "") shows as an ACL with no such line,
-    # or an explicit "no access control" style entry for the partition.
-    has_trusted_app = ("application:" in segment) or ("group:" in segment)
-    return not has_trusted_app
+    segment = matches[0]
+    # Measured real format (not guessed): `security dump-keychain -a`
+    # renders each ACL entry as
+    #     entry N:
+    #         authorizations (K): decrypt derive export_clear export_wrapped mac sign
+    #         ...
+    #         applications (COUNT):
+    # `-T ""` specifically restricts the CONFIDENTIALITY-relevant
+    # authorizations (decrypt/export) -- that is the one entry this
+    # function must check. `applications (0):` on that entry means zero
+    # trusted applications (every read prompts). A non-zero count, or a
+    # listed application path, means at least one trusted app exists.
+    entries = re.split(r"\n {4}entry \d+:\n", segment)[1:]
+    for entry in entries:
+        header = entry.split("\n", 1)[0]
+        if "decrypt" not in header:
+            continue
+        count_match = re.search(r"applications \((\d+)\):", entry)
+        if count_match:
+            return int(count_match.group(1)) == 0
+        # Any other shape (e.g. "applications: <null>") is not a form this
+        # function claims to interpret -- do not guess either way.
+        return None
+    # No ACL entry gates the decrypt/export authorizations at all -- not
+    # the shape this function was written to interpret.
+    return None
 
 
 def main():
@@ -273,8 +345,34 @@ def main():
             )
             sys.exit(2)
 
-    account = getpass.getuser()
+    if args.keychain:
+        _reject_unsafe_for_security_line("keychain path", args.keychain)
+
+    # Round 6 (T1b): the account name comes from the OS user database, not
+    # $USER/$LOGNAME -- an ambient env var an unusual environment could set
+    # to something unexpected. `pwd.getpwuid(os.getuid())` asks the kernel
+    # who actually owns this process.
+    account = pwd.getpwuid(os.getuid()).pw_name
     service = SERVICE_NAME[args.mode]
+
+    # Round 6 (T1a): re-adding over an existing item with `-U` does not
+    # reset that item's ACL -- an item created some other way (e.g. the
+    # withdrawn round-2/3 manual flow, which trusted `/usr/bin/security`
+    # itself) would silently keep its old, looser ACL forever. Check
+    # first, and refuse with the exact command to remove it, rather than
+    # ever risk widening or leaving stale an ACL guarantee.
+    exists = _item_exists(account, service, args.keychain)
+    if exists is None:
+        print("refusing: could not determine whether an item already exists", file=sys.stderr)
+        sys.exit(2)
+    if exists:
+        print(
+            "refusing: an item for this service/account already exists -- its ACL is "
+            "NOT reset by re-adding over it. Delete it first, then re-run this tool:\n"
+            f'  security delete-generic-password -a "$USER" -s {service}',
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     if args.stdin_for_test:
         value = _read_secret_stdin_for_test()
