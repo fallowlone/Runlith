@@ -4741,49 +4741,61 @@ items:
   # not scoped to any single implementation gate.
   - id: TASK-0153
     gate: G8
-    title: Propose open-source-only repository licensing (ADR-0038)
+    title: Propose Apache License, Version 2.0 repository licensing (ADR-0038)
     objective: >-
-      Draft ADR-0038 (Proposed) changing the repository default license from
-      Apache Shield 1.0.0 to Apache open-source 1.0.0 so that free use
-      is open-source-use-only with all features included, any commercial
-      use requires a separately executed commercial license, and the core is
+      Rework ADR-0038 (Proposed) changing the repository default license from
+      Apache Shield 1.0.0 to Apache License, Version 2.0 (Apache-2.0), with an
+      License Grant limiting free production use to individuals'
+      personal open-source use and to charitable/privately-operated
+      not-for-profit educational or research institutions, so that any other
+      production use (any business; any government body or
+      government-operated institution, including public schools and public
+      universities; any freelancer/contractor acting commercially) requires a
+      separately executed commercial license, while non-production use
+      (evaluation, testing, development) remains free for everyone under the
+      License's own base grant; each version converts to Apache License 2.0
+      four years after its first public distribution; the core stays
       described as open source, never open source; apply the
-      corresponding LICENSE, LICENSE, README.md, monetization-doc and
-      ADR-index changes, all pending owner ratification.
+      corresponding LICENSE, NOTICE, LICENSE, README.md, monetization-doc
+      and ADR-index changes, all pending owner ratification.
     scope: >-
       Docs/licensing/governance only; no code, no product/version.toml, no
-      Cargo manifest change. LICENSE replaced with a byte-identical Apache
-      open-source 1.0.0 copy; LICENSE rewritten for the new model;
-      README.md License section updated; targeted edits to
+      Cargo manifest change. LICENSE replaced with the verbatim Apache-2.0 1.1
+      license body plus the license's own permitted Parameters; NOTICE
+      rewritten for Apache-2.0; LICENSE rewritten for the new model; README.md
+      License section updated; targeted edits to
       AI_ENGINEERING_OS_MONETIZATION_AND_PLUGIN_ECOSYSTEM.md §2.1, §2.2, §3
-      tier table and §3.1-§3.3 wording only; new
-      docs/architecture/adr/ADR-0038-product-licensing-open-source.md; ADR
-      index updated with a Proposed row. No license-enforcement or
-      phone-home mechanism is authorized (ADR-0014 preserved).
+      tier table and §3.1-§3.5 wording only; ADR renamed to
+      docs/architecture/adr/ADR-0038-product-licensing.md and rewritten
+      for Apache-2.0; ADR index updated with a Proposed row. No license-enforcement
+      or phone-home mechanism is authorized (ADR-0014 preserved).
     exit_criteria_summary: >-
-      ADR-0038 exists, contains at minimum Context/Decision/Alternatives/
-      Consequences/Security impact/Migration impact per AGENT.md §11, and
-      remains Status Proposed; LICENSE is byte-identical to upstream
-      Apache open-source 1.0.0; NOTICE carries the required plain-text
-      `Required Notice:` line; LICENSE, README.md and the monetization
-      doc's targeted sections are consistent with the open-source-only
-      model; ADR-0038 is linked from docs/architecture/adr/INDEX.md; owner
+      ADR-0038 exists at docs/architecture/adr/ADR-0038-product-licensing.md,
+      contains at minimum Context/Decision/Alternatives/Consequences/Security
+      impact/Migration impact per AGENT.md §11, and remains Status Proposed;
+      LICENSE's license body (from "Terms" through the terms of the License)
+      is byte-identical to upstream Apache-2.0 1.1 (SPDX `Apache-2.0`) with only the
+      permitted Parameters filled in; NOTICE carries plain-text copyright and
+      Apache-2.0 licensing-summary lines; LICENSE, README.md and the
+      monetization doc's targeted sections are consistent with the Apache-2.0 model,
+      stating plainly that non-production use is free for everyone and that
+      free production use is limited to the License Grant; ADR-0038 is
+      linked from docs/architecture/adr/INDEX.md under its new path; owner
       ratification after independent architecture/governance review PASS is
       required before any status changes to Accepted; merging the
       LICENSE/NOTICE change into the repository default branch is gated on,
       and happens only together with or after, that ratification; and before
       product/version.toml, Cargo manifest license metadata, a commercial
-      license/EULA, a CLA, or a trademark policy are adopted. Two open
-      questions remain unresolved and unmerged pending owner decision:
-      whether government-institution use should be excluded from the
-      open-source-organization grant (the current verbatim Apache text
-      conflicts with the owner's stated wish for government use to be paid),
-      and the freelancer/contractor-for-a-open-source-organization
-      question.
+      license/EULA, a CLA, or a trademark policy are adopted. Open questions
+      remain unresolved pending owner decision: License Grant wording
+      legal review, whether to publish a Licensor FAQ on "production use",
+      exact commercial terms/prices, and whether a government-owned but
+      independently chartered institution counts as "government" for harder
+      edge cases beyond the settled public-school/public-university case.
     depends_on: []
     blocked_by: []
     references:
-      - docs/architecture/adr/ADR-0038-product-licensing-open-source.md
+      - docs/architecture/adr/ADR-0038-product-licensing.md
       - LICENSE
       - AI_ENGINEERING_OS_MONETIZATION_AND_PLUGIN_ECOSYSTEM.md
       - NOTICE

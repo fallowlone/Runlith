@@ -92,44 +92,63 @@ The project should distinguish three different rights:
 
 3. Reuse, redistribute, white-label, host-resell, embed or commercialize
    AI Engineering OS source/core itself
-   → subject to Apache open-source; commercial rights of any kind require
-     a separate Commercial/OEM agreement.
+   → subject to the Apache License, Version 2.0 (Apache-2.0) and its Additional Use
+     Grant; commercial rights of any kind beyond that grant require a
+     separate Commercial/OEM agreement.
 ```
 
-open-source use (personal use without any anticipated commercial
-application, or use by a open-source organization as the license defines)
-remains free and includes every feature; no tier gates functionality for
-open-source users. A developer or company doing any
-commercial use — including using AI Engineering OS to build and sell their own
-SaaS or software — needs a paid commercial license. That license does **not**
-automatically grant the right to extract the orchestration core, repackage it
-as a competing product or offer AI Engineering OS itself as a managed service.
+Apache-2.0's base grant — copy, modify, create derivative works, redistribute and
+make non-production use (evaluation, testing, development) — is free for
+**everyone**, including every business and government, and cannot be
+narrowed by the License Grant. Free *production* use is limited to
+the License Grant: individuals' personal open-source use, and use
+by charitable organizations or privately operated, non-governmental,
+not-for-profit educational/research institutions, for their open-source
+purposes; it does not extend to any business, to freelancers/contractors
+acting commercially (including for a open-source-institution client), or
+to any government body or government-operated institution (including public
+schools and universities). No tier gates functionality for anyone permitted
+to use the product, whether for free or under a commercial license. A
+developer, company or government body doing any production use outside the
+License Grant — including using AI Engineering OS to build and sell
+their own SaaS or software — needs a paid commercial license. That license
+does **not** automatically grant the right to extract the orchestration
+core, repackage it as a competing product or offer AI Engineering OS itself
+as a managed service.
 
 ### Selected repository license
 
-The repository default is **Apache open-source 1.0.0**, provided verbatim
-in [LICENSE](LICENSE). [LICENSE](LICENSE) defines the repository
-boundaries and outstanding commercial/legal work. This is open source,
-never described as OSI Open Source; no delayed conversion to a permissive
-license is promised for the core. This decision is recorded, pending owner
+The repository default is the **Apache License, Version 2.0** (Apache-2.0, SPDX id
+`Apache-2.0`), provided in [LICENSE](LICENSE): the license body is verbatim,
+with only the license's own permitted Parameters (Licensor, Licensed Work,
+License Grant, License Date, Apache License) filled in.
+[LICENSE](LICENSE) defines the repository boundaries and
+outstanding commercial/legal work. This is open source, never described
+as OSI Open Source; unlike a permanent open source license, each
+version converts to Apache License 2.0 four years after that version's own
+first public distribution. This decision is recorded, pending owner
 ratification, in
-[ADR-0038](docs/architecture/adr/ADR-0038-product-licensing-open-source.md).
+[ADR-0038](docs/architecture/adr/ADR-0038-product-licensing.md).
 
-Free use under this license is open-source use only, exactly as the license
-text defines permitted purposes. All commercial use of the product and all its
-features requires a separately executed commercial license — Pro/Team/
-Enterprise components and rights become that commercial licensing path, not an
-additional feature-gate layered on top of a free commercial tier. The license
-does not itself impose paid feature or seat entitlements or any
-enforcement/phone-home mechanism, and product purchase terms must not
-contradict rights already granted to the same code under it. No commercial
-EULA or OEM agreement is established by this strategy document.
+Free production use under this license is limited to its Additional Use
+Grant — individuals' personal open-source use, and use by qualifying
+charitable/educational/research organizations — exactly as the license's
+Parameters define it; non-production use (evaluation, testing, development)
+is free for everyone regardless of tier. All production use of the product
+and all its features outside the License Grant requires a separately
+executed commercial license — Pro/Team/Enterprise components and rights
+become that commercial licensing path, not an additional feature-gate
+layered on top of a free commercial tier. The license does not itself
+impose paid feature or seat entitlements or any enforcement/phone-home
+mechanism, and product purchase terms must not contradict rights already
+granted to the same code under it. No commercial EULA or OEM agreement is
+established by this strategy document.
 
 The future independently scoped Plugin SDK is intended to use Apache-2.0.
 No existing core, IPC or planner-contract component is thereby relicensed.
-If the entire Pro implementation is later published while paid internal use
-must remain mandatory, that requires a separately reviewed licensing decision,
-not an assumed restriction in the open-source license.
+If the entire Pro implementation is later published while paid production
+use must remain mandatory, that requires a separately reviewed licensing
+decision, not an assumed restriction in the License Grant.
 
 This section is product strategy, not legal advice. Before public release or
 accepting material third-party contributions, obtain qualified legal review of
@@ -151,7 +170,7 @@ Potential repository/license split once the extension contracts stabilize:
 
 | Surface | Likely licensing direction |
 | --- | --- |
-| Core desktop/runtime/orchestration product | Apache open-source 1.0.0 repository default (free for open-source use only) |
+| Core desktop/runtime/orchestration product | Apache License, Version 2.0 repository default (free production use only per the License Grant; non-production use free for everyone; converts to Apache-2.0 per version four years after first public distribution) |
 | Any commercial use, including OEM/white-label rights | separate negotiated Commercial License |
 | Future explicitly scoped Plugin SDK / public schemas / examples | Apache-2.0 (OSI); no current component designated |
 | Enterprise/cloud services | commercial/private as appropriate |
@@ -172,31 +191,38 @@ experience.
 
 | Tier | Commercial model | Product role |
 | --- | --- | --- |
-| **Community** | Free for open-source use (per [LICENSE](LICENSE)); all features | Useful local-first entry point for open-source users: personal use without any anticipated commercial application, and use by open-source organizations (charitable organizations, educational institutions, public research, public safety/health, environmental, government), with the full feature set. |
+| **Community** | Free non-production use for everyone; free production use per the License Grant (per [LICENSE](LICENSE)); all features | Useful local-first entry point: evaluation/testing/development is free for anyone, and production use is free for individuals' personal open-source use and for charitable/privately-operated-nonprofit educational or research institutions, with the full feature set. |
 | **Pro Local** | Perpetual commercial-use license + 12 months of updates | Primary individual commercial-user offer (e.g. a freelancer or any individual doing commercial work): the same full control plane and orchestration, licensed for commercial use, without a required subscription. |
 | **Pro Subscription** | Monthly/annual commercial-use license | Alternative to the perpetual purchase for individual commercial users who prefer predictable recurring billing and continuous updates. |
 | **Teams** | Per-user subscription | Commercial-use licensing plus shared engineering workflows, team policy, shared registries, governance, collaboration and organizational visibility for organizations. |
 | **Enterprise** | Annual contract | Commercial-use licensing plus SSO/SCIM, private registry, advanced policy/audit, on-prem/air-gapped options, support and compliance-oriented controls for organizations. |
 | **Cloud Add-ons** | Usage-based and/or fixed add-on subscription | Optional services such as encrypted sync, remote workers/runners, managed browsers, storage or hosted infrastructure. |
 
-Tiers no longer gate software features for open-source users: Community,
-under Apache open-source 1.0.0, includes the full feature set — including
-the team/organizational/governance capabilities listed for Teams and
-Enterprise — for any permitted open-source purpose, including use by
-open-source organizations. What Pro/Teams/Enterprise sell to an individual
-or organization doing **any** commercial use is (a) the required
-commercial-use license itself, and (b) separately contracted services such as
-support, SLAs, rollout assistance and hosted/cloud add-ons, which are not
-software features granted by the license. See
-[ADR-0038](docs/architecture/adr/ADR-0038-product-licensing-open-source.md)
+Tiers no longer gate software features for anyone permitted to use the
+product for free: Community, under Apache-2.0's base grant and Additional Use
+Grant, includes the full feature set — including the
+team/organizational/governance capabilities listed for Teams and Enterprise
+— for non-production use by anyone, and for production use by individuals'
+personal open-source use and by charitable or privately operated,
+non-governmental, not-for-profit educational/research institutions. What
+Pro/Teams/Enterprise sell to an individual, business or government body
+doing **any** production use outside the License Grant is (a) the
+required commercial-use license itself, and (b) separately contracted
+services such as support, SLAs, rollout assistance and hosted/cloud
+add-ons, which are not software features granted by the license. See
+[ADR-0038](docs/architecture/adr/ADR-0038-product-licensing.md)
 (Proposed, pending owner ratification).
 
 ### 3.1 Community
 
-Community is the open-source-use tier: free for any permitted open-source
-purpose under [LICENSE](LICENSE), with the full feature set, not a crippled
-trial. It must be useful enough to prove the local-first model and grow an
-ecosystem.
+Community is the free tier: non-production use (evaluation, testing,
+development) is free for everyone under Apache-2.0's base grant, and production use
+is free for anyone covered by the License Grant under
+[LICENSE](LICENSE) — individuals' personal open-source use, and use by
+charitable organizations or privately operated, non-governmental,
+not-for-profit educational/research institutions — with the full feature
+set, not a crippled trial. It must be useful enough to prove the
+local-first model and grow an ecosystem.
 
 Expected direction:
 
@@ -208,9 +234,12 @@ Expected direction:
   exists;
 - no forced cloud account for normal local use.
 
-Community is licensed for open-source use only; any commercial use requires
-Pro Local, Pro Subscription, Teams or Enterprise regardless of feature need.
-It should not be intentionally crippled in ways that damage trust or make the
+Community's free production use is limited to the License Grant;
+production use outside it — by any business, by a freelancer/contractor
+acting commercially, or by any government body or government-operated
+institution (including public schools and universities) — requires Pro
+Local, Pro Subscription, Teams or Enterprise regardless of feature need. It
+should not be intentionally crippled in ways that damage trust or make the
 local-first claim misleading.
 
 ### 3.2 Pro Local — perpetual
@@ -258,11 +287,15 @@ create an artificial second architecture for the product.
 
 ### 3.4 Teams
 
-Teams is the commercial-use license for organizations, bundled with
-organizational coordination and governance capabilities. Those
-team/organizational/governance capabilities are software features of the
-product; per the license, they are likewise available at no cost to
-open-source organizations under Community (see §3, ADR-0038 D3). What a
+Teams is the commercial-use license for organizations doing production use
+outside the License Grant, bundled with organizational coordination
+and governance capabilities. Those team/organizational/governance
+capabilities are software features of the product; per the license, they
+are likewise available at no cost under Community to anyone covered by the
+License Grant — charitable organizations and privately operated,
+non-governmental, not-for-profit educational/research institutions (see §3,
+ADR-0038 D2/D3/D10) — but not to government bodies or government-operated
+institutions, which require Teams or Enterprise regardless of size. What a
 Teams commercial customer pays for is the required commercial-use license
 itself, plus, where purchased, separately contracted services (support,
 rollout assistance) and hosted/cloud add-ons around this feature set.
@@ -287,10 +320,15 @@ Initial pricing hypothesis:
 
 ### 3.5 Enterprise
 
-Enterprise is the commercial-use license for organizations, bundled with
-governance, deployment control and integration capabilities. As with Teams,
-those governance/deployment software features are likewise available at no
-cost to open-source organizations under Community; what an Enterprise
+Enterprise is the commercial-use license for organizations doing production
+use outside the License Grant, bundled with governance, deployment
+control and integration capabilities. As with Teams, those
+governance/deployment software features are likewise available at no cost
+under Community to anyone covered by the License Grant (charitable
+organizations and privately operated, non-governmental, not-for-profit
+educational/research institutions), but not to government bodies or
+government-operated institutions, including public schools and
+universities, which require Enterprise or Teams; what an Enterprise
 commercial customer pays for is the required commercial-use license itself
 plus contracted support, rollout assistance and negotiated SLAs.
 
