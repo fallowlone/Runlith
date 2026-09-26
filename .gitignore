@@ -11,3 +11,16 @@
 /.zcode/
 /Support/
 data/sessions.db
+# Other local agent and editor state (owner request, TASK-0154).
+/.cursor/
+/.windsurf/
+/.continue/
+/.aider*
+/.codex/
+/.gemini/
+/.opencode/
+/.idea/
+/.vscode/
+.DS_Store
+*.swp
+*.orig
