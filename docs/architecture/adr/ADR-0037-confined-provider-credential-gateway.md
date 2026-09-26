@@ -22,10 +22,13 @@ Gate: G8
 > separate, listed documentation follow-up (see "Proposed amendments"). It
 > authorizes no production implementation on its own; it stays Proposed
 > until the owner ratifies it after independent architecture/security
-> review, and the owner's own real-credential gateway probe is recorded
-> here as **PENDING** (see "Owner real-credential receipts"). No credential
-> value, Keychain item, or `security`/`claude` invocation was read, run, or
-> reproduced while drafting this ADR.
+> review. The owner's own real-credential gateway probe has now run
+> successfully for both credential classes and is recorded in "Owner
+> real-credential receipts", alongside an operator-error exposure of the
+> OAuth token used, the owner's scheduled revocation of it, and the round-4
+> hardening that exposure triggered — carried into the hardening rules
+> below (D15-D22). No credential value, Keychain item, or `security`/
+> `claude` invocation was read, run, or reproduced while drafting this ADR.
 
 ## Context
 
@@ -355,10 +358,11 @@ Broker under policy-authorized `SecretAccess` — validates the placeholder
 on every request, rewrites the credential header before forwarding to the
 pinned real Anthropic host, and streams the response back unmodified. This
 is the exact mechanism the evidence doc's "Option B probe" section
-(`docs/development/task0152-probes/owner_proxy_probe.py`) already designed
-and partially exercised — its negative self-check (wrong placeholder →
-local `401`, zero forwarded requests) was run; a real-credential forward
-was not (see "Owner real-credential receipts").
+(`docs/development/task0152-probes/owner_proxy_probe.py`) designed and the
+owner has now run end-to-end with a real credential for both modes: the
+negative self-check (wrong placeholder → local `401`, zero forwarded
+requests) and one legitimate forwarded request reaching the real Anthropic
+API with a genuine `200` (see "Owner real-credential receipts").
 
 **Threat model.** The real credential never enters the confined child's
 address space, environment, or filesystem — only a random, non-secret-
@@ -485,10 +489,14 @@ receipts") rather than inventing a new, unprobed design.
   mismatch is rejected locally with `401`, never forwarded.
 - **D4.** The gateway allowlists exactly two request shapes from the
   child: `HEAD`/`GET /api/hello`, answered locally without forwarding; and
-  `POST /v1/messages` (any query string), forwarded only on a placeholder
-  match per D3. Every other method or path is rejected locally with `403`
-  and recorded to Security Audit (method + path only, per the Audit
-  requirement above).
+  `POST /v1/messages` whose query string is exactly empty or exactly
+  `beta=true` — the only two shapes R6/R7/R8 ever observed the CLI send
+  (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:196,206,236`;
+  reference implementation: `ALLOWED_QUERY_STRINGS = ("", "beta=true")`,
+  `docs/development/task0152-probes/owner_proxy_probe.py:187`), forwarded
+  only on a placeholder match per D3. Any other query string, method, or
+  path is rejected locally with `403` and recorded to Security Audit
+  (method + path only, per the Audit requirement above).
 - **D5.** A forwarded request has its credential header rewritten before
   leaving the gateway: API-key mode sets `x-api-key` to the real key and
   drops any `authorization` header; OAuth mode sets `authorization: Bearer
@@ -551,6 +559,79 @@ receipts") rather than inventing a new, unprobed design.
   released credential — never unconditionally for the macOS platform as a
   whole.
 
+### Additional hardening rules (D15-D22)
+
+Triggered by an owner operator error during round-4 probe operation: on
+2026-09-25 a real OAuth token was typed into a Keychain-setup command
+argument instead of an interactive prompt, exposing it in shell argv,
+history, and chat (revocation scheduled 2026-09-26 — see "Owner
+real-credential receipts"). The probe's own round-4 hardening (C1-C10,
+`docs/development/task0152-probes/owner_proxy_probe.py`) fixes the class of
+mistake, not only that symptom; D15-D22 carry the same posture into the
+production Rust gateway as normative rules, not optional polish.
+
+- **D15.** Only an explicit header-**name** allowlist is forwarded
+  upstream: `content-type`, `accept`, `anthropic-version`, `anthropic-beta`,
+  `user-agent`, the R8-observed non-identifying Stainless SDK metadata
+  names, and `x-app` (`FORWARD_HEADER_ALLOWLIST`, `owner_proxy_probe.py:227-241`).
+  Everything else the child sends — including `x-claude-code-session-id`
+  and `anthropic-dangerous-direct-browser-access` — is dropped; only the
+  dropped header **name** may be audited, never a value.
+- **D16.** Request-smuggling/parser hardening, checked before any body is
+  read: reject `Transfer-Encoding` from the child, more than one
+  `Content-Length` header or a non-numeric one, and a declared body over a
+  fixed size limit (`owner_proxy_probe.py:190`); enforce a bounded header
+  count/size and a per-connection read timeout (`:192,455`); run a single
+  listener with no address reuse, bound to `127.0.0.1` only
+  (`ProxyServer.allow_reuse_address = False`, `:429-433`).
+- **D17.** Upstream TLS uses an explicit trust configuration ignoring
+  environment overrides (`SSL_CERT_FILE`/`SSL_CERT_DIR`/`*_CA_BUNDLE` and
+  ambient proxy variables are never read for this connection), TLS ≥ 1.2,
+  full certificate/hostname verification, and a pinned upstream host, per
+  D6 (`_build_opener`, `owner_proxy_probe.py:272-280`); no redirect is ever
+  followed, per D6.
+- **D18.** On the first upstream authentication failure (`401`/`403` from
+  the real Anthropic API), the gateway stops forwarding for that attempt
+  and fails with a typed provider-authentication condition — never a retry
+  of the same request, never a retry with a different credential or class,
+  never a fallback around D14's refusal. This is deliberately stricter
+  than the child's own retry behavior: round-4 owner operation observed
+  the CLI itself retry a real-shaped but invalid credential 9 times
+  (visible via the forwarded `x-stainless-retry-count` header, itself in
+  the D15 allowlist) before giving up — the gateway must not wait out the
+  child's own retry budget. Total forwards per attempt remain bounded
+  regardless (D9; `MAX_FORWARDED_REQUESTS = 32`, `owner_proxy_probe.py:191`).
+- **D19.** No credential value ever appears in an error, log line, panic/
+  crash message, `Debug`/`Display` output, crash report, or Security Audit
+  record — only classified failure reasons and counts, matching the
+  probe's own posture of printing an exception's class name only, never
+  its message (C6 hardening). Credential buffers are cleared/zeroized
+  after use to the extent the implementation language allows, and core
+  dumps are disabled for the gateway process
+  (`_c9_disable_core_dumps`/`RLIMIT_CORE`, `owner_proxy_probe.py:383-389`).
+- **D20.** Credential shape is strictly validated per class — mode-specific
+  prefix and charset — at both provisioning and release; a mismatch fails
+  closed without logging the rejected value
+  (`_validate_credential_shape`, `owner_proxy_probe.py:392-399`; same
+  pattern in `provision_keychain_item.py`'s `TOKEN_PREFIX` check).
+- **D21.** The per-attempt placeholder is at least 256 bits from the OS
+  CSPRNG (`secrets.token_urlsafe(32)` = 32 bytes, `owner_proxy_probe.py:1004`),
+  compared only with a constant-time comparison (D3;
+  `hmac.compare_digest`, `:482-484`), and is never written to a log, Event
+  Journal payload, or Security Audit record in any form.
+- **D22 (provisioning UX, implementation follow-up).** The owner-facing
+  provisioning tool never accepts a credential as a command argument,
+  environment variable, or clipboard-persisted value — only a masked,
+  hidden prompt entered twice and compared, matching
+  `provision_keychain_item.py`'s `getpass.getpass` pattern (`:128-130`)
+  and its refusal to run on any credential-shaped argv element. The
+  Keychain item's ACL trusts only the code-signed `agentd` binary, so
+  `agentd` needs no repeated OS prompt while any other same-user process
+  triggers one — stricter than the probe tooling's own "trust no
+  application" precedent (`-T ""`, `:172-186`), since the probe itself is
+  not a code-signed production binary. Service names are fixed by
+  credential class, never typed by the owner (`SERVICE_NAME`, `:38-41`).
+
 ## Provider neutrality
 
 Per AGENT.md §13, the gateway's core (D1, D3, D4, D6-D11, D14) is
@@ -600,12 +681,15 @@ subscription used by `setup-token` falls under the Consumer Terms
 only; it draws no independent legal conclusion beyond it, and is not a
 substitute for the owner's own review of Anthropic's primary terms.
 
-**Compliance risk, owner-accepted (2026-09-25).** The owner has read the
-above and explicitly accepts the compliance risk of running the
-`setup-token` (OAuth subscription) credential class for their own personal
-use of Runlith under their own Claude subscription. This acceptance is the
-owner's own risk decision; it is recorded here, not concluded by this ADR,
-and this ADR is not a substitute for the owner's own legal review.
+**Compliance risk, owner-accepted (2026-09-25).** On 2026-09-25 the owner
+chose, in a structured decision prompt, the option "API key + setup-token."
+That option's stated consequence — presented to the owner before the
+choice was made — was amending `providers.md` §7, the H7 closure record,
+and `PRIVACY_ARCHITECTURE.md` §5 as this ADR proposes, and recording the
+Anthropic third-party-login compliance risk discussed above as a risk the
+owner accepts. This is the owner's own recorded decision, not an
+independent legal conclusion by this ADR, and it is not a substitute for
+the owner's own review of Anthropic's primary terms.
 
 **Proposed for ratification, not yet owner-ratified:** the `setup-token`
 credential class is constrained to the owner's own account, used only on
@@ -618,33 +702,58 @@ default and is the *only* class available in any distributed or
 multi-user Runlith configuration; the `setup-token` class is never enabled
 by default and never exposed as a general product feature.
 
-## Owner real-credential receipts: PENDING
+## Owner real-credential receipts
 
-Every automated probe in
-`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md` used a dummy or no
-credential. No row in that document, and nothing in this ADR, is evidence
-that a *real* Claude credential completes an authenticated round trip
-through the Option B gateway. That gap is closed only by the owner running
-the two commands the evidence doc already documents, on their own host,
-with their own credentials; this task does not run them and does not
-fabricate a result:
+Measured by the **owner** (not this ADR's drafter, per its no-credential-
+read constraint) on 2026-09-25, CLI `2.1.281`, running
+`owner_proxy_probe.py` at commit `9787690` — the pre-round-4 script; C1-C10
+had not yet landed at the time these two runs were made
+(`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md`, "Owner
+real-credential receipts", lines 520-565). Both modes (api-key, OAuth)
+produced this identical result shape:
 
-```bash
-python3 task0152-probes/owner_proxy_probe.py api-key --service runlith-task0152-owner-anthropic-api-key
-python3 task0152-probes/owner_proxy_probe.py oauth   --service runlith-task0152-owner-oauth-token
-```
+| field | value |
+| --- | --- |
+| `self_check_pass` | `True` |
+| `self_check_status` | `401` |
+| `child_exit` | `0` |
+| `marker_present` | `True` |
+| `failure_class` | `success` |
+| `local_401` | `1` (pre-flight self-check) |
+| `forwarded` | `1` |
+| `upstream_status_codes` | `[200]` |
 
-(One-time Keychain setup for both credential classes, and the exact
-command shapes, are recorded in
-`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md`, "Option B probe",
-"Owner commands" — owner-run, not run by this task.)
+**What this proves.** The negative self-check correctly rejected a wrong
+placeholder locally, with zero forwarded requests, before either mode ever
+read the real credential; the one legitimate forwarded request reached the
+real Anthropic API and returned a real `200`; the confined child completed
+its non-interactive round trip while holding only the placeholder. This
+is direct evidence for Option B's core claim (a real, valid credential
+completes a session through the gateway without the confined child ever
+holding it), for both credential classes.
 
-**Status: PENDING.** Ratification of this ADR requires the owner to record
-the result of both invocations (pass/fail, `forwarded` count,
-`upstream_status_codes`, and confirmation that no credential value was
-printed) in this section or a linked follow-up record before the owner
-accepts this decision. Ratifying without that evidence would violate
-AGENT.md §5 (evidence over claims).
+**What this does not prove.** One short, non-interactive, single-turn run
+per mode — no long-lived session near real token expiry, and no OAuth
+refresh behavior, was exercised (same open question as "Security impact"
+below). The result was measured against the pre-round-4 script, so it does
+not by itself prove the round-4 hardened gateway (D15-D22, C1-C10) behaves
+identically against a real credential; round 4's own verification
+exercises the hardening's local-only rejection paths via
+`--dry-self-check`, which never touches Keychain or upstream.
+
+**Operator-error exposure and revocation (unchanged by this receipt's
+validity).** The OAuth token used for the OAuth-mode run above was exposed
+during round-2/3 manual Keychain setup: the owner typed a real token into
+a command's service-name argument instead of letting `-w` prompt for it,
+landing it in shell argv/history/chat. No token value, account identifier,
+or org identifier is recorded here or anywhere in this task's artifacts.
+The owner has scheduled revocation of that token for 2026-09-26. This
+receipt stands as evidence of a real, working round trip because it was
+measured **before** that revocation; it does not imply the exposed token
+remains valid or usable after revocation. This exposure is the direct
+trigger for the round-4 hardening cited throughout D15-D22 above, and for
+withdrawing the manual `security add-generic-password ... -w` instructions
+in favor of `provision_keychain_item.py`'s hidden-prompt provisioning (D22).
 
 ## Proposed amendments (pending ratification)
 
@@ -753,6 +862,29 @@ Residual risks, not resolved by this ADR and not glossed over:
   outbound call this design's allowlist does not yet account for (same
   caveat the evidence doc records verbatim).
 
+**What this ADR explicitly cannot prevent:**
+
+- **Root or kernel compromise of the host** — every guarantee above is an
+  OS-process-boundary guarantee; regardless of D1-D22.
+- **Malware running as the same user as `agentd`** — can read the confined
+  child's environment (the attempt-scoped placeholder, per the
+  confused-deputy risk above) or attempt to trigger/automate D22's OS
+  approval prompt; D22 raises the bar (only code-signed `agentd` is
+  silently trusted) but does not make a same-user compromise safe.
+- **Compromise of the upstream provider itself** is outside this ADR's
+  threat model; the gateway pins and authenticates the connection, it does
+  not attest upstream behavior.
+- **Operator error outside the tool** — D15-D22 narrow, but do not
+  eliminate, the class of mistake behind this ADR's own receipts exposure
+  (a secret typed somewhere other than the intended hidden prompt); no
+  tool-level control substitutes for owner care.
+
+**Option A's probe was withdrawn, never run.** `owner_positive_probe.sh`
+was deleted in round 4 without being run — the `*:443` blast-radius
+argument above already rejected Option A on its own
+(`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md`, "Owner-run
+positive probe (Option A) — WITHDRAWN, never run").
+
 ## Migration impact
 
 This is a docs-only ADR: no schema, storage, or `completed_through`/
@@ -778,16 +910,28 @@ separately after ratification. Each depends on this ADR's ratification
   adversarial tests proving no destination outside the exact bound port is
   reachable, and that every other backend fails closed on the new scope
   until it implements it. Depends on: this ADR's ratification.
-- **Credential gateway component.** Implement D1-D10 as a new `agentd`-
-  owned component with its own targeted test suite (self-check,
-  method/path allowlist, header rewrite per mode, redirect/proxy-env
-  hardening, streaming passthrough, size/count limits, attempt-bound
-  lifetime). Depends on: this ADR's ratification.
+- **Credential gateway component.** Implement D1-D10 and the D15-D21
+  hardening rules as a new `agentd`-owned component with its own targeted
+  test suite: self-check, method/path/query allowlist (D4), header-name
+  allowlist (D15), request-smuggling/size/timeout/single-listener rules
+  (D16), pinned-TLS/no-redirect/no-ambient-proxy (D6, D7, D17), stop-on-
+  first-upstream-401/403 with a typed condition and bounded total forwards
+  (D18), no-credential-in-error/log/panic/audit plus zeroization and
+  disabled core dumps (D19), credential shape validation at release (D20,
+  shared with the provisioning path below), and CSPRNG placeholder length/
+  constant-time comparison (D21) — each rule gets its own adversarial test
+  (e.g., a crafted `Transfer-Encoding`/duplicate-`Content-Length` request
+  for D16, a forced upstream `401` for D18, a deliberately malformed
+  credential for D20). Depends on: this ADR's ratification.
 - **Secrets Broker binding/provisioning path for both credential
-  classes.** An owner-run CLI/setup path that creates the `SecretRef` for
-  an API key or a `setup-token` without ever placing the value in argv or
-  shell history (mirroring the evidence doc's `-w`-last pattern). Depends
-  on: this ADR's ratification.
+  classes.** An owner-run CLI/setup path (D22) that creates the
+  `SecretRef` for an API key or a `setup-token` through a masked, hidden
+  interactive prompt only — never argv, environment, shell history, or
+  clipboard persistence — refusing any argument that looks credential-
+  shaped, mirroring `provision_keychain_item.py`'s pattern; the Keychain
+  item's ACL trusts only the code-signed `agentd` binary; service names
+  are fixed by credential class, never typed. Depends on: this ADR's
+  ratification.
 - **`provider-claude` environment + `CHILD_ENV_ALLOWLIST` changes.** Add
   the placeholder variable(s) and `ANTHROPIC_BASE_URL` to
   `ProviderEnvironment` and to `CHILD_ENV_ALLOWLIST`, gated on a
@@ -832,10 +976,23 @@ separately after ratification. Each depends on this ADR's ratification
 - `docs/development/G7_TASK_0112_PROVIDER_AUTH_DIAGNOSIS.md` — root cause,
   capability ablation, rejected remediation (Option C).
 - `docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md` — R0-R8, Option B
-  probe design and hardening, "Owner commands", "What this does NOT
+  probe design, round-4 hardening (C1-C10), "Owner commands", "Owner
+  real-credential receipts" (lines 520-565), "Owner-run positive probe
+  (Option A) — WITHDRAWN, never run" (lines 681-698), "What this does NOT
   prove".
-- `docs/development/task0152-probes/owner_proxy_probe.py`,
-  `owner_positive_probe.sh` — probed mechanics this Decision formalizes.
+- `docs/development/task0152-probes/owner_proxy_probe.py` — probed
+  mechanics D1-D21 formalize; `:187` (`ALLOWED_QUERY_STRINGS`), `:190-192`
+  (body/count/timeout limits), `:227-241` (`FORWARD_HEADER_ALLOWLIST`),
+  `:272-280` (`_build_opener`, TLS pinning), `:383-389`
+  (`_c9_disable_core_dumps`), `:392-399` (`_validate_credential_shape`),
+  `:429-433` (`ProxyServer`, single listener, no address reuse), `:455`
+  (socket timeout), `:482-484` (`hmac.compare_digest`), `:1004`
+  (`secrets.token_urlsafe(32)`).
+- `docs/development/task0152-probes/provision_keychain_item.py` — D22
+  provisioning UX; `:38-41` (`SERVICE_NAME`), `:128-130`
+  (`_read_secret_getpass`), `:172-186` (`-T ""` Keychain-trust precedent).
+  `owner_positive_probe.sh` (Option A's probe) was deleted in round 4,
+  withdrawn unrun — not cited as a live source.
 - `docs/development/G6_SECRETS_BROKER.md` — Secrets Broker authority/trust
   boundary (`SecretRef`, `SecretBinding`, `SecretDelivery`).
 - `docs/development/G6_PROVIDER_ENVIRONMENT_ISOLATION_H7_CLOSURE.md` —
