@@ -126,19 +126,25 @@ the contact line and the Notice paragraph is the unmodified BSL 1.1 text.
 
 **Covenant analysis (informs the Change License and Change Date choices
 below; reviewer judgement, subject to legal review).** Covenant 1 requires
-the Change License to be either GPLv2-or-later or a license approved by the
-Open Source Initiative as of the Change Date; Apache License 2.0 is an
-OSI-approved license and is listed by the Apache Software Foundation as
-compatible with GPL v3 (as a "later version" of GPL 2.0), though not with
-GPLv2 itself — see
+the Change License to be "the GPL Version 2.0 or any later version, or a
+license that is compatible with GPL Version 2.0 or a later version"
+(LICENSE, Covenants of Licensor, ¶1); Apache License 2.0 is listed by the
+Apache Software Foundation as compatible with GPL v3 (as a "later version"
+of GPL 2.0), though not with GPLv2 itself — see
 [Apache's GPL-compatibility page](https://www.apache.org/licenses/GPL-compatible.html)
 — and Apache-2.0 is the same Change License used by CockroachDB's and
-Sentry's BSL releases (see References). Covenant 3 permits the Change Date
-to be no more than four years out and to be defined relative to the "first
-publicly available distribution of that version of the Licensed Work,"
-which is the same relative form used by Terraform's BSL adoption, rather
-than a single fixed calendar date. Covenant 2 permits the Additional Use
-Grant only to add production-use rights on top of the base grant, and the
+Sentry's BSL releases (see References). Covenant 3 itself only requires the
+Licensor "To specify a Change Date" (LICENSE, Covenants of Licensor, ¶3);
+the four-year ceiling and its relative form come from the License's Terms
+section, not from Covenant 3: "Effective on the Change Date, or the fourth
+anniversary of the first publicly available distribution of a specific
+version of the Licensed Work under this License, whichever comes first,
+the Licensor hereby grants you rights under the terms of the Change
+License" (LICENSE, Terms), which is the same relative form used by
+Terraform's BSL adoption, rather than a single fixed calendar date.
+Covenant 2 requires the Additional Use Grant to be "an additional grant of
+rights to use that does not impose any additional restriction on the right
+granted in this License" (LICENSE, Covenants of Licensor, ¶2), and the
 License's "For clarity" sentence (quoted verbatim in D2 below) reads, in
 this ADR's judgement, as qualifying only the Additional Use Grant
 Parameter's own scope, not the base grant itself — this reading is
@@ -678,6 +684,20 @@ ADR:
   <https://www.apache.org/licenses/GPL-compatible.html> — cited for the
   Covenant 1 analysis under D1 (Apache-2.0 compatibility with GPL v3, not
   GPLv2).
+- CockroachDB, BSL license file:
+  <https://raw.githubusercontent.com/cockroachdb/cockroach/release-22.1/licenses/BSL.txt>
+  — fetched and confirmed to specify Apache License, Version 2.0 as the
+  Change License; cited as Change License precedent under D1, not as legal
+  precedent for this ADR's terms.
+- Sentry, `LICENSE` at tag `22.10.0`:
+  <https://raw.githubusercontent.com/getsentry/sentry/22.10.0/LICENSE> —
+  fetched and confirmed to specify Apache License, Version 2.0 as the
+  Change License; cited as Change License precedent under D1, not as legal
+  precedent for this ADR's terms.
+- HashiCorp, "Licensing FAQ" (covers the HashiCorp/IBM Terraform BSL 1.1
+  transition): <https://www.hashicorp.com/license-faq> — fetched; cited in
+  Open questions as a comparison point for a possible Licensor FAQ, not as
+  legal precedent for this ADR's terms.
 - U.S. Copyright Office, *Copyright and Artificial Intelligence, Part 2:
   Copyrightability* (January 2025) — cited as a legal-review risk, not a
   legal conclusion.
