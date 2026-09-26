@@ -2,7 +2,7 @@
 
 **Verdict: CONFORMANCE_REMEDIATION_REQUIRED — TASK-0087 not accepted.**
 
-2026-09-17. Worktree `/Users/artemmac/dev/runlith-wt-0089`, branch
+2026-09-17. Worktree `~/dev/runlith-wt-0089`, branch
 `task-0089-child-materialization-conformance`, base/HEAD
 `f0eeb72` (TASK-0088 amendment accepted and merged). Read-only with respect to
 production code: this pass adds only this report and the TASK-0089 queue entry.

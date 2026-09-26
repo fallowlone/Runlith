@@ -8,8 +8,8 @@ Product-owner direction captured during the strategy follow-up: preserve a futur
 
 | Repository | Role in the study | Baseline |
 |---|---|---|
-| Main Runlith checkout | Current implementation and canonical project contracts | /Users/artemmac/dev/runlith; main; 891c36f4b30a030ee581344fb718403712c8bbf1, 16 September 2026 |
-| External-research checkout | Existing research and destination for this package | /Users/artemmac/dev/runlith-external-research; research/external-architecture-intelligence; d3a656b47b34e800935b182e93b6eefe5431d87b, 16 September 2026 |
+| Main Runlith checkout | Current implementation and canonical project contracts | ~/dev/runlith; main; 891c36f4b30a030ee581344fb718403712c8bbf1, 16 September 2026 |
+| External-research checkout | Existing research and destination for this package | ~/dev/runlith-external-research; research/external-architecture-intelligence; d3a656b47b34e800935b182e93b6eefe5431d87b, 16 September 2026 |
 | Main documentation update during the study | Additional UI/UX foundation, reconciled before completion | f063af90e75e3bd7f8ba0ece78943d7808ff7431, 17 September 2026; adds only docs/ui/research/2026-09-17-runlith-ui-ux-research.md |
 
 At initial inspection, main already had modified planning/roadmap.yaml and planning/tasks/queue.yaml, plus an untracked image. Those files were not edited by this study. The two planning files were read as existing working-tree evidence, not silently treated as committed facts. The research checkout was initially clean.
