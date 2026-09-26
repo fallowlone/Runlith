@@ -86,9 +86,11 @@ The project should distinguish three different rights:
      commercial software with the tool is itself commercial use.
 
 2. Run AI Engineering OS internally at a company
-   → any commercial use, including ordinary internal use, requires a
-     separately executed commercial license; additional paid components and
-     services follow their own separately identified commercial terms.
+   → any production use, including ordinary internal use, requires a
+     separately executed commercial license; non-production use (evaluating
+     or testing the product, or developing/debugging it) is free even for a
+     business; additional paid components and services follow their own
+     separately identified commercial terms.
 
 3. Reuse, redistribute, white-label, host-resell, embed or commercialize
    AI Engineering OS source/core itself
@@ -98,16 +100,17 @@ The project should distinguish three different rights:
 ```
 
 BSL's base grant — copy, modify, create derivative works, redistribute and
-make non-production use (evaluation, testing, development) — is free for
-**everyone**, including every business and government, and cannot be
-narrowed by the Additional Use Grant. Free *production* use is limited to
-the Additional Use Grant: individuals' personal noncommercial use, and use
-by charitable organizations or privately operated, non-governmental,
-not-for-profit educational/research institutions, for their noncommercial
-purposes; it does not extend to any business, to freelancers/contractors
-acting commercially (including for a noncommercial-institution client), or
-to any government body or government-operated institution (including public
-schools and universities). No tier gates functionality for anyone permitted
+make non-production use (evaluating or testing the product, and developing
+or debugging the product itself) — is free for **everyone**, including
+every business and government, and cannot be narrowed by the Additional Use
+Grant. Free *production* use is limited to the Additional Use Grant:
+individuals' personal noncommercial use, and use by charitable organizations
+or privately operated, non-governmental, not-for-profit educational/research
+institutions, for their noncommercial purposes; it does not extend to any
+business, to freelancers/contractors acting commercially (including for a
+noncommercial-institution client), or to any government body or
+government-operated institution (including public schools and public
+universities). No tier gates functionality for anyone permitted
 to use the product, whether for free or under a commercial license. A
 developer, company or government body doing any production use outside the
 Additional Use Grant — including using AI Engineering OS to build and sell
@@ -133,8 +136,9 @@ ratification, in
 Free production use under this license is limited to its Additional Use
 Grant — individuals' personal noncommercial use, and use by qualifying
 charitable/educational/research organizations — exactly as the license's
-Parameters define it; non-production use (evaluation, testing, development)
-is free for everyone regardless of tier. All production use of the product
+Parameters define it; non-production use (evaluating or testing the
+product, and developing or debugging the product itself) is free for
+everyone regardless of tier. All production use of the product
 and all its features outside the Additional Use Grant requires a separately
 executed commercial license — Pro/Team/Enterprise components and rights
 become that commercial licensing path, not an additional feature-gate
@@ -171,7 +175,7 @@ Potential repository/license split once the extension contracts stabilize:
 | Surface | Likely licensing direction |
 | --- | --- |
 | Core desktop/runtime/orchestration product | Business Source License 1.1 repository default (free production use only per the Additional Use Grant; non-production use free for everyone; converts to Apache-2.0 per version four years after first public distribution) |
-| Any commercial use, including OEM/white-label rights | separate negotiated Commercial License |
+| Any production use, including OEM/white-label rights | separate negotiated Commercial License |
 | Future explicitly scoped Plugin SDK / public schemas / examples | Apache-2.0 (OSI); no current component designated |
 | Enterprise/cloud services | commercial/private as appropriate |
 | Brand/trademark | separate trademark policy |
@@ -191,7 +195,7 @@ experience.
 
 | Tier | Commercial model | Product role |
 | --- | --- | --- |
-| **Community** | Free non-production use for everyone; free production use per the Additional Use Grant (per [LICENSE](LICENSE)); all features | Useful local-first entry point: evaluation/testing/development is free for anyone, and production use is free for individuals' personal noncommercial use and for charitable/privately-operated-nonprofit educational or research institutions, with the full feature set. |
+| **Community** | Free non-production use for everyone; free production use per the Additional Use Grant (per [LICENSE](LICENSE)); all features | Useful local-first entry point: evaluating or testing the product, and developing or debugging the product itself, is free for anyone, and production use is free for (a) individuals, for personal, noncommercial purposes with no anticipated commercial application; (b) charitable organizations; and (c) privately operated, non-governmental, not-for-profit educational or research institutions, for their noncommercial purposes — with the full feature set. |
 | **Pro Local** | Perpetual commercial-use license + 12 months of updates | Primary individual commercial-user offer (e.g. a freelancer or any individual doing commercial work): the same full control plane and orchestration, licensed for commercial use, without a required subscription. |
 | **Pro Subscription** | Monthly/annual commercial-use license | Alternative to the perpetual purchase for individual commercial users who prefer predictable recurring billing and continuous updates. |
 | **Teams** | Per-user subscription | Commercial-use licensing plus shared engineering workflows, team policy, shared registries, governance, collaboration and organizational visibility for organizations. |
@@ -215,8 +219,9 @@ add-ons, which are not software features granted by the license. See
 
 ### 3.1 Community
 
-Community is the free tier: non-production use (evaluation, testing,
-development) is free for everyone under BSL's base grant, and production use
+Community is the free tier: non-production use (evaluating or testing the
+product, and developing or debugging the product itself) is free for
+everyone under BSL's base grant, and production use
 is free for anyone covered by the Additional Use Grant under
 [LICENSE](LICENSE) — individuals' personal noncommercial use, and use by
 charitable organizations or privately operated, non-governmental,
@@ -237,7 +242,7 @@ Expected direction:
 Community's free production use is limited to the Additional Use Grant;
 production use outside it — by any business, by a freelancer/contractor
 acting commercially, or by any government body or government-operated
-institution (including public schools and universities) — requires Pro
+institution (including public schools and public universities) — requires Pro
 Local, Pro Subscription, Teams or Enterprise regardless of feature need. It
 should not be intentionally crippled in ways that damage trust or make the
 local-first claim misleading.
@@ -327,7 +332,7 @@ governance/deployment software features are likewise available at no cost
 under Community to anyone covered by the Additional Use Grant (charitable
 organizations and privately operated, non-governmental, not-for-profit
 educational/research institutions), but not to government bodies or
-government-operated institutions, including public schools and
+government-operated institutions, including public schools and public
 universities, which require Enterprise or Teams; what an Enterprise
 commercial customer pays for is the required commercial-use license itself
 plus contracted support, rollout assistance and negotiated SLAs.

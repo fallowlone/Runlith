@@ -36,7 +36,9 @@ of "production use" versus "non-production use."
 
 Production use — using Runlith to do real work, such as developing, shipping
 or operating software that you, your employer or a client relies on — is
-free without a commercial license **only** if you are:
+free without a commercial license **only** if you are (this framing of
+"production use" is the Licensor's interpretation, not license text; see
+ADR-0038 D3a):
 
 - **(a)** an individual using Runlith for your own personal, noncommercial
   purposes, without any anticipated commercial application; or
@@ -54,11 +56,11 @@ by a government, **including public schools and public universities**. The
 exact wording is reproduced in [LICENSE](LICENSE)'s Parameters block; this
 page only summarizes it.
 
-Everyone above the Additional Use Grant gets the full product: every
-software feature — including team/organizational/governance features — is
-available to anyone permitted to use Runlith, whether for free under
-non-production use or the Additional Use Grant, or under a paid commercial
-license; tiers do not gate functionality. What is paid is (a) the
+Everyone permitted to use Runlith under the License gets the full product:
+every software feature — including team/organizational/governance
+features — is available to anyone permitted to use Runlith, whether for
+free under non-production use or the Additional Use Grant, or under a paid
+commercial license; tiers do not gate functionality. What is paid is (a) the
 commercial production-use license itself, required for any production use
 outside the Additional Use Grant, and (b) separately contracted services
 such as support, SLAs, rollout assistance and hosted/cloud add-ons, which

@@ -4752,8 +4752,9 @@ items:
       government-operated institution, including public schools and public
       universities; any freelancer/contractor acting commercially) requires a
       separately executed commercial license, while non-production use
-      (evaluation, testing, development) remains free for everyone under the
-      License's own base grant; each version converts to Apache License 2.0
+      (evaluating or testing Runlith, and developing or debugging Runlith
+      itself) remains free for everyone under the License's own base grant;
+      each version converts to Apache License 2.0
       four years after its first public distribution; the core stays
       described as source-available, never open source; apply the
       corresponding LICENSE, NOTICE, LICENSING.md, README.md, monetization-doc
@@ -4770,32 +4771,52 @@ items:
       for BSL; ADR index updated with a Proposed row. No license-enforcement
       or phone-home mechanism is authorized (ADR-0014 preserved).
     exit_criteria_summary: >-
-      ADR-0038 exists at docs/architecture/adr/ADR-0038-product-licensing-bsl.md,
-      contains at minimum Context/Decision/Alternatives/Consequences/Security
-      impact/Migration impact per AGENT.md §11, and remains Status Proposed;
-      LICENSE's license body (from "Terms" through the Covenants of Licensor)
-      is byte-identical to upstream BSL 1.1 (SPDX `BUSL-1.1`) with only the
-      permitted Parameters filled in; NOTICE carries plain-text copyright and
-      BSL licensing-summary lines; LICENSING.md, README.md and the
-      monetization doc's targeted sections are consistent with the BSL model,
-      stating plainly that non-production use is free for everyone and that
-      free production use is limited to the Additional Use Grant; ADR-0038 is
-      linked from docs/architecture/adr/INDEX.md under its new path; owner
-      ratification after independent architecture/governance review PASS is
-      required before any status changes to Accepted; merging the
-      LICENSE/NOTICE change into the repository default branch is gated on,
-      and happens only together with or after, that ratification; and before
-      product/version.toml, Cargo manifest license metadata, a commercial
-      license/EULA, a CLA, or a trademark policy are adopted. Open questions
-      remain unresolved pending owner decision: Additional Use Grant wording
-      legal review, whether to publish a Licensor FAQ on "production use",
-      exact commercial terms/prices, and whether a government-owned but
-      independently chartered institution counts as "government" for harder
-      edge cases beyond the settled public-school/public-university case.
+      (1) Content: ADR-0038 exists at
+      docs/architecture/adr/ADR-0038-product-licensing-bsl.md and contains at
+      minimum Context/Decision/Alternatives/Consequences/Security
+      impact/Migration impact per AGENT.md §11; LICENSE's license body (from
+      "Terms" through the Covenants of Licensor) is byte-identical to
+      upstream BSL 1.1 (SPDX `BUSL-1.1`) with only the permitted Parameters
+      filled in; NOTICE carries plain-text copyright and BSL
+      licensing-summary lines; LICENSING.md, README.md and the monetization
+      doc's targeted sections (§2.1, §2.2, §3 tier table, §3.1-§3.5) are
+      consistent with the BSL model, stating plainly that non-production use
+      is free for everyone and that free production use is limited to the
+      Additional Use Grant; ADR-0038 is linked from
+      docs/architecture/adr/INDEX.md under its new path.
+      (2) Status gate: ADR-0038 remains Status Proposed until the owner
+      ratifies it, and owner ratification happens only after an independent
+      architecture/governance review returns PASS; only ratification may
+      change the ADR's status to Accepted.
+      (3) Merge gate: the LICENSE/NOTICE change described by this ADR takes
+      effect only once merged into the repository default branch, and that
+      merge happens only together with, or after, owner ratification —
+      never before it.
+      (4) Follow-up gate: adding `license = "BUSL-1.1"` to
+      product/version.toml or Cargo manifests, drafting a commercial
+      license/EULA, drafting a CLA, and establishing a trademark policy are
+      all follow-up work that happens only after owner ratification, not as
+      part of this task.
+      (5) Open questions remain unresolved pending owner decision and/or
+      qualified legal review: Additional Use Grant wording, that "production
+      use" is undefined by BSL itself (a priority legal-review item),
+      whether to publish a Licensor FAQ on "production use", exact
+      commercial terms/prices, jurisdiction-dependent scope of "charitable
+      organization", UK usage of "public schools", government-created
+      charities, students' personal coursework use at public universities,
+      unpaid volunteers/pro-bono work for Additional-Use-Grant-qualifying
+      organizations, individual OSS maintainers with "anticipated commercial
+      application", undefined "version" for Change Date bookkeeping, whether
+      a government-owned but independently chartered institution counts as
+      "government" for harder edge cases beyond the settled
+      public-school/public-university case, and explicit owner confirmation
+      of D10 (tiers do not gate features).
     depends_on: []
     blocked_by: []
     references:
       - docs/architecture/adr/ADR-0038-product-licensing-bsl.md
-      - LICENSING.md
-      - AI_ENGINEERING_OS_MONETIZATION_AND_PLUGIN_ECOSYSTEM.md
+      - LICENSE
       - NOTICE
+      - LICENSING.md
+      - README.md
+      - AI_ENGINEERING_OS_MONETIZATION_AND_PLUGIN_ECOSYSTEM.md

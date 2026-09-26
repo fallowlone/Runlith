@@ -26,11 +26,15 @@ unrelated to this ADR's licensing decision.
 ## Context
 
 The repository's current default license, verified byte-identical to
-upstream, is [PolyForm Shield 1.0.0](../../../LICENSE) as distributed on the
-repository's default branch. Shield permits broad use — including ordinary
-internal business use — subject only to a noncompete restriction on
-providing a *competing* product. It does not require payment for internal
-commercial use that does not compete with the licensor's own offering. That
+upstream, is [PolyForm Shield 1.0.0](https://github.com/polyformproject/polyform-licenses/blob/1.0.0/PolyForm-Shield-1.0.0.md)
+as distributed on the repository's default branch before this ADR's change
+(`LICENSE` in this repository now holds the BSL 1.1 text proposed by this
+ADR; this link is the original upstream Shield text this decision replaces,
+not this repository's current `LICENSE`). Shield permits broad use —
+including ordinary internal business use — subject only to a noncompete
+restriction on providing a *competing* product. It does not require payment
+for internal commercial use that does not compete with the licensor's own
+offering. That
 does not meet the owner's goal: the owner wants **all** commercial and
 government-institution use of the product, by any individual, company or
 government body of any size, to require a paid commercial license, while
@@ -98,15 +102,16 @@ from the PolyForm Noncommercial draft, which promised no such conversion.
 becomes [Business Source License 1.1](https://mariadb.com/bsl11/) (BSL,
 SPDX id `BUSL-1.1`), replacing PolyForm Shield 1.0.0. `LICENSE` reproduces
 the BSL 1.1 license body verbatim (byte-identical from the "Terms" heading
-through the Covenants of Licensor, verified by `sha256sum`, see Verification
-below) with only the license's own permitted Parameters filled in, laid out
+through the Covenants of Licensor, verified by `sha256sum`, see References)
+with only the license's own permitted Parameters filled in, laid out
 in the same Parameters-block column format used by other real-world BSL
 adopters (e.g. Terraform's `LICENSE`, see References):
 
 - **Licensor:** Artem Hrechuk (<https://github.com/fallowlone>) — a natural
   person, not a legal entity.
 - **Licensed Work:** Runlith. The Licensed Work is (c) 2026 Artem Hrechuk.
-- **Additional Use Grant:** see D2 (full text in LICENSE and Consequences).
+- **Additional Use Grant:** see D2 (full text quoted verbatim in D2, and in
+  LICENSE).
 - **Change Date:** four years from the date on which a version of the
   Licensed Work is first publicly distributed under this License (applies
   per version — see D4).
@@ -119,6 +124,27 @@ Per Covenant 4 of the license text, the Licensor may not modify the License
 body in any other way; every word of `LICENSE` outside the Parameters block,
 the contact line and the Notice paragraph is the unmodified BSL 1.1 text.
 
+**Covenant analysis (informs the Change License and Change Date choices
+below; reviewer judgement, subject to legal review).** Covenant 1 requires
+the Change License to be either GPLv2-or-later or a license approved by the
+Open Source Initiative as of the Change Date; Apache License 2.0 is an
+OSI-approved license and is listed by the Apache Software Foundation as
+compatible with GPL v3 (as a "later version" of GPL 2.0), though not with
+GPLv2 itself — see
+[Apache's GPL-compatibility page](https://www.apache.org/licenses/GPL-compatible.html)
+— and Apache-2.0 is the same Change License used by CockroachDB's and
+Sentry's BSL releases (see References). Covenant 3 permits the Change Date
+to be no more than four years out and to be defined relative to the "first
+publicly available distribution of that version of the Licensed Work,"
+which is the same relative form used by Terraform's BSL adoption, rather
+than a single fixed calendar date. Covenant 2 permits the Additional Use
+Grant only to add production-use rights on top of the base grant, and the
+License's "For clarity" sentence (quoted verbatim in D2 below) reads, in
+this ADR's judgement, as qualifying only the Additional Use Grant
+Parameter's own scope, not the base grant itself — this reading is
+reviewer judgement, not settled, and is flagged for legal review (see Open
+questions).
+
 **D2 — Free production use, exactly per the Additional Use Grant.** The
 Additional Use Grant, per Covenant 2 of the License, may only *add* rights on
 top of the base grant — it cannot narrow the base grant's copy/modify/
@@ -130,6 +156,25 @@ a commercial license only for:
 - (b) a charitable organization, or a privately operated, non-governmental,
   not-for-profit educational or research institution, using the Licensed
   Work for its noncommercial purposes.
+
+The full Additional Use Grant Parameter text, quoted verbatim from
+`LICENSE` (this is the actual license text, not a paraphrase; do not treat
+this quotation as an independent source of terms — `LICENSE` governs):
+
+> Additional Use Grant: You may make production use of the Licensed Work
+> without a commercial license only if you are: (a) an individual using the
+> Licensed Work for your own personal, noncommercial purposes, without any
+> anticipated commercial application; or (b) a charitable organization, or a
+> privately operated, non-governmental, not-for-profit educational or
+> research institution, using the Licensed Work for its noncommercial
+> purposes. For clarity, this Additional Use Grant does not extend to
+> production use by or on behalf of any business or other for-profit
+> entity; by an individual in the course of commercial activity, including
+> work performed as a freelancer or contractor for any client (including a
+> client described in (b)); or by or on behalf of any government,
+> government body or agency, or any institution owned or operated by a
+> government, including public schools and public universities. Such
+> production use requires a commercial license from the Licensor.
 
 This resolves the government-institution problem that blocked the earlier
 PolyForm Noncommercial draft: government bodies are not covered by (a) or
@@ -160,17 +205,20 @@ license from the Licensor whenever it is not covered by D2, specifically:
 
 No commercial license or EULA is executed as of this ADR.
 
-**D3a — Non-production use (evaluation, testing, development) is free for
-everyone, by the base License grant, and this ADR cannot remove that.** BSL's
+**D3a — Non-production use (evaluating or testing Runlith, and developing or
+debugging Runlith itself) is free for everyone, by the base License grant,
+and this ADR cannot remove that.** BSL's
 first paragraph of Terms grants "the right to copy, modify, create
 derivative works, redistribute, and make non-production use of the Licensed
 Work" to everyone, unconditionally; the Additional Use Grant in D2 only adds
 production-use rights on top of that base grant (Covenant 2) and the
 Licensor covenants not to modify the License body in any other way
-(Covenant 4). Consequently, **evaluating, testing, or developing against
-Runlith is free for any individual, business or government, with no
-commercial license required, and no Additional Use Grant wording can take
-that away.** This ADR was drafted after that fact was verified
+(Covenant 4). Consequently, **evaluating or testing Runlith, and developing
+or debugging Runlith itself, is free for any individual, business or
+government, with no commercial license required, and no Additional Use
+Grant wording can take that away — but using Runlith to develop, review,
+ship or operate other software is production use, not covered by this
+sentence.** This ADR was drafted after that fact was verified
 (orchestrator-verified) and the owner was told of it; it is stated plainly
 here and must be stated plainly in `LICENSING.md`/README, not left implicit.
 
@@ -237,11 +285,11 @@ by this ADR; drafting one is a follow-up (see Migration impact).
 
 **D8 — Transition.** The GitHub repository (`fallowlone/Runlith`) is private;
 git history as of `69b2221` (181 commits) shows no external human
-contributors: authors are the owner (147 commits, across two owner
-identities), `Claude <noreply@anthropic.com>` (33 commits) and `Runlith
-Orchestrator` (1 commit); 66 of 181 commits carry a Claude co-author trailer,
-and 68 of 181 commits involve AI authorship or co-authorship (orchestrator-
-verified 2026-09-26). Trailer counts measure commit attribution, not the
+contributors: as of `69b2221`, 181 commits; 147 owner (across two owner
+identities), 33 authored by Claude, and 1 by `Runlith Orchestrator`; 66
+carry a Claude co-author trailer; 67 have Claude as author or co-author; 68
+including the Orchestrator-authored commit (orchestrator-verified
+2026-09-26). Trailer counts measure commit attribution, not the
 share of AI-generated code. No third-party Shield licensee is known to exist
 from public distribution of this repository. This ADR does not attempt to
 retroactively alter any grant: if any copy of this repository was already
@@ -345,9 +393,10 @@ which are not software features granted or withheld by the license.
   freelancer/contractor use regardless of client, matching the owner's
   stated goal directly instead of requiring an unratified license
   modification.
-- **Non-production use (evaluation, testing, development) is free for
-  everyone, including every business and government body, and cannot be
-  restricted by the Additional Use Grant** — this is a structural property
+- **Non-production use (evaluating or testing Runlith, and developing or
+  debugging Runlith itself) is free for everyone, including every business
+  and government body, and cannot be restricted by the Additional Use
+  Grant** — this is a structural property
   of BSL's base grant (Covenants 2 and 4), not a discretionary Licensor
   choice, and must be stated plainly wherever this ADR, `LICENSING.md` or
   `README.md` describe the license (see D3a).
@@ -384,6 +433,17 @@ which are not software features granted or withheld by the license.
   commercial production-use licensing vehicle, not merely a feature unlock.
 - No runtime, code or enforcement change ships with this ADR; it is a
   documentation/governance decision only, pending ratification.
+- **BSL does not itself define "production use"; for a developer tool this
+  boundary is inherently contestable.** The License's own text only defines
+  "non-production use" by the negative space around the Additional Use
+  Grant, and the Licensor's D3a interpretation above (using Runlith to
+  develop, review, ship or operate software you, your employer or a client
+  relies on is production use; evaluating/testing Runlith or
+  developing/debugging Runlith itself is not) is this ADR's own reading, not
+  License text. This is a priority item for qualified legal review before
+  public distribution (see Migration impact and Open questions), and the
+  owner should consider publishing a Licensor FAQ to reduce ambiguity for
+  users (see Open questions).
 
 ## Security impact
 
@@ -429,9 +489,12 @@ ADR:
   authorship in this repository. The U.S. Copyright Office's *Copyright and
   Artificial Intelligence* report, Part 2 (January 2025), states that
   material generated solely by AI is not copyrightable while human-authored
-  selection, arrangement or modification can be; with 66 of 181 commits in
-  this repository carrying an AI co-author trailer (verified 2026-09-26),
-  this repository's copyright ownership over AI-assisted portions is a
+  selection, arrangement or modification can be; as of `69b2221`: 181
+  commits; 147 owner (two identities), 33 authored by Claude, 1 by `Runlith
+  Orchestrator`; 66 carry a Claude co-author trailer; 67 have Claude as
+  author or co-author; 68 including the Orchestrator-authored commit
+  (verified 2026-09-26), this repository's copyright ownership over
+  AI-assisted portions is a
   genuine legal-review question, stated here as a risk requiring legal
   review, not resolved as a legal conclusion.
 - Record, for each publicly released version going forward, the date that
@@ -444,19 +507,46 @@ ADR:
   are outside this task's allowed file list and are not edited here.
 - Reconcile sections of `AI_ENGINEERING_OS_MONETIZATION_AND_PLUGIN_ECOSYSTEM.md`
   that still reflect the pre-ADR-0038 (or the pre-BSL-rework) model and were
-  not in this task's allowed edit scope, including its appendix and §5
-  "Community rights concept" (~line 1205, lists "evaluation" as a potential
-  free/community right — now redundant, since D3a makes non-production use
-  free for everyone regardless of tier), §6 "Commercial use of the product
-  should remain allowed" (~line 1228), §7/§12/§33 (PolyForm Shield
-  recommendations/ranking, ~lines 1251, 1322, 1795), and §34 "Critical
-  unresolved questions" Q1/Q2 (~lines 1826-1827, which ask whether commercial
-  internal/small-company use should be free — already answered "no" by this
-  ADR). Also reconcile
-  `AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md` §86 "Monetization
-  strategy" → "Community — Free" (~line 4058), which predates this decision.
-  A follow-up reconciliation task should update or annotate all of these;
-  none of them are edited by this ADR or this task.
+  not in this task's allowed edit scope — its appendix in full, and
+  specifically (line numbers refreshed by `grep`, ~line as of `b534030`):
+  - appendix §5 "Community rights concept" (~line 1256 onward, lists
+    "evaluation" as a potential free/community right — now redundant, since
+    D3a makes non-production use free for everyone regardless of tier);
+  - appendix §6 "Commercial use of the product should remain allowed"
+    (~line 1284);
+  - appendix §7 "PolyForm Shield as a serious candidate" (~line 1307);
+  - appendix §9 "BSL / Business Source License" (~lines 1341-1349,
+    including "If the owner strongly wants permanent anti-clone protection
+    for the commercial core, BSL may not fit" — this ADR's decision already
+    accepted the BSL trade-off, so this framing is now stale);
+  - appendix §12 "Recommended licensing architecture — current hypothesis"
+    (~line 1378, still recommends PolyForm Shield, not BSL);
+  - appendix §21 "Pro Individual philosophy" (~lines 1576-1599, pricing
+    hypothesis only, unaffected in substance but still under the old
+    section numbering);
+  - appendix §29 "Open/local core vs monetized layer" (~lines 1761-1785);
+  - appendix §33 "Current preliminary ranking" (~line 1851, ranks BSL below
+    PolyForm Shield/a custom Community Source License — the opposite of
+    this ADR's decision);
+  - appendix §34 "Critical unresolved questions" Q1/Q2 (~lines 1882-1883,
+    "Should commercial internal business use of Community edition be
+    free?" / "Should small companies have free internal use?" — already
+    answered "no" by this ADR), Q6 (~line 1887, "Should old versions ever
+    become open source?" — already answered "yes, after each version's own
+    four-year Change Date" by D4), Q13 (~line 1894, "Should Community
+    license permit SaaS use that is not competitive?" — superseded by the
+    Additional Use Grant's individual/nonprofit scoping) and Q14 (~line
+    1895, "Should consultants be allowed to deploy the product for
+    clients?" — already answered "no, a contractor's own use is commercial
+    regardless of client" by D3).
+
+  Also reconcile `AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md` §86
+  "Monetization strategy" → "Community — Free" feature list (~line 4058 as
+  of `b534030`, immediately followed by the "Pro" feature list), which
+  predates this decision and still frames Pro features as gated rather than
+  available to everyone permitted to use the product (D10). A follow-up
+  reconciliation task should update or annotate all of these; none of them
+  are edited by this ADR or this task.
 - Merge sequencing: this ADR's LICENSE/NOTICE change takes effect only when
   merged into the repository default branch, and merge happens only together
   with or after owner ratification of this ADR (see D8 "Merge sequencing").
@@ -470,6 +560,15 @@ ADR:
   license clause reused verbatim; it is the piece of this decision most in
   need of qualified legal review before public distribution (see Migration
   impact).
+- **"Production use" is undefined by BSL itself and is inherently
+  contestable for a developer tool — priority item for legal review.** The
+  License text never defines "production use"; D3a's boundary (using
+  Runlith to develop, review, ship or operate software someone relies on is
+  production use; evaluating/testing Runlith or developing/debugging
+  Runlith itself is not) is the Licensor's own interpretation, not License
+  text, and a court or a disagreeing licensee could read it differently.
+  This should be a priority item for qualified legal review before public
+  distribution, alongside the Additional Use Grant wording above.
 - **Whether to publish a Licensor FAQ on "production use."** D3a records the
   Licensor's own interpretation of production vs. non-production use as
   interpretation, not License text. Whether to publish a fuller,
@@ -480,6 +579,46 @@ ADR:
   Local/Subscription/Teams/Enterprise purchase terms are drafted as one
   commercial license or several, remain undecided; §3 of the monetization
   doc keeps its prices as hypotheses (unchanged by this task).
+- **"Commercial license from the Licensor" (used throughout this ADR and
+  LICENSING.md) vs. a future Terms-of-Service phrasing of "Licensor, its
+  affiliated entities, or authorized resellers".** Should either document
+  standardize on the other's wording once commercial Terms are drafted; not
+  resolved by this ADR.
+- **Whether "charitable organization" and its jurisdictional scope need
+  further definition.** What counts as a "charitable organization" differs
+  by jurisdiction (e.g. US 501(c)(3) vs. UK charity law vs. other regimes);
+  D2(b) does not itself define the term.
+- **UK "public schools."** In UK usage, "public school" commonly refers to a
+  privately operated, historically elite fee-charging school (a charitable
+  institution), the opposite of the grant's own example of a
+  government-operated institution; this terminology clash is a real
+  ambiguity risk for UK readers and is not resolved by this ADR.
+- **Government-created charities.** A charity that is itself created or
+  controlled by a government body sits ambiguously between D2(b) ("privately
+  operated, non-governmental") and D3's government exclusion; not resolved
+  here.
+- **Students at public universities using Runlith for their own coursework.**
+  Whether an individual student's personal, noncommercial coursework use at
+  a public (government) university falls under D2(a) (individual,
+  personal, noncommercial) or is instead "on behalf of" a government
+  institution and therefore excluded by D3, is not resolved by this ADR.
+- **Unpaid volunteers or pro-bono contributors working for a D2(b)
+  organization.** Whether volunteer or pro-bono work for a qualifying
+  charitable/educational/research institution is the institution's own
+  noncommercial use (free under D2(b)) or the volunteer's own commercial/
+  professional activity (excluded, as with a paid contractor under D3) is
+  not resolved by this ADR.
+- **Individual OSS maintainers whose projects have "anticipated commercial
+  application."** D2(a) requires no anticipated commercial application; an
+  individual maintaining an open-source project that third parties later use
+  commercially raises a boundary question about what the maintainer's own
+  use "anticipates" that this ADR does not resolve.
+- **"Version" is undefined for per-version Change Date bookkeeping once the
+  repository is public.** The License applies "separately for each
+  version," but neither the License nor this ADR defines what counts as a
+  distinct "version" for that purpose (a tag, a release, a commit); this
+  needs a concrete bookkeeping convention before or shortly after first
+  public distribution (see Migration impact).
 - **Whether a government-owned but independently chartered institution
   counts as "government" for D3 — the owner's decision is recorded, but the
   boundary for edge cases is not fully drafted.** The owner has decided that
@@ -489,6 +628,14 @@ ADR:
   independent research foundation, or a public-private partnership — are not
   resolved by this ADR and remain open for a future FAQ or Licensor
   determination if they arise.
+- **D10 (tiers do not gate features) needs explicit owner confirmation at
+  ratification.** D10's "every software feature is available to everyone
+  permitted to use it for free or under a commercial license" is this ADR's
+  (orchestrator's) inference from the owner's stated position that
+  noncommercial users get everything and business pays for everything; it
+  has not been separately, explicitly re-confirmed by the owner as its own
+  decision point and should be confirmed at ratification alongside the rest
+  of this ADR.
 
 ## References
 
@@ -524,6 +671,13 @@ ADR:
   <https://github.com/polyformproject/polyform-licenses/blob/1.0.0/PolyForm-Noncommercial-1.0.0.md>.
 - Anthropic legal & compliance page (read 2026-09-25):
   <https://code.claude.com/docs/en/legal-and-compliance>.
+- Anthropic, "Claude for Open Source" program page:
+  <https://claude.com/contact-sales/claude-for-oss> — referenced for D5/OSS
+  maintainer-program eligibility discussion (Context, D5).
+- Apache Software Foundation, "Apache License v2.0 and GPL Compatibility":
+  <https://www.apache.org/licenses/GPL-compatible.html> — cited for the
+  Covenant 1 analysis under D1 (Apache-2.0 compatibility with GPL v3, not
+  GPLv2).
 - U.S. Copyright Office, *Copyright and Artificial Intelligence, Part 2:
   Copyrightability* (January 2025) — cited as a legal-review risk, not a
   legal conclusion.
