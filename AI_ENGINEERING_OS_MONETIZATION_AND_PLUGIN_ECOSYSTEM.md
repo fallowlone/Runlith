@@ -82,41 +82,53 @@ The project should distinguish three different rights:
 
 ```text
 1. Use AI Engineering OS to build commercial software
-   → normal user/product entitlement; should be broadly allowed.
+   → requires a commercial license (individual or company); building
+     commercial software with the tool is itself commercial use.
 
 2. Run AI Engineering OS internally at a company
-   → permitted subject to the source license; additional paid components and
-     services follow their separately identified commercial terms.
+   → any commercial use, including ordinary internal use, requires a
+     separately executed commercial license; additional paid components and
+     services follow their own separately identified commercial terms.
 
 3. Reuse, redistribute, white-label, host-resell, embed or commercialize
    AI Engineering OS source/core itself
-   → subject to Shield; rights beyond its permitted purposes require a
-     separate Commercial/OEM agreement.
+   → subject to PolyForm Noncommercial; commercial rights of any kind require
+     a separate Commercial/OEM agreement.
 ```
 
-A developer paying for Pro must be able to build and sell their own SaaS or
-software with AI Engineering OS. That does **not** automatically grant the right
-to extract the orchestration core, repackage it as a competing product or offer
-AI Engineering OS itself as a managed service.
+Noncommercial use (personal, evaluation, or by a noncommercial organization as
+the license defines) remains free and includes every feature; no tier gates
+functionality for noncommercial users. A developer or company doing any
+commercial use — including using AI Engineering OS to build and sell their own
+SaaS or software — needs a paid commercial license. That license does **not**
+automatically grant the right to extract the orchestration core, repackage it
+as a competing product or offer AI Engineering OS itself as a managed service.
 
 ### Selected repository license
 
-The Community repository default is **PolyForm Shield 1.0.0**, provided verbatim
+The repository default is **PolyForm Noncommercial 1.0.0**, provided verbatim
 in [LICENSE](LICENSE). [LICENSING.md](LICENSING.md) defines the repository
 boundaries and outstanding commercial/legal work. This is source-available,
-not OSI Open Source; no delayed conversion to a permissive license is promised.
+never described as OSI Open Source; no delayed conversion to a permissive
+license is promised for the core. This decision is recorded, pending owner
+ratification, in
+[ADR-0038](docs/architecture/adr/ADR-0038-product-licensing-noncommercial.md).
 
-Additional Pro/Team/Enterprise components and rights beyond Shield require
-separately identified commercial terms. Shield does not itself impose paid
-feature or seat entitlements, and product purchase terms must not contradict
-rights already granted to the same code under Shield. No commercial EULA or
-OEM agreement is established by this strategy document.
+Free use under this license is noncommercial use only, exactly as the license
+text defines permitted purposes. All commercial use of the product and all its
+features requires a separately executed commercial license — Pro/Team/
+Enterprise components and rights become that commercial licensing path, not an
+additional feature-gate layered on top of a free commercial tier. The license
+does not itself impose paid feature or seat entitlements or any
+enforcement/phone-home mechanism, and product purchase terms must not
+contradict rights already granted to the same code under it. No commercial
+EULA or OEM agreement is established by this strategy document.
 
 The future independently scoped Plugin SDK is intended to use Apache-2.0.
 No existing core, IPC or planner-contract component is thereby relicensed.
 If the entire Pro implementation is later published while paid internal use
 must remain mandatory, that requires a separately reviewed licensing decision,
-not an assumed restriction in Shield.
+not an assumed restriction in the noncommercial license.
 
 This section is product strategy, not legal advice. Before public release or
 accepting material third-party contributions, obtain qualified legal review of
@@ -139,9 +151,9 @@ Potential repository/license split once the extension contracts stabilize:
 
 | Surface | Likely licensing direction |
 | --- | --- |
-| Core desktop/runtime/orchestration product | PolyForm Shield 1.0.0 repository default |
-| Commercial/OEM/white-label rights beyond Shield | separate negotiated Commercial License |
-| Future explicitly scoped Plugin SDK / public schemas / examples | Apache-2.0; no current component designated |
+| Core desktop/runtime/orchestration product | PolyForm Noncommercial 1.0.0 repository default (free for noncommercial use only) |
+| Any commercial use, including OEM/white-label rights | separate negotiated Commercial License |
+| Future explicitly scoped Plugin SDK / public schemas / examples | Apache-2.0 (OSI); no current component designated |
 | Enterprise/cloud services | commercial/private as appropriate |
 | Brand/trademark | separate trademark policy |
 
@@ -160,16 +172,27 @@ experience.
 
 | Tier | Commercial model | Product role |
 | --- | --- | --- |
-| **Community** | Free | Useful local-first entry point, single-user/core workflows, community plugins and evaluation of the product. |
-| **Pro Local** | Perpetual license + 12 months of updates | Primary individual-developer offer: full local control plane and advanced orchestration without a required subscription. |
-| **Pro Subscription** | Monthly/annual subscription | Alternative to the perpetual purchase for users who prefer predictable recurring billing and continuous updates. |
-| **Teams** | Per-user subscription | Shared engineering workflows, team policy, shared registries, governance, collaboration and organizational visibility. |
-| **Enterprise** | Annual contract | SSO/SCIM, private registry, advanced policy/audit, on-prem/air-gapped options, support and compliance-oriented controls. |
+| **Community** | Free for noncommercial use (per [LICENSE](LICENSE)); all features | Useful local-first entry point for noncommercial users: personal use, evaluation, and use by noncommercial organizations (charities, educational institutions, public research, public safety/health, environmental, government), with the full feature set. |
+| **Pro Local** | Perpetual commercial-use license + 12 months of updates | Primary individual commercial-user offer (e.g. a freelancer or any individual doing commercial work): the same full control plane and orchestration, licensed for commercial use, without a required subscription. |
+| **Pro Subscription** | Monthly/annual commercial-use license | Alternative to the perpetual purchase for individual commercial users who prefer predictable recurring billing and continuous updates. |
+| **Teams** | Per-user subscription | Commercial-use licensing plus shared engineering workflows, team policy, shared registries, governance, collaboration and organizational visibility for organizations. |
+| **Enterprise** | Annual contract | Commercial-use licensing plus SSO/SCIM, private registry, advanced policy/audit, on-prem/air-gapped options, support and compliance-oriented controls for organizations. |
 | **Cloud Add-ons** | Usage-based and/or fixed add-on subscription | Optional services such as encrypted sync, remote workers/runners, managed browsers, storage or hosted infrastructure. |
+
+Tiers no longer gate features for noncommercial users: Community, under
+PolyForm Noncommercial 1.0.0, includes the full feature set for permitted
+noncommercial purposes. What Pro/Teams/Enterprise sell to an individual or
+organization doing **any** commercial use is the required commercial license
+itself, plus the organizational/collaboration/governance capabilities listed
+for Teams and Enterprise. See
+[ADR-0038](docs/architecture/adr/ADR-0038-product-licensing-noncommercial.md)
+(Proposed, pending owner ratification).
 
 ### 3.1 Community
 
-Community must be useful enough to prove the local-first model and grow an
+Community is the noncommercial-use tier: free for any permitted noncommercial
+purpose under [LICENSE](LICENSE), with the full feature set, not a crippled
+trial. It must be useful enough to prove the local-first model and grow an
 ecosystem.
 
 Expected direction:
@@ -177,17 +200,21 @@ Expected direction:
 - local `agentd` and CLI/control-plane basics;
 - single-user operation;
 - core provider connections through user-owned credentials/subscriptions;
-- basic task/orchestration flows appropriate to the mature core at release;
+- the full task/orchestration feature set appropriate to the mature core at
+  release, not a feature-limited subset;
 - local plugin installation for free/open plugins once the plugin platform
   exists;
 - no forced cloud account for normal local use.
 
-Community should not be intentionally crippled in ways that damage trust or
-make the local-first claim misleading.
+Community is licensed for noncommercial use only; any commercial use requires
+Pro Local, Pro Subscription, Teams or Enterprise regardless of feature need.
+It should not be intentionally crippled in ways that damage trust or make the
+local-first claim misleading.
 
 ### 3.2 Pro Local — perpetual
 
-Recommended primary individual offer:
+Recommended primary individual commercial-use offer (any individual doing
+commercial work, including a freelancer):
 
 ```text
 one-time Pro Local purchase
@@ -215,8 +242,8 @@ actual amount of completed product value.
 
 ### 3.3 Pro Subscription
 
-Offer the same individual Pro capability through an optional subscription for
-users who do not want a larger one-time purchase.
+Offer the same individual Pro commercial-use license through an optional
+subscription for commercial users who do not want a larger one-time purchase.
 
 Initial pricing hypothesis:
 
