@@ -1,6 +1,9 @@
 # ADR-0038 — Product licensing: Business Source License 1.1 with noncommercial Additional Use Grant
 
-Status: **Proposed** (TASK-0153; awaiting owner ratification after independent review)
+Status: **Accepted** (TASK-0153; owner ratified 2026-09-26 after independent
+architecture/governance and adversarial reviews; the final adversarial review
+returned PASS WITH NON-BLOCKING FINDINGS on exact pre-acceptance commit
+`5ba1af136456fec4cde583b5a13e0dcb7e719225`)
 Gate: cross-gate (governance)
 
 ADR-0037 is reserved for TASK-0152 (confined Claude provider authentication),
@@ -28,7 +31,7 @@ unrelated to this ADR's licensing decision.
 The repository's current default license, verified byte-identical to
 upstream, is [PolyForm Shield 1.0.0](https://github.com/polyformproject/polyform-licenses/blob/1.0.0/PolyForm-Shield-1.0.0.md)
 as distributed on the repository's default branch before this ADR's change
-(`LICENSE` in this repository now holds the BSL 1.1 text proposed by this
+(`LICENSE` on this branch holds the BSL 1.1 text adopted by this
 ADR; this link is the original upstream Shield text this decision replaces,
 not this repository's current `LICENSE`). Shield permits broad use —
 including ordinary internal business use — subject only to a noncompete
@@ -310,8 +313,8 @@ forward to the repository default as of ratification.
 **Merge sequencing.** The LICENSE/NOTICE change described by this ADR takes
 effect only when the branch carrying it is merged into the repository
 default branch. Merge happens only together with, or after, owner
-ratification of this ADR; this ADR being Proposed and its files existing on
-a branch is not itself a license change. `planning/tasks/queue.yaml`'s
+ratification of this ADR; the ADR being ratified and its files existing on
+a branch is not itself a license change — the change takes effect at merge. `planning/tasks/queue.yaml`'s
 TASK-0153 `exit_criteria_summary` records the same gate (see Migration
 impact).
 
@@ -634,14 +637,37 @@ ADR:
   independent research foundation, or a public-private partnership — are not
   resolved by this ADR and remain open for a future FAQ or Licensor
   determination if they arise.
-- **D10 (tiers do not gate features) needs explicit owner confirmation at
-  ratification.** D10's "every software feature is available to everyone
+- **D10 (tiers do not gate features) — resolved: explicitly confirmed by the
+  owner at ratification on 2026-09-26.** D10's "every software feature is available to everyone
   permitted to use it for free or under a commercial license" is this ADR's
   (orchestrator's) inference from the owner's stated position that
   noncommercial users get everything and business pays for everything; it
   has not been separately, explicitly re-confirmed by the owner as its own
   decision point and should be confirmed at ratification alongside the rest
   of this ADR.
+
+## Ratification
+
+Ratified by the owner (Artem Hrechuk) on 2026-09-26, together with an
+explicit confirmation of D10. Review record, all on the TASK-0153 branch:
+
+- `69b2221` (PolyForm Noncommercial draft): independent and adversarial
+  reviews FAIL (wording findings); superseded.
+- `b534030` (BSL rework): independent and adversarial reviews FAIL, one
+  shared blocking finding ("development" listed as free non-production use).
+- `789333a` (remediation): adversarial re-review PASS WITH NON-BLOCKING
+  FINDINGS.
+- `5ba1af1` (covenant wording): adversarial review PASS WITH NON-BLOCKING
+  FINDINGS — the exact pre-acceptance commit.
+
+The ratification commit applies only status/bookkeeping changes plus the two
+remaining non-blocking wording fixes from the final review (OEM/white-label
+row scope; HashiCorp FAQ reference labelled unverified). LICENSE and NOTICE
+are unchanged from `5ba1af1`. Ratification does not by itself change the
+license in effect: that happens only when this branch is merged into the
+default branch, which requires separate owner authorization. Open questions
+above other than D10 remain open for legal review; they do not block
+adoption.
 
 ## References
 
@@ -695,7 +721,9 @@ ADR:
   Change License; cited as Change License precedent under D1, not as legal
   precedent for this ADR's terms.
 - HashiCorp, "Licensing FAQ" (covers the HashiCorp/IBM Terraform BSL 1.1
-  transition): <https://www.hashicorp.com/license-faq> — fetched; cited in
+  transition): <https://www.hashicorp.com/license-faq> — reported fetched by
+  the drafting agent; an independent reviewer could not re-fetch it (HTTP 429
+  bot checkpoint), so treat its content as unverified; cited in
   Open questions as a comparison point for a possible Licensor FAQ, not as
   legal precedent for this ADR's terms.
 - U.S. Copyright Office, *Copyright and Artificial Intelligence, Part 2:

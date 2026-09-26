@@ -29,4 +29,4 @@ third-party notices and the future Apache-2.0 Plugin SDK direction.
 Apache-2.0 is not an alternative license for the current core version. This
 is not legal advice; see
 [ADR-0038](docs/architecture/adr/ADR-0038-product-licensing-bsl.md)
-(Proposed, pending owner ratification) for the full decision record.
+(Accepted, owner-ratified 2026-09-26) for the full decision record.

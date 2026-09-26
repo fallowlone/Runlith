@@ -6,11 +6,11 @@ described as "open source." The repository's default license is the
 license text governs; this page explains scope and product direction and
 does not add restrictions to or replace its grants.
 
-This page is product/documentation guidance, not legal advice. It records a
-Proposed decision — see
+This page is product/documentation guidance, not legal advice. It records
+the decision in
 [ADR-0038](docs/architecture/adr/ADR-0038-product-licensing-bsl.md)
-(status: Proposed, pending owner ratification after independent review).
-Nothing here is Accepted policy until that ADR is ratified.
+(status: Accepted, owner-ratified 2026-09-26). The license text in `LICENSE`
+governs once this change is merged into the repository default branch.
 
 ## Current scope
 
@@ -184,8 +184,9 @@ text is not evidence that those release checks have been completed.
 
 This LICENSE/NOTICE change takes effect only once it is merged into the
 repository default branch, and merge happens only together with or after
-owner ratification of ADR-0038. Until then, this page and NOTICE describe a
-Proposed decision, not the license terms already in effect.
+owner ratification of ADR-0038 (ratified 2026-09-26; merge requires separate
+owner authorization). Until merge, this page and NOTICE describe an adopted
+decision, not the license terms already in effect on the default branch.
 
 ## License source
 

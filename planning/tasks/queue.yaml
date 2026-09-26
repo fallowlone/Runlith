@@ -4819,4 +4819,26 @@ items:
       - NOTICE
       - LICENSING.md
       - README.md
+    outcome: >-
+      ADR-0038 Accepted: owner ratified 2026-09-26, including explicit
+      confirmation of D10 (tiers do not gate features), after independent
+      architecture/governance and adversarial reviews; the final adversarial
+      review returned PASS WITH NON-BLOCKING FINDINGS on exact pre-acceptance
+      commit 5ba1af1. Business Source License 1.1 adopted with Licensor Artem
+      Hrechuk, Change License Apache-2.0 and a four-year per-version Change
+      Date; the Additional Use Grant gives free production use only to
+      individuals' personal noncommercial use and to charitable organizations
+      and privately operated, non-governmental, not-for-profit educational or
+      research institutions. LICENSE body verified byte-identical to SPDX
+      BUSL-1.1 (lines 1-4 and Terms through EOF). Docs/licensing/governance
+      only; product/version.toml advanced to 0.1.0-dev.task0153. The license
+      change takes effect only on merge into main, which requires separate
+      owner authorization; CI on the branch was blocked by GitHub Actions
+      runner provisioning (no runner assigned), not by the diff. Follow-ups,
+      not started: legal review of the Additional Use Grant and of
+      "production use", commercial license/EULA, CLA, trademark policy,
+      Cargo license metadata, reconciliation of the monetization appendix and
+      SOURCE_OF_TRUTH section 86, and pre-publication hygiene before any
+      public repository. This outcome records completion on the task branch;
+      integration into main is not claimed.
       - AI_ENGINEERING_OS_MONETIZATION_AND_PLUGIN_ECOSYSTEM.md
