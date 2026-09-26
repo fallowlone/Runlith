@@ -88,9 +88,9 @@ The project should distinguish three different rights:
 2. Run AI Engineering OS internally at a company
    → any production use, including ordinary internal use, requires a
      separately executed commercial license; non-production use (evaluating
-     or testing the product, or developing/debugging it) is free even for a
-     business; additional paid components and services follow their own
-     separately identified commercial terms.
+     or testing the product, or developing or debugging Runlith itself) is
+     free even for a business; additional paid components and services
+     follow their own separately identified commercial terms.
 
 3. Reuse, redistribute, white-label, host-resell, embed or commercialize
    AI Engineering OS source/core itself
@@ -175,7 +175,7 @@ Potential repository/license split once the extension contracts stabilize:
 | Surface | Likely licensing direction |
 | --- | --- |
 | Core desktop/runtime/orchestration product | Apache License, Version 2.0 repository default (free production use only per the License Grant; non-production use free for everyone; converts to Apache-2.0 per version four years after first public distribution) |
-| Any production use, including OEM/white-label rights | separate negotiated Commercial License |
+| Any production use outside the License Grant, and any OEM/white-label rights | separate negotiated Commercial License |
 | Future explicitly scoped Plugin SDK / public schemas / examples | Apache-2.0 (OSI); no current component designated |
 | Enterprise/cloud services | commercial/private as appropriate |
 | Brand/trademark | separate trademark policy |
