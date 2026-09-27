@@ -25,11 +25,14 @@ Gate: G8
 > review. The owner's own real-credential gateway probe has now run
 > successfully for both credential classes and is recorded in "Owner
 > real-credential receipts", alongside an operator-error exposure of the
-> OAuth token used, the owner's scheduled revocation of it, and the round-4
-> hardening that exposure triggered — carried into the hardening rules
-> below (D15-D22, D25-D26). This revision also remediates two independent
-> ADR_REVIEW_FAIL findings sets (B1-B3 blocking, N1-N10 non-blocking; see
-> each D-rule and the Security impact section for the finding it fixes). No
+> OAuth token used (the owner stated intent to revoke it; treated as
+> exposed until revocation is confirmed, not as already revoked), and the
+> round-4/6/7 hardening that exposure and two independent review cycles
+> triggered — carried into the hardening rules below (D15-D27). This
+> revision remediates a second independent review cycle
+> (architecture/security: PASS_WITH_NONBLOCKING_FINDINGS; adversarial:
+> FAIL) on top of the first (B1-B3 blocking, N1-N10 non-blocking; see each
+> D-rule and the Security impact section for the finding it fixes). No
 > real credential value or the owner's own Keychain item was ever read;
 > `security` and this ADR's own probe scripts were invoked, but only
 > against throwaway temp keychains holding dummy/fake values, never the
@@ -420,13 +423,18 @@ ambient proxy environment variables (`ProxyHandler({})`), so
 What the probe does **not** close — stated as a documented limitation, not
 glossed over — is a same-host, same-user concurrent process guessing or
 racing the placeholder before the legitimate child does (no TOCTOU/
-concurrency analysis was performed), nor any **other-uid local attacker**
-on the same host: this ADR's threat model assumes the confined child and
-any co-resident attacker share the launching user's uid (matching G6's
-existing trust model elsewhere); a different-uid local process is out of
-scope, same as for every other Runner-enforced boundary. This is carried
-into "Security impact" below as a residual risk, not silently assumed
-away.
+concurrency analysis was performed). **An other-uid local attacker is not
+out of scope here, unlike every other Runner-enforced boundary** — see
+D27: the gateway is an anonymous loopback TCP/HTTP endpoint any local uid
+can reach, which is exactly what ADR-0020 otherwise forbids, so this ADR
+states a narrow, explicit exception rather than silently assuming
+same-uid isolation. An other-uid process can discover the port (D4's
+`/api/hello` answers unconditionally, per round-7 evidence that the CLI
+itself never sends a credential there) and attempt the bounded DoS D16
+already caps, but cannot obtain the credential or forward a request
+without the exact per-attempt placeholder, which it has no way to know.
+This is carried into "Security impact" below as an owner-accepted
+residual risk, not silently assumed away.
 
 **Credential lifetime/scope/rotation/revocation.**
 
@@ -468,10 +476,10 @@ TASK-0114 refusal fires exactly as it does today, before any provider work
 **Owner UX.** One-time setup per credential class, unchanged from Option
 A: the owner creates a Keychain item for an API key, or generates a
 `claude setup-token` themselves (Runlith never runs that command and never
-sees the token) and stores the resulting value the same way, mirroring the
-evidence doc's "Owner commands" pattern (`-w` as the last `security`
-argument so the value is typed only at an interactive prompt, never in
-argv or shell history).
+sees the token) and provides it once to the provisioning helper (D22),
+which reads it only from a masked, hidden interactive prompt entered
+twice — never a command argument, environment variable, or clipboard
+value (`provision_keychain_item.py`'s `getpass.getpass` pattern; see D22).
 
 **Blast radius if leaked.** Bounded to the credential class described
 above; critically, "leaked" here means the *real* credential being
@@ -568,14 +576,14 @@ review reaches a different conclusion.
   (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:196,206,236`);
   the empty-string branch is allowed defensively, by design, not because it
   was itself observed (reference implementation: `ALLOWED_QUERY_STRINGS =
-  ("", "beta=true")`, `docs/development/task0152-probes/owner_proxy_probe.py:269`).
+  ("", "beta=true")`, `docs/development/task0152-probes/owner_proxy_probe.py:336`).
   Any other query string, method, or path is rejected locally with `403`
   and recorded to Security Audit as a fixed category plus a truncated,
   non-reversible digest of the raw value — **never the raw child-supplied
   path, query, or header value itself** (round-6 finding T2d: recording a
   child-controlled string verbatim turns the audit trail into an
   attacker-steered logging channel;
-  `docs/development/task0152-probes/owner_proxy_probe.py:505-514`,
+  `docs/development/task0152-probes/owner_proxy_probe.py:593-602`,
   `_hash_path_for_logging`). This resolves the tension a raw-path audit
   record would otherwise create against D21's stricter "never in any form"
   posture for the placeholder: nothing child-controlled or secret is ever
@@ -623,7 +631,19 @@ review reaches a different conclusion.
   and the host's own non-loopback LAN interface address — while correctly
   denying a different port and a genuinely remote host. Consequently:
   - **The gateway must hold the port on every local address the rule
-    admits, not just `127.0.0.1`.** At gateway start it binds
+    admits, not just `127.0.0.1`.** L1's measurement admitted, at minimum:
+    `127.0.0.1` (loopback IPv4), `::1` (loopback IPv6), a second, distinct
+    `127.0.0.0/8` alias configured on the host, and the host's own
+    non-loopback LAN interface address
+    (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:284-333`).
+    Beyond what L1 directly measured, the same underlying primitive
+    plausibly admits further classes this ADR does not claim to have
+    individually verified: IPv6 link-local addresses scoped to loopback
+    (e.g. `fe80::1%lo0`), other IPv6 global or link-local addresses the
+    host has configured (including other scoped addresses), and
+    VPN/tunnel-interface addresses (e.g. `utun*`) — this last class is
+    explicitly **inconclusive**, neither confirmed admitted nor confirmed
+    denied by any measurement in this task. At gateway start it binds
     `127.0.0.1:<port>` and `[::1]:<port>` at minimum (both addresses, same
     port, same handler); if either bind fails, gateway startup fails
     closed (same shape as D14's other startup-failure paths). Every
@@ -631,26 +651,28 @@ review reaches a different conclusion.
     (`127.0.0.0/8` or `::1`) and any other peer is dropped immediately,
     unauthenticated by anything but that source-address check (probe
     reference: dual-stack bind and peer filter,
-    `docs/development/task0152-probes/owner_proxy_probe.py:1257-1270`,
-    `_is_loopback_peer` at `:558-565`).
-  - **Residual, stated explicitly, not fixed by this rule:** (a) a local,
-    non-loopback interface address or an additional `127/8` alias that
-    Seatbelt's rule also admits, but which the gateway does not itself
-    bind at attempt start, remains something the *rule* would admit a
-    connection attempt toward — there is simply nothing listening there
-    for *this* gateway to accept, so no functional gap exists for this
-    design today, but a future consumer reusing this same network-rule
-    pattern must account for that admission itself, not assume "loopback
-    only"; (b) an address added to the host mid-attempt (DHCP renewal, a
-    VPN interface coming up) after the gateway has already bound its
-    fixed set is not retroactively covered — the gateway does not
-    re-enumerate interfaces during an attempt; and (c) binding a
-    non-loopback address specifically (if a future implementation ever
-    chose to, which this rule does not require) would itself expose a
-    listener on that address, relying entirely on the peer-drop check
-    above rather than on the OS not routing a connection there at all —
-    the peer filter is a real, load-bearing check under this design, not
-    defense in depth.
+    `docs/development/task0152-probes/owner_proxy_probe.py:1478-1489`,
+    `_is_loopback_peer` at `:652-659`).
+  - **Residual, stated explicitly, not fixed by this rule — and this is an
+    exfiltration sink, not a cosmetic gap:** (a) **any other local process
+    that is already listening on port `P` on any address the Seatbelt rule
+    admits — including a scoped IPv6 link-local address the gateway does
+    not itself bind — receives a compromised confined child's connection
+    instead of the legitimate gateway.** This is exactly why the gateway
+    must bind every admitted address, including scoped IPv6 forms, and why
+    a Runner backend that cannot express or enumerate the full admitted set
+    must fail closed rather than bind only the addresses it happens to
+    think of; (b) an address added to the host mid-attempt (DHCP renewal, a
+    VPN interface coming up) after the gateway has already bound its fixed
+    set is not retroactively covered — the gateway does not re-enumerate
+    interfaces during an attempt, so a listener on a newly-added admitted
+    address is still an unguarded exfiltration sink for the remainder of
+    that attempt; and (c) binding a non-loopback address specifically (if a
+    future implementation ever chose to, which this rule does not require)
+    would itself expose a listener on that address, relying entirely on the
+    peer-drop check above rather than on the OS not routing a connection
+    there at all — the peer filter is a real, load-bearing check under this
+    design, not defense in depth.
   - Any Runner backend that cannot express this true destination set
     (bind-everywhere-admitted-plus-peer-filter) fails closed
     (`RunnerError::BackendUnavailable`), exactly as `profile_for` already
@@ -661,7 +683,9 @@ review reaches a different conclusion.
     unchanged.
 - **D12.** The real credential is released by the Secrets Broker
   (`crates/secrets`, policy-authorized `Capability::SecretAccess`, per
-  ADR-0026) only to the gateway process — never to the confined child, and
+  ADR-0026) only to the gateway component (in-process within `agentd`,
+  per N7's process-boundary decision — never a separate process) — never
+  to the confined child, and
   never through `ProviderEnvironment`/`CHILD_ENV_ALLOWLIST`, both of which
   carry only the non-secret placeholder and `ANTHROPIC_BASE_URL`.
 - **D13.** `ProviderEnvironment` stays secret-free: the placeholder added
@@ -697,23 +721,69 @@ review reaches a different conclusion.
   entirely outside the adapter. See "Proposed amendments" for the exact
   §9a superseding text and "Implementation task list" for the matching
   code change.
-- **D24 (body-scoped enforcement — B2, owner-accepted residual risk).** The
-  gateway parses the forwarded `POST /v1/messages` JSON body only to
-  enforce two owner-configured limits: (a) the `model` field must match an
-  owner-configured model allowlist — an unknown or missing `model` is a
-  local rejection, never forwarded; (b) `max_tokens` must not exceed an
-  owner-configured per-request cap, and the gateway tracks a per-attempt
-  request-count and cumulative-token budget, rejecting locally once either
-  is exceeded. If no allowlist/cap configuration is present for an
-  attempt, the gateway fails closed (refuses to forward at all) rather
-  than defaulting to unrestricted. This is a narrow, owner-scoped guard,
-  not a general body-content policy: it does not inspect, filter, or
-  reject `tools`, `mcp_servers`, or any other body field — see "Security
-  impact" for the residual risk this leaves open, which the owner has
-  reviewed and accepted, and "Implementation task list" for an optional,
-  not-yet-decided future hardening follow-up that would go further.
+- **D24 (corrected — G3: enforceable and fail-closed body-scoped
+  enforcement, B2 owner-accepted residual risk).** Before forwarding a
+  `POST /v1/messages` request, the gateway validates its body under a
+  strict parse, then forwards the **original, unmodified bytes** only
+  after that validation passes — the parse is a gate, never a
+  transformation, so a parser-differential bypass (a body that one parser
+  accepts leniently and another interprets differently) cannot smuggle
+  content past the check the gateway itself enforces. Validation, all of
+  it fail-closed (any violation is a local rejection, nothing forwarded):
+  - `Content-Type` must be exactly `application/json`; any other or
+    missing value is rejected.
+  - The body must decode as strict UTF-8 and parse as a single JSON
+    **object** (not an array, string, number, or other JSON value); a
+    parse failure of any kind is rejected.
+  - The body must contain **no duplicate object keys at any nesting
+    level** — rejected outright if found. (Two JSON parsers can legally
+    disagree on which value a duplicate key resolves to; refusing
+    duplicates entirely, rather than picking one interpretation, is what
+    closes that class of parser-differential bypass, consistent with this
+    rule's "validate then forward original bytes" design.)
+  - `model` must be present, must be a JSON **string** (not a number,
+    bool, or other type), and must exactly match one entry in an
+    owner-configured model allowlist — any other value, or an absent
+    `model` field, is rejected.
+  - `max_tokens` must be present and must be a JSON **integer** — not a
+    float, not a value using exponent notation, not a boolean, and not a
+    big-number/string-encoded form — with `1 <= max_tokens <= cap` for an
+    owner-configured per-request cap; any other shape or an out-of-range
+    value is rejected.
+  - If no model allowlist or `max_tokens` cap is configured for the
+    attempt, the gateway fails closed: it refuses to forward *any* request
+    for that attempt, rather than defaulting to unrestricted.
 
-### Additional hardening rules (D15-D22, D25-D26)
+  **The per-attempt budget is exactly two bounds, stated precisely:** (a)
+  a maximum **count** of forwarded requests per attempt (shared with D9's
+  general request-count bound); and (b) a cap on the **sum of the
+  `max_tokens` values of every forwarded request** in the attempt — once
+  either bound is reached, every further request in that attempt is
+  rejected locally, forwarding none.
+
+  **What this does NOT bound, stated explicitly rather than implied by
+  omission:** input-token volume beyond whatever D9's request body-size
+  limit implies (a large but well-formed body under the size cap can still
+  carry a large input-token count `max_tokens` says nothing about);
+  beta-enabled long-context modes the CLI itself requests (R8 observed the
+  CLI send `context-1m-2025-08-07` in `anthropic-beta`, which D24 forwards
+  unmodified per D5/D15 — a 1M-token context is not a `max_tokens` output
+  bound and this rule does not constrain it); and any per-use charge
+  Anthropic bills for a server-side tool or MCP connector use the
+  forwarded body invokes — that is part of the Anthropic-server-mediated
+  egress risk "Security impact" records as owner-accepted, not something
+  D24's model/token-count enforcement reaches. **The claim that this rule
+  alone bounds attempt spend is false and is not made:** D24 bounds
+  request count and the declared `max_tokens` sum; it does not bound
+  actual spend, which also depends on input tokens, context mode, and any
+  billed tool/connector use. D24 does not inspect, filter, or reject
+  `tools`, `mcp_servers`, or any other body field beyond `model` and
+  `max_tokens` — see "Security impact" for the residual risk this leaves
+  open, which the owner has reviewed and accepted, and "Implementation
+  task list" for an optional, not-yet-decided future hardening follow-up
+  that would go further.
+
+### Additional hardening rules (D15-D22, D25-D27)
 
 Triggered by an owner operator error during the withdrawn round-2/3
 *manual* Keychain-setup flow (not the round-4 probe itself): on 2026-09-25
@@ -725,58 +795,103 @@ established in primary docs, so this ADR treats the token as exposed
 until revocation is confirmed, not as already revoked — see "Owner
 real-credential receipts"). The probe's own round-4/round-6 hardening
 (C1-C10, T1-T2, `docs/development/task0152-probes/`) fixes the class of
-mistake, not only that symptom; D15-D26 carry the same posture into the
+mistake, not only that symptom; D15-D27 carry the same posture into the
 production Rust gateway as normative rules, not optional polish.
 
 - **D15.** Only an explicit header-**name** allowlist is forwarded
   upstream: `content-type`, `accept`, `anthropic-version`, `anthropic-beta`,
   `user-agent`, the R8-observed non-identifying Stainless SDK metadata
-  names, and `x-app` (`FORWARD_HEADER_ALLOWLIST`, `owner_proxy_probe.py:318-332`).
+  names, and `x-app` (`FORWARD_HEADER_ALLOWLIST`, `owner_proxy_probe.py:417-431`).
   Everything else the child sends — including `x-claude-code-session-id`
   and `anthropic-dangerous-direct-browser-access` — is dropped; only the
   dropped header **name** may be audited, never a value.
-- **D16.** Request-smuggling/parser hardening, checked before any body is
-  read: reject `Transfer-Encoding` from the child, more than one
-  `Content-Length` header or a non-numeric one, and a declared body over a
-  fixed size limit (`owner_proxy_probe.py:272`, `MAX_BODY_BYTES`); enforce
-  a bounded header count/size and a per-connection read timeout
-  (`CLIENT_SOCKET_TIMEOUT`, `:274`, used at `:602`); run with no
-  address reuse, bound only to the addresses D11 requires. **Bounded
-  concurrency and a whole-request deadline (round-6, T2b — closes an
-  other-uid-irrelevant but same-attempt DoS gap a slow client can otherwise
-  open):** a client trickling a request body a byte at a time can hold a
-  single per-operation-timeout-only server the *entire* time, since each
-  individual read completes within its own timeout even though the whole
-  request never does. The gateway bounds concurrent in-flight requests to
-  a small fixed number (the reference implementation is single-threaded,
-  i.e. exactly one) and enforces a separate, shorter wall-clock deadline
-  from connection accept through headers-and-body-fully-read (never
-  through response writing) — reference: a 10s `signal.alarm`-based
-  deadline layered on top of the unchanged per-operation socket timeout
-  (`REQUEST_DEADLINE_SECONDS = 10`, `owner_proxy_probe.py:283`; enforcement
-  at `:607-630`).
+- **D16 (corrected — G1).** Request-smuggling/parser hardening, checked
+  before any body is read: reject `Transfer-Encoding` from the child, more
+  than one `Content-Length` header or a non-numeric one, and a declared
+  body over a fixed size limit (`owner_proxy_probe.py:339`,
+  `MAX_BODY_BYTES`); enforce a bounded header count/size; run with no
+  address reuse, bound to every address D11 requires. **A bounded total
+  concurrent-connection limit and a per-connection deadline, enforced in
+  the connection's own handling context — never process-wide signals:**
+  the round-6 reference design used `signal.alarm` for a whole-request
+  deadline; two independent reviews found, and the round-7 evidence
+  confirms by direct reproduction, that this was **ineffective**: Python
+  only ever invokes a signal handler on the main thread regardless of
+  which thread calls `signal.alarm` or is blocked, and the reference
+  implementation already ran one listener thread per address family, so
+  the alarm fired wherever the main thread happened to be — in production
+  terms, this could abort unrelated work (e.g. the child-process wait)
+  instead of bounding the stalled connection, while leaving the actual
+  stalled connection unbounded. **The round-6 dry-self-check was a false
+  pass**: with no concurrent main-thread work in dry mode, the alarm
+  interrupted the test's *own* slow-client `recv()` instead, which looked
+  like enforcement without the server ever having bounded its own
+  connection thread
+  (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:593-717`,
+  "Round 7 hardening (K1-K3, review remediation 2)", K1). Production must
+  instead: (a) run one short-lived handling context per accepted
+  connection (reference: `socketserver.ThreadingMixIn`, one thread per
+  connection, `class ProxyServer`, `owner_proxy_probe.py:663-682`), never
+  one context shared across a whole listener; (b) admit at most a small,
+  fixed total number of concurrent connections across every address D11
+  binds, checked atomically before a handling context is created for a
+  new connection, with any excess accepted at the transport level and
+  immediately closed, never processed (reference: `MAX_CONCURRENT_CONNECTIONS
+  = 4`, `:382`; admission check, `verify_request`, `:684-701`); and (c)
+  enforce the 10s deadline with a mechanism scoped to that one connection's
+  own handling context — a watchdog started inside the connection's own
+  thread that force-closes only that connection's own socket at the
+  deadline, touching no other connection and never a process-wide signal
+  (reference: `threading.Timer` watchdog, `handle_one_request`,
+  `owner_proxy_probe.py:736-758`; `REQUEST_DEADLINE_SECONDS = 10`, `:373`).
+  The corrected reference verification observes server-side hold time
+  directly from a worker thread that drives a slow client while a separate
+  simulated main-thread task runs concurrently, asserting the main-thread
+  task completes its full, uninterrupted duration regardless of the
+  connection deadline firing — the exact property `signal.alarm` could not
+  provide, reproduced outside the repo as a standalone scratch script (not
+  part of this task's committed tooling) that ran a real
+  `subprocess.run(["/bin/sleep", "13"])` on the simulated main thread
+  concurrently with a stalled connection whose 10s deadline fired, and
+  observed the sleep complete uninterrupted at `~13.1s`
+  (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:593-717`, K1
+  scratch verification). **Every "single-threaded" / "exactly one
+  connection in flight" statement in this ADR is corrected by this rule**:
+  the reference design is one thread per accepted connection, capped at a
+  total of `MAX_CONCURRENT_CONNECTIONS` across every address D11 binds,
+  never "single-threaded" or "exactly one."
 - **D17.** Upstream TLS uses an explicit, code-configured trust
-  configuration — **an explicitly loaded/pinned root store**, never
-  whatever the ambient process environment happens to select — ignoring
-  `SSL_CERT_FILE`, `SSL_CERT_DIR`, any `*_CA_BUNDLE` name, any `OPENSSL_*`
-  name (including `OPENSSL_CONF` specifically), `SSLKEYLOGFILE`, and
-  ambient proxy variables. **`OPENSSL_CONF` is checked and refused before
-  any TLS-capable module is even imported** (round-6, T2a): a review
-  measured that OpenSSL can read `OPENSSL_CONF` at library-initialization
-  time, which can happen as early as import, so scrubbing the process
+  configuration — **production must explicitly load/pin its own root
+  store**, never whatever the ambient process environment happens to
+  select — ignoring `SSL_CERT_FILE`, `SSL_CERT_DIR`, any `*_CA_BUNDLE`
+  name, any `OPENSSL_*` name (including `OPENSSL_CONF` specifically),
+  `SSLKEYLOGFILE`, and ambient proxy variables. **Stated precisely (R2):
+  the reference probe does NOT implement an explicitly pinned root
+  store** — `_build_opener` uses `ssl.create_default_context()`, which
+  loads the platform's default verify paths; only the TLS minimum version
+  and the environment-override refusal are pinned in the probe (round-7,
+  K3:
+  `docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:593-717`). The
+  explicit-root-store requirement is a normative rule for the production
+  Rust gateway, not something this rule cites the probe as already
+  satisfying. **`OPENSSL_CONF` is checked and refused before any
+  TLS-capable module is even imported** (round-6, T2a): a review measured
+  that OpenSSL can read `OPENSSL_CONF` at library-initialization time,
+  which can happen as early as import, so scrubbing the process
   environment *after* that point is already too late — the reference
   implementation's check runs as the very first code in the process
   (`_c3_refuse_if_dangerous_tls_env`,
-  `docs/development/task0152-probes/owner_proxy_probe.py:207-224`), and
+  `docs/development/task0152-probes/owner_proxy_probe.py:274-296`), and
   refuses outright rather than stripping-and-continuing. TLS is pinned to
-  a minimum of 1.2, with full certificate and hostname verification, and a
-  pinned upstream host (reference: `_build_opener`, `:363-372`). **This
-  reconciles with D6:** D6's "default TLS certificate verification" means
-  the verification *algorithm* is the platform TLS library's own default
-  (full chain + hostname checks, nothing loosened) — it does not mean
-  "whatever root store or config the ambient environment happens to
-  supply," which D17 explicitly pins instead; no redirect is ever
-  followed, per D6.
+  a minimum of 1.2 in the reference implementation, with full certificate
+  and hostname verification (platform default) and a pinned upstream host
+  (reference: `_build_opener`, `:462-471`). **This reconciles with D6:**
+  D6's "default TLS certificate verification" means the verification
+  *algorithm* is the platform TLS library's own default (full chain +
+  hostname checks, nothing loosened) — it does not mean "whatever root
+  store or config the ambient environment happens to supply," which
+  production must pin explicitly instead of the probe's default-verify-
+  paths approach; no redirect is ever followed, per D6.
 - **D18.** On the first upstream authentication failure (`401`/`403` from
   the real Anthropic API), the gateway stops forwarding for that attempt
   and fails with a typed provider-authentication condition — never a retry
@@ -791,7 +906,7 @@ production Rust gateway as normative rules, not optional polish.
   recorded the CLI child issuing exactly 9 forwarded requests and receiving
   9 real `401` responses before the harness's own 120s timeout cut it off
   without the child ever exiting
-  (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:785-909`,
+  (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:924-1049`,
   "Agent-run end-to-end invalid-credential test (round 4)" — the two
   implementer-agent runs are recorded there in full; the orchestrator's
   additional confirmation reproduced the same shape). **Why the CLI
@@ -801,7 +916,7 @@ production Rust gateway as normative rules, not optional polish.
   claimed mechanism; what is observed is only the count and outcome. The
   gateway must not wait out whatever the child's own retry budget turns
   out to be. Total forwards per attempt remain bounded regardless (D9;
-  `MAX_FORWARDED_REQUESTS = 32`, `owner_proxy_probe.py:273`).
+  `MAX_FORWARDED_REQUESTS = 32`, `owner_proxy_probe.py:340`).
 - **D19.** No credential value ever appears in an error, log line, panic/
   crash message, `Debug`/`Display` output, crash report, or Security Audit
   record — only classified failure reasons and counts, matching the
@@ -812,7 +927,7 @@ production Rust gateway as normative rules, not optional polish.
   (see "Process boundary" above, N7), core-dump disabling is a property of
   the `agentd` process itself** — reference:
   `_c9_disable_core_dumps`/`RLIMIT_CORE`,
-  `owner_proxy_probe.py:474-480`, which this rule generalizes from a
+  `owner_proxy_probe.py:573-579`, which this rule generalizes from a
   standalone probe process to `agentd` as a whole. Stated as a trade-off,
   not glossed over: this disables core dumps for all of `agentd`'s other
   responsibilities too, for as long as any credential may be resident in
@@ -822,21 +937,21 @@ production Rust gateway as normative rules, not optional polish.
 - **D20.** Credential shape is strictly validated per class — mode-specific
   prefix and charset — at both provisioning and release; a mismatch fails
   closed without logging the rejected value
-  (`_validate_credential_shape`, `owner_proxy_probe.py:483-491`; same
+  (`_validate_credential_shape`, `owner_proxy_probe.py:582-590`; same
   pattern in `provision_keychain_item.py`'s `TOKEN_PREFIX` check).
 - **D21.** The per-attempt placeholder is at least 256 bits from the OS
-  CSPRNG (`secrets.token_urlsafe(32)` = 32 bytes, `owner_proxy_probe.py:1253`),
+  CSPRNG (`secrets.token_urlsafe(32)` = 32 bytes, `owner_proxy_probe.py:1472`),
   compared only with a constant-time comparison (D3;
-  `hmac.compare_digest`, `:652-654`), and is never written to a log, Event
+  `hmac.compare_digest`, `:800-807`), and is never written to a log, Event
   Journal payload, or Security Audit record in any form.
 - **D22 (provisioning UX, implementation follow-up).** The owner-facing
   provisioning tool never accepts a credential as a command argument,
   environment variable, or clipboard-persisted value — only a masked,
   hidden prompt entered twice and compared, matching
-  `provision_keychain_item.py`'s `getpass.getpass` pattern (`:149-151`)
+  `provision_keychain_item.py`'s `getpass.getpass` pattern (`:150-152`)
   and its refusal to run on any credential-shaped argv element. Service
   names are fixed by credential class, never typed by the owner
-  (`SERVICE_NAME`, `:38-41`). **Round-6 additions (N8):** the tool refuses
+  (`SERVICE_NAME`, `:40-43`). **Round-6 additions (N8):** the tool refuses
   to provision when an item for the service/account already exists — it
   never re-adds over one (no `-U`), because re-adding does not reset an
   existing item's ACL, so an item created some other, looser way would
@@ -844,15 +959,15 @@ production Rust gateway as normative rules, not optional polish.
   existence check first (`find-generic-password` without `-w`, never
   touching the confidential data) and instructs the owner to delete the
   old item explicitly before re-provisioning
-  (`_item_exists`, `provision_keychain_item.py:192-208`; refusal logic,
-  `:358-372`). The account name comes from the OS user database
-  (`pwd.getpwuid(os.getuid()).pw_name`, `:353-356`), never an ambient
+  (`_item_exists`, `provision_keychain_item.py:193-210`; refusal logic,
+  `:358-373`). The account name comes from the OS user database
+  (`pwd.getpwuid(os.getuid()).pw_name`, `:354-356`), never an ambient
   `$USER`/`$LOGNAME` an unusual environment could set to something else.
   Any value destined for the `security -i` command line is rejected if it
   contains a control character, quote, or backslash — a raw newline could
   otherwise terminate one intended command and start a second,
   attacker-chosen one, since `security -i` reads one command per line
-  (`_reject_unsafe_for_security_line`, `:118-132`). **When macOS prompts
+  (`_reject_unsafe_for_security_line`, `:119-133`). **When macOS prompts
   for approval to use the item, the owner clicks "Allow," never "Always
   Allow"** — "Always Allow" permanently adds the requesting application to
   the item's trusted-application list, silently widening exactly what
@@ -863,12 +978,12 @@ production Rust gateway as normative rules, not optional polish.
   `authorizations` list includes `decrypt`/`export_clear`) shows
   `applications (0):` — zero trusted applications, so every read prompts
   the owner, exactly as designed
-  (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:663-712`,
+  (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:802-851`,
   "ACL excerpt (T1c)").
 
   **ACL trade-off, stated explicitly rather than as a simple "stricter."**
   `provision_keychain_item.py` stores the owner's real item with `-T ""`
-  (`:212-221`) — no application is trusted, so *every* read, including
+  (`:213-222`) — no application is trusted, so *every* read, including
   `agentd`'s own, prompts the owner for approval. Production instead names
   exactly one trusted application: the code-signed `agentd` binary. That
   is **looser** than `-T ""` by precisely that one binary — `agentd` reads
@@ -894,7 +1009,7 @@ production Rust gateway as normative rules, not optional polish.
   isolated runtime root and grants **no** host `~/.claude` or
   `~/.claude.json` support-read — the same pattern R5 and the owner's own
   probe already use (`launch_confined_child`,
-  `docs/development/task0152-probes/owner_proxy_probe.py:990-1060`;
+  `docs/development/task0152-probes/owner_proxy_probe.py:1210-1281`;
   current production support-read roots that this rule *excludes* for a
   gateway-backed launch:
   `adapters/provider-claude/src/environment.rs:219-230`). A gateway-backed
@@ -912,11 +1027,58 @@ production Rust gateway as normative rules, not optional polish.
   provider-neutral (no `claude`/`anthropic`-specific identifier in the
   Runner's own admission type). Independent of that binding, the Runner
   refuses — as a defense-in-depth backstop, not the primary control — any
-  admitted value shaped like a real credential (reusing D20's shape-
-  validation posture): a plan-admitted "placeholder" that happens to match
-  a real credential's prefix/charset is refused rather than passed
-  through, since D2 already guarantees a genuine placeholder never has
-  that shape.
+  admitted value shaped like a real credential. **This stays
+  provider-neutral (G6): the Runner never hard-codes a Claude/Anthropic
+  prefix or shape.** The provider adapter (`provider-claude`) supplies the
+  detector as opaque data — a pattern or predicate the Runner evaluates
+  without interpreting — matching D20's shape-validation posture, which
+  itself lives in the adapter, not the Runner; a plan-admitted
+  "placeholder" that happens to match the adapter-supplied detector is
+  refused rather than passed through, since D2 already guarantees a
+  genuine placeholder never has that shape.
+- **D27 (ADR-0020 exception, scoped narrowly to the gateway transport —
+  G2, owner decision 2026-09-26 via a structured decision prompt:
+  "ADR-0020 exception + narrowing").** The gateway is an anonymous
+  loopback TCP/HTTP endpoint any local uid can reach — in direct tension
+  with ADR-0020's decision that local IPC accepts only a peer whose OS
+  identity matches `agentd`'s own user, with "no silent fallback to
+  endpoint-permissions-only, `client_kind`, PID checks, TCP/HTTP, or
+  anonymous connection" (`docs/architecture/adr/ADR-0020-local-ipc-peer-authentication.md:151-156`).
+  This ADR states an explicit, narrow exception rather than silently
+  reinterpreting ADR-0020 or claiming same-uid isolation the gateway does
+  not have:
+  - The exception applies **only** to the ADR-0037 gateway's own loopback
+    transport (D1, D11) — never to `agentd`'s existing control/IPC
+    endpoint (ADR-0003/ADR-0020's own transport), which keeps its
+    unchanged same-uid peer authentication. The gateway exposes no
+    `agentd` operation of any kind: its only two request shapes are D4's
+    `/api/hello` and `/v1/messages` forward, neither of which is a
+    control-plane or business operation.
+  - The gateway substitutes a different authenticator for the one
+    ADR-0020 requires: not OS peer identity, but possession of the
+    attempt-scoped random placeholder (D2, D3) — a capability with its
+    own lifetime (D10) and entropy (D21) properties, narrower in some
+    ways (attempt-scoped, not session-scoped) and reliant on a different
+    trust primitive in others (a shared secret over the wire, not an OS
+    peer-credential check).
+  - Narrowing rules, all already normative rules above, restated here as
+    the set that makes this exception bounded rather than open-ended:
+    D16's per-connection deadline and total concurrent-connection cap;
+    D4's `/api/hello` answered only as a fixed, empty `200` with no
+    information content, never gated on the placeholder (round-7
+    evidence: the CLI itself sends no credential header on `HEAD
+    /api/hello`, so gating it would add no secrecy while adding a failure
+    mode the CLI does not expect); and D11's loopback-only bind with a
+    loopback-peer filter, so no non-loopback network peer can reach the
+    endpoint at all.
+  - **Residual risk, stated and owner-accepted, not silently narrowed:**
+    an other-uid local process can discover the gateway's port (via
+    `/api/hello`) and attempt a bounded denial-of-service against it
+    (capped by D16), but cannot obtain the real credential or forward a
+    request through it, because doing so requires the exact per-attempt
+    placeholder, which such a process has no way to know. See "Security
+    impact" for this risk restated in context, and "Proposed amendments"
+    for the exact ADR-0020 superseding text.
 
 ## Provider neutrality
 
@@ -997,7 +1159,7 @@ the owner's own review of Anthropic's primary terms.
 
 **Proposed for ratification, not yet owner-ratified:** the `setup-token`
 credential class is constrained to the owner's own account, used only on
-the owner's own machine, exclusively through this ADR's gateway (D1-D26) —
+the owner's own machine, exclusively through this ADR's gateway (D1-D27) —
 never a raw HTTP adapter that reuses the token outside the gateway's
 single-host, single-attempt design — and must not be offered to any other
 user as a product sign-in or authentication feature without separate,
@@ -1030,11 +1192,13 @@ owner-accepted residual risk, not silently narrowed by D24's wording (see
 "Security impact" for the full statement, and "Implementation task list"
 for an optional, not-yet-decided future hardening follow-up).
 
+## Owner real-credential receipts
+
 Measured by the **owner** (not this ADR's drafter, per its no-credential-
 read constraint) on 2026-09-25, CLI `2.1.281`, running
 `owner_proxy_probe.py` at commit `9787690` — the pre-round-4 script; C1-C10
 had not yet landed at the time these two runs were made
-(`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:735-783`, "Owner
+(`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:874-923`, "Owner
 real-credential receipts"). Both modes (api-key, OAuth)
 produced this identical result shape:
 
@@ -1062,7 +1226,7 @@ holding it), for both credential classes.
 per mode — no long-lived session near real token expiry, and no OAuth
 refresh behavior, was exercised (same open question as "Security impact"
 below). The result was measured against the pre-round-4 script, so it does
-not by itself prove the round-4 hardened gateway (D15-D26, C1-C10, T1-T2) behaves
+not by itself prove the round-4 hardened gateway (D15-D27, C1-C10, T1-T2, K1-K3) behaves
 identically against a real credential; round 4's own verification
 exercises the hardening's local-only rejection paths via
 `--dry-self-check`, which never touches Keychain or upstream.
@@ -1081,7 +1245,7 @@ revoked on the stated date. This receipt stands as evidence of a real,
 working round trip because it was measured **before** any revocation
 attempt; it does not imply the exposed token remains valid or usable
 afterward, confirmed or not. This exposure is the direct trigger for the
-round-4/round-6 hardening cited throughout D15-D26 above, and for
+round-4/round-6 hardening cited throughout D15-D27 above, and for
 withdrawing the manual `security add-generic-password ... -w` instructions
 in favor of `provision_keychain_item.py`'s hidden-prompt provisioning (D22).
 
@@ -1157,6 +1321,27 @@ text unchanged above this point):
 > per-attempt credential gateway, and it reaches the confined provider
 > process only as a non-secret, attempt-scoped placeholder.
 
+**`docs/architecture/adr/ADR-0020-local-ipc-peer-authentication.md`** —
+append a new numbered exception after §7 ("Failure behavior") stating
+(text unchanged above this point; owner decision 2026-09-26, "ADR-0020
+exception + narrowing," see D27):
+
+> **Exception (ADR-0037, owner-ratified): the ADR-0037 confined-provider
+> credential gateway.** This ADR's same-OS-user-peer requirement and its
+> "no silent fallback to ... TCP/HTTP, or anonymous connection" rule (§7)
+> do not apply to the narrow loopback TCP/HTTP transport ADR-0037 D1/D11
+> define, under all of the following bounds simultaneously: the transport
+> is loopback-only (D11); its lifetime is bound to one provider attempt,
+> never longer (D10); it authenticates a request by possession of a
+> random, attempt-scoped placeholder (D2, D3, D21) rather than OS peer
+> identity; it is never `agentd`'s control/IPC endpoint and exposes no
+> `agentd` operation of any kind (its only two request shapes are a fixed,
+> uninformative health check and one forward path, D4); and it is bounded
+> by a per-connection deadline and a total concurrent-connection cap
+> (D16). Any transport that does not meet all of these bounds remains
+> fully subject to this ADR's same-user peer-authentication requirement
+> without exception.
+
 ## Consequences
 
 - Production can run the Claude provider under mandatory G6 macOS
@@ -1177,9 +1362,9 @@ text unchanged above this point):
   bounded lifetime, request allowlist, and audit surface — a new piece of
   reviewable code, not a new authority model (it composes existing Secrets
   Broker/Policy primitives, per D12).
-- `providers.md` §7, §9a, the H7 closure record, and
-  `PRIVACY_ARCHITECTURE.md` §5 each require the amendment text above once
-  this ADR is ratified (D23 for §9a).
+- `providers.md` §7, §9a, the H7 closure record, `PRIVACY_ARCHITECTURE.md`
+  §5, and ADR-0020 (a scoped exception, D27) each require the amendment
+  text above once this ADR is ratified (D23 for §9a, D27 for ADR-0020).
 - Option A and Option C remain explicitly rejected; adopting either later
   would require a superseding ADR, not a silent implementation choice.
 
@@ -1191,9 +1376,14 @@ Residual risks, not resolved by this ADR and not glossed over:
   process able to reach the gateway's bound addresses (D11: broader than
   `127.0.0.1` alone) with the correct placeholder during the attempt's
   lifetime can spend against the real credential through the gateway's
-  allowlisted `/v1/messages` path, bounded by D24's model/token limits. The
-  intended caller is the one confined child the attempt launched; nothing
-  in D1-D26 cryptographically binds the placeholder to that specific
+  allowlisted `/v1/messages` path. D24 bounds the forwarded-request count
+  and the sum of declared `max_tokens` values — it does **not** bound
+  actual spend: input-token volume, beta-enabled long-context modes the
+  CLI itself requests, and any billed server-tool/MCP-connector use are
+  all outside D24's reach (see D24's own "what this does NOT bound" and
+  the Anthropic-server-mediated egress risk below). The intended caller is
+  the one confined child the attempt launched; nothing in D1-D27
+  cryptographically binds the placeholder to that specific
   process beyond "whoever currently holds the placeholder bytes."
 - **Same-user local processes that learn the placeholder during an
   attempt.** The probe's own limitation statement is carried forward
@@ -1201,12 +1391,18 @@ Residual risks, not resolved by this ADR and not glossed over:
   same-user, same-host process racing the legitimate child to use a
   captured placeholder before attempt end. D10's short attempt-bound
   lifetime narrows the exposure window; it does not eliminate it. **A
-  different-uid local attacker is out of this threat model entirely** —
-  same as every other Runner-enforced boundary — and D4's unauthenticated
-  `/api/hello` endpoint means any same-host process, of any uid that can
-  reach the bound port, can discover that a Runlith gateway is listening
-  (nothing more: no attempt detail, credential, or placeholder is
-  revealed by that endpoint).
+  different-uid local attacker is explicitly in scope here, unlike every
+  other Runner-enforced boundary — this is exactly D27's owner-accepted
+  ADR-0020 exception.** Any same-host process, of any uid, that can reach
+  the gateway's bound port can discover it is listening (D4's `/api/hello`
+  answers unconditionally, with no placeholder check — round-7 evidence
+  confirms the CLI itself never sends a credential there, so gating it on
+  the placeholder would add no secrecy) and can attempt the bounded DoS
+  D16's connection-count cap and per-connection deadline already limit.
+  Such a process cannot obtain the real credential or forward a request:
+  the one path that forwards (`POST /v1/messages`) requires the exact
+  per-attempt placeholder in the credential header, which an other-uid
+  attacker has no way to know.
 - **Data sent to Anthropic via prompts is inherent to using the provider
   at all**, unaffected by which of these options is chosen — out of this
   ADR's scope.
@@ -1248,7 +1444,7 @@ Residual risks, not resolved by this ADR and not glossed over:
 **What this ADR explicitly cannot prevent:**
 
 - **Root or kernel compromise of the host** — every guarantee above is an
-  OS-process-boundary guarantee; regardless of D1-D22.
+  OS-process-boundary guarantee; regardless of D1-D27.
 - **Malware running as the same user as `agentd`** — can read the confined
   child's environment (the attempt-scoped placeholder, per the
   confused-deputy risk above) or attempt to trigger/automate D22's OS
@@ -1257,7 +1453,7 @@ Residual risks, not resolved by this ADR and not glossed over:
 - **Compromise of the upstream provider itself** is outside this ADR's
   threat model; the gateway pins and authenticates the connection, it does
   not attest upstream behavior.
-- **Operator error outside the tool** — D15-D26 narrow, but do not
+- **Operator error outside the tool** — D15-D27 narrow, but do not
   eliminate, the class of mistake behind this ADR's own receipts exposure
   (a secret typed somewhere other than the intended hidden prompt); no
   tool-level control substitutes for owner care.
@@ -1288,41 +1484,59 @@ Not created as queue tasks by this ADR; the orchestrator registers them
 separately after ratification. Each depends on this ADR's ratification
 (and the owner's real-credential receipts, above).
 
-- **Runner loopback network scope (D11 — B3).** Add the D11 capability to
-  `crates/runner` and compile it in `adapters/runner-macos-seatbelt`,
-  binding every local address the Seatbelt rule admits (D11) and filtering
-  to loopback-sourced peers only. Adversarial tests must specifically
-  include: a connection attempt from `::1`, from a second/alias
-  `127.0.0.0/8` address, and from a non-loopback interface address —
-  proving each is either reachable-but-peer-rejected or unreachable as
-  D11 requires, not merely proving `127.0.0.1` alone works; plus a test
-  that every backend without this capability fails closed. Depends on:
-  this ADR's ratification.
+- **Runner loopback network scope (D11 — B3, G4/R5).** Add the D11
+  capability to `crates/runner` and compile it in
+  `adapters/runner-macos-seatbelt`, binding every local address the
+  Seatbelt rule admits (D11) and filtering to loopback-sourced peers only.
+  Adversarial tests must specifically include: a connection attempt from
+  `::1`, from `fe80::1%lo0` (IPv6 link-local scoped to loopback), from a
+  second/alias `127.0.0.0/8` address, and from a non-loopback interface
+  address — proving each is either reachable-but-peer-rejected (if bound)
+  or that an unbound admitted address is a real exfiltration-sink finding
+  to fix, not merely proving `127.0.0.1` alone works; plus a test that
+  every backend without this capability fails closed, and a test proving
+  a compromised child cannot successfully connect to a decoy listener
+  planted on another admitted address while the real gateway holds its
+  own bound set. Depends on: this ADR's ratification.
 - **§9a authentication-precondition code change (D23 — B1).** Update
   `bins/agentd/src/execution.rs:816-826`'s pre-launch flow so a
   gateway-backed launch skips `provider_claude::probe_authentication`
   entirely and instead checks D23's credential/shape/gateway-started
   precondition; a non-gateway launch is untouched. Depends on: gateway
   component, doc amendments (§9a text is fixed by this ADR).
+- **ADR-0020 exception implementation (D27 — G2).** Implement the
+  gateway's transport exactly within D27's bounds (loopback-only,
+  attempt-scoped, placeholder-authenticated, no `agentd` operation
+  exposed, deadline/concurrency-capped); adversarial test proving the
+  gateway never accepts or interprets an `agentd` control/IPC-shaped
+  request even if one is sent to it. Depends on: gateway component, doc
+  amendments (ADR-0020 exception text is fixed by this ADR).
 - **Credential gateway component.** Implement D1-D10 and the D15-D21,
   D24-D26 hardening/scope rules as a new component *inside* `agentd`
   (N7 — not a separate process) with its own targeted test suite:
   self-check, method/path/query allowlist (D4, with audit digest not raw
-  values, N3), header-name allowlist (D15), request-smuggling/size/
-  timeout/single-listener/bounded-concurrency/whole-request-deadline rules
-  (D16, N4), pinned-TLS/no-redirect/no-ambient-proxy/no-`OPENSSL_CONF`
-  bypass (D6, D7, D17), stop-on-first-upstream-401/403 with a typed
-  condition and bounded total forwards (D18), no-credential-in-error/log/
-  panic/audit plus zeroization and `agentd`-scoped core-dump disabling
-  (D19), credential shape validation at release (D20, shared with the
-  provisioning path below), CSPRNG placeholder length/constant-time
+  values, N3), header-name allowlist (D15), request-smuggling/size limits
+  plus per-connection concurrency cap and per-connection deadline enforced
+  in the connection's own handling context (D16, G1 — adversarial test
+  must prove the deadline fires from a non-main thread while a separate
+  main-thread task runs concurrently and completes unaffected, and that a
+  connection beyond the concurrency cap is closed immediately, never
+  processed), pinned-TLS/no-redirect/no-ambient-proxy/no-`OPENSSL_CONF`
+  bypass plus an explicitly pinned root store (D6, D7, D17 — R2:
+  distinct from and stricter than the reference probe), stop-on-first-
+  upstream-401/403 with a typed condition and bounded total forwards
+  (D18), no-credential-in-error/log/panic/audit plus zeroization and
+  `agentd`-scoped core-dump disabling (D19), credential shape validation
+  at release supplied as opaque adapter data (D20, D26, G6 — shared with
+  the provisioning path below), CSPRNG placeholder length/constant-time
   comparison (D21), the fresh config anchor with no host `~/.claude` read
   (D25), the D26 plan-scoped typed environment admission, and D24's
-  model-allowlist/token-budget body enforcement — each rule gets its own
-  adversarial test (e.g., a crafted `Transfer-Encoding`/duplicate-
-  `Content-Length` request for D16, a forced upstream `401` for D18, a
-  deliberately malformed credential for D20, an over-cap `max_tokens` or
-  unlisted `model` for D24). Depends on: this ADR's ratification.
+  strict-parse/model-allowlist/token-budget body enforcement (G3 —
+  adversarial tests must include a duplicate-key body, a non-object JSON
+  body, a non-`application/json` Content-Type, a `max_tokens` sent as a
+  float/exponent/bool, and an over-cap or unlisted `model`, each proving
+  local rejection with nothing forwarded) — each rule gets its own
+  adversarial test. Depends on: this ADR's ratification.
 - **Secrets Broker binding/provisioning path for both credential classes
   (D22 — N8).** An owner-run CLI/setup path that creates the `SecretRef`
   for an API key or a `setup-token` through a masked, hidden interactive
@@ -1349,9 +1563,10 @@ separately after ratification. Each depends on this ADR's ratification
   as a fixed category plus a truncated digest — never a raw child-supplied
   path/query/header value. Depends on: gateway component.
 - **Doc amendments.** Apply the exact superseding text in "Proposed
-  amendments" to `providers.md` §7, §9a, the H7 closure record, and
-  `PRIVACY_ARCHITECTURE.md` §5. Depends on: this ADR's ratification (text
-  is already fixed by this ADR; the follow-up is mechanical).
+  amendments" to `providers.md` §7, §9a, the H7 closure record,
+  `PRIVACY_ARCHITECTURE.md` §5, and ADR-0020 §7. Depends on: this ADR's
+  ratification (text is already fixed by this ADR; the follow-up is
+  mechanical).
 - **Real-provider production G6 smoke, both credential classes.** A
   production-shaped smoke test exercising the gateway with a real
   (owner-provisioned, non-committed) credential for each class, verifying
@@ -1400,33 +1615,35 @@ separately after ratification. Each depends on this ADR's ratification
 - `docs/development/G7_TASK_0112_PROVIDER_AUTH_DIAGNOSIS.md` — root cause,
   capability ablation, rejected remediation (Option C).
 - `docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md` — R0-R8, Option B
-  probe design, round-4 hardening (C1-C10), "Owner commands", "Owner
-  real-credential receipts" (lines 520-565), "Agent-run end-to-end
-  invalid-credential test (round 4)" (lines 567-687), "Owner-run positive
-  probe (Option A) — WITHDRAWN, never run" (lines 1025-1042), "What this does
-  NOT prove".
+  probe design, round-4/6/7 hardening (C1-C10, T1-T2, K1-K3), "Round 7
+  hardening (K1-K3, review remediation 2)" (lines 593-717), "Owner
+  commands", "Owner real-credential receipts" (lines 874-923), "Agent-run
+  end-to-end invalid-credential test (round 4)" (lines 924-1049),
+  "Owner-run positive probe (Option A) — WITHDRAWN, never run" (lines
+  1164-1182), "What this does NOT prove".
 - `docs/development/task0152-probes/owner_proxy_probe.py` — probed
-  mechanics D1-D21, D25 formalize; `:207-224` (`_c3_refuse_if_dangerous_tls_env`,
-  `_DANGEROUS_ENV_EXACT`), `:269` (`ALLOWED_QUERY_STRINGS`), `:272-274`
-  (body/count/timeout limits), `:283` (`REQUEST_DEADLINE_SECONDS`),
-  `:318-332` (`FORWARD_HEADER_ALLOWLIST`), `:363-372` (`_build_opener`, TLS
-  pinning), `:990-1060` (`launch_confined_child`, fresh HOME/
-  `CLAUDE_CONFIG_DIR` anchor), `:474-480`
-  (`_c9_disable_core_dumps`), `:483-491` (`_validate_credential_shape`),
-  `:505-514` (`_hash_path_for_logging`), `:558-565` (`_is_loopback_peer`),
-  `:569-573` (`ProxyServer`, single listener, no address reuse), `:602`
-  (per-connection socket timeout), `:607-630` (whole-request deadline
-  enforcement), `:652-654` (`hmac.compare_digest`), `:1253`
-  (`secrets.token_urlsafe(32)`), `:1257-1270` (dual-stack `127.0.0.1`/
-  `[::1]` bind).
+  mechanics D1-D21, D25 formalize; `:274` (`_DANGEROUS_ENV_EXACT`), `:277`
+  (`_c3_refuse_if_dangerous_tls_env`), `:336` (`ALLOWED_QUERY_STRINGS`),
+  `:339-341` (body/count/timeout limits), `:373`
+  (`REQUEST_DEADLINE_SECONDS`), `:382` (`MAX_CONCURRENT_CONNECTIONS`),
+  `:417-431` (`FORWARD_HEADER_ALLOWLIST`), `:462-471` (`_build_opener`,
+  TLS pinning), `:663-682` (`class ProxyServer`, `ThreadingMixIn`, one
+  thread per connection), `:684-701` (`verify_request`, concurrent-
+  connection admission), `:736-758` (`handle_one_request`,
+  `threading.Timer` watchdog), `:573-579` (`_c9_disable_core_dumps`),
+  `:582-590` (`_validate_credential_shape`), `:593-602`
+  (`_hash_path_for_logging`), `:652-659` (`_is_loopback_peer`), `:800-807`
+  (`hmac.compare_digest`), `:1472` (`secrets.token_urlsafe(32)`),
+  `:1478-1489` (dual-stack `127.0.0.1`/`[::1]` bind), `:1210-1281`
+  (`launch_confined_child`, fresh HOME/`CLAUDE_CONFIG_DIR` anchor).
 - `docs/development/task0152-probes/provision_keychain_item.py` — D22
-  provisioning UX; `:38-41` (`SERVICE_NAME`), `:118-132`
-  (`_reject_unsafe_for_security_line`), `:149-151`
-  (`_read_secret_getpass`), `:192-208` (`_item_exists`), `:212-221`
+  provisioning UX; `:40-43` (`SERVICE_NAME`), `:119-133`
+  (`_reject_unsafe_for_security_line`), `:150-152`
+  (`_read_secret_getpass`), `:193-210` (`_item_exists`), `:213-222`
   (`_store_via_security_interactive`, `-T ""` Keychain-trust precedent),
-  `:353-372` (OS-user-database account, existence-refusal logic).
-  `owner_positive_probe.sh` (Option A's probe) was deleted in round 4,
-  withdrawn unrun — not cited as a live source.
+  `:354-373` (OS-user-database account, existence-refusal logic, round-7
+  actual-account-name fix). `owner_positive_probe.sh` (Option A's probe)
+  was deleted in round 4, withdrawn unrun — not cited as a live source.
 - `docs/development/G6_SECRETS_BROKER.md` — Secrets Broker authority/trust
   boundary (`SecretRef`, `SecretBinding`, `SecretDelivery`).
 - `docs/development/G6_PROVIDER_ENVIRONMENT_ISOLATION_H7_CLOSURE.md` —
@@ -1437,7 +1654,8 @@ separately after ratification. Each depends on this ADR's ratification
 - `docs/architecture/adr/ADR-0013-policy-engine-os-isolation.md` — secrets
   live in OS credential store, never SQLite.
 - `docs/architecture/adr/ADR-0020-local-ipc-peer-authentication.md` —
-  local trusted-boundary authentication precedent.
+  same-OS-user peer-authentication decision; §7 (lines 151-156) is the
+  amended text target for D27's scoped exception (G2).
 - `docs/architecture/adr/ADR-0024-g5-provider-execution-seam.md` —
   `agentd` as composition root for concrete provider adapters.
 - `docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md` —
