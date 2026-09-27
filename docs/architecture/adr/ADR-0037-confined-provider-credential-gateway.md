@@ -378,8 +378,10 @@ alongside A and B.
 
 **Mechanism.** `agentd` hosts a per-attempt HTTP(S) listener component
 (D-rule N7 below: in-process within `agentd`, not a separate helper
-process) bound to loopback addresses only (D11's true destination set, not
-"127.0.0.1 only" — see D11), on an ephemeral port (the "gateway"). The
+process) bound, per D11, on every local address the host has configured —
+not "127.0.0.1 only" — with every accepted connection peer-filtered to
+loopback sources regardless of which address it arrived on (see D11), on
+an ephemeral port (the "gateway"). The
 confined child receives, in the mode-appropriate variable, a random
 per-attempt placeholder value plus `ANTHROPIC_BASE_URL` pointed at that
 loopback listener, and a Seatbelt network scope permitting outbound
@@ -545,12 +547,13 @@ alternative is recorded here, not ratified, in case a future security
 review reaches a different conclusion.
 
 - **D1.** The gateway is owned by `agentd`, created fresh per provider
-  attempt, on an ephemeral (OS-assigned) port. It binds every local
-  address D11's compiled network rule admits (at minimum `127.0.0.1` and
-  `[::1]`; see D11 for the full set and the residuals this does not
-  cover), and never binds a non-loopback interface address itself, even
-  though the Seatbelt rule may separately admit connections toward one
-  (D11).
+  attempt, on an ephemeral (OS-assigned) port. Per D11's normative
+  enumerate-and-bind rule, it binds every local interface address the
+  host has configured, in every family — including non-loopback
+  addresses — and accepts requests on all of them only from loopback
+  peers; see D11 for the full enumeration requirement, the residuals this
+  does not cover, and the macOS firewall-prompt handling a non-loopback
+  bind requires.
 - **D2.** At gateway start, `agentd` mints a random per-attempt placeholder
   credential value and delivers it to the confined child in the
   mode-appropriate variable — `ANTHROPIC_API_KEY` for API-key mode,
@@ -616,71 +619,78 @@ review reaches a different conclusion.
   closes and its placeholder becomes invalid at attempt end (success,
   failure, cancellation, or timeout alike). No gateway outlives the
   attempt that created it.
-- **D11 (corrected — B3).** `crates/runner` gains a new provider-neutral
-  network scope (structurally parallel to `NETWORK_SCOPE_OUTBOUND_TCP_443`,
-  `crates/runner/src/lib.rs:27`) compiled by the macOS Seatbelt backend
+- **D11 (corrected — B3, made internally consistent — round 5).**
+  `crates/runner` gains a new provider-neutral network scope (structurally
+  parallel to `NETWORK_SCOPE_OUTBOUND_TCP_443`, `crates/runner/src/lib.rs:27`)
+  compiled by the macOS Seatbelt backend
   (`adapters/runner-macos-seatbelt/src/lib.rs:103-248`) to an exact
   `(remote tcp "localhost:<port>")` rule bound to the gateway's actual
   listening port — replacing `tcp:443` for a gateway-authenticated
   provider launch, never adding to it. **The scope's true destination set
-  is broader than "loopback" and must be named accurately, not assumed:**
-  round-6's credential-free "L1 loopback admission" measurement
-  (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:284-333`) proved
-  that Seatbelt's `(remote tcp "localhost:P")` admits `127.0.0.1:P`,
-  `[::1]:P`, a second distinct `127.0.0.0/8` alias configured on the host,
-  and the host's own non-loopback LAN interface address — while correctly
-  denying a different port and a genuinely remote host. Consequently:
-  - **The gateway must hold the port on every local address the rule
-    admits, not just `127.0.0.1`.** L1's measurement admitted, at minimum:
-    `127.0.0.1` (loopback IPv4), `::1` (loopback IPv6), a second, distinct
-    `127.0.0.0/8` alias configured on the host, and the host's own
-    non-loopback LAN interface address
-    (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:284-333`).
-    Beyond what L1 directly measured, the same underlying primitive
-    plausibly admits further classes this ADR does not claim to have
-    individually verified: IPv6 link-local addresses scoped to loopback
-    (e.g. `fe80::1%lo0`), other IPv6 global or link-local addresses the
-    host has configured (including other scoped addresses), and
-    VPN/tunnel-interface addresses (e.g. `utun*`) — this last class is
-    explicitly **inconclusive**, neither confirmed admitted nor confirmed
-    denied by any measurement in this task. At gateway start it binds
-    `127.0.0.1:<port>` and `[::1]:<port>` at minimum (both addresses, same
-    port, same handler); if either bind fails, gateway startup fails
-    closed (same shape as D14's other startup-failure paths). Every
-    accepted connection is checked against a loopback-peer allowlist
-    (`127.0.0.0/8` or `::1`) and any other peer is dropped immediately,
-    unauthenticated by anything but that source-address check (probe
-    reference: dual-stack bind and peer filter,
-    `docs/development/task0152-probes/owner_proxy_probe.py:1478-1489`,
-    `_is_loopback_peer` at `:652-659`).
-  - **Residual, stated explicitly, not fixed by this rule — and this is an
-    exfiltration sink, not a cosmetic gap:** (a) **any other local process
-    that is already listening on port `P` on any address the Seatbelt rule
-    admits — including a scoped IPv6 link-local address the gateway does
-    not itself bind — receives a compromised confined child's connection
-    instead of the legitimate gateway.** This is exactly why the gateway
-    must bind every admitted address, including scoped IPv6 forms, and why
-    a Runner backend that cannot express or enumerate the full admitted set
-    must fail closed rather than bind only the addresses it happens to
-    think of; (b) an address added to the host mid-attempt (DHCP renewal, a
-    VPN interface coming up) after the gateway has already bound its fixed
-    set is not retroactively covered — the gateway does not re-enumerate
-    interfaces during an attempt, so a listener on a newly-added admitted
-    address is still an unguarded exfiltration sink for the remainder of
-    that attempt; and (c) binding a non-loopback address specifically (if a
-    future implementation ever chose to, which this rule does not require)
-    would itself expose a listener on that address, relying entirely on the
-    peer-drop check above rather than on the OS not routing a connection
-    there at all — the peer filter is a real, load-bearing check under this
-    design, not defense in depth.
-  - Any Runner backend that cannot express this true destination set
-    (bind-everywhere-admitted-plus-peer-filter) fails closed
-    (`RunnerError::BackendUnavailable`), exactly as `profile_for` already
-    fails closed on every unsupported destination set today
-    (`adapters/runner-macos-seatbelt/src/lib.rs:229-245`). This is new
-    capability surface, not a reinterpretation of the existing `tcp:443`
-    rule; a non-gateway provider launch keeps its current `tcp:443` scope
-    unchanged.
+  is broader than "loopback" and must be named accurately, not assumed.**
+
+  **Measured provenance, stated precisely, not "plausibly":**
+  `docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:284-333`
+  ("Round 6: L1 loopback admission") measured, credential-free, that
+  `(remote tcp "localhost:P")` admits `127.0.0.1:P`, `[::1]:P`, a second
+  distinct `127.0.0.0/8` alias configured on the host, and the host's own
+  non-loopback LAN IPv4 interface address, while correctly denying a
+  different port and a genuinely remote host. Separately, an independent
+  adversarial reviewer additionally measured, also credential-free
+  (2026-09-26, review report — not itself part of the evidence doc), that
+  the rule further admits `fe80::1%lo0` (the loopback-scoped IPv6
+  link-local address), the host's `en0` interface's global IPv6 address,
+  and `en0`'s own IPv6 link-local address. `utun`/VPN-tunnel interface
+  addresses remain explicitly **inconclusive** — neither confirmed
+  admitted nor confirmed denied by any measurement cited by this ADR.
+
+  **Normative rule.** At gateway start, the implementation enumerates
+  every local interface address the host currently has configured, in
+  every address family — IPv4 (including every `127.0.0.0/8` alias and
+  every non-loopback address) and IPv6 (including `::1`, `fe80::1%lo0`,
+  and every other scoped link-local or global address) — and binds the
+  gateway's port on **each one**. Every accepted connection, on every one
+  of those bound addresses, is checked against a loopback-peer allowlist
+  (`127.0.0.0/8`, `::1`, or the loopback-scoped link-local address) before
+  a single byte of the request is read; any other peer is dropped
+  immediately. If any enumerated address fails to bind, or interface
+  enumeration itself fails or encounters an address it cannot represent,
+  gateway startup fails closed (D14) — it does not silently proceed with
+  a partial bind set. **The owner-run probe is not a reference
+  implementation for this full rule**: it binds only `127.0.0.1` and
+  `[::1]` (probe reference: dual-stack bind and peer filter,
+  `docs/development/task0152-probes/owner_proxy_probe.py:1478-1489`,
+  `_is_loopback_peer` at `:652-659`) — a deliberately narrower scope than
+  what this normative rule requires of production, adequate for probing
+  the mechanism's shape but not for closing the exfiltration-sink residual
+  below.
+
+  **Residual, stated explicitly, not fixed by this rule:** (a) an address
+  added to the host mid-attempt (DHCP renewal, a VPN interface coming up)
+  after the gateway has already bound its enumerated set is not
+  retroactively covered — the gateway does not re-enumerate interfaces
+  during an attempt, so a listener on a newly-added admitted address is
+  still an unguarded exfiltration sink for the remainder of that attempt;
+  and (b) binding a non-loopback address, as this rule now requires,
+  itself exposes a real listener on that address — relying entirely on
+  the peer-drop check above (which immediately drops every non-loopback
+  peer, never processing its request) rather than on the OS not routing a
+  connection there at all — and, on macOS specifically, may trigger the
+  application firewall's incoming-connection-approval prompt for the
+  `agentd` binary; the implementation must handle that prompt explicitly,
+  never silently skip the bind if it cannot be resolved — either fail
+  closed (D14) when firewall approval is unavailable or unresolved, or
+  require an explicit, owner-approved firewall rule provisioned ahead of
+  the attempt.
+
+  Any Runner backend that cannot enumerate and bind the full admitted
+  address set, or cannot express this destination set at all, fails
+  closed (`RunnerError::BackendUnavailable`), exactly as `profile_for`
+  already fails closed on every unsupported destination set today
+  (`adapters/runner-macos-seatbelt/src/lib.rs:229-245`). This is new
+  capability surface, not a reinterpretation of the existing `tcp:443`
+  rule; a non-gateway provider launch keeps its current `tcp:443` scope
+  unchanged.
 - **D12.** The real credential is released by the Secrets Broker
   (`crates/secrets`, policy-authorized `Capability::SecretAccess`, per
   ADR-0026) only to the gateway component (in-process within `agentd`,
@@ -1068,9 +1078,12 @@ production Rust gateway as normative rules, not optional polish.
     information content, never gated on the placeholder (round-7
     evidence: the CLI itself sends no credential header on `HEAD
     /api/hello`, so gating it would add no secrecy while adding a failure
-    mode the CLI does not expect); and D11's loopback-only bind with a
-    loopback-peer filter, so no non-loopback network peer can reach the
-    endpoint at all.
+    mode the CLI does not expect); and D11's loopback-peer filter, applied
+    on every address the gateway binds (including any non-loopback address
+    D11's enumerate-and-bind rule requires) — so a non-loopback network
+    peer is dropped immediately on every bound address and can never reach
+    the forward path, even though the gateway may hold a socket open on a
+    non-loopback address.
   - **Residual risk, stated and owner-accepted, not silently narrowed:**
     an other-uid local process can discover the gateway's port (via
     `/api/hello`) and attempt a bounded denial-of-service against it
@@ -1326,13 +1339,15 @@ append a new numbered exception after §7 ("Failure behavior") stating
 (text unchanged above this point; owner decision 2026-09-26, "ADR-0020
 exception + narrowing," see D27):
 
-> **Exception (ADR-0037, owner-ratified): the ADR-0037 confined-provider
-> credential gateway.** This ADR's same-OS-user-peer requirement and its
-> "no silent fallback to ... TCP/HTTP, or anonymous connection" rule (§7)
-> do not apply to the narrow loopback TCP/HTTP transport ADR-0037 D1/D11
-> define, under all of the following bounds simultaneously: the transport
-> is loopback-only (D11); its lifetime is bound to one provider attempt,
-> never longer (D10); it authenticates a request by possession of a
+> **Exception (per ADR-0037): the ADR-0037 confined-provider credential
+> gateway.** This ADR's same-OS-user-peer requirement and its "no silent
+> fallback to ... TCP/HTTP, or anonymous connection" rule (§7) do not
+> apply to the narrow TCP/HTTP transport ADR-0037 D1/D11 define, under all
+> of the following bounds simultaneously: every accepted peer, on every
+> address the transport binds, is authenticated as loopback-sourced before
+> any request is read (D11); its lifetime is bound to one provider
+> attempt, never longer (D10); it authenticates a request by possession of
+> a
 > random, attempt-scoped placeholder (D2, D3, D21) rather than OS peer
 > identity; it is never `agentd`'s control/IPC endpoint and exposes no
 > `agentd` operation of any kind (its only two request shapes are a fixed,
@@ -1484,20 +1499,26 @@ Not created as queue tasks by this ADR; the orchestrator registers them
 separately after ratification. Each depends on this ADR's ratification
 (and the owner's real-credential receipts, above).
 
-- **Runner loopback network scope (D11 — B3, G4/R5).** Add the D11
-  capability to `crates/runner` and compile it in
-  `adapters/runner-macos-seatbelt`, binding every local address the
-  Seatbelt rule admits (D11) and filtering to loopback-sourced peers only.
-  Adversarial tests must specifically include: a connection attempt from
-  `::1`, from `fe80::1%lo0` (IPv6 link-local scoped to loopback), from a
-  second/alias `127.0.0.0/8` address, and from a non-loopback interface
-  address — proving each is either reachable-but-peer-rejected (if bound)
-  or that an unbound admitted address is a real exfiltration-sink finding
-  to fix, not merely proving `127.0.0.1` alone works; plus a test that
-  every backend without this capability fails closed, and a test proving
-  a compromised child cannot successfully connect to a decoy listener
-  planted on another admitted address while the real gateway holds its
-  own bound set. Depends on: this ADR's ratification.
+- **Runner loopback network scope (D11 — B3, G4/R5, round-5
+  consistency).** Add the D11 capability to `crates/runner` and compile
+  it in `adapters/runner-macos-seatbelt`: enumerate every local interface
+  address in every family the host has configured, bind the gateway's
+  port on **all** of them (not a fixed minimal set), and filter to
+  loopback-sourced peers only on every one. Adversarial tests must
+  specifically include: (a) a connection attempt from `::1`, from
+  `fe80::1%lo0`, from a second/alias `127.0.0.0/8` address, and from a
+  non-loopback interface address (e.g. the LAN/`en0` address) — each
+  proving the bind exists and non-loopback peers are dropped before any
+  byte is read; (b) a pre-existing foreign listener already bound to any
+  enumerated address at the target port before the gateway starts — this
+  **must** cause the gateway's own startup to fail closed (D11/D14),
+  proving the design cannot silently coexist with, or lose a bind race
+  to, another process on any admitted address; (c) a test that every
+  backend unable to enumerate or bind the full admitted set fails closed;
+  and (d) on macOS, a test exercising the application-firewall approval
+  path for a non-loopback bind, proving the implementation fails closed
+  or requires an explicit owner-approved rule rather than silently
+  skipping that bind. Depends on: this ADR's ratification.
 - **§9a authentication-precondition code change (D23 — B1).** Update
   `bins/agentd/src/execution.rs:816-826`'s pre-launch flow so a
   gateway-backed launch skips `provider_claude::probe_authentication`
@@ -1505,11 +1526,12 @@ separately after ratification. Each depends on this ADR's ratification
   precondition; a non-gateway launch is untouched. Depends on: gateway
   component, doc amendments (§9a text is fixed by this ADR).
 - **ADR-0020 exception implementation (D27 — G2).** Implement the
-  gateway's transport exactly within D27's bounds (loopback-only,
-  attempt-scoped, placeholder-authenticated, no `agentd` operation
-  exposed, deadline/concurrency-capped); adversarial test proving the
-  gateway never accepts or interprets an `agentd` control/IPC-shaped
-  request even if one is sent to it. Depends on: gateway component, doc
+  gateway's transport exactly within D27's bounds (loopback-peer-filtered
+  on every bound address per D11, attempt-scoped, placeholder-
+  authenticated, no `agentd` operation exposed, deadline/concurrency-
+  capped); adversarial test proving the gateway never accepts or
+  interprets an `agentd` control/IPC-shaped request even if one is sent to
+  it. Depends on: gateway component, doc
   amendments (ADR-0020 exception text is fixed by this ADR).
 - **Credential gateway component.** Implement D1-D10 and the D15-D21,
   D24-D26 hardening/scope rules as a new component *inside* `agentd`
