@@ -4939,15 +4939,23 @@ items:
       - adapters/storage-sqlite/src/path_security.rs
       - adapters/provider-claude/src/environment.rs
     outcome: >-
-      Remediation committed and reconciled with accepted TASK-0154 from main
-      on the task branch; ready for fresh acceptance verification. Explicit
-      fixture environments refuse Runner environment/support-root accessors
-      and sandbox attachment at the shared executor boundary, permanently
-      and before spawn, including planner NotStarted spend. Regression tests
+      Remediation reconciled with accepted TASK-0154. Explicit fixture
+      environments refuse Runner environment/support-root accessors and
+      sandbox attachment at the shared executor boundary, permanently and
+      before spawn, including planner NotStarted spend. Regression tests
       cover clone/reattachment refusal, no trusted-host fallback, ordinary
       ambient production bind composition, and explicit missing/empty
       principal variables. SQLite fixtures use test-owned 0700 parents;
       storage UnsafePath and production HOME/USER requirements are preserved.
-      Fresh verification evidence and independent-review readiness are
-      recorded in the task result for the immutable reconciled HEAD;
-      this entry does not claim acceptance or integration into main.
+      Independent acceptance review PASS on exact HEAD
+      f279dd3e420228d5b5d89335f800fa99428d5432, with no blocking or
+      non-blocking findings. Integrated into main via
+      53714152e6b5c0dd678e1156d12b6c2702e1b062; reviewed and integrated
+      tree both 5d4eba52d54fe0083de535b84ff5c735bb4bbc9b.
+      Post-merge verification on main GREEN: provider-claude 103 passed / 1
+      ignored; app-services 297 passed / 1 ignored; product-version 6 passed;
+      strict YAML, diff, ancestry and cleanliness checks PASS. Fresh Linux
+      and adverse macOS acceptance evidence verified by independent review
+      is inherited through exact tree identity. Real-provider smokes remain
+      ignored; full workspace was not run or required for this task scope.
+      G8 remains IN_PROGRESS.
