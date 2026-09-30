@@ -2,7 +2,7 @@
 
 **Verdict: BLOCKED — materialization contract decision required; R1 submitted, not accepted.**
 
-2026-09-17. Worktree `/Users/artemmac/dev/runlith-wt-0087-r1`, branch
+2026-09-17. Worktree `~/dev/runlith-wt-0087-r1`, branch
 `task-0087-r1-contract-verification`, base/HEAD
 `6a02eaa4f696e673613f7ebd0511c2df7613b5db` (PR #2 merged).
 Implementation is merged, not merely branch-local. This review changes only
@@ -178,7 +178,7 @@ Final test file SHA-256:
 Workspace execution preceded a whitespace-only rustfmt repair; check/clippy
 passed after semantic fixture correction, and final fmt validates the repair.
 Baseline logs are session-local under
-`/Users/artemmac/.zcode/cli/exec/sess_5dacfebd-dde8-41a3-839f-0a5f01ca1930/`
+`~/.zcode/cli/exec/sess_5dacfebd-dde8-41a3-839f-0a5f01ca1930/`
 (`084c3aac-e63d-47ff-ac6f-d2d54ff34452-stdout.log` and
 `b034ea2e-89ab-4200-b74e-3b435940ac64-stdout.log`). These logs are operational
 artifacts, not committed evidence or post-merge verification.

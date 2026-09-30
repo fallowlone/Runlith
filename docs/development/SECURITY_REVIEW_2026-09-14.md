@@ -3,7 +3,7 @@
 - **Date:** 2026-09-14
 - **Target:** Runlith workspace, HEAD `297f1bf` (branch `main`)
 - **Method:** read-only security review in dedicated worktree
-  `/Users/artemmac/dev/runlith-sec-review` (detached HEAD). No files
+  `~/dev/runlith-sec-review` (detached HEAD). No files
   modified, nothing committed, nothing merged. Four parallel deep audits
   (IPC/transport, process execution/sandbox, policy/data/secrets,
   git/provider) + manual line-level verification of every HIGH/MEDIUM
