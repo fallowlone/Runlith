@@ -4899,3 +4899,55 @@ items:
       - SECURITY.md
       - .gitleaks.toml
       - docs/development/PUBLICATION_RUNBOOK.md
+
+  # Cross-gate test hygiene: app-services integration tests depended on the
+  # runner's ambient temp directory and login session, so they failed on a
+  # default Linux container (world-writable /tmp, no USER). TASK-0155 follows
+  # accepted TASK-0154 and preserves its publication-hygiene changes.
+  - id: TASK-0155
+    gate: G8
+    title: Hermetic app-services integration tests (private temp root, explicit provider environment)
+    objective: >-
+      Make `cargo test --locked -p app-services` pass on a Linux container
+      with the default world-writable /tmp and no USER variable, without
+      weakening the storage UnsafePath parent check or the production
+      provider requirement for HOME/USER.
+    scope: >-
+      g6_security_integration.rs creates each SQLite database inside its own
+      0700 directory instead of directly under std::env::temp_dir().
+      planning_service.rs and provider_binding.rs trusted-host Claude
+      fixtures supply PATH/HOME/USER explicitly through a new trusted-host-only
+      provider-claude constructor (ClaudeExecutor/ClaudePlanner
+      bind_trusted_host_with_host_environment) instead of inheriting the
+      ambient process environment. Production `bind`, the sandboxed launch
+      path and ProviderEnvironment::prepare keep reading the real host
+      environment and still fail closed without HOME/USER. Allowed paths:
+      crates/app-services/tests/, adapters/provider-claude/src/,
+      planning/tasks/queue.yaml, product/version.toml.
+    exit_criteria_summary: >-
+      RED reproduced with TMPDIR=/tmp (mode 1777) and USER unset; afterwards
+      the full app-services suite passes both under that environment and
+      under the default macOS environment; the storage parent check and the
+      production USER/HOME requirement are unchanged and covered by a
+      provider-claude unit test proving an explicit host environment without
+      USER still fails closed. Explicit fixture constructors refuse Runner
+      environment/support-root access and sandbox attachment before spawn,
+      including through the planner's shared executor boundary.
+    depends_on: []
+    blocked_by: []
+    references:
+      - adapters/storage-sqlite/src/path_security.rs
+      - adapters/provider-claude/src/environment.rs
+    outcome: >-
+      Remediation committed and reconciled with accepted TASK-0154 from main
+      on the task branch; ready for fresh acceptance verification. Explicit
+      fixture environments refuse Runner environment/support-root accessors
+      and sandbox attachment at the shared executor boundary, permanently
+      and before spawn, including planner NotStarted spend. Regression tests
+      cover clone/reattachment refusal, no trusted-host fallback, ordinary
+      ambient production bind composition, and explicit missing/empty
+      principal variables. SQLite fixtures use test-owned 0700 parents;
+      storage UnsafePath and production HOME/USER requirements are preserved.
+      Fresh verification evidence and independent-review readiness are
+      recorded in the task result for the immutable reconciled HEAD;
+      this entry does not claim acceptance or integration into main.

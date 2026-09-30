@@ -42,6 +42,9 @@ use crate::tracker::LiveProcessTracker;
 use crate::usage::UsageSample;
 use crate::CLAUDE_PROVIDER_REF;
 
+const TRUSTED_HOST_ENVIRONMENT_ONLY: &str =
+    "explicit host environment is restricted to trusted-host execution";
+
 /// Full adapter outcome for consumers that want usage alongside evidence.
 /// [`ExecutionPort::execute`] returns the evidence half; this shape keeps
 /// the usage half available for the future Usage Ledger contract without
@@ -83,6 +86,7 @@ pub struct ClaudeExecutor {
     prompt: String,
     workdir: PathBuf,
     environment: Result<ProviderEnvironment, String>,
+    trusted_host_only: bool,
     tracker: Option<LiveProcessTracker>,
     process_exit_observer: Option<Arc<dyn ProcessExitObservationSink>>,
     cancel: CancelFlag,
@@ -113,6 +117,7 @@ impl ClaudeExecutor {
             workdir,
             environment_base,
             ProviderLaunch::Unattached,
+            &ambient_host_variable,
         )
     }
 
@@ -134,7 +139,39 @@ impl ClaudeExecutor {
             workdir,
             environment_base,
             ProviderLaunch::TrustedHost,
+            &ambient_host_variable,
         )
+    }
+
+    /// [`Self::bind_trusted_host`] with the provider's host variables (PATH,
+    /// HOME, USER, ...) taken only from `host_environment` instead of the
+    /// ambient process environment, so deterministic fixtures do not depend
+    /// on the runner's login session (TASK-0155). The HOME/USER requirement
+    /// is unchanged. Runner environment/support accessors refuse this mode;
+    /// attaching a sandboxed launch permanently invalidates its environment.
+    pub fn bind_trusted_host_with_host_environment(
+        config: ClaudeConfig,
+        prompt: impl Into<String>,
+        workdir: impl Into<PathBuf>,
+        environment_base: impl Into<PathBuf>,
+        host_environment: impl IntoIterator<Item = (OsString, OsString)>,
+    ) -> Result<Self, String> {
+        let host_environment: Vec<(OsString, OsString)> = host_environment.into_iter().collect();
+        let mut executor = Self::bind_with_launch(
+            config,
+            prompt,
+            workdir,
+            environment_base,
+            ProviderLaunch::TrustedHost,
+            &|name| {
+                host_environment
+                    .iter()
+                    .find(|(key, _)| *key == *name)
+                    .map(|(_, value)| value.clone())
+            },
+        )?;
+        executor.trusted_host_only = true;
+        Ok(executor)
     }
 
     fn bind_with_launch(
@@ -143,6 +180,7 @@ impl ClaudeExecutor {
         workdir: impl Into<PathBuf>,
         environment_base: impl Into<PathBuf>,
         launch: ProviderLaunch,
+        host: &dyn Fn(&str) -> Option<OsString>,
     ) -> Result<Self, String> {
         let prompt = prompt.into();
         if prompt.trim().is_empty() {
@@ -156,12 +194,13 @@ impl ClaudeExecutor {
         if environment_base.as_os_str().is_empty() {
             return Err("claude provider environment base must not be blank".to_owned());
         }
-        let environment = ProviderEnvironment::prepare(&workdir, &environment_base);
+        let environment = ProviderEnvironment::prepare_from(&workdir, &environment_base, host);
         Ok(Self {
             config,
             prompt,
             workdir,
             environment,
+            trusted_host_only: false,
             tracker: None,
             process_exit_observer: None,
             cancel: CancelFlag::fresh(),
@@ -207,6 +246,11 @@ impl ClaudeExecutor {
     /// forgetting a step.
     #[must_use]
     pub fn with_sandboxed_launch(mut self, launch: Arc<SandboxedLaunch>) -> Self {
+        if self.trusted_host_only {
+            // Discard fixture values and refuse before spawn; never retain
+            // the trusted-host launch as a fallback after this composition.
+            self.environment = Err(TRUSTED_HOST_ENVIRONMENT_ONLY.to_owned());
+        }
         self.launch = ProviderLaunch::Sandboxed(launch);
         self
     }
@@ -233,27 +277,25 @@ impl ClaudeExecutor {
     /// Environment preparation has already validated the runtime root before
     /// these paths are exposed to the composition layer.
     pub fn isolation_support_read_roots(&self) -> Result<Vec<PathBuf>, String> {
-        self.environment
-            .as_ref()
-            .map_err(Clone::clone)?
-            .isolation_support_read_roots()
+        self.runner_environment()?.isolation_support_read_roots()
     }
 
     pub fn isolation_support_write_roots(&self) -> Result<Vec<PathBuf>, String> {
-        self.environment
-            .as_ref()
-            .map(ProviderEnvironment::isolation_support_write_roots)
-            .map_err(Clone::clone)
+        Ok(self.runner_environment()?.isolation_support_write_roots())
     }
 
     /// The exact explicit child environment this execution would install,
     /// for the Runner to plan and enforce (TASK-SEC-R1 R1-H2). Values stay
     /// composition-resolved directories; no ambient variable is read here.
     pub fn child_environment(&self) -> Result<Vec<(OsString, OsString)>, String> {
-        self.environment
-            .as_ref()
-            .map(ProviderEnvironment::child_environment)
-            .map_err(Clone::clone)
+        Ok(self.runner_environment()?.child_environment())
+    }
+
+    fn runner_environment(&self) -> Result<&ProviderEnvironment, String> {
+        if self.trusted_host_only {
+            return Err(TRUSTED_HOST_ENVIRONMENT_ONLY.to_owned());
+        }
+        self.environment.as_ref().map_err(Clone::clone)
     }
 
     /// Runs one bounded execution, returning the full adapter outcome
@@ -423,6 +465,11 @@ impl ExecutionPort for ClaudeExecutor {
             }),
         }
     }
+}
+
+/// Host-variable source for the production and default trusted-host paths.
+fn ambient_host_variable(name: &str) -> Option<OsString> {
+    std::env::var_os(name)
 }
 
 /// Maps one parsed provider result onto canonical evidence. The session

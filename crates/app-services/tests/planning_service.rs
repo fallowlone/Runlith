@@ -1446,6 +1446,7 @@ fn atomicity_assessment_shares_the_bounded_recorded_call_budget() {
 #[cfg(unix)]
 mod claude_fixture {
     use super::*;
+    use std::ffi::OsString;
     use std::io::Write;
     use std::time::Duration;
 
@@ -1462,6 +1463,17 @@ mod claude_fixture {
                 .map(|text| text.len())
                 .unwrap_or(0)
         }
+    }
+
+    /// Explicit provider host environment for the fixture executable, so the
+    /// tests do not depend on the runner's ambient login session: containers
+    /// commonly have no USER, which the provider requires (TASK-0155).
+    fn host_environment(db: &TestDb) -> Vec<(OsString, OsString)> {
+        vec![
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("HOME".into(), db.dir.clone().into_os_string()),
+            ("USER".into(), "runlith-fixture".into()),
+        ]
     }
 
     /// Real `ClaudePlanner` over a deterministic provider executable that
@@ -1489,8 +1501,13 @@ mod claude_fixture {
             .expect("fixture executable")
             .with_timeout(Duration::from_secs(10))
             .expect("timeout");
-        let planner = ClaudePlanner::bind_trusted_host(config, workdir, db.dir.join("env"))
-            .expect("claude planner");
+        let planner = ClaudePlanner::bind_trusted_host_with_host_environment(
+            config,
+            workdir,
+            db.dir.join("env"),
+            host_environment(db),
+        )
+        .expect("claude planner");
         Fixture { planner, spawns }
     }
 
