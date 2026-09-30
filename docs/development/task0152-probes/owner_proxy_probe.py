@@ -40,7 +40,7 @@ credential; the trusted host does):
      (round 4: any other query is a local 403 -- the CLI's own R8-measured
      shape is either bare or `?beta=true`, nothing else is expected).
      Every other path/method/query is rejected locally with 403 and the
-     path recorded. A request is also rejected locally, before any
+     path digest recorded. A request is also rejected locally, before any
      forward, if it looks like a request-smuggling attempt: a
      `Transfer-Encoding` header (400), more than one `Content-Length`
      header or a non-numeric one (400), or a declared body over 8 MiB
@@ -57,32 +57,28 @@ credential; the trusted host does):
      `x-stainless-package-version`, `x-stainless-retry-count`,
      `x-stainless-runtime`, `x-stainless-runtime-version`,
      `x-stainless-timeout`) and `x-app`. Everything else the child sent is
-     dropped and only its NAME is counted/reported --
+     dropped and only an integer count is reported --
      `x-claude-code-session-id` (a session identifier) and
      `anthropic-dangerous-direct-browser-access` (changes trust semantics,
      never asked for) are deliberately NOT in the allowlist even though
      R8 observed the CLI send them. `anthropic-beta`/`anthropic-version`
      are forwarded exactly as the CLI sent them (R8 already proved the
      CLI itself sends the correct flag set per mode -- nothing is added or
-     guessed). The forward is made through a dedicated opener that never
-     follows a redirect, ignores ambient proxy env vars, and pins TLS to a
-     minimum of 1.2 with an explicit `SSLContext` built after stripping
-     any ambient CA-override env var (round 4, C3) -- see `_build_opener`.
-     A defensive assertion confirms the outgoing request's host is exactly
-     `api.anthropic.com` immediately before the real credential is
-     attached. At most 32 requests are ever forwarded in one run (round 4,
-     C8). Concurrency model (round 7, K1 -- corrects an earlier "single-
-     threaded" claim that was already stale once step 6's dual-stack bind
-     existed): one short-lived thread per accepted connection, bounded by
-     a shared cap of `MAX_CONCURRENT_CONNECTIONS` (4) total across BOTH
-     listeners -- never per-listener -- with excess connections accepted
-     at the TCP level and closed immediately, counted, never processed.
-     Every accepted-and-admitted connection gets a 30s per-operation
-     socket timeout plus a 10s whole-request deadline from accept through
-     headers+body fully read, enforced by a `threading.Timer` watchdog
-     that runs inside THAT connection's own thread and force-closes only
-     that connection's own socket (round 6, T2b; the enforcement mechanism
-     was rewritten in round 7, K1 -- see below).
+     guessed). The forward uses direct `http.client` on one registered, pre-resolved
+     pinned-host socket, with explicit default-root TLS >= 1.2/hostname
+     verification. It never follows a redirect, consults proxy env, or
+     reconnects. `_build_opener` now serves local rejection self-checks.
+     Atomic pre-dispatch reservations admit at most 32 requests per run,
+     counting in-flight attempts and never refunding failed/cancelled work.
+     One short-lived thread per accepted connection shares a 4-slot cap
+     across BOTH listeners. Rejected sockets release no slot; admitted
+     sockets release once. Ingress has a 10s absolute deadline; forwarding
+     plus relay has 60s, with 70s total from admission and an 8 MiB response
+     cap. Timers shut down downstream AND registered upstream I/O. Server
+     close joins handlers after cancellation before credential references
+     are dropped. A 30s operation timeout is only an additional idle guard.
+     Startup libc DNS and OS scheduling/cleanup latency are not bounded by
+     this probe; production must enforce finite startup/cleanup budgets.
      Bound to BOTH `127.0.0.1:<port>` and `[::1]:<port>` (the SAME port,
      round 6, T2c -- Seatbelt's `(remote tcp "localhost:P")` was measured
      to admit both; see the evidence doc's "L1 loopback admission" row),
@@ -93,7 +89,7 @@ credential; the trusted host does):
      see the evidence doc.
   7. The confined child itself is launched by this script, under the
      production-shaped Seatbelt profile from gen_profile.sh, but with the
-     network rule replaced by "outbound to this proxy's local port only"
+     network rule replaced by "outbound to the admitted local-address set at this port"
      (same technique R6/R7/R8 used) and a fresh, empty HOME/
      CLAUDE_CONFIG_DIR under this run's own temp directory (same pattern
      as R5) -- no host `~/.claude` is granted.
@@ -298,6 +294,7 @@ _c3_refuse_if_dangerous_tls_env()
 import argparse
 import hashlib
 import hmac
+import http.client
 import http.server
 import json
 import re
@@ -337,8 +334,11 @@ ALLOWED_QUERY_STRINGS = ("", "beta=true")
 HELLO_PATH = "/api/hello"
 
 MAX_BODY_BYTES = 8 * 1024 * 1024
+MAX_RESPONSE_BYTES = MAX_BODY_BYTES  # probe byte bound; not a product-policy default
 MAX_FORWARDED_REQUESTS = 32
 CLIENT_SOCKET_TIMEOUT = 30
+FORWARD_DEADLINE_SECONDS = 60  # existing upstream timeout, now an aggregate phase bound
+CHILD_TIMEOUT_SECONDS = 120
 # Round 6 (T2b): whole-request deadline -- from connection accept through
 # completion of reading headers+body -- separate from and tighter than
 # the per-recv() idle timeout above. An independent review measured a
@@ -371,6 +371,7 @@ CLIENT_SOCKET_TIMEOUT = 30
 # primitive (a per-listener watchdog would still conflate multiple
 # connections on the same listener).
 REQUEST_DEADLINE_SECONDS = 10
+CONNECTION_DEADLINE_SECONDS = REQUEST_DEADLINE_SECONDS + FORWARD_DEADLINE_SECONDS
 
 # Round 7 (K1): bounded concurrent-connection limit, shared across BOTH
 # the IPv4 and IPv6 listeners (SharedState.active_connections, guarded by
@@ -410,7 +411,7 @@ HOP_BY_HOP = {
 }
 
 # C7: explicit allowlist of request header NAMES forwarded to upstream.
-# Everything else the child sends is dropped (name-only counted, value
+# Everything else the child sends is dropped (integer count only, value
 # never inspected further). See the module docstring, step 6, for the
 # justification of each Stainless/x-app name and what was deliberately
 # excluded.
@@ -439,21 +440,16 @@ THIS_FILE = os.path.abspath(__file__)
 GEN_PROFILE = os.path.join(SCRIPT_DIR, "gen_profile.sh")
 
 # Built by _build_opener() inside main(), after the C3 env scrub, with an
-# explicit TLS-1.2-minimum SSLContext. Module-level so _forward/
-# run_self_check can reference it without threading it through every call.
+# explicit TLS-1.2-minimum SSLContext. The opener is for local checks;
+# _forward uses the same context on its own registered cancellable socket.
 _OPENER = None
+_TLS_CONTEXT = None
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Never follows a redirect. `redirect_request` returning `None` makes
-    a 3xx from upstream come back as an `HTTPError` (this Python version's
-    behavior) instead of a second request being issued -- so it is relayed
-    to the child exactly as received (counted like any other response),
-    and this process never re-sends the freshly rewritten credential
-    header to whatever host a `Location` might name. Only one HTTPS
-    connection is ever made per forwarded request, always to the URL this
-    script built itself (`UPSTREAM_URL + path`, host asserted in
-    `_forward`)."""
+    """No-redirect local self-check opener (historically also the forward
+    transport). Current forwarding is one direct http.client request and
+    never dispatches a second request for a Location response."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -466,7 +462,9 @@ def _build_opener():
     ambient `http_proxy`/`https_proxy` cannot reroute the credential-
     bearing request). Certificate/hostname verification is otherwise the
     Python default (unchanged)."""
+    global _TLS_CONTEXT
     ctx = ssl.create_default_context()
+    _TLS_CONTEXT = ctx
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     return urllib.request.build_opener(
         _NoRedirect(), urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=ctx)
@@ -610,7 +608,7 @@ class Counters:
         self.local_403_paths = []
         self.local_400 = 0
         self.local_413 = 0
-        self.dropped_header_names = set()
+        self.dropped_header_count = 0
         self.forwarded = 0
         self.upstream_status = []
         self.connection_limit_rejected = 0  # round 7, K1
@@ -623,7 +621,7 @@ class Counters:
                 "local_403_paths": sorted(set(self.local_403_paths)),
                 "local_400": self.local_400,
                 "local_413": self.local_413,
-                "dropped_header_names": sorted(self.dropped_header_names),
+                "dropped_header_count": self.dropped_header_count,
                 "forwarded": self.forwarded,
                 "upstream_status": list(self.upstream_status),
                 "connection_limit_rejected": self.connection_limit_rejected,
@@ -647,6 +645,32 @@ class SharedState:
         self.counters = counters
         self.conn_lock = threading.Lock()
         self.active_connections = 0
+        self.connections = {}  # socket -> admission monotonic time; owns each slot once
+        self.handlers = {}
+        self.stopping = False
+        self.upstream_address = None  # resolved before admitting any authorized forward
+
+    def cancel_connections(self):
+        with self.conn_lock:
+            self.stopping = True
+            connections = list(self.connections)
+            handlers = list(self.handlers.values())
+        for handler in handlers:
+            handler._deadline_watchdog()
+        for connection in connections:
+            _shutdown_socket(connection)
+
+
+def _shutdown_socket(sock):
+    # shutdown unblocks buffered HTTP reads; close alone need not unblock them.
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        sock.close()
+    except OSError:
+        pass
 
 
 def _is_loopback_peer(address_tuple):
@@ -671,11 +695,11 @@ class ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     # `threading.Timer` watchdog (see `ProxyHandler.handle_one_request`)
     # the right fit: each connection's own deadline lives entirely inside
     # its own thread, touching no other connection and never the main
-    # thread. `daemon_threads = True` so a stuck connection thread can
-    # never block process exit. Never reuse a just-closed address; bind
+    # thread. Join handlers on server_close after cancelling their I/O.
+    # Never reuse a just-closed address; bind
     # loopback-only via the addr tuple main() constructs this with.
     allow_reuse_address = False
-    daemon_threads = True
+    daemon_threads = False
 
     def __init__(self, addr, handler_cls, state):
         super().__init__(addr, handler_cls)
@@ -693,23 +717,25 @@ class ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         if not _is_loopback_peer(client_address):
             return False
         with self.state.conn_lock:
+            if self.state.stopping:
+                return False
             if self.state.active_connections >= MAX_CONCURRENT_CONNECTIONS:
                 with self.state.counters.lock:
                     self.state.counters.connection_limit_rejected += 1
                 return False
             self.state.active_connections += 1
+            self.state.connections[request] = time.monotonic()
         return True
 
     def close_request(self, request):
-        # Called exactly once per accepted-and-admitted connection,
-        # regardless of success/failure, in whichever thread handled it --
-        # the correct single place to release the admission slot
-        # `verify_request` claimed.
+        # socketserver also closes rejected requests; they own no slot.
         try:
             super().close_request(request)
         finally:
             with self.state.conn_lock:
-                self.state.active_connections = max(0, self.state.active_connections - 1)
+                if request in self.state.connections:
+                    del self.state.connections[request]
+                    self.state.active_connections -= 1
 
     def handle_error(self, request, client_address):
         # C6: the default socketserver.handle_error prints a full
@@ -734,53 +760,65 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     # -- whole-request deadline (round 6, T2b; fixed round 7, K1) ----------
     def handle_one_request(self):
-        # A `threading.Timer` watchdog, started fresh for THIS connection
-        # in THIS connection's own handler thread (see `ProxyServer`'s
-        # `ThreadingMixIn` above -- one thread per connection). At the
-        # deadline, the watchdog force-closes THIS connection's own
-        # socket from its own timer thread, unblocking whatever read was
-        # in progress with an OSError that naturally terminates this
-        # connection's processing -- never touching any other connection,
-        # never touching the main thread. This replaces the round-6
-        # `signal.alarm` mechanism, which two independent reviews showed
-        # cannot bound a specific thread at all (Python only ever invokes
-        # a signal handler on the main thread).
-        # Covers from connection accept through whatever point `_dispatch`
-        # calls `_cancel_deadline()` -- i.e. through headers+body being
-        # fully read, never through response writing.
-        watchdog = threading.Timer(REQUEST_DEADLINE_SECONDS, self._deadline_watchdog)
+        self.close_connection = True  # exactly one request per admitted connection
+        self._io_lock = threading.Lock()
+        self._cancelled = False
+        self._upstream_socket = None
+        self._deadline_timer = None
+        with self.server.state.conn_lock:
+            accepted = self.server.state.connections[self.connection]
+            self.server.state.handlers[self.connection] = self
+            stopping = self.server.state.stopping
+        self._connection_end = accepted + CONNECTION_DEADLINE_SECONDS
+        try:
+            self._start_deadline(accepted + REQUEST_DEADLINE_SECONDS - time.monotonic())
+            if stopping:
+                self._deadline_watchdog()
+                return
+            super().handle_one_request()
+        finally:
+            self.close_connection = True
+            self._cancel_deadline()
+            self._deadline_watchdog()
+            with self.server.state.conn_lock:
+                self.server.state.handlers.pop(self.connection, None)
+
+    def _start_deadline(self, seconds):
+        self._cancel_deadline()
+        if seconds <= 0:
+            self._deadline_watchdog()
+            raise TimeoutError
+        watchdog = threading.Timer(seconds, self._deadline_watchdog)
         watchdog.daemon = True
         self._deadline_timer = watchdog
         watchdog.start()
-        try:
-            super().handle_one_request()
-        finally:
-            watchdog.cancel()
 
     def _deadline_watchdog(self):
-        # Runs in the Timer's own thread, not this connection's handler
-        # thread -- exactly why this works regardless of what the handler
-        # thread is currently blocked on.
-        try:
-            self.connection.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        try:
-            self.connection.close()
-        except OSError:
-            pass
+        with self._io_lock:
+            self._cancelled = True
+            upstream = self._upstream_socket
+        _shutdown_socket(self.connection)
+        if upstream is not None:
+            _shutdown_socket(upstream)
+
+    def _set_upstream_socket(self, sock):
+        with self._io_lock:
+            cancelled = self._cancelled
+            self._upstream_socket = sock
+        if cancelled:
+            _shutdown_socket(sock)
+            raise TimeoutError
 
     def _cancel_deadline(self):
         timer = getattr(self, "_deadline_timer", None)
         if timer is not None:
             timer.cancel()
+            timer.join()
 
     # -- local responses -----------------------------------------------
     def _send_local(self, code):
-        # Every local-rejection path funnels through here -- the single
-        # place that cancels the whole-request deadline for all of them,
-        # since none needs to read any more of the request afterward.
-        self._cancel_deadline()
+        # Retain the deadline through local response writes, too.
+        self.close_connection = True
         body = json.dumps({"type": "error", "error": {"type": "local_proxy_rejection"}}).encode(
             "utf-8"
         )
@@ -821,7 +859,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         query = self.path.split("?", 1)[1] if "?" in self.path else ""
 
         if self.command in ("HEAD", "GET") and base_path == HELLO_PATH:
-            self._cancel_deadline()
+            self.close_connection = True
             self.send_response(200)
             self.send_header("Content-Length", "0")
             self.send_header("Connection", "close")
@@ -879,10 +917,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
 
         body = self.rfile.read(length) if length else b""
-        # The request (headers + body) is now fully read -- the deadline
-        # this specifically guards against (a slow trickle) is satisfied
-        # regardless of which branch below is taken next.
-        self._cancel_deadline()
+        if len(body) != length:
+            with self.server.state.counters.lock:
+                self.server.state.counters.local_400 += 1
+            self._send_local(400)
+            return
 
         if not self._credential_ok():
             with self.server.state.counters.lock:
@@ -900,16 +939,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         with self.server.state.counters.lock:
             over_cap = self.server.state.counters.forwarded >= MAX_FORWARDED_REQUESTS
+            if not over_cap:
+                # Reservation includes in-flight work; never refunded on failure.
+                self.server.state.counters.forwarded += 1
         if over_cap:
             self._send_local(503)
             return
 
+        self._start_deadline(min(FORWARD_DEADLINE_SECONDS, self._connection_end - time.monotonic()))
         self._forward(self.path, body)
 
     # -- forwarding ---------------------------------------------------------
     def _forward(self, path, body):
         headers = {}
-        dropped = []
+        dropped = 0
         for name, value in self.headers.items():
             lname = name.lower()
             if lname in ("x-api-key", "authorization", "host"):
@@ -917,10 +960,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if lname in FORWARD_HEADER_ALLOWLIST:
                 headers[name] = value
             else:
-                dropped.append(name)
+                dropped += 1
         if dropped:
             with self.server.state.counters.lock:
-                self.server.state.counters.dropped_header_names.update(dropped)
+                self.server.state.counters.dropped_header_count += dropped
 
         if self.server.state.mode == "api-key":
             headers["x-api-key"] = self.server.state.real_credential
@@ -935,15 +978,33 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             return
-        req = urllib.request.Request(url, data=body if body else None, headers=headers, method="POST")
+        connection = None
+        response = None
+        raw_socket = None
         try:
-            with _OPENER.open(req, timeout=60) as resp:
-                self._relay_response(resp, resp.status, dict(resp.getheaders()))
-        except urllib.error.HTTPError as error:
-            self._relay_response(error, error.code, dict(error.headers or {}))
+            family, address = self.server.state.upstream_address
+            # DNS is resolved once, before credential read/child launch, never
+            # inside a handler: libc DNS itself is not cancellable by shutdown.
+            connection = http.client.HTTPSConnection(
+                UPSTREAM_HOST, timeout=CLIENT_SOCKET_TIMEOUT, context=_TLS_CONTEXT
+            )
+            connection.auto_open = 0  # never reconnect through unregistered I/O
+            raw_socket = socket.socket(family, socket.SOCK_STREAM)
+            raw_socket.settimeout(CLIENT_SOCKET_TIMEOUT)
+            self._set_upstream_socket(raw_socket)
+            raw_socket.connect(address)
+            tls_socket = _TLS_CONTEXT.wrap_socket(
+                raw_socket, server_hostname=UPSTREAM_HOST, do_handshake_on_connect=False
+            )
+            self._set_upstream_socket(tls_socket)
+            connection.sock = tls_socket
+            tls_socket.do_handshake()
+            connection.request("POST", path, body, headers)
+            response = connection.getresponse()
+            # Direct http.client performs no proxy-env lookup or redirect.
+            self._relay_response(response, response.status, dict(response.getheaders()))
         except Exception:
             with self.server.state.counters.lock:
-                self.server.state.counters.forwarded += 1
                 self.server.state.counters.upstream_status.append(0)
             try:
                 self.send_response(502)
@@ -952,10 +1013,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
             except Exception:
                 pass
+        finally:
+            if response is not None:
+                response.close()
+            if connection is not None:
+                connection.close()
+            if raw_socket is not None:
+                raw_socket.close()
 
     def _relay_response(self, resp_like, status, resp_headers):
         with self.server.state.counters.lock:
-            self.server.state.counters.forwarded += 1
             self.server.state.counters.upstream_status.append(status)
         content_type = ""
         for k, v in resp_headers.items():
@@ -979,16 +1046,22 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             try:
+                received = 0
                 while True:
                     chunk = resp_like.read(1)
                     if not chunk:
                         break
+                    received += len(chunk)
+                    if received > MAX_RESPONSE_BYTES:
+                        raise ValueError("response byte limit exceeded")
                     self.wfile.write(chunk)
                     self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 pass
         else:
-            data = resp_like.read()
+            data = resp_like.read(MAX_RESPONSE_BYTES + 1)
+            if len(data) > MAX_RESPONSE_BYTES:
+                raise ValueError("response byte limit exceeded")
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Connection", "close")
             self.end_headers()
@@ -1052,7 +1125,7 @@ def run_self_check(state, port):
     return ok, status
 
 
-def _check_whole_request_deadline(port):
+def _check_whole_request_deadline(port, state):
     """Round 6 (T2b), rewritten round 7 (K1) to actually prove what it
     claims: a slow client (trickles a request body 1 byte, then stops --
     the exact shape of stall an independent review measured holding the
@@ -1090,8 +1163,10 @@ def _check_whole_request_deadline(port):
                     if not chunk:
                         result["got_eof"] = True
                         break
-        except Exception:
+        except ConnectionResetError:
             result["got_eof"] = True
+        except Exception:
+            result["got_eof"] = False
         result["elapsed"] = time.monotonic() - start
 
     worker = threading.Thread(target=slow_client)
@@ -1111,8 +1186,17 @@ def _check_whole_request_deadline(port):
     except BaseException:
         main_thread_interrupted = True
     worker.join(timeout=5)
+    cleanup_end = time.monotonic() + 1
+    while time.monotonic() < cleanup_end:
+        with state.conn_lock:
+            terminated = state.active_connections == 0 and not state.handlers
+        if terminated:
+            break
+        time.sleep(.01)
     ok = (
         result["got_eof"]
+        and not worker.is_alive()
+        and terminated
         and not main_thread_interrupted
         and main_thread_iterations > 0
         and (REQUEST_DEADLINE_SECONDS - 2) <= (result["elapsed"] or 0) <= (REQUEST_DEADLINE_SECONDS + 10)
@@ -1135,14 +1219,12 @@ def _check_connection_limit(port):
         for _ in range(MAX_CONCURRENT_CONNECTIONS):
             holders.append(socket.create_connection(("127.0.0.1", port), timeout=5))
         time.sleep(0.3)  # let the server's admission bookkeeping settle
-        extra = socket.create_connection(("127.0.0.1", port), timeout=5)
-        try:
-            extra.settimeout(3)
-            data = extra.recv(16)
-            rejected_immediately = data == b""
-        finally:
-            extra.close()
-        return rejected_immediately
+        for _ in range(3):
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as extra:
+                extra.settimeout(1)
+                if extra.recv(16) != b"":
+                    return False
+        return True
     except Exception:
         return False
     finally:
@@ -1210,7 +1292,7 @@ def cli_version(claude_exec):
 def launch_confined_child(mode, placeholder, port, claude_exec):
     """Launches the confined child with ONLY the placeholder (never the
     real credential), under the production-shaped profile with a
-    localhost-only network rule, a fresh empty HOME/CLAUDE_CONFIG_DIR, and
+    local-address-at-one-port network rule, a fresh empty HOME/CLAUDE_CONFIG_DIR, and
     no host `~/.claude` support-read at all (same pattern as R5). Returns
     (exit_code, marker_present, stdout_text_bounded)."""
     workdir = tempfile.mkdtemp(prefix="task0152-proxy-")
@@ -1298,7 +1380,7 @@ def launch_confined_child(mode, placeholder, port, claude_exec):
                 env=child_env,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=CHILD_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired:
             return None, False, "timeout"
@@ -1329,8 +1411,14 @@ def _extended_dry_checks(state, port):
     T2b whole-request deadline, T2a OPENSSL_CONF refusal, and T2d path-
     hashing. Prints one `check_<name>=pass|fail` line per assertion.
     Never touches Keychain or contacts upstream."""
+    results = []
+
+    def check(name, passed):
+        results.append(bool(passed))
+        print(f"check_{name}={'pass' if passed else 'fail'}")
+
     ok, status = run_self_check(state, port)
-    print(f"check_wrong_placeholder_401={'pass' if ok and status == 401 else 'fail'}")
+    check("wrong_placeholder_401", ok and status == 401)
 
     DISALLOWED_PATH_MARKER = "/v1/models"
     req = urllib.request.Request(
@@ -1344,7 +1432,7 @@ def _extended_dry_checks(state, port):
         status = 200
     except urllib.error.HTTPError as error:
         status = error.code
-    print(f"check_bad_query_403={'pass' if status == 403 else 'fail'}")
+    check("bad_query_403", status == 403)
 
     status = _raw_http_request(
         port,
@@ -1353,7 +1441,7 @@ def _extended_dry_checks(state, port):
         extra_headers=[("Transfer-Encoding", "chunked")],
         body=b"0\r\n\r\n",
     )
-    print(f"check_transfer_encoding_400={'pass' if status == 400 else 'fail'}")
+    check("transfer_encoding_400", status == 400)
 
     status = _raw_http_request(
         port,
@@ -1362,7 +1450,7 @@ def _extended_dry_checks(state, port):
         extra_headers=[("Content-Length", "2"), ("Content-Length", "2")],
         body=b"{}",
     )
-    print(f"check_duplicate_content_length_400={'pass' if status == 400 else 'fail'}")
+    check("duplicate_content_length_400", status == 400)
 
     status = _raw_http_request(
         port,
@@ -1372,7 +1460,7 @@ def _extended_dry_checks(state, port):
         body=b"",
         send_declared_length_only=True,
     )
-    print(f"check_oversized_body_413={'pass' if status == 413 else 'fail'}")
+    check("oversized_body_413", status == 413)
 
     req = urllib.request.Request(f"http://127.0.0.1:{port}{DISALLOWED_PATH_MARKER}", method="GET")
     try:
@@ -1380,23 +1468,23 @@ def _extended_dry_checks(state, port):
         status = 200
     except urllib.error.HTTPError as error:
         status = error.code
-    print(f"check_disallowed_path_403={'pass' if status == 403 else 'fail'}")
+    check("disallowed_path_403", status == 403)
 
     # T2d: the disallowed path above must never appear verbatim in this
     # process's own recorded counters -- only a truncated hash may.
     recorded_paths = state.counters.snapshot()["local_403_paths"]
     path_not_leaked = not any(DISALLOWED_PATH_MARKER in entry for entry in recorded_paths)
-    print(f"check_disallowed_path_not_recorded_raw={'pass' if path_not_leaked else 'fail'}")
+    check("disallowed_path_not_recorded_raw", path_not_leaked)
 
     # T2b/K1: whole-request deadline against a slow-trickled body, with
     # the slow client on a worker thread and the main thread's own
     # uninterrupted execution asserted.
-    deadline_ok = _check_whole_request_deadline(port)
-    print(f"check_whole_request_deadline={'pass' if deadline_ok else 'fail'}")
+    deadline_ok = _check_whole_request_deadline(port, state)
+    check("whole_request_deadline", deadline_ok)
 
     # K1: bounded concurrent-connection limit.
     limit_ok = _check_connection_limit(port)
-    print(f"check_connection_limit={'pass' if limit_ok else 'fail'}")
+    check("connection_limit", limit_ok)
 
     poison = "A" * (_HIGH_ENTROPY_MIN_LEN + 5)
     proc = subprocess.run(
@@ -1406,7 +1494,7 @@ def _extended_dry_checks(state, port):
         timeout=20,
     )
     leaked = poison in (proc.stdout or "") or poison in (proc.stderr or "")
-    print(f"check_secret_argv_refused={'pass' if proc.returncode != 0 and not leaked else 'fail'}")
+    check("secret_argv_refused", proc.returncode != 0 and not leaked)
 
     proc2 = subprocess.run(
         [sys.executable, THIS_FILE, "oauth", "--dry-self-check"],
@@ -1414,7 +1502,7 @@ def _extended_dry_checks(state, port):
         text=True,
         timeout=20,
     )
-    print(f"check_non_isolated_refused={'pass' if proc2.returncode != 0 else 'fail'}")
+    check("non_isolated_refused", proc2.returncode != 0)
 
     # T2a/T2e: OPENSSL_CONF (and friends) must refuse, checked before any
     # TLS-touching import -- a subprocess with a poisoned environment.
@@ -1427,7 +1515,9 @@ def _extended_dry_checks(state, port):
         timeout=20,
         env=poisoned_env,
     )
-    print(f"check_openssl_conf_refused={'pass' if proc3.returncode != 0 else 'fail'}")
+    check("openssl_conf_refused", proc3.returncode != 0)
+
+    return all(results)
 
 
 def _real_main():
@@ -1502,7 +1592,8 @@ def _real_main():
             sys.exit(1)
 
         if args.dry_self_check:
-            _extended_dry_checks(state, port)
+            if not _extended_dry_checks(state, port):
+                sys.exit(1)
             counts = counters.snapshot()
             print(f"mode={args.mode}")
             print("dry_run=true")
@@ -1517,6 +1608,12 @@ def _real_main():
         claude_exec = find_claude_exec()
         version = cli_version(claude_exec)
 
+        # No handler performs DNS; one fixed resolved address, no retry/fallback.
+        addresses = socket.getaddrinfo(UPSTREAM_HOST, 443, type=socket.SOCK_STREAM)
+        if not addresses:
+            raise OSError
+        state.upstream_address = (addresses[0][0], addresses[0][4])
+
         real_credential = read_keychain_credential(service, args.account, args.keychain)
         if not _validate_credential_shape(args.mode, real_credential):
             real_credential = None
@@ -1528,6 +1625,11 @@ def _real_main():
                 args.mode, placeholder, port, claude_exec
             )
         finally:
+            state.cancel_connections()
+            server_v4.shutdown()
+            server_v6.shutdown()
+            server_v4.server_close()  # joins all non-daemon handlers
+            server_v6.server_close()
             # Best-effort only -- see module docstring: Python strings
             # cannot be securely wiped. Drop every reference this process
             # holds as soon as the child has run.
@@ -1550,9 +1652,9 @@ def _real_main():
         print(f"forwarded={counts['forwarded']}")
         print(f"upstream_status_codes={counts['upstream_status']}")
         print(f"connection_limit_rejected={counts['connection_limit_rejected']}")
-        if counts["dropped_header_names"]:
-            print(f"dropped_header_names={counts['dropped_header_names']}")
+        print(f"dropped_header_count={counts['dropped_header_count']}")
     finally:
+        state.cancel_connections()
         server_v4.shutdown()
         server_v4.server_close()
         server_v6.shutdown()

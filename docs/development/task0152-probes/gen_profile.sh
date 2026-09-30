@@ -190,12 +190,16 @@ mkdir -p "$(dirname "$OUT")"
       # here does NOT admit only one single loopback interface -- round 6's
       # "L1 loopback admission" evidence row measured that it admits BOTH
       # 127.0.0.1:PORT and [::1]:PORT (and, on this host, other 127/8
-      # addresses too), while a non-loopback interface address and a
-      # genuinely remote host on the same port are both denied. A listener
+      # addresses too), AND the host's non-loopback LAN IPv4 at this port.
+      # A different port and the tested genuinely remote host were denied.
+      # Additional scoped/global IPv6 is historical reviewer evidence;
+      # VPN/utun remains inconclusive. A listener
       # meant to receive this traffic must itself bind every address this
       # rule admits, not just 127.0.0.1 -- see
       # docs/development/task0152-probes/owner_proxy_probe.py's dual-stack
-      # (127.0.0.1 + [::1]) bind for the concrete fix this motivated.
+      # (127.0.0.1 + [::1]) bind, which guards only those two endpoints.
+      # Foreign same-port listeners elsewhere are not excluded by this probe;
+      # ADR-0037 D11's full address hold/filter is a proposed production rule.
       printf '(allow network-outbound\n  (remote tcp "localhost:%s"))\n' "$port"
       ;;
     none) : ;;

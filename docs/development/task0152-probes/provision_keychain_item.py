@@ -35,6 +35,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import warnings
 
 MODES = ("oauth", "api-key")
 SERVICE_NAME = {
@@ -148,8 +149,15 @@ def _validate_shape(mode, value):
 
 
 def _read_secret_getpass():
-    first = getpass.getpass("Secret value (input hidden): ")
-    second = getpass.getpass("Re-enter to confirm (input hidden): ")
+    try:
+        with warnings.catch_warnings():
+            # getpass warns BEFORE its ordinary-stdin fallback reads anything.
+            warnings.simplefilter("error", getpass.GetPassWarning)
+            first = getpass.getpass("Secret value (input hidden): ")
+            second = getpass.getpass("Re-enter to confirm (input hidden): ")
+    except (getpass.GetPassWarning, EOFError, OSError):
+        print("refusing: hidden terminal input is unavailable", file=sys.stderr)
+        sys.exit(2)
     if not hmac.compare_digest(first.encode("utf-8", "replace"), second.encode("utf-8", "replace")):
         print("refusing: the two entries did not match", file=sys.stderr)
         sys.exit(2)
