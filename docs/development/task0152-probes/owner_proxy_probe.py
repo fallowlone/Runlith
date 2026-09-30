@@ -758,6 +758,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # silence default stderr logging
         pass
 
+    def send_error(self, code, message=None, explain=None):
+        # stdlib parser errors may contain child-controlled request tokens.
+        if code == 501:
+            code = 403
+            with self.server.state.counters.lock:
+                self.server.state.counters.local_403 += 1
+        self._send_local(code)
+
     # -- whole-request deadline (round 6, T2b; fixed round 7, K1) ----------
     def handle_one_request(self):
         self.close_connection = True  # exactly one request per admitted connection

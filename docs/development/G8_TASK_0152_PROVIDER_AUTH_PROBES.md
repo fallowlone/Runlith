@@ -813,7 +813,7 @@ Targeted official protocol evidence, read-only retrieval on 2026-09-30:
 
 These are dated documentation claims, not a live provider/API/sandbox probe,
 Runlith authority or proof of CLI `2.1.281` runtime behavior. Later page revisions
-must be re-reviewed; no complete supported protocol-profile artifact exists here.
+must be re-reviewed; no complete admissible protocol-profile artifact exists here.
 Repository evidence remains R6/R8's marker run: HEAD `/api/hello`, Messages
 `beta=true`, API `2023-06-01`, per-mode betas and short inference/SSE. It did not
 record a complete coding-tool body/continuation fixture or prove all observed
@@ -831,7 +831,72 @@ P3's separate accepted exact mapping/enforcement proof; P1/P2 request binding an
 dispatch validity must be ratified and implemented before production forwarding.
 Future production compatibility evidence must include actual sanitized versioned
 CLI fixtures/negative cases and a canonical-admission confinement run. This
-revision runs only synthetic checks; historical tables/observations are retained.
+contract revision ran only synthetic checks; historical tables/observations are retained.
+
+### CR-01 actual candidate and RR-N1 correction (2026-09-30)
+
+**CR-01 remains blocked.** Fresh actual diagnostic emission is now preserved in
+the versioned
+[claude-2.1.283-proposal-api-key-v1 candidate](task0152-probes/claude-2.1.283-proposal-api-key-v1/PROFILE.md).
+Its full request/header/beta/nested-field classification, unresolved exact
+semantics, launch/isolation limits, sanitization and reproducible artifact chain
+are recorded there. This does not replace the historical `2.1.281` measurements
+above or historical owner authentication receipts.
+
+The installed binary changed to `2.1.283`; its SHA-256 is
+`d8cb1e5c79684cc12a8bfc813e3a2073406921b6245744b3009be3ab5651d21e`.
+The actual argv uses the existing adapter proposal-only configuration:
+`-p --safe-mode --tools "" --disallowedTools "mcp__*" --output-format json`
+plus a benign marker prompt. No undocumented feature suppression was added.
+The child runs under the existing diagnostic Seatbelt generator with fresh
+temporary HOME/config/runtime/workspace and an environment constructed from
+scratch, a dummy API-key-class placeholder and a local endpoint that never
+forwards. No credential/login/auth-status/provisioning path is invoked. The
+capture is bounded to 45 seconds, eight requests, 2 MiB/request, 8 MiB total
+request bodies and 64 KiB child output. Full D11 and production confinement are
+not certified by this diagnostic extension.
+
+The final run exits 0, emits the marker and exactly two requests: HEAD
+`/api/hello`, POST `/v1/messages?beta=true` with SSE. All ten betas and complete
+body structure are retained, including an empty tool list, a system-role message
+with per-message effort, adaptive omitted thinking, keep-all context management,
+ephemeral cache markers and attribution metadata. The response is explicitly
+synthetic; no live authentication or provider receipt follows. No tool call or
+continuation occurs in this named workflow. API-key/OAuth differences were not
+re-probed: this candidate makes no OAuth profile-admission claim.
+
+`profile_check.py` proves capture/source hashes and complete strict normalization,
+accepts the local health shape and rejects Messages as
+`unsupported_beta_contract`. The four unresolved exact values are
+`claude-code-20250219`, `prompt-caching-scope-2026-01-05`,
+`mid-conversation-system-2026-04-07` and `per-turn-control-2026-07-01`.
+The candidate's primary-source table explains partial documented evidence and
+the smallest missing evidence; names/search hits do not prove the full contract.
+The official gateway guide's open forwarding recommendation cannot override B.
+The acceptance command exits 1; safety/provenance checks and 26 mutations pass.
+No whole-sequence positive is claimed, and no fields or beta values are removed
+to make the gate pass. P1/P2 production enforcement is pending; remote set stays
+empty until P3. Client-tool/continuation acceptance is still unverified.
+
+**RR-N1 corrected locally.** The actual stdlib parser previously responded 501
+to an unknown method and echoed its token before `_dispatch`. The focused
+`rr_n1_self_check.py` reproduced that RED result, then passes after
+`ProxyHandler.send_error` routes inherited errors to the existing fixed JSON
+refusal; unknown methods map to 403. Malformed request-version errors retain
+400 without supplied-token reflection. Both actual-parser cases prove no
+forward/reservation, no console reflection, terminated handler and zero owned
+slots. The original `remediation_self_check.py` is unchanged and passes 16/16.
+The new checks are author-added diagnostics, requiring independent re-review;
+they are not production or OS scheduling certification.
+
+The later [bounded CR-01 pass](task0152-probes/cr01-bounded-pass-20260930/EVIDENCE.md)
+adds version-pinned vendor evidence and one isolated actual
+[system-prompt alternative](task0152-probes/claude-2.1.283-system-prompt-api-key-v1/PROFILE.md).
+The legacy effort alias is partially explained, but all ten betas and the
+dynamic system-role/effort message remain in that alternative. Both complete
+sequences fail semantic admission. CR-01 is OPEN; this is blocked evidence with
+an owner decision package, not a submitted acceptance candidate. Historical
+captures, source hashes, RR-N1 and existing mechanics are preserved.
 
 ### Owner commands (round 4 — supersedes the manual `security` form)
 

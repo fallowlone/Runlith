@@ -1393,9 +1393,30 @@ continuation is blocked under current B. A name alone cannot establish that a
 particular CLI WebSearch shape is server-mediated. Full coding/interactive,
 count-tokens/other endpoints, long-session OAuth and production confinement
 compatibility are unproven; no switch to broad delegation is authorized.
-After ratification, the bounded compatibility evidence must include actual
-sanitized versioned CLI request/continuation fixtures, profile negatives and a
-separate production run through canonical admission. No such run occurs here.
+Before ratification, at least one complete actual CLI sequence must pass its
+reviewed strict B profile (CR-01). The fresh
+[2.1.283 proposal-only candidate](../../development/task0152-probes/claude-2.1.283-proposal-api-key-v1/PROFILE.md)
+now supplies a complete sanitized actual sequence, exact executable/argv,
+provenance and offline negatives. It is **not admissible**: its required
+`claude-code-20250219`, `prompt-caching-scope-2026-01-05`,
+`mid-conversation-system-2026-04-07` and `per-turn-control-2026-07-01`
+beta combination lacks sufficient reviewed exact upstream semantics. The
+offline acceptance command exits 1, refusing Messages even though the bounded
+dummy-credential/local-synthetic run exits 0. CR-01 therefore remains blocked;
+transport success is not semantic admission. No beta/field is stripped to
+manufacture a positive. Proposal-only is already supported by the adapter's
+argv builder, but does not establish coding/client-tool compatibility or OAuth
+compatibility. P1/P2 and a separate production canonical-admission run remain
+post-ratification implementation obligations; remote admission remains empty
+until P3. No such production run occurs here.
+
+The [bounded CR-01 feasibility checkpoint](../../development/task0152-probes/cr01-bounded-pass-20260930/EVIDENCE.md)
+evaluates exact versioned vendor evidence and exactly one existing-contract
+system-prompt alternative. Vendor material partially establishes the legacy
+per-turn effort alias, but not the complete captured combination. The actual
+alternative retains every unresolved beta and the system-role/effort features;
+its hypothesis is refuted. CR-01 stays OPEN. The checkpoint supplies the exact
+missing external contract and owner options, not acceptance or ratification.
 
 `owner_proxy_probe.py` remains owner-operated diagnostic tooling: placeholder,
 transport/count/deadline checks, not canonical Policy admission. It forwards
@@ -1407,6 +1428,13 @@ and declared-token obligations, redaction, hidden-input fail-closed, exact
 Content-Length and honest address/evidence limits remain required. D11,
 in-process delivery/ACL/core-dump and OAuth decisions remain pending their
 separate owner ratification; the B choice accepts none of them by implication.
+
+The local nonblocking RR-N1 diagnostic correction overrides inherited HTTP
+parser errors with fixed JSON refusal responses: unknown methods receive 403,
+other parser errors preserve their refusal status without reflecting supplied
+tokens. A focused actual-parser synthetic check proves zero forwarding and
+handler/slot cleanup; the original 16 remediation checks remain unchanged.
+This is a probe correction, not a production gateway implementation.
 
 ## Provider neutrality
 
