@@ -37,21 +37,31 @@ fn child_environment() -> ChildEnvironment {
     .unwrap()
 }
 
+/// SQLite path inside a fresh test-owned 0700 directory. The storage layer
+/// refuses group/world-writable database parents, so the database must not
+/// sit directly in a shared temp root such as Linux `/tmp` (TASK-0155).
 struct TestDb(PathBuf);
 
 impl TestDb {
     fn new(label: &str) -> Self {
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-        Self(std::env::temp_dir().join(format!(
-            "runlith-g6-integration-{label}-{}-{id}.sqlite3",
+        let dir = std::env::temp_dir().join(format!(
+            "runlith-g6-integration-{label}-{}-{id}",
             std::process::id()
-        )))
+        ));
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(&dir).unwrap();
+        Self(dir.join("state.sqlite3"))
     }
 }
 
 impl Drop for TestDb {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        if let Some(dir) = self.0.parent() {
+            let _ = fs::remove_dir_all(dir);
+        }
     }
 }
 
