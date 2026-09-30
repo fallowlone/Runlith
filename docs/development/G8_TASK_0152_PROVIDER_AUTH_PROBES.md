@@ -731,7 +731,8 @@ predictable value).
 
 Unified findings for the independent reports on `3924bb7`; original IDs
 are retained. “Resolved” means the bounded source/proposed-contract defect,
-not independent review PASS or production certification. AS-01 is OPEN.
+not independent review PASS or production certification. AS-01 now has owner
+choice B; contract closure remains pending independent re-review.
 
 | Envelope row / finding IDs | Disposition | Correction and runnable evidence |
 | --- | --- | --- |
@@ -741,7 +742,7 @@ not independent review PASS or production certification. AS-01 is OPEN.
 | R4: AS-05 / A4 | resolved | Atomic pre-dispatch request reservation includes in-flight work, no completion recharge or failure refund. Probe enforces count only; Proposed D24 also mandates atomic declared-`max_tokens` reservation. Overlapping-admission boundary test exercises actual dispatch; no actual-spend claim. |
 | R5: A5 | resolved | `GetPassWarning` becomes an exception before fallback stdin reading. No-TTY and warning doubles refuse; hidden success and explicitly gated synthetic stdin path remain. No provisioning/Keychain execution. |
 | R6: AS-06 / A6 | resolved | Corrected L1/probe/pass/generator interpretation separates intended endpoint, admitted destinations and foreign listener possibility. Original measurement tables/receipts retained; IPv6/VPN/firewall/dynamic limitations remain. |
-| R7: AS-01 | open | ADR “AS-01 adjudication” compares accepted authority and exact structured owner choice, answers six admission questions and proposes three owner options plus decision wording. No selected remote-operation semantics or new capability grant. |
+| R7: AS-01 / B2 / F1 | owner choice B; contract submitted for re-review | ADR “AS-01 contract” selects bounded remote delegation with canonical current Execution/Attempt authority, complete protocol classification, exact scopes and pre-forward enforcement. P1/P2 are proposed binding/validity amendments; P3 is the prerequisite for the first remote shape. No remote operation has sufficient evidence today. Independent finding closure remains pending; no production capability granted. |
 | AS-07 | resolved | D22 replaces unconditional creator-trust superset claim with reader-identity substitution and empty-vs-singleton silent-read trade-off. Source logic correction only; no ACL experiment. |
 | Adversarial N1 | resolved | Exact-length EOF rejection before auth/reservation/forward, with focused check. Production unknown-length/encoding/duplicate-header refusal is explicit in D16. No HTTP-smuggling exploit is claimed. |
 
@@ -781,6 +782,56 @@ are unverified here. Expanding into those areas would require forbidden
 runtime/credential/production work. The `9787690` owner positives and old
 9x401/ACL/redirect/sleep observations remain **inherited pre-remediation**
 evidence, never a fresh positive of the corrected subject.
+
+### B contract evidence and compatibility limits (2026-09-30)
+
+The owner selected **B — bounded remote delegation** in the contract/remediation
+envelope, superseding unfiltered remote-forwarding intent. The normative
+[AS-01 contract](../architecture/adr/ADR-0037-confined-provider-credential-gateway.md#as-01-contract--owner-choice-b-submitted-for-independent-re-review)
+distinguishes inference, client-only tool declarations/returned calls/results,
+server execution and unknown shapes. It requires canonical exact authority and
+mechanical enforcement before forwarding. Historical risk acceptance remains
+provenance and does not grant capabilities. ADR-0037 remains Proposed; B does
+not accept pending D11, in-process/ACL/core-dump or OAuth decisions.
+
+`owner_proxy_probe.py` is an **owner-operated diagnostic**, with no canonical
+Policy/Execution/Attempt admission gate. Its placeholder checks prove gateway
+credential-header possession; count/deadline/parser checks prove their named
+mechanics in the test model. Body/beta forwarding is not production authorization
+or scope proof. No fake production authorization object or executable redesign
+is added in this contract-only revision. The unchanged 16 synthetic remediation
+self-checks are rerun on this revision; prior RED/GREEN history above and old
+owner positives remain historical, not fresh final-head provider receipts.
+
+Targeted official protocol evidence, read-only retrieval on 2026-09-30:
+
+| Primary source / version provenance | Supported protocol fact | Limit on inference from it |
+| --- | --- | --- |
+| [Tool use overview](https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview), mutable official page | Custom/client tools return `tool_use`; application execution supplies `tool_result`. Provider tools execute remotely. | Neither a tool name nor `tools` presence proves where an enclosing CLI request executes. No exact CLI coding fixture. |
+| [MCP connector](https://platform.claude.com/docs/en/agents-and-tools/mcp-connector), `mcp-client-2025-11-20`; prior `mcp-client-2025-04-04` deprecated | `mcp_servers` supplies a remote entry URL; `mcp_toolset` controls enabled tools. | Entry URL/toolset does not prove all downstream destinations, actions or redirect enforcement. Both versions unsupported under current B evidence. |
+| [Web fetch](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-fetch-tool), `web_fetch_20250910`, `web_fetch_20260209` and later | Server fetching; domain/use controls. Dynamic filtering also enables code execution implicitly; a client-result continuation may resume fetching. | Request-level controls are not demonstrated Runlith per-hop enforcement. Unsupported under current B evidence. |
+
+These are dated documentation claims, not a live provider/API/sandbox probe,
+Runlith authority or proof of CLI `2.1.281` runtime behavior. Later page revisions
+must be re-reviewed; no complete supported protocol-profile artifact exists here.
+Repository evidence remains R6/R8's marker run: HEAD `/api/hello`, Messages
+`beta=true`, API `2023-06-01`, per-mode betas and short inference/SSE. It did not
+record a complete coding-tool body/continuation fixture or prove all observed
+betas' semantics. Unknown beta interactions are an explicit profile-compatibility
+blocker, even for the marker workflow, until proven. Free-form descriptions are
+data; only actual dispatch-enabling protocol positions require classification.
+
+Client coding-tool declarations are conditionally eligible as client-only
+protocol shapes; they gain no remote authority. Returned calls remain untrusted
+requests for the existing Runlith Policy/Runner/tool boundary. A shape that cannot
+prove this boundary fails closed. Workflows requiring provider-side search/fetch,
+MCP, containers/code or ambiguous mixed continuations are currently unsupported.
+No complete CLI compatibility claim is made. The first remote operation needs
+P3's separate accepted exact mapping/enforcement proof; P1/P2 request binding and
+dispatch validity must be ratified and implemented before production forwarding.
+Future production compatibility evidence must include actual sanitized versioned
+CLI fixtures/negative cases and a canonical-admission confinement run. This
+revision runs only synthetic checks; historical tables/observations are retained.
 
 ### Owner commands (round 4 — supersedes the manual `security` form)
 

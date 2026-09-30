@@ -30,7 +30,11 @@ Gate: G8
 > round-4/6/7 hardening that exposure and two independent review cycles
 > triggered — carried into the hardening rules below (D15-D27). This
 > revision also remediates the independent reviews of `3924bb7` (AS-02–07,
-> A1–A6 and N1); AS-01 remains OPEN for the owner decision below. Earlier
+> A1–A6 and N1). On 2026-09-30 the owner selected **B — bounded remote
+> delegation** for AS-01, separately from the credential-mechanism Option B.
+> The contract below is submitted for independent re-review; no remote
+> operation currently has sufficient enforcement evidence for v1 admission.
+> The ADR remains Proposed, including its other pending decisions. Earlier
 > revisions remediated a second independent review cycle
 > (architecture/security: PASS_WITH_NONBLOCKING_FINDINGS; adversarial:
 > FAIL) on top of the first (B1-B3 blocking, N1-N10 non-blocking; see each
@@ -390,8 +394,9 @@ loopback listener, and a Seatbelt network scope permitting outbound
 connections to nothing but that one port on any local address the rule
 admits (D11). This confines the *transport*: it does not, by itself, limit
 what the real Anthropic API is asked to do with a forwarded request's JSON
-body — see D24 and "Security impact" for the owner-accepted residual risk
-this leaves open (server-side tools, the MCP connector). The gateway holds
+body — D24 and the AS-01 contract require separate canonical admission of
+its semantics. Historical server-tool/MCP risk acceptance grants no
+forwarding authority outside the new bounded contract. The gateway holds
 the real credential — released from the Secrets Broker under
 policy-authorized `SecretAccess` — validates the placeholder on every
 request, rewrites the credential header before forwarding to the pinned
@@ -524,10 +529,11 @@ below.
 
 The owner selected **Option B** on 2026-09-25, in a structured decision
 prompt, as a proposed decision pending ratification. The following
-normative rules define the gateway's required shape. They formalize the
-design already probed by `docs/development/task0152-probes/owner_proxy_probe.py`
-and now run end-to-end with a real credential for both modes (see "Owner
-real-credential receipts") rather than inventing a new, unprobed design.
+normative rules define the gateway's required shape. The credential transport
+was probed by
+`docs/development/task0152-probes/owner_proxy_probe.py` and historically run
+with real credentials for both modes (see "Owner real-credential receipts").
+The new AS-01 authorization contract is not implemented or proven by that probe.
 
 **Process boundary (orchestrator decision, flagged for owner ratification
 — N7).** The gateway is a component *inside* the existing `agentd`
@@ -575,7 +581,9 @@ review reaches a different conclusion.
   (unauthenticated — see N4 in "Security impact": this reveals only that a
   Runlith gateway is listening, never a credential or attempt detail); and
   `POST /v1/messages` whose query string is exactly empty or exactly
-  `beta=true`, forwarded only on a placeholder match per D3. Every query
+  `beta=true`, forwarded only after D3, D24 and AS-01 admission all pass.
+  Placeholder possession authenticates this gateway access, not the
+  requested operation's authorization. Every query
   string R6/R7/R8 actually **observed** the real CLI send was `beta=true`
   — never bare/empty in any measured row
   (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md`, “R6/R7 request detail” and “R8”);
@@ -597,7 +605,8 @@ review reaches a different conclusion.
   leaving the gateway: API-key mode sets `x-api-key` to the real key and
   drops any `authorization` header; OAuth mode sets `authorization: Bearer
   <real>` and drops any `x-api-key`. `anthropic-beta` and
-  `anthropic-version` are forwarded exactly as the child sent them — R8
+  `anthropic-version` are forwarded exactly as the child sent them **only
+  after their complete version/feature combination passes AS-01** — R8
   already proved the CLI itself decides the correct per-mode flag set, so
   the gateway never adds or guesses one.
 - **D6.** The upstream host is pinned (the real Anthropic API host); the
@@ -733,8 +742,8 @@ review reaches a different conclusion.
   entirely outside the adapter. See "Proposed amendments" for the exact
   §9a superseding text and "Implementation task list" for the matching
   code change.
-- **D24 (corrected — G3: enforceable and fail-closed body-scoped
-  enforcement, B2 owner-accepted residual risk).** Before forwarding a
+- **D24 (corrected — G3, AS-01: body validation plus canonical bounded
+  admission).** Before forwarding a
   `POST /v1/messages` request, the gateway validates its body under a
   strict parse, then forwards the **original, unmodified bytes** only
   after that validation passes — the parse is a gate, never a
@@ -792,20 +801,20 @@ review reaches a different conclusion.
   bound and this rule does not constrain it); and any per-use charge
   Anthropic bills for a server-side tool or MCP connector use the
   forwarded body invokes — that is part of the Anthropic-server-mediated
-  egress risk "Security impact" records as owner-accepted, not something
+  egress risk "Security impact" records historically, not something
   D24's model/token-count enforcement reaches. **The claim that this rule
   alone bounds attempt spend is false and is not made:** D24 bounds
   request count and the declared `max_tokens` sum; it does not bound
   actual spend, which also depends on input tokens, context mode, and any
-  billed tool/connector use. **AS-01 remains OPEN:** the previously selected
-  passthrough proposal does not inspect, filter, or reject
-  `tools`, `mcp_servers`, or any other body field beyond `model` and
-  `max_tokens` — see "Security impact" for the residual risk this leaves
-  open, which the owner has reviewed and accepted, and "Implementation
-  task list" for an optional, not-yet-decided future hardening follow-up
-  that would go further. This passthrough cannot be represented as an
-  authorized v1 contract until the AS-01 decision below resolves its Policy
-  boundary; the risk acceptance itself grants no effective capability.
+  billed tool/connector use. **Mandatory AS-01 gate:** validate the entire
+  request's protocol semantics, including nested dispatch features and
+  version/beta combinations, against the bounded contract below. Reject
+  unknown or unsupported shapes before credential attachment/forwarding;
+  do not strip features and silently change the requested operation.
+  Client-side tool declarations are eligible when proven to request only
+  returned calls; the presence of `tools` alone is not a rejection reason.
+  The diagnostic probe's unfiltered body forwarding is not this production
+  authorization boundary.
 
 ### Additional hardening rules (D15-D22, D25-D27)
 
@@ -1120,97 +1129,284 @@ production Rust gateway as normative rules, not optional polish.
     impact" for this risk restated in context, and "Proposed amendments"
     for the exact ADR-0020 superseding text.
 
-## AS-01 adjudication — OPEN; owner decision required before ratification
+## AS-01 contract — owner choice B; submitted for independent re-review
 
-The architecture/security review calls remote-operation authority missing;
-its exact normative citations are ADR-0013 “Consequences”, ADR-0026
-“Decision” (initial exact-resource capability vocabulary, delegation,
-unknown/unprovable scope and operation-adjacent enforcement), and
-INV-097/146/147/148/149/153. Primary normative sources:
-[ADR-0013, Consequences](ADR-0013-policy-engine-os-isolation.md),
-[ADR-0026, Decision](ADR-0026-g6-security-authority-and-capability-contracts.md),
-[Policy, Capability model / Provider boundary / Enforcement points](../../security/POLICY_CONTRACT.md),
-and [INVARIANTS](../INVARIANTS.md). The adversarial review treats B2/F1 as a
-**documented owner-accepted residual**, while still rejecting undeclared
-widening of the chosen bounds. Those positions concern different claims:
-the residual was disclosed/accepted, but canonical authority is unspecified.
+### Decision and authority boundary
 
-Primary source for the owner's actual choice: structured question at parent
-session `4a4b6711-1bb0-4f8a-b706-a991787996f0.jsonl:877`, answered at `:884`
-on 2026-09-26: “Принять как риск”, with the presented consequence “Тело не
-фильтруется ... Только лимиты модели и токенов.” This is preserved; it is not
-an invariant amendment or a grant from BuiltInHard/UserManaged Policy.
+On 2026-09-30, the TASK-0152 contract/remediation envelope records the owner's
+choice **B — bounded remote delegation**. This is the selected remote-operation
+semantics, distinct from credential-mechanism Options A/B/C above. The gateway
+may admit only remote operations/destinations for which the required canonical
+capability is defined, effective authority belongs to the current execution,
+scope/destination is known before privileged forwarding, and every mandatory
+restriction is mechanically enforceable. Malformed, unknown or unprovable
+mandatory restrictions fail closed. Residual-risk acceptance alone grants no
+authority. This choice permits neither broad passthrough nor gateway-created
+capabilities; provider/model output cannot authorize anything, and hard denial
+remains final. It does not ratify any other Proposed ADR-0037 decision.
 
-1. **Operation/destination:** model inference sent to the pinned provider
-   is one network operation. A requested provider-server tool invocation,
-   MCP server/tool and its destination, external side effect, or web fetch
-   (including every redirect hop, INV-097) is additional privileged scope.
-   Provider transport authorization and `SecretAccess` do not authorize all
-   operations a JSON body can delegate (ADR-0026, Policy “Capability model”
-   and “Provider boundary”). Local client tools are executed through their
-   existing local tool boundary; merely describing one is not a remote call.
-2. **Knowledge/enforcement before forward:** the trusted gateway/adapter can
-   inspect a declared MCP URL, tool definitions/configuration and beta
-   selection, bind recognized requests to canonical effective capabilities,
-   and refuse before credential-bearing dispatch. It cannot learn/mediate
-   model-selected future fetch URLs, provider redirects, dynamic MCP tool
-   discovery or arbitrary server-side code's later actions from the initial
-   request alone. Provider-native restrictions/claims are defense in depth,
-   not proof of mandatory scope enforcement (ADR-0026 “Decision”). Current
-   [MCP docs](https://platform.claude.com/docs/en/agents-and-tools/mcp-connector)
-   describe request server URLs and toolsets; the
-   [web-fetch docs](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-fetch-tool)
-   describe model-selected fetching and request-level restrictions. Read on
-   2026-09-30 for this adjudication, not runtime evidence of CLI 2.1.281.
-3. **Existing effective capabilities:** current
-   `build_provider_launch_security_for_context` in
-   `bins/agentd/src/execution.rs` composes workspace filesystem scope, exact
-   provider executable and `NetworkAccess("tcp:443")`; no `ToolInvoke` or
-   `ExternalAction` is granted there. Runner supports only that port scope
-   or none (`profile_for`). D11 proposes a different child transport scope;
-   D12 separately consumes exact secret access/binding. Neither implies
-   authority for arbitrary delegated tool/destination scope. Initial
-   non-filesystem ScopeIds are exact-match, no wildcard language (ADR-0026;
-   Policy “Requested and effective authority”/“Policy sources”).
-4. **Unknown/unprovable:** unknown feature/body/beta semantics or restrictions
-   the trusted boundary cannot enforce must fail closed (INV-149/153), not
-   become authority through opaque passthrough. No claim that a static tool
-   allowlist proves per-hop enforcement on Anthropic's infrastructure.
-5. **Risk acceptance:** covers disclosed egress/spend exposure **within
-   canonically authorized, enforceable scope**. It cannot override `DENY`,
-   invent a capability/scope or waive mandatory restrictions (INV-148;
-   ADR-0026 approval semantics). Ordinary internal failure stays distinct
-   from policy denial. The old choice grants no production authority today.
-6. **Feasible v1:** an inference-only, version-pinned request admission gate
-   refusing remote-dispatch features can preserve Option B with no hidden
-   widening. It narrows the expressly chosen passthrough, so selecting it is
-   a new owner architectural choice. Selective remote delegation needs exact
-   scope mapping **and** enforceability proof; broad opaque passthrough cannot
-   meet the existing contract simply by naming it an accepted residual.
+B may expand only through a separately accepted operation contract. No broader
+mode, toggle, wildcard grant or speculative extension infrastructure is proposed.
+The previous inference-only recommendation is not selected. An empty evidenced
+remote-operation set today is a prerequisite limitation of B, not a replacement
+architecture decision.
 
-No semantics is selected or implemented by this remediation. D24's
-passthrough and optional-filter statements are historical selected intent
-with this unresolved contract gap; they are not a ready-for-ratification v1
-permission. Necessary choices:
+The architecture/security AS-01 finding identified missing canonical authority;
+the adversarial B2/F1 disposition recognized authentic residual-risk acceptance.
+Both concern valid, different claims. Historical provenance is preserved: parent
+session `4a4b6711-1bb0-4f8a-b706-a991787996f0.jsonl:877/:884`, 2026-09-26,
+recorded “Принять как риск” with “Тело не фильтруется ... Только лимиты модели и
+токенов.” That choice cannot authorize forwarding outside this newer B contract.
+Accepted authority remains [ADR-0013](ADR-0013-policy-engine-os-isolation.md),
+[ADR-0026](ADR-0026-g6-security-authority-and-capability-contracts.md),
+[Policy](../../security/POLICY_CONTRACT.md) and
+[INV-097/146–153](../INVARIANTS.md). Contract-finding closure still requires
+independent review of the exact new commit; this section is not a review PASS.
 
-| Proposed option | Enforceability and scope | Security consequences | Compatibility / evidence needed | Effect on Option B |
-| --- | --- | --- | --- | --- |
-| **1. Inference-only v1 (recommended)** | Version-pinned body/beta gate refuses remote server tools, MCP, containers/remote code and unknown dispatch features; local tool execution retains its canonical boundary. | No delegated remote authority; fail closed on unrecognized features. Preserve input/context spend caveat. | Changes the 2026-09-26 passthrough choice; may disable CLI WebSearch. Need exact CLI request fixtures, negative nested/unknown/beta cases and genuine confined production smoke after ratification. | Gateway credential mechanism retained; narrower accepted request shapes. |
-| **2. Explicit limited remote delegation** | Typed Policy admission of recognized remote tools/actions and exact destinations; permit only scopes the trusted boundary can demonstrably enforce, otherwise reject. | No wildcard grants; server-chosen URLs/redirects stay closed absent proof. User risk acceptance applies after authorization. | Needs precise versioned provider scope mapping, redirect/dynamic-tool proof, current-policy checks, negative capability tests and compatibility fixtures. Not established by current evidence. | Gateway retained with mandatory inspection; functionality conditional on enforceable scope. |
-| **3. Broad passthrough delegation via separate architecture amendment** | Explicitly define remote-service authority and any proposed exception to per-destination/per-hop enforcement; existing exact vocabulary is insufficient. | Enlarges the trusted provider/delegated authority and egress/side-effect surface; cannot silently override accepted invariants/hard denials. | Closest to recorded passthrough preference, but requires separate accepted Policy/invariant/scope design and independent security review; outside this envelope. | Mechanism retained but blocked under current contracts until those changes are authorized. |
+### Classification inputs and rules
 
-**Recommendation:** option 1 for a bounded v1; option 2 only for independently
-proven scopes. Option 3 is not authorized by the existing residual choice.
-**Proposed owner wording (NOT ACCEPTED):** “For ADR-0037 v1 I replace my
-2026-09-26 unfiltered server-tool passthrough choice with inference-only
-admission. The gateway must refuse server tools/MCP/remote code/containers
-and unknown dispatch-enabling body or beta features before forwarding;
-local client tools retain canonical Policy enforcement. This narrows provider
-functionality and does not grant new capabilities. Preserve model/request/
-declared-token limits and the disclosed input/context spend residual.
-Selective remote delegation requires a separately reviewed enforceable
-scope contract. Option B remains selected; ADR-0037 remains Proposed until
-exact-head independent review and owner ratification.”
+The trusted provider adapter must supply a reviewed, version-pinned protocol
+profile covering method/path/query, API version, the entire beta combination,
+body fields, nested content/tool schemas and their interactions. Its trusted
+version/schema selection must agree with the actual headers/body; child claims
+about protocol identity alone are insufficient. It is a
+mechanism description, not an authorization source. It must enumerate accepted
+forms and reject unknown fields/versions or ambiguous combinations at semantic
+positions. Free-form prompt/tool-description/schema data remains untrusted data;
+a string mentioning a tool, URL or field name is not itself protocol dispatch.
+The actual D16-framed/D24-parsed bytes are facts about what was requested, not
+proof it is permitted. Trusted core supplies current Task/Execution/Attempt,
+parent authority, policy state, operation binding and budgets. Child-supplied
+IDs, tool names, `allowed_domains`, model text, remote responses and placeholder
+possession cannot supply or widen those facts.
+
+Classification examines **all** execution-enabling features together, including
+continuation state, container references, tool callers/discovery and betas:
+
+- **Inference:** the profile proves this request causes only inference at the
+  pinned provider and has no enabled server execution. Absence of `tools`
+  alone is insufficient proof; a remote continuation or beta may change it.
+- **Client-side tools:** a reviewed custom definition (`name`, `input_schema`
+  and permitted metadata), or an explicitly versioned client-tool schema,
+  causes the API to return a `tool_use` proposal for local handling, with a
+  subsequent correlated `tool_result`. No remote executor/caller or server
+  feature may be enabled by the enclosing request. Names such as `Bash`,
+  `WebSearch` or `web_fetch` do not classify a tool; `input_schema` alone is
+  also insufficient when other features enable server execution. A returned
+  call is untrusted requested work: actual local execution must still route
+  through the accepted Runlith operation boundary with current effective
+  authority, including the enforced Runner plan for already-authorized
+  confined local work. A declaration grants no new tool/process/filesystem
+  permission. No interception of every CLI built-in tool call is claimed.
+  Correlated results/history do not confer authority.
+- **Server-mediated execution:** any feature that can execute on the provider
+  or a downstream server, even conditionally or during continuation, requires
+  separate remote admission. Disabling tool choice for one turn, a prompt
+  saying “do not use tools,” or a response with no call is not an enforcement
+  proof. A mixed client/server request requires admission for every possible
+  privileged operation; client calls in it cannot hide server execution.
+- **Unknown/unsupported:** if the profile cannot prove the distinction or
+  mandatory enforcement, reject the entire shape before forwarding. No
+  guessed classification, sanitizing fallback or broad passthrough.
+
+Primary protocol evidence (read-only official documentation, retrieved
+2026-09-30; mutable pages, not CLI runtime evidence or Runlith authority):
+[Tool use overview](https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview)
+distinguishes application-executed calls/results from provider-executed tools,
+including client bash/editor schemas. This supports the mechanism distinction,
+not a complete admissible CLI profile.
+[MCP connector](https://platform.claude.com/docs/en/agents-and-tools/mcp-connector)
+documents `mcp_servers` plus `mcp_toolset`, beta `mcp-client-2025-11-20` and
+deprecated `mcp-client-2025-04-04`; a declared server URL identifies an entry
+point, not all actions or downstream destinations.
+[Web fetch](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-fetch-tool)
+documents server fetching, domain/use controls, and versions `web_fetch_20250910`
+and `web_fetch_20260209` (and later). Dynamic filtering in the latter also enables
+code execution without a separate code-execution entry. A client-result
+continuation can resume server fetching. Thus a `tools` name/type allowlist alone
+cannot prove the complete action set. Per-hop enforcement and exact CLI body
+compatibility are not established by these pages. Dated summaries and
+provenance are also recorded in the probe evidence document.
+
+### Canonical capability mapping and forwarding gate
+
+For each recognized shape, a trusted, accepted operation mapping must define
+its complete required capability set and resolve exact resources before
+forwarding. Inference requires the gateway's exact pinned upstream
+`NetworkAccess`; credential release separately requires exact
+`SecretAccess(SecretRef)` and the existing execution delivery binding. Child
+D11 network scope authorizes only its gateway transport. Neither scope grants
+remote `ToolInvoke`, `ExternalAction` or third-party `NetworkAccess`.
+For a future remote tool the mapping must specify exact `ToolInvoke` identity,
+exact destinations for each network access/hop and any exact `ExternalAction`
+identity required by its effects. No new capability enum or string-pattern
+policy language is defined here. A raw URL/tool name must first resolve to a
+trusted exact-resource mapping; passing arbitrary strings through `ScopeId::new`
+only validates identifiers and is not that mapping. Missing mapping rejects.
+
+`agentd`'s operation owner constructs `PolicyRequest` from the immutable request
+and trusted origin, narrows against the current execution's parent
+`EffectiveCapabilities`, and asks canonical Policy to evaluate. Gateway code
+consumes the trusted result in-process; it accepts no child HTTP authorization
+object, stored approval row or self-created capability set. Its attempt context
+must include nonempty existing Execution/Attempt IDs (Task alone is insufficient),
+current parent authority and the exact credential execution binding. The broker's
+execution-level binding does not itself attest the attempt: `agentd` owns that
+association and must revoke access at attempt end. No new durable identity is
+needed. `EffectiveCapabilities` by itself has no origin, policy revision, expiry
+or request binding and must not be cached as a reusable forwarding grant.
+
+Immediately before credential attachment and each dispatch, the trusted owner
+and gateway must, in this order:
+
+1. Finish D16/D24 framing, strict parsing and complete profile classification;
+   resolve the exact operation, all scopes and enforcement proof. Hold the
+   original body plus semantic headers/path/query immutable through dispatch.
+2. Revalidate live Execution/Attempt, secret target and current parent authority;
+   recompute canonical Policy using current policy fingerprint and the exact
+   request/origin. Requested and delegated effective authority must each be
+   subsets of the current parent, with no capability-kind or resource widening.
+   The existing launch composition grants filesystem/process/`tcp:443`, not
+   remote tools/actions (`build_provider_launch_security_for_context`). It is
+   not sufficient authority for new remote features.
+3. Refuse `DENY` without approval conversion. `REQUIRE_APPROVAL` withholds the
+   whole atomic request until the existing trusted `ApprovalService::authorize`
+   consumes an exact, current, unexpired matching grant once. A durable Approved
+   row is not bearer authorization. `ALLOW` needs no fabricated approval. A
+   policy/parent/request change requires re-evaluation and, where required, a
+   new exact approval; prior consumption cannot authorize retry or another call.
+4. Verify current request binding and every mandatory enforcement constraint,
+   including destination/hops, finite D16 time/byte/cleanup bounds and D18 latch.
+   Couple authority validity to dispatch so revocation/end or mutation cannot
+   race a stale preflight. If that coupling cannot be proven, do not forward.
+5. Atomically reserve D24 count and declared tokens across all listeners,
+   including in-flight work; then attach only D5's credential rewrite and
+   forward the validated original bytes to D6/D17's pinned transport. No body,
+   version/beta, path or destination mutation is allowed after authorization.
+   Errors/cancellation/ambiguous dispatch never refund reservations or reuse
+   consumed authorization. Retry is a new operation with current checks.
+
+These are operation-owner enforcement obligations, not a second Policy Engine
+or gateway approval authority. A provider that hides destinations/actions,
+redirect hops or execution restrictions cannot satisfy them merely by returning
+an audit-like response. Monotonic delegation applies throughout continuations:
+a later request/action must remain within current parent authority and receive
+its own admission; it cannot inherit a broader grant from the first request.
+
+### Exact proposed contract gaps and ratification dependencies
+
+The accepted types supply `PolicyRequest` operation/requester/origin/capabilities,
+`PolicyDecision`/policy fingerprint, exact-resource `ScopeId`, parent narrowing,
+and single-use `ApprovalBinding`. They do **not** supply a typed HTTP request
+integrity binding, gateway dispatch validity coupling, or an accepted mapping
+from a remote provider operation to its complete destinations/actions. These
+are production admission blockers, explicitly resolved here as proposed
+requirements rather than invented existing production ports:
+
+- **P1 — request binding amendment:** proposed addition to ADR-0026/Policy's
+  exact-request/approval contract: “For delegated provider dispatch, the exact
+  request binding includes a versioned integrity fingerprint of the immutable
+  method, path/query, semantic headers (API version and complete beta set),
+  original body bytes, protocol/operation mapping revision, resolved exact
+  resources and mandatory limits. Authentication header values are excluded;
+  the original body is bound as opaque bytes, never logged or persisted raw.
+  The integrity digest is internal binding data, never an audit/log payload.
+  It is covered by the canonical decision and approval
+  binding. Changed content or mapping invalidates prior authorization.” This
+  needs an accepted typed representation and fingerprint inclusion; existing
+  arbitrary `operation_id` strings are not claimed to implement it. Reuse
+  Task/Execution/Attempt/operation/approval identities; introduce no new durable
+  grant identity. No raw request or integrity digest may enter audit.
+- **P2 — dispatch validity amendment:** proposed addition to Policy's enforcement
+  contract: “The operation owner couples current parent/policy/attempt validity,
+  exact request binding and one dispatch under the same trusted enforcement
+  boundary. End/cancellation or authority change prevents further dispatch and
+  cancels outstanding access; stale preflight or replay cannot authorize it.”
+  Accepted TOCTOU rules require this property but do not specify a gateway
+  mechanism. Its implementation must prove the race boundary; this ADR freezes
+  no API/lock/lease or fake authorization object.
+- **P3 — first remote-operation prerequisite:** before enabling one shape, a
+  separately accepted mapping must define its exact typed resources, all
+  possible actions/destinations/hops, provider/API/beta versions, enforceable
+  finite restrictions and trusted enforcement mechanism, with independent
+  negative tests for widening, hidden actions, mutation and replay. Exact
+  `ScopeId` equality can be reused only after resource semantics are defined.
+  Current MCP URLs/domain filters do not establish such a mapping. If a
+  required scope cannot fit the accepted vocabulary, specify and ratify the
+  exact amendment before admission; do not silently weaken INV-097/149/153.
+
+P1/P2 require explicit ratification with ADR-0037 and its accepted-contract
+amendment package before production wiring; no accepted file is edited here.
+P3 requires a separately accepted operation contract before expanding the
+empty remote set. Independent re-review can judge this Proposed contract now;
+none of these dependencies is claimed implemented or accepted.
+
+### Supported v1 scope and failure behavior
+
+“Eligible” below describes the Proposed contract, not a working production
+gateway. **No server-mediated remote operation is currently evidenced as
+admissible.** B is the selected direction; its first remote operation is blocked
+on P3, not on another owner choice between architectures.
+
+| Operation/request shape | Required authority | Destination source | Enforcement | Evidence | v1 status |
+| --- | --- | --- | --- | --- | --- |
+| D4 `HEAD`/`GET /api/hello` | No privileged forwarding authority | Local gateway only | Fixed empty local reply, D11 peer filter, D16 bounds | R6/R8 observed HEAD; GET is design allowance | Local diagnostic shape; no remote action |
+| Proven inference-only Messages profile | Exact upstream NetworkAccess; separate SecretAccess/execution binding | Trusted pinned upstream config | Full profile gate, P1/P2, D3–D24 | R6/R8 marker transport, historical owner success; complete body/beta profile not proven | Eligible after profile proof, ratification and production integration |
+| Proven client declaration / returned `tool_use` / correlated `tool_result` | Inference transport for declaration; current local capabilities before actual local execution | Pinned provider for inference; local tool owner resolves later action scope | Reviewed client-only schema/feature combination plus accepted local Policy/Runner boundary | Official protocol distinction; no CLI coding-tool round-trip fixture here | Eligible without blanket `tools` ban; exact CLI shape remains unverified |
+| Provider web search/fetch, including continuation or dynamic filtering | Exact remote tool + each destination/hop and any required external action | Selected during provider execution; filters are declarations | No proven operation-adjacent per-hop control here | Official tool overview/web-fetch versions above | Unsupported; reject before forwarding |
+| MCP connector/toolset (both documented beta versions) | Exact tool/action and complete destination scopes | Declared entry URL; downstream actions/discovery hidden | URL/toolset alone cannot bound all effects | Official MCP connector | Unsupported; reject before forwarding |
+| Server code/container/programmatic caller or remote continuation | Exact execution/tool/action/network resources per accepted mapping | Runtime-selected/hidden | No complete enforceable mapping here | Protocol overview and implicit fetch code-execution evidence | Unsupported; reject before forwarding |
+| Unknown type/field/beta/combination, dynamic or unbounded destination | None may be inferred | Unknown/unprovable | Whole-shape local rejection | INV-149/153; no guessed provider semantics | Unsupported; fail closed |
+
+Missing/malformed trusted authorization, origin mismatch, missing scope mapping,
+unknown/dynamic destination, unsupported provider behavior or enforcement proof
+all reject before forwarding. Mutation/scope widening requires a new canonical
+request, never a modified grant. Stale/replayed evidence, consumed approval,
+expiry, terminated attempt or changed policy/parent state cannot authorize a
+forward. Internal/transport failures remain distinct from policy denial; all
+failures emit only fixed product-owned reason categories and bounded counts.
+
+Audit retains existing Task/Execution/Attempt/operation correlation, typed
+capability/resource references, policy fingerprint/rule/reason, approval
+reference/outcome, fixed classification/profile revision, admission/dispatch
+outcome and reserved budgets. Gateway lifecycle and D16 terminal facts may be
+recorded as typed product facts. Never record secret/placeholder bytes (including
+hashes), arbitrary child names/URLs/headers, raw request/response/model text or
+unvalidated claimed identities. Profile/resource references must come from the
+trusted mapping. The proposed new gateway fact vocabulary needs the existing
+Security Audit extension; no generic payload column or audit-as-authority.
+
+### Claude CLI compatibility and diagnostic boundary
+
+CLI `2.1.281` R6/R8 observed unauthenticated HEAD, Messages `beta=true`, API
+version `2023-06-01`, mode-specific beta sets and short marker inference/SSE.
+They did not capture a complete coding-tool admission fixture or prove every
+beta's dispatch semantics. Even the marker prompt's “do not use tools” cannot
+prove that its request declares no tools. Unknown semantics in those observed
+beta sets therefore remain a concrete **profile-compatibility blocker** until
+reviewed; observed headers alone are not an approved profile.
+
+Custom client coding-tool declarations/calls/results are not automatically
+remote grants or prohibited because `tools` exists. A CLI workflow requiring
+server WebSearch, fetch, MCP connector, remote code or an unclassifiable mixed
+continuation is blocked under current B. A name alone cannot establish that a
+particular CLI WebSearch shape is server-mediated. Full coding/interactive,
+count-tokens/other endpoints, long-session OAuth and production confinement
+compatibility are unproven; no switch to broad delegation is authorized.
+After ratification, the bounded compatibility evidence must include actual
+sanitized versioned CLI request/continuation fixtures, profile negatives and a
+separate production run through canonical admission. No such run occurs here.
+
+`owner_proxy_probe.py` remains owner-operated diagnostic tooling: placeholder,
+transport/count/deadline checks, not canonical Policy admission. It forwards
+bodies without this production semantic/authorization gate; its synthetic
+checks and old positive receipts cannot prove P1–P3 or production admission.
+No fake production authorization object or probe redesign is introduced.
+Existing connection-slot ownership, aggregate deadlines/cleanup, atomic request
+and declared-token obligations, redaction, hidden-input fail-closed, exact
+Content-Length and honest address/evidence limits remain required. D11,
+in-process delivery/ACL/core-dump and OAuth decisions remain pending their
+separate owner ratification; the B choice accepts none of them by implication.
 
 ## Provider neutrality
 
@@ -1300,30 +1496,18 @@ default and is the *only* class available in any distributed or
 multi-user Runlith configuration; the `setup-token` class is never enabled
 by default and never exposed as a general product feature.
 
-**Anthropic-server-mediated egress risk, owner-accepted (2026-09-26).**
-The gateway forwards the `/v1/messages` body and `anthropic-beta`
-unchanged (D5). Two Anthropic-side features let the confined child cause
-Anthropic's own servers — not the confined child directly — to contact
-arbitrary third-party hosts: the MCP connector accepts an `mcp_servers`
-array naming any publicly-exposed HTTP(S) server URL, which Anthropic's
-servers then connect to on the caller's behalf
-(<https://platform.claude.com/docs/en/agents-and-tools/mcp-connector>,
-retrieved 2026-09-26); and the web fetch server tool has Anthropic's API
-retrieve the content of a URL the model selects, inserted server-side into
-the conversation (<https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-fetch-tool>,
-retrieved 2026-09-26; that page's own warning names this an exfiltration
-risk and documents `allowed_domains`/`max_uses`/disabling the tool
-entirely as mitigations available at the API-request level, not something
-this gateway currently sets). On 2026-09-26, in a structured decision
-prompt, the owner chose "accept as risk": D24's body parsing enforces
-only a model allowlist and token/request budget (see above); the body is
-**not** filtered to strip or block `tools`, `mcp_servers`, or any other
-field. This channel — Anthropic-server-mediated egress via server-side
-tools and the MCP connector — is recorded here explicitly as an
-owner-accepted residual risk, not silently narrowed by D24's wording (see
-"Security impact" for the full statement, and "Implementation task list"
-for future hardening; see “AS-01 adjudication” for the unresolved mandatory
-authority boundary).
+**Historical Anthropic-server-mediated egress risk acceptance (2026-09-26).**
+The owner previously accepted the proposal to forward body/betas without
+remote semantic admission, subject only to model/token/request limits.
+Primary provenance is the structured question/answer recorded in AS-01.
+That historical choice concerns the real egress exposure from provider-side
+tools and the MCP connector; it never amended canonical Policy authority.
+The 2026-09-30 B decision now requires bounded authorization and enforceable
+scope before forwarding. Unknown/unprovable remote shapes are refused;
+filtering/classification is mandatory admission, not optional future hardening.
+The diagnostic probe still forwards bodies without that production gate.
+Historical compliance and credential-class choices above remain separate
+from this B choice and from the other pending ratification decisions.
 
 ## Owner real-credential receipts
 
@@ -1388,6 +1572,14 @@ This ADR does not edit the files below; editing them is a listed
 implementation follow-up (see "Implementation task list", "Doc
 amendments"). It states the exact superseding text now so the follow-up
 has no interpretive latitude.
+
+**ADR-0026 / `docs/security/POLICY_CONTRACT.md` request/approval and
+enforcement sections** — append the exact normative sentences in AS-01
+P1 and P2, respectively. Their typed binding/fingerprint and dispatch-coupling
+implementation is not supplied by existing contracts. Both amendments must be
+ratified with this Proposed ADR before gateway production admission; P3's
+separate exact operation contract is required before any remote shape is enabled.
+This does not amend an invariant or add an approval authority.
 
 **`docs/architecture/providers.md` §7 ("Authentication boundary")** — append
 after the existing paragraph (`providers.md:162-171`, text unchanged above
@@ -1541,29 +1733,18 @@ Residual risks, not resolved by this ADR and not glossed over:
 - **Data sent to Anthropic via prompts is inherent to using the provider
   at all**, unaffected by which of these options is chosen — out of this
   ADR's scope.
-- **Anthropic-server-mediated egress via server-side tools and the MCP
-  connector — owner-accepted residual risk (B2).** D24 enforces only a
-  model allowlist and a token/request budget on the forwarded body; it
-  does **not** filter, strip, or block `tools`, `mcp_servers`, or any other
-  body field. If the CLI's request includes Anthropic's web-fetch/
-  web-search/code-execution server tools or an `mcp_servers` entry naming
-  an arbitrary HTTP(S) server, **Anthropic's own servers** — not the
-  confined child — will contact that third-party host or service on the
-  API caller's behalf
-  (<https://platform.claude.com/docs/en/agents-and-tools/mcp-connector>,
-  <https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-fetch-tool>,
-  both retrieved 2026-09-26). This is a real egress channel this design
-  does not close: it exists because the gateway forwards the body
-  unchanged (D5), not because of any gap in the loopback network
-  confinement (D11) — the confined child's own network access is still
-  exactly the gateway's port, nothing more. The owner reviewed this and
-  chose, on 2026-09-26 in a structured decision prompt, to accept it as
-  risk (see "Compliance"); it is not silently narrowed by D24's more
-  limited scope. A stricter, optional body policy (rejecting `mcp_servers`/
-  server tools/`container` entirely, or an `anthropic-beta` allowlist) is
-  listed in "Implementation task list" as a not-yet-decided future
-  hardening follow-up. This records the historical choice, not canonical
-  authorization; AS-01 above must be resolved before ratification.
+- **Provider-mediated actions (B2 / AS-01).** Historical unfiltered
+  delegation exposed an additional remote egress/action channel despite
+  confining the child's direct network access. The owner accepted that risk
+  on 2026-09-26; the newer B choice requires canonical scope admission and
+  mechanically enforceable mandatory restrictions before dispatch. Current
+  remote tool/MCP/container shapes are unsupported. Domain filters, pinned
+  provider TLS and risk acceptance do not prove hidden downstream actions
+  or redirect scopes. The first permitted remote shape requires the accepted
+  P3 operation contract; no broad-delegation fallback is available. Input/
+  context spend exposure remains within otherwise authorized inference,
+  and D24 still does not bound actual spend. Diagnostic passthrough and old
+  receipts are not production admission evidence.
 - **`/api/hello`, `/v1/messages` beyond D24's own scope, and any CLI
   feature needing a different outbound destination than the pinned
   upstream** — D4's allowlist is deliberately narrow; anything else is
@@ -1655,7 +1836,7 @@ separately after ratification. Each depends on this ADR's ratification
   it. Depends on: gateway component, doc
   amendments (ADR-0020 exception text is fixed by this ADR).
 - **Credential gateway component.** Implement D1-D10 and the D15-D21,
-  D24-D26 hardening/scope rules as a new component *inside* `agentd`
+  D24-D26 and AS-01 hardening/admission rules as a new component *inside* `agentd`
   (N7 — not a separate process) with its own targeted test suite:
   self-check, method/path/query allowlist (D4, with audit digest not raw
   values, N3), header-name allowlist (D15), request-smuggling/size limits
@@ -1710,9 +1891,10 @@ separately after ratification. Each depends on this ADR's ratification
   path/query/header name or value. Depends on: gateway component.
 - **Doc amendments.** Apply the exact superseding text in "Proposed
   amendments" to `providers.md` §7, §9a, the H7 closure record,
-  `PRIVACY_ARCHITECTURE.md` §5, and ADR-0020 §7. Depends on: this ADR's
-  ratification (text is already fixed by this ADR; the follow-up is
-  mechanical).
+  `PRIVACY_ARCHITECTURE.md` §5, ADR-0020 §7 and the P1/P2 ADR-0026/Policy
+  binding/enforcement amendments. Depends on: this ADR's
+  ratification (text is fixed here; typed implementation requires its
+  separate verification).
 - **Real-provider production G6 smoke, both credential classes.** A
   production-shaped smoke test exercising the gateway with a real
   (owner-provisioned, non-committed) credential for each class, verifying
@@ -1725,16 +1907,17 @@ separately after ratification. Each depends on this ADR's ratification
   only once the smoke task above is green; the `Unsupported` path (and its
   TASK-0112 reasoning) remains unchanged for any launch that is not
   gateway-backed. Depends on: real-provider production smoke.
-- **AS-01 resolution before ratification (B2).** Choose an enforceable
-  canonical remote-operation contract from the adjudication above; this is
-  mandatory and remains OPEN. No option is authorized by this remediation.
-  Additional future hardening may include a
-  stricter body policy that rejects `mcp_servers`, Anthropic server-side
-  tools (web fetch/web search/code execution), and `container` entirely,
-  or pins an explicit `anthropic-beta` allowlist, restricting the
-  Anthropic-server-mediated egress channel "Security impact" records as
-  owner-accepted residual risk. Not authorized or scoped by this ADR;
-  listed so the option is not lost, not committed to.
+- **AS-01 canonical admission (B2).** Implement the owner-selected B
+  contract only after independent re-review and ratification of P1/P2 with
+  the amendment package. Add complete protocol-profile admission and current
+  execution/attempt-bound canonical authorization adjacent to dispatch,
+  preserving D24 reservations. Tests must cover client-only declarations
+  versus mixed/server continuations, implicit server features, nested unknowns,
+  unsupported betas, missing/malformed/widened authority, policy changes,
+  mutated requests, terminated attempts and replay/expiry. No remote shape
+  may be enabled until P3's separate accepted mapping/enforcement evidence
+  exists. These are dependencies of the existing gateway follow-up, not new
+  queue entries or an optional passthrough filter.
 
 ## Open questions
 
