@@ -4842,3 +4842,60 @@ items:
       public repository. This outcome records completion on the task branch;
       integration into main is not claimed.
       - AI_ENGINEERING_OS_MONETIZATION_AND_PLUGIN_ECOSYSTEM.md
+
+  # Cross-gate test hygiene: app-services integration tests depended on the
+  # runner's ambient temp directory and login session, so they failed on a
+  # default Linux container (world-writable /tmp, no USER). TASK-0155 follows
+  # accepted TASK-0154; this task branch still requires main reconciliation.
+  - id: TASK-0155
+    gate: G8
+    title: Hermetic app-services integration tests (private temp root, explicit provider environment)
+    objective: >-
+      Make `cargo test --locked -p app-services` pass on a Linux container
+      with the default world-writable /tmp and no USER variable, without
+      weakening the storage UnsafePath parent check or the production
+      provider requirement for HOME/USER.
+    scope: >-
+      g6_security_integration.rs creates each SQLite database inside its own
+      0700 directory instead of directly under std::env::temp_dir().
+      planning_service.rs and provider_binding.rs trusted-host Claude
+      fixtures supply PATH/HOME/USER explicitly through a new trusted-host-only
+      provider-claude constructor (ClaudeExecutor/ClaudePlanner
+      bind_trusted_host_with_host_environment) instead of inheriting the
+      ambient process environment. Production `bind`, the sandboxed launch
+      path and ProviderEnvironment::prepare keep reading the real host
+      environment and still fail closed without HOME/USER. Allowed paths:
+      crates/app-services/tests/, adapters/provider-claude/src/,
+      planning/tasks/queue.yaml, product/version.toml.
+    exit_criteria_summary: >-
+      RED reproduced with TMPDIR=/tmp (mode 1777) and USER unset; afterwards
+      the full app-services suite passes both under that environment and
+      under the default macOS environment; the storage parent check and the
+      production USER/HOME requirement are unchanged and covered by a
+      provider-claude unit test proving an explicit host environment without
+      USER still fails closed. Explicit fixture constructors refuse Runner
+      environment/support-root access and sandbox attachment before spawn,
+      including through the planner's shared executor boundary.
+    depends_on: []
+    blocked_by: []
+    references:
+      - adapters/storage-sqlite/src/path_security.rs
+      - adapters/provider-claude/src/environment.rs
+    outcome: >-
+      Remediation implemented; blocked, not submitted. Regression RED
+      demonstrated that explicit fixture environment plus Runner attachment
+      launched successfully. GREEN now proves refusal before spawn, no
+      trusted-host fallback, irreversible refusal on clone/reattachment,
+      planner NotStarted spend and refusal of all Runner environment/support
+      accessors. Trusted-host fixture execution and ordinary production bind
+      composition preserve their contracts. Fresh macOS verification passes
+      provider-claude, app-services under default environment and with
+      TMPDIR=/tmp (mode 1777) and USER unset, clippy -D warnings for both
+      crates, fmt, product-version and strict YAML/unique task-ID checks.
+      Storage UnsafePath and production HOME/USER checks are unchanged;
+      explicit missing PATH/HOME/USER, empty USER and an unallowlisted name
+      are checked. Linux container evidence is pending: Docker daemon is
+      unavailable. Git staging is denied by the execution sandbox at
+      index.lock creation, so no task commit or merge of accepted main was
+      possible. Verification applies to the unreconciled working tree only;
+      accepted TASK-0154 must be preserved by the eventual ordinary merge.
