@@ -24,7 +24,7 @@
 | --- | --- |
 | Source main commit | `88d63d494b1251f44943f015a6c324608efaa223` |
 | Audit branch | `task-0070-independent-adversarial-g6-closure-reaudit` |
-| Audit worktree | `/Users/artemmac/dev/runlith-task0070` |
+| Audit worktree | `~/dev/runlith-task0070` |
 | Audited tree (before this record) | `88d63d494b1251f44943f015a6c324608efaa223` |
 | Host | macOS 26.6.2 (build 25G83), arm64 (aarch64-apple-darwin) |
 | Toolchain | rustc 1.95.0 / cargo 1.95.0 |
@@ -215,7 +215,7 @@ as environmental gap R3, non-blocking.
 
 ## 8. Verification evidence
 
-All commands run from `/Users/artemmac/dev/runlith-task0070`.
+All commands run from `~/dev/runlith-task0070`.
 
 | Command | Exit | Result |
 | --- | --- | --- |

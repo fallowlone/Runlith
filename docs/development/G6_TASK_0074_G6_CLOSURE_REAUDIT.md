@@ -22,7 +22,7 @@ carry over unchanged; R3 re-confirmed environmental. G7 not started.
 
 | Field | Value |
 | --- | --- |
-| Worktree | `/Users/artemmac/dev/runlith-task0074` |
+| Worktree | `~/dev/runlith-task0074` |
 | Branch | `task-0074-g6-closure-reaudit` |
 | Audited HEAD | `126292e74b0ebd15f4a42072d45ab71999d6cf0f` (clean tree) |
 | Baseline of prior verdict | `e9009a8` (TASK-0070 `G6_REMEDIATION_REQUIRED`) |

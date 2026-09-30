@@ -23,7 +23,7 @@ as detailed in §7.
 | --- | --- |
 | Source main | `85bc607adc510f07dfc7e13f3fa1827cf3ac259f` (post TASK-0119 merge; TASK-0120 queueing commit) |
 | Audit branch | `task-0120-g7-closure-reaudit` |
-| Audit worktree | `/Users/artemmac/dev/runlith/.claude/worktrees/task-0120-g7-closure-reaudit` (clean tree; `git diff --check` green) |
+| Audit worktree | `~/dev/runlith/.claude/worktrees/task-0120-g7-closure-reaudit` (clean tree; `git diff --check` green) |
 | Host | macOS 27.0 (26A428), arm64 |
 | Rust | `rustc 1.95.0` / `cargo 1.95.0` |
 | Toolchain workaround | `DEVELOPER_DIR=/Library/Developer/CommandLineTools` (Xcode license not accepted on host) |
