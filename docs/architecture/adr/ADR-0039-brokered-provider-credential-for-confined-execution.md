@@ -229,4 +229,41 @@ the Claude Code version changes before the verdict is relied on.
 - Host-login preflight: dropped for brokered mode, no fallback, kept only for
   `trusted-host` (decision 7).
 
+## Addendum A — Vault format v1 and KDF parameters (2026-10-03, P4)
+
+Implementation: `adapters/secrets-vault` (`src/envelope.rs`, `src/phrase.rs`).
+
+- **Primitives.** Argon2id v0x13 (`argon2` 0.6.0) and XChaCha20-Poly1305
+  (`chacha20poly1305` 0.11.0), RustCrypto, default features off. Randomness
+  from `getrandom` 0.4. Random 24-byte nonces, fresh for every write.
+- **KDF parameters v1 (owner choice):** `m = 256 MiB (262144 KiB), t = 3,
+  p = 1`, 32-byte output, 16-byte random salt per slot. The password and the
+  recovery phrase use the same parameters with separate salts. Parameters are
+  stored in the file. A file asking for more than `m = 1 GiB`, `t = 16` or
+  `p = 4` is refused before any derivation.
+- **Measurement.** One derivation, release build, Apple M2 Pro, rustc 1.95.0,
+  median of 5: 64 MiB/t=3 99 ms, 128 MiB/t=3 213 ms, **256 MiB/t=3 436 ms**,
+  256 MiB/t=4 582 ms, 512 MiB/t=3 874 ms. Unlock briefly holds 256 MiB.
+- **File layout v1** (little-endian):
+  `"RLVAULT\0"`, version `u16 = 1`, `m_cost_kib`, `t_cost`, `p_cost` (`u32`
+  each); password slot and recovery slot, each `salt[16] nonce[24]
+  wrapped_dek[48]`; payload `nonce[24]` + ciphertext + tag. The plaintext is
+  `count u32`, then per entry `name_len u16, name, created_at u64 (Unix
+  seconds), value_len u32, value`. Limits: 256 entries, 256-byte names,
+  64 KiB values; the same check runs on write (refused) and read (corrupt).
+- **Associated data.** Every AEAD call binds magic, version and KDF parameters
+  plus the label `password`, `recovery` or `payload`. A changed salt derives a
+  different key. Changing the password re-wraps only the password slot.
+- **Errors.** A wrong secret and a tampered key slot are not distinguishable
+  (`UnlockFailed`). A tampered payload, an unknown version or a malformed file
+  is `Corrupt`.
+- **Recovery phrase.** EFF large word list (7776 words, CC BY 4.0, attribution
+  in the crate `NOTICE`, SHA-256 pinned by a test). Uniform choice by rejection
+  sampling of 16-bit draws. Input is normalized to lowercase words separated by
+  single spaces.
+- **Password.** At least 12 characters. Raw UTF-8 bytes, no Unicode
+  normalization.
+- **Limits of this addendum.** Timing was measured on one host. The adapter,
+  lock model and file I/O follow in the next P4 step.
+
 Status remains Proposed until the owner formally ratifies the ADR.
