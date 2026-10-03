@@ -82,6 +82,17 @@ Rules for any consumer (UI, planner context, approval prompt):
 No code change: there is no verified human-facing renderer of
 `Submitted.reason` yet, so there is nothing to sanitize against.
 
+## Resume session binding (audit F9)
+
+`ClaudeConfig::with_resume_session` checks syntax only (non-blank, <= 256
+bytes, no NUL, no leading `-`) and `argv.rs:54` passes it as `--resume`.
+Nothing binds the session id to a Task or workspace lease. A session from
+another Task would load that Task's conversation into this attempt, crossing
+isolation and acting as an injection channel (see A9). Status: latent; no
+production caller sets a resume session. Duty on the first caller: resume only
+a session ref recorded by an earlier attempt of the same Task and workspace
+lease; never accept one from another Task or from unbound user or model text.
+
 ## Hardening recommendations
 
 **H1 — Runtime denial visibility (A6).** Map provider-captured

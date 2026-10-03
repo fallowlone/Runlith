@@ -83,7 +83,8 @@ pub struct ClaudeConfig {
     permission_mode: Option<String>,
     /// Opaque provider session to resume via `--resume`, if set. Never a
     /// Task/Execution/Attempt identity — provider state only, validated as
-    /// opaque bounded text.
+    /// opaque bounded text. Binding to a Task is the setter's duty; see
+    /// [`ClaudeConfig::with_resume_session`].
     resume_session: Option<String>,
     /// Session system prompt passed as `--system-prompt`, replacing the
     /// provider's default. Adapter-authored only: it states the role the
@@ -192,6 +193,15 @@ impl ClaudeConfig {
 
     /// Opaque provider session reference for `--resume`. Validated as
     /// bounded opaque text only — never interpreted, never a durable id.
+    ///
+    /// This adapter cannot tell whose session the value is. Resuming loads
+    /// that session's conversation (repo content, prior outputs) into the
+    /// attempt, so a session from another Task crosses Task and workspace
+    /// isolation. The composition root that calls this must only pass a
+    /// session ref recorded by an earlier attempt of the same Task and the
+    /// same workspace lease, never one taken from another Task, from
+    /// provider output of another Task, or from user/model-controlled text
+    /// without that binding (audit F9). No production caller exists yet.
     pub fn with_resume_session(mut self, session: impl Into<String>) -> Result<Self, String> {
         let session = session.into();
         let trimmed = session.trim();
