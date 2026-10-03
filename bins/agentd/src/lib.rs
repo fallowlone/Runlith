@@ -483,6 +483,7 @@ where
 /// (TASK-0054).
 async fn serve_streams<S>(
     mut accepted: tokio::sync::mpsc::Receiver<(S, Option<BytesMut>)>,
+    acceptor: tokio::task::JoinHandle<()>,
     config: &DaemonConfig,
     business: Option<BusinessHandle>,
     execution: Option<execution::ExecutionHandle>,
@@ -547,6 +548,10 @@ where
     // joined so in-flight runs conclude their bookkeeping instead of
     // dying mid-write; each run is provider-timeout-bounded. The owned
     // endpoint is released by the caller.
+    // The accept task (F19) is stopped first so the listener closes
+    // before the endpoint is released.
+    acceptor.abort();
+    let _ = acceptor.await;
     joins.abort_all();
     while joins.join_next().await.is_some() {}
     if let Some(composition) = execution.as_ref() {
@@ -707,7 +712,7 @@ mod unix_daemon {
         let owned = snapshot_endpoint(&endpoint.socket_path).ok();
         let (accepted_tx, accepted_rx) =
             tokio::sync::mpsc::channel::<(UnixStream, Option<BytesMut>)>(MAX_CONTROL_CLIENTS + 2);
-        tokio::spawn(async move {
+        let acceptor = tokio::spawn(async move {
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
@@ -734,6 +739,7 @@ mod unix_daemon {
         let human_decision = open_human_decision_service(&config)?;
         let outcome = serve_streams(
             accepted_rx,
+            acceptor,
             &config,
             business,
             open_execution(&config),
@@ -801,7 +807,7 @@ mod windows_daemon {
             NamedPipeServer,
             Option<BytesMut>,
         )>(MAX_CONTROL_CLIENTS + 2);
-        tokio::spawn(async move {
+        let acceptor = tokio::spawn(async move {
             loop {
                 match listener.accept().await {
                     Ok(server) => {
@@ -834,6 +840,7 @@ mod windows_daemon {
         let human_decision = super::open_human_decision_service(&config)?;
         Ok(serve_streams(
             accepted_rx,
+            acceptor,
             &config,
             business,
             open_execution(&config),
@@ -1188,6 +1195,28 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.peer.clone())
         }
+    }
+
+    /// Production source that carries a liveness token: the token drops
+    /// only when the acceptor task (the sole owner of the source) ends.
+    struct TokenOsSource(#[allow(dead_code)] Arc<()>);
+
+    impl PeerSource for TokenOsSource {
+        fn peer_of(&self, stream: &UnixStream) -> TransportResult<PeerIdentity> {
+            OsPeerSource.peer_of(stream)
+        }
+    }
+
+    /// F19: shutdown must stop and reap the accept task, not leave it
+    /// detached holding the listener after the daemon reports completion.
+    #[tokio::test]
+    async fn shutdown_reaps_acceptor_task() {
+        let sandbox = Sandbox::new("f19-acceptor");
+        let token = Arc::new(());
+        let handle = spawn_daemon_with(&sandbox.endpoint, TokenOsSource(token.clone()));
+        wait_ready(&sandbox.endpoint).await;
+        shutdown_and_await(handle, &sandbox.endpoint).await;
+        assert_eq!(Arc::strong_count(&token), 1, "acceptor task still alive");
     }
 
     /// Production source plus a presentation counter, for reconnect tests.
