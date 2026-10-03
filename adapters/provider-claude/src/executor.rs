@@ -33,7 +33,7 @@ use scheduler::{ExecutionPort, ExecutionProblem, WorkEvidence, WorkItem};
 use crate::argv::build_argv;
 use crate::config::{bounded_detail, ClaudeConfig};
 use crate::environment::ProviderEnvironment;
-use crate::failure::{looks_like_auth_failure, ClaudeFailure};
+use crate::failure::{looks_like_auth_failure, looks_like_transient_failure, ClaudeFailure};
 use crate::output::{parse_provider_output, ParsedOutput};
 use crate::process::{
     spawn_and_supervise, CancelFlag, ChildOutcome, ProcessInvocation, ProviderLaunch,
@@ -433,6 +433,14 @@ impl ClaudeExecutor {
                         )),
                     });
                 }
+                // F5: rate-limit/overload/5xx prose classifies as
+                // Transient (distinguishable from hard failure); the
+                // parseable-error path below is checked the same way.
+                if looks_like_transient_failure(&excerpt) {
+                    return Err(ClaudeFailure::transient(format!(
+                        "claude reports transient upstream failure: {excerpt}"
+                    )));
+                }
                 // A parseable error object upgrades the detail; an
                 // unparseable one keeps exit-code evidence. Neither path
                 // can become success.
@@ -444,6 +452,11 @@ impl ClaudeExecutor {
                     ),
                     Err(_) => format!("claude exited with code {other:?}: {excerpt}"),
                 };
+                if looks_like_transient_failure(&detail) {
+                    return Err(ClaudeFailure::transient(format!(
+                        "claude reports transient upstream failure: {detail}"
+                    )));
+                }
                 Err(ClaudeFailure::failed(detail))
             }
         }
@@ -460,6 +473,7 @@ impl ExecutionPort for ClaudeExecutor {
             Ok(outcome) => Ok(outcome.evidence),
             Err(ClaudeFailure::TimedOut { detail }) => Err(ExecutionProblem::TimedOut { detail }),
             Err(ClaudeFailure::Cancelled) => Err(ExecutionProblem::Cancelled),
+            Err(ClaudeFailure::Transient { detail }) => Err(ExecutionProblem::Transient { detail }),
             Err(other) => Err(ExecutionProblem::Failed {
                 detail: other.to_string(),
             }),
@@ -604,6 +618,20 @@ mod tests {
             }
             other => panic!("missing workdir must be Failed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn overloaded_stderr_maps_to_transient_never_success() {
+        // F5 RED: overload prose on the exit path must classify as
+        // Transient (distinguishable), never success, never plain Failed.
+        let executor = bind_default("do work");
+        let err = executor
+            .interpret_exit(Some(1), b"", b"Error: model overloaded, try again later")
+            .expect_err("non-zero exit must fail");
+        assert!(
+            matches!(err, crate::failure::ClaudeFailure::Transient { .. }),
+            "overload must be Transient, got {err:?}"
+        );
     }
 
     #[test]

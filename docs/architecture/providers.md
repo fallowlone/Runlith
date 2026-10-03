@@ -52,7 +52,7 @@ the orchestrator injects, one executor per cycle:
 WorkItem { task_id, execution_id, attempt_id }   (durable identities only)
   → ExecutionPort::execute
   → Ok(WorkEvidence { summary, evidence_ref, partial })
-  → Err(ExecutionProblem::{TimedOut, Cancelled, Failed})
+  → Err(ExecutionProblem::{TimedOut, Cancelled, Transient, Failed})
 ```
 
 `provider_ref()` is opaque identity only; orchestration never branches

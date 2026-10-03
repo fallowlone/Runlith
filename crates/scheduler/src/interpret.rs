@@ -69,6 +69,13 @@ pub fn interpret(
             outcome: AttemptOutcome::Cancelled,
             detail: format!("attempt {} was cancelled", work.attempt_id),
         },
+        // F5: terminal like Failed — no new AttemptOutcome, no automatic
+        // retry — but the `transient` marker survives in the evidence note
+        // so quota/overload stays distinguishable from hard failure.
+        Err(ExecutionProblem::Transient { detail }) => AttemptInterpretation::NotSubmittable {
+            outcome: AttemptOutcome::Failed,
+            detail: format!("attempt {} transient failure: {detail}", work.attempt_id),
+        },
         Err(ExecutionProblem::Failed { detail }) => AttemptInterpretation::NotSubmittable {
             outcome: AttemptOutcome::Failed,
             detail: format!("attempt {} failed: {detail}", work.attempt_id),
@@ -153,6 +160,29 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn transient_is_failed_with_transient_preserved_in_detail() {
+        // F5 RED: the transient problem must stay distinguishable from
+        // hard failure in the evidence note (same terminal outcome, no
+        // silent retry), so operators can tell quota/overload from bugs.
+        let interpretation = interpret(
+            Err(ExecutionProblem::Transient {
+                detail: "upstream overloaded".to_owned(),
+            }),
+            &work(),
+        );
+        let AttemptInterpretation::NotSubmittable {
+            outcome,
+            detail: kept,
+        } = interpretation
+        else {
+            panic!("transient failure must not be submittable");
+        };
+        assert_eq!(outcome, AttemptOutcome::Failed);
+        assert!(kept.contains("transient"), "got {kept:?}");
+        assert!(kept.contains("upstream overloaded"));
     }
 
     #[test]

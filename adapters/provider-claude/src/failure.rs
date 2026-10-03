@@ -59,6 +59,17 @@ pub enum ClaudeFailure {
         /// Bounded diagnostic (exit code + stderr excerpt / subtype).
         detail: String,
     },
+    /// Rate-limit/quota-exhaustion/overload/5xx signal (F5). Detected via
+    /// a small documented stderr-marker table like [`Self::AuthRequired`];
+    /// anything not matching stays [`ClaudeFailure::Failed`]. No
+    /// machine-readable retry-after exists in CLI output, so none is
+    /// invented: the detail carries the bounded evidence and retry
+    /// routing stays an explicit operator/orchestration decision (the
+    /// scheduler performs no automatic retry per TASK-0037).
+    Transient {
+        /// Bounded diagnostic (exit code + stderr excerpt / subtype).
+        detail: String,
+    },
     /// Exit zero but output unusable: empty, non-JSON, wrong shape, or
     /// blank result text. Never trusted as evidence.
     MalformedOutput {
@@ -91,6 +102,7 @@ impl ClaudeFailure {
             Self::TimedOut { .. } => "timed_out",
             Self::Cancelled => "cancelled",
             Self::Failed { .. } => "failed",
+            Self::Transient { .. } => "transient",
             Self::MalformedOutput { .. } => "malformed_output",
             Self::WorkspaceBinding { .. } => "workspace_binding",
             Self::EnvironmentIsolation { .. } => "environment_isolation",
@@ -102,6 +114,15 @@ impl ClaudeFailure {
     #[must_use]
     pub fn failed(detail: impl Into<String>) -> Self {
         Self::Failed {
+            detail: bounded_detail(detail.into()),
+        }
+    }
+
+    /// Wraps an arbitrary detail string into the transient failure,
+    /// bounded on the way in.
+    #[must_use]
+    pub fn transient(detail: impl Into<String>) -> Self {
+        Self::Transient {
             detail: bounded_detail(detail.into()),
         }
     }
@@ -125,6 +146,7 @@ impl std::fmt::Display for ClaudeFailure {
             | Self::SpawnFailed { detail }
             | Self::TimedOut { detail }
             | Self::Failed { detail }
+            | Self::Transient { detail }
             | Self::MalformedOutput { detail }
             | Self::WorkspaceBinding { detail }
             | Self::EnvironmentIsolation { detail } => {
@@ -166,6 +188,44 @@ pub fn looks_like_auth_failure(stderr_excerpt: &str) -> bool {
         .any(|marker| stderr_excerpt.contains(marker))
 }
 
+/// Bounded textual fallback: stderr markers that reliably indicate
+/// rate limiting, quota exhaustion, overload, or a 5xx-class upstream
+/// failure.
+///
+/// Documented, minimal, and unknown-safe like `AUTH_MARKERS`: matching
+/// only ever produces `Transient`; non-matching output keeps its generic
+/// class. Markers were observed against CLI 2.1.x prose ("model
+/// overloaded", HTTP status digits in error text); if a future CLI
+/// changes its wording, transient failures degrade to generic `Failed`
+/// (loud, bounded, still fail-closed) — never to success.
+const TRANSIENT_MARKERS: &[&str] = &[
+    "overloaded",
+    "Overloaded",
+    "over capacity",
+    "rate limit",
+    "Rate limit",
+    "rate_limit",
+    "ratelimit",
+    "quota exceeded",
+    "quota exhausted",
+    "429",
+    "529",
+    "500",
+    "502",
+    "503",
+    "temporarily unavailable",
+    "try again",
+];
+
+/// Checks bounded stderr text against the transient-marker table.
+/// Case-sensitive on purpose, matching the auth-marker policy.
+#[must_use]
+pub fn looks_like_transient_failure(stderr_excerpt: &str) -> bool {
+    TRANSIENT_MARKERS
+        .iter()
+        .any(|marker| stderr_excerpt.contains(marker))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,6 +260,29 @@ mod tests {
                 "environment_isolation",
             ]
         );
+    }
+
+    #[test]
+    fn transient_markers_are_narrow_and_unknown_safe() {
+        // F5: rate-limit/overload/5xx signals classify as Transient;
+        // anything unrecognized stays a generic failure, never success.
+        assert!(looks_like_transient_failure(
+            "Error: model overloaded, try again later"
+        ));
+        assert!(looks_like_transient_failure(
+            "Rate limit reached, retry later"
+        ));
+        assert!(looks_like_transient_failure(
+            "claude exited with code Some(1): 529 overloaded"
+        ));
+        assert!(looks_like_transient_failure("503 Service Unavailable"));
+        assert!(!looks_like_transient_failure(
+            "Error: Invalid API key · Fix: run /login"
+        ));
+        assert!(!looks_like_transient_failure(""));
+        assert!(!looks_like_transient_failure("exit code 1"));
+        let transient = ClaudeFailure::transient("upstream overloaded");
+        assert_eq!(transient.kind(), "transient");
     }
 
     #[test]

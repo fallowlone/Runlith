@@ -41,7 +41,12 @@ pub struct WorkEvidence {
 /// Provider-neutral execution problem, normalized at the adapter boundary.
 /// Adapter error variants (quota, network, crash, capability denial,
 /// malformed output, …) arrive as `Failed` with their detail; only the
-/// orchestration-relevant timeout/cancelled split keeps its own shape.
+/// orchestration-relevant timeout/cancelled/transient split keeps its own
+/// shape. `Transient` is terminal like `Failed` — the scheduler performs
+/// no automatic retry (TASK-0037); the split exists so overload and
+/// quota exhaustion stay distinguishable from hard failure in the
+/// evidence note, and retry stays an explicit operator/orchestration
+/// decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionProblem {
     /// The try made no progress within its bound.
@@ -51,6 +56,12 @@ pub enum ExecutionProblem {
     },
     /// The try was cancelled before concluding on its own.
     Cancelled,
+    /// Rate-limit/quota/overload/5xx signal. Terminal: interprets as
+    /// attempt `Failed` with `transient` preserved in the detail.
+    Transient {
+        /// Adapter-minted diagnostic note (never a scenario name).
+        detail: String,
+    },
     /// Any other executor/runtime failure. The detail is opaque evidence,
     /// never durable vocabulary.
     Failed {
