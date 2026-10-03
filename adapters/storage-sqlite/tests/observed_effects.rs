@@ -1225,3 +1225,179 @@ fn now_millis() -> u64 {
         .unwrap()
         .as_millis() as u64
 }
+
+// F15: the assessment must pair with the selection recorded for the same
+// attempt, not merely be internally consistent.
+fn pairing_assessment(
+    execution: &ExecutionId,
+    attempt: &AttemptId,
+    mutate: impl FnOnce(&mut CandidateIntegrityAssessment),
+) -> CandidateIntegrityAssessment {
+    let mut assessment = CandidateIntegrityAssessment {
+        task_id: "T-EFFECT".to_owned(),
+        execution_id: execution.as_str().to_owned(),
+        attempt_id: attempt.as_str().to_owned(),
+        subject_ref: format!("attempt:{}", attempt.as_str()),
+        requirement_revision: format!("sha256:{}", "b".repeat(64)),
+        policy_revision: 1,
+        policy_fingerprint: format!("sha256:{}", "c".repeat(64)),
+        criterion_id: "criterion-1".to_owned(),
+        selector: "candidate.file-contains.v1".to_owned(),
+        selector_path: "src/main.rs".to_owned(),
+        selector_literal: "accepted".to_owned(),
+        invocation_id: "candidate-invocation-1".to_owned(),
+        evaluator_ref: "runlith.agentd.candidate-evaluator.v1".to_owned(),
+        runtime_ref: "agentd/1".to_owned(),
+        enforcement_ref: "runner-operation-1".to_owned(),
+        invocation_descriptor_version: 1,
+        invocation_descriptor_sha256: String::new(),
+        evaluator_executable: "/trusted/agentd".to_owned(),
+        toolchain_ref: "git-executable=/usr/bin/git;git version 2.54.0".to_owned(),
+        runner_backend: "native".to_owned(),
+        runner_plan_sha256: format!("sha256:{}", "6".repeat(64)),
+        runner_enforced_axes: 3,
+        runner_env_isolated: true,
+        base_commit_oid: "1".repeat(40),
+        base_tree_oid: "2".repeat(40),
+        base_manifest_sha256: format!("sha256:{}", "a".repeat(64)),
+        candidate_commit_oid: "3".repeat(40),
+        candidate_tree_oid: "4".repeat(40),
+        candidate_manifest_sha256: format!("sha256:{}", "d".repeat(64)),
+        deletions: Vec::new(),
+        checkpoints: [
+            CandidateCheckpointPhase::Selection,
+            CandidateCheckpointPhase::BeforeEvaluation,
+            CandidateCheckpointPhase::AfterEvaluation,
+            CandidateCheckpointPhase::ResultAdmission,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, phase)| CandidateFreshnessCheckpoint {
+            phase,
+            observed_at_ms: 11 + index as u64,
+            git_metadata_fingerprint: format!("sha256:{}", "e".repeat(64)),
+            live_worktree_manifest_sha256: format!("sha256:{}", "f".repeat(64)),
+            matched: true,
+        })
+        .collect(),
+        outcome: CandidateIntegrityOutcome::Intact,
+        started_at_ms: 10,
+        completed_at_ms: 20,
+    };
+    mutate(&mut assessment);
+    assessment.refresh_invocation_descriptor_digest();
+    assessment
+}
+
+fn append_paired(
+    store: &mut SqliteStore,
+    execution: &ExecutionId,
+    attempt: &AttemptId,
+    assessment: &CandidateIntegrityAssessment,
+) -> Result<evaluation::ObservedEffect, StorageError> {
+    let subject = EffectSubjectRef::new(assessment.subject_ref.clone()).unwrap();
+    let config = candidate_sha256(
+        format!(
+            "{}\0{}\0{}\0{}\0{}\0{}",
+            assessment.requirement_revision,
+            assessment.policy_fingerprint,
+            assessment.selector,
+            assessment.selector_path,
+            assessment.selector_literal,
+            assessment.invocation_descriptor_sha256,
+        )
+        .as_bytes(),
+    );
+    let fingerprint = subject_fingerprint(
+        EffectKind::TestSuiteResult,
+        subject.as_str(),
+        &[
+            ("content", &assessment.candidate_manifest_sha256),
+            ("toolchain", &assessment.runtime_ref),
+            ("config", &config),
+        ],
+    )
+    .unwrap();
+    store.append_candidate_result(
+        subject,
+        fingerprint,
+        EffectPayload::TestSuiteResult {
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            result_sha256: Sha256Digest::new(format!("sha256:{}", "9".repeat(64))).unwrap(),
+        },
+        "2026-09-23T12:00:00Z",
+        EffectProvenance::new(execution.clone(), attempt.clone(), "agentd/1")
+            .unwrap()
+            .with_lineage(
+                Some("runlith.agentd.candidate-evaluator.v1".to_owned()),
+                Some("candidate-invocation-1".to_owned()),
+            )
+            .unwrap(),
+        assessment,
+    )
+}
+
+#[test]
+fn candidate_result_must_pair_with_the_recorded_selection() {
+    type Mutation = fn(&mut CandidateIntegrityAssessment);
+    let mismatches: [(&str, Mutation); 6] = [
+        ("policy-fingerprint", |a| {
+            a.policy_fingerprint = format!("sha256:{}", "7".repeat(64));
+        }),
+        ("requirement-revision", |a| {
+            a.requirement_revision = format!("sha256:{}", "7".repeat(64));
+        }),
+        ("policy-revision", |a| a.policy_revision = 2),
+        ("candidate-commit", |a| {
+            a.candidate_commit_oid = "8".repeat(40)
+        }),
+        ("selector-literal", |a| {
+            a.selector_literal = "other".to_owned()
+        }),
+        ("criterion", |a| a.criterion_id = "criterion-2".to_owned()),
+    ];
+    for (name, mutate) in mismatches {
+        let db = TestDb::new(&format!("pairing-{name}"));
+        let mut store = db.open();
+        let (execution, attempt) = seed_runtime(&mut store);
+        store
+            .record_candidate_selection(
+                "T-EFFECT",
+                execution.as_str(),
+                attempt.as_str(),
+                "candidate-operation-1",
+                &"1".repeat(40),
+                &"3".repeat(40),
+                &format!("sha256:{}", "b".repeat(64)),
+                1,
+                &format!("sha256:{}", "c".repeat(64)),
+                "criterion-1",
+                "candidate.file-contains.v1",
+                "src/main.rs",
+                "accepted",
+                10,
+            )
+            .unwrap();
+        let assessment = pairing_assessment(&execution, &attempt, mutate);
+        let result = append_paired(&mut store, &execution, &attempt, &assessment);
+        assert!(
+            matches!(result, Err(StorageError::ConstraintViolation(_))),
+            "{name}: expected ConstraintViolation, got {result:?}"
+        );
+    }
+}
+
+#[test]
+fn candidate_result_without_a_recorded_selection_is_refused() {
+    let db = TestDb::new("pairing-no-selection");
+    let mut store = db.open();
+    let (execution, attempt) = seed_runtime(&mut store);
+    let assessment = pairing_assessment(&execution, &attempt, |_| {});
+    let result = append_paired(&mut store, &execution, &attempt, &assessment);
+    assert!(
+        matches!(result, Err(StorageError::ConstraintViolation(_))),
+        "got {result:?}"
+    );
+}

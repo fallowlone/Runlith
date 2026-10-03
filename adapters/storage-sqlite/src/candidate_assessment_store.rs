@@ -371,6 +371,11 @@ impl crate::SqliteStore {
                 "candidate assessment task lineage is invalid".to_owned(),
             ));
         }
+        if !assessment_pairs_with_selection(self.connection(), &integrity)? {
+            return Err(StorageError::Corrupt(
+                "candidate assessment does not pair with the recorded selection".to_owned(),
+            ));
+        }
         let expected_fingerprint = candidate_result_fingerprint(&integrity)
             .map_err(|error| StorageError::Corrupt(error.to_string()))?;
         if effect.effect_kind() != EffectKind::TestSuiteResult
@@ -464,6 +469,11 @@ impl crate::SqliteStore {
         }) {
             return Err(StorageError::Corrupt(
                 "candidate result task/execution/attempt lineage mismatch".to_owned(),
+            ));
+        }
+        if !assessment_pairs_with_selection(&transaction, assessment)? {
+            return Err(StorageError::ConstraintViolation(
+                "candidate assessment does not pair with the recorded selection".to_owned(),
             ));
         }
         let next: i64 = transaction.query_row(
@@ -794,6 +804,40 @@ impl crate::SqliteStore {
         }
         Ok(())
     }
+}
+
+/// F15: the assessment's selection-bound fields must equal what
+/// `record_candidate_selection` durably recorded for the same attempt.
+/// A missing operation row never pairs.
+fn assessment_pairs_with_selection(
+    connection: &rusqlite::Connection,
+    assessment: &CandidateIntegrityAssessment,
+) -> StorageResult<bool> {
+    let paired: Option<bool> = connection
+        .query_row(
+            "SELECT task_id = ?3 AND selected_commit_oid = ?4
+                AND requirement_revision = ?5 AND policy_revision = ?6
+                AND policy_fingerprint = ?7 AND criterion_id = ?8
+                AND selector = ?9 AND selector_path = ?10 AND selector_literal = ?11
+             FROM candidate_input_operations
+             WHERE execution_id = ?1 AND attempt_id = ?2",
+            params![
+                assessment.execution_id,
+                assessment.attempt_id,
+                assessment.task_id,
+                assessment.candidate_commit_oid,
+                assessment.requirement_revision,
+                i64::try_from(assessment.policy_revision).unwrap_or(i64::MAX),
+                assessment.policy_fingerprint,
+                assessment.criterion_id,
+                assessment.selector,
+                assessment.selector_path,
+                assessment.selector_literal,
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(paired == Some(true))
 }
 
 fn candidate_result_fingerprint(
