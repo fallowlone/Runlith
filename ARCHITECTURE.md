@@ -212,6 +212,9 @@ this document; physical decomposition happens incrementally.
 - Inbound: transactional appends alongside state mutations.
 - Outbound: replay/debug/analytics reads; future projection feeds.
 - Authoritative state: the journal itself (history), not current state.
+- Ordering: the journal `seq` (and `evt-<seq>` identity) is storage-local to one
+  database; compare it only between events of the same store, never across
+  stores, exports or restores.
 - Refs: ADR-0006; INV-010, INV-044.
 
 ### Security Audit — Core (G6)

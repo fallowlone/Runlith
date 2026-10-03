@@ -126,6 +126,7 @@ let task_id: String = row.get("task_id")
     call sites together; that is a refactor, not an F18 fix.
 - F19: closed in 6135b80 (`serve_streams` aborts and awaits the acceptor task).
 - F12: closed by failing closed. Non-unix builds compile `path_security_unsupported.rs`, which refuses every durable-store open. Windows ACL admission is not implemented; a Windows `agentd` cannot open its durable store until it is.
+- F14: closed (documented). `EventId`, `JournalEvent.seq` and `ARCHITECTURE.md` state that `seq` is storage-local.
 - F13: closed (`SecretBackendError` gains `Locked`, `Failure`, `Corrupt`; keychain adapter maps them distinctly).
 - F1: add a fail-closed reconciliation sweep plus an operator resume command that routes only through validated transitions.
 - F16: append a fingerprint (hash of kind + pinned fields) to the observed-effect record and verify it in `restore`.

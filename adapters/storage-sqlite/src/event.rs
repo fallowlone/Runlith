@@ -278,6 +278,11 @@ impl From<AttemptOutcome> for agent_runtime::AttemptOutcome {
 /// `evt-<seq>`. The sequence is the journal's deterministic retrieval
 /// order (storage mechanics, not a domain contract); the string form is a
 /// pure function of it, unique and stable per database.
+///
+/// The identity is meaningful only within the one SQLite database that
+/// assigned it. Do not compare, persist or exchange it across stores,
+/// exports or restores, and do not use it as a cross-system identity or
+/// ordering. Two events read from the same database may be ordered by it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EventId(i64);
 
@@ -388,7 +393,9 @@ pub struct NewJournalEvent {
 pub struct JournalEvent {
     /// Assigned identity (`evt-<seq>`).
     pub id: EventId,
-    /// Storage-local sequence; journal retrieval order.
+    /// Storage-local sequence: unique and increasing within this database,
+    /// which is both the retrieval order and the hash-chain order. Not a
+    /// domain contract; comparable only between events of the same database.
     pub seq: i64,
     /// Event-schema version (always [`EVENT_SCHEMA_VERSION`] from v1).
     pub event_version: u32,
