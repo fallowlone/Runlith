@@ -25,6 +25,10 @@ mod human_decision_store;
 mod journal_store;
 mod migration;
 mod observed_effect_store;
+#[cfg(unix)]
+mod path_security;
+#[cfg(not(unix))]
+#[path = "path_security_unsupported.rs"]
 mod path_security;
 mod plan_cost_store;
 mod plan_guardrail_store;

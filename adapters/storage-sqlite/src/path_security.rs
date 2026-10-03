@@ -4,31 +4,29 @@
 //! before this adapter is opened. This layer still protects every open from
 //! final-component symlinks, insecure database/sidecar modes, path replacement
 //! between admission and SQLite open, and umask-dependent database creation.
+//!
+//! Unix only. Other platforms compile `path_security_unsupported.rs`, which
+//! refuses every open: owner/mode/ACL admission is not implemented there.
 
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 use crate::{StorageError, StorageResult};
 
-#[cfg(unix)]
 const PRIVATE_FILE_MODE: u32 = 0o600;
 
 const SQLITE_SIDECARS: &[&str] = &["-journal", "-wal", "-shm"];
 
 pub(crate) struct PreparedDatabasePath {
     path: PathBuf,
-    #[cfg(unix)]
     parent_uid: u32,
-    #[cfg(unix)]
     identity: FileIdentity,
 }
 
-#[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FileIdentity {
     device: u64,
@@ -94,7 +92,6 @@ pub(crate) fn prepare_database_path(path: &Path) -> StorageResult<PreparedDataba
     let canonical_path = canonical_parent.join(file_name);
 
     ensure_database_file(&canonical_path)?;
-    #[cfg(unix)]
     let (identity, parent_uid) = {
         let metadata =
             validate_private_regular_file(&canonical_path, canonical_parent_metadata.uid())?;
@@ -107,20 +104,15 @@ pub(crate) fn prepare_database_path(path: &Path) -> StorageResult<PreparedDataba
             canonical_parent_metadata.uid(),
         )
     };
-    #[cfg(not(unix))]
-    validate_private_regular_file(&canonical_path)?;
 
     Ok(PreparedDatabasePath {
         path: canonical_path,
-        #[cfg(unix)]
         parent_uid,
-        #[cfg(unix)]
         identity,
     })
 }
 
 pub(crate) fn verify_database_path(prepared: &PreparedDatabasePath) -> StorageResult<()> {
-    #[cfg(unix)]
     {
         let metadata = validate_private_regular_file(&prepared.path, prepared.parent_uid)?;
         let observed = FileIdentity {
@@ -135,8 +127,6 @@ pub(crate) fn verify_database_path(prepared: &PreparedDatabasePath) -> StorageRe
         }
         validate_sidecars(&prepared.path, prepared.parent_uid)?;
     }
-    #[cfg(not(unix))]
-    validate_private_regular_file(&prepared.path)?;
     Ok(())
 }
 
@@ -154,11 +144,9 @@ fn ensure_database_file(path: &Path) -> StorageResult<()> {
 
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
-    #[cfg(unix)]
     options.mode(PRIVATE_FILE_MODE);
     match options.open(path) {
         Ok(file) => {
-            #[cfg(unix)]
             file.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))
                 .map_err(|error| {
                     io_path(
@@ -176,7 +164,6 @@ fn ensure_database_file(path: &Path) -> StorageResult<()> {
     }
 }
 
-#[cfg(unix)]
 fn validate_parent_metadata(path: &Path, metadata: &fs::Metadata) -> StorageResult<()> {
     if metadata.mode() & 0o022 != 0 {
         return Err(unsafe_path(format!(
@@ -187,12 +174,6 @@ fn validate_parent_metadata(path: &Path, metadata: &fs::Metadata) -> StorageResu
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn validate_parent_metadata(_path: &Path, _metadata: &fs::Metadata) -> StorageResult<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
 fn validate_private_regular_file(path: &Path, parent_uid: u32) -> StorageResult<fs::Metadata> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| io_path(&format!("inspect sqlite file {}", path.display()), error))?;
@@ -230,20 +211,6 @@ fn validate_private_regular_file(path: &Path, parent_uid: u32) -> StorageResult<
     Ok(metadata)
 }
 
-#[cfg(not(unix))]
-fn validate_private_regular_file(path: &Path) -> StorageResult<fs::Metadata> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| io_path(&format!("inspect sqlite file {}", path.display()), error))?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-        return Err(unsafe_path(format!(
-            "sqlite path {} must be a regular non-symlink file",
-            path.display()
-        )));
-    }
-    Ok(metadata)
-}
-
-#[cfg(unix)]
 fn validate_sidecars(path: &Path, parent_uid: u32) -> StorageResult<()> {
     for suffix in SQLITE_SIDECARS {
         let sidecar = sidecar_path(path, suffix);

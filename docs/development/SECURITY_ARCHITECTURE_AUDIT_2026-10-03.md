@@ -125,6 +125,7 @@ let task_id: String = row.get("task_id")
     runner adapter (a spawn handle with `wait_timeout` and `kill`) and migrate all
     call sites together; that is a refactor, not an F18 fix.
 - F19: closed in 6135b80 (`serve_streams` aborts and awaits the acceptor task).
+- F12: closed by failing closed. Non-unix builds compile `path_security_unsupported.rs`, which refuses every durable-store open. Windows ACL admission is not implemented; a Windows `agentd` cannot open its durable store until it is.
 - F13: closed (`SecretBackendError` gains `Locked`, `Failure`, `Corrupt`; keychain adapter maps them distinctly).
 - F1: add a fail-closed reconciliation sweep plus an operator resume command that routes only through validated transitions.
 - F16: append a fingerprint (hash of kind + pinned fields) to the observed-effect record and verify it in `restore`.
