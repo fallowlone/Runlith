@@ -7,6 +7,7 @@ use evaluation::{
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use security_audit::{SecurityAuditEvent, SecurityAuditOutcome, SecurityAuditSubjectKind};
 
+use crate::observed_effect_store::insert_effect;
 use crate::{StorageError, StorageResult};
 
 type CandidateOperationRow = (
@@ -494,7 +495,7 @@ impl crate::SqliteStore {
             provenance,
         )
         .map_err(|error| StorageError::ConstraintViolation(error.to_string()))?;
-        insert_effect(&transaction, &effect)?;
+        insert_effect(&transaction, &effect, "store candidate result")?;
         insert_assessment(&transaction, effect.effect_id(), assessment)?;
         transaction.commit()?;
         Ok(effect)
@@ -864,37 +865,6 @@ fn candidate_result_fingerprint(
             ("config", &config),
         ],
     )
-}
-
-fn insert_effect(
-    transaction: &rusqlite::Transaction<'_>,
-    effect: &ObservedEffect,
-) -> StorageResult<()> {
-    let provenance = effect.provenance();
-    transaction
-        .execute(
-            "INSERT INTO observed_effects (
-            effect_id, subject_ref, subject_fingerprint, effect_kind, captured_by,
-            captured_at, payload_ref, execution_id, attempt_id, runtime_ref,
-            evaluator_ref, receipt_ref
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                effect.effect_id().as_str(),
-                effect.subject_ref().as_str(),
-                effect.subject_fingerprint().as_str(),
-                effect.effect_kind().as_str(),
-                effect.captured_by().as_str(),
-                effect.captured_at(),
-                effect.payload().encode(),
-                provenance.execution_id.as_str(),
-                provenance.attempt_id.as_str(),
-                provenance.runtime_ref,
-                provenance.evaluator_ref,
-                provenance.receipt_ref,
-            ],
-        )
-        .map_err(|error| crate::error::map_constraint(error, "store candidate result"))?;
-    Ok(())
 }
 
 fn insert_assessment(

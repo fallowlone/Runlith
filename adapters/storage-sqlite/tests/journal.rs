@@ -117,7 +117,7 @@ fn fresh_database_reaches_current_schema() {
     let db = TestDb::new("fresh-current");
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 24);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 25);
     assert!(store.list_events_ordered().unwrap().is_empty());
 }
 
@@ -1156,6 +1156,7 @@ fn legacy_journal_without_hashes_is_backfilled_on_upgrade() {
             "DROP TRIGGER event_journal_no_update;
              ALTER TABLE event_journal DROP COLUMN previous_hash;
              ALTER TABLE event_journal DROP COLUMN record_hash;
+             ALTER TABLE observed_effects DROP COLUMN record_fingerprint;
              CREATE TRIGGER event_journal_no_update BEFORE UPDATE ON event_journal
              BEGIN SELECT RAISE(ABORT, 'event journal is append-only'); END;
              PRAGMA user_version = 23;",

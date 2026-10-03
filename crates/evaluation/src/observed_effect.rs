@@ -423,6 +423,40 @@ impl ObservedEffect {
         })
     }
 
+    /// F16: SHA-256 over every persisted field (kind, authority, timestamp,
+    /// encoded payload, provenance). `subject_fingerprint` binds only the
+    /// subject, so a type-valid edit to the payload or provenance would
+    /// otherwise survive `restore`.
+    #[must_use]
+    pub fn record_fingerprint(&self) -> String {
+        let mut hash = Sha256::new();
+        push(&mut hash, b"runlith:observed-effect-record:v1");
+        for value in [
+            self.effect_id.as_str(),
+            self.subject_ref.as_str(),
+            self.subject_fingerprint.as_str(),
+            self.effect_kind.as_str(),
+            self.captured_by.as_str(),
+            self.captured_at.as_str(),
+            self.payload.encode().as_str(),
+            self.provenance.execution_id.as_str(),
+            self.provenance.attempt_id.as_str(),
+            self.provenance.runtime_ref.as_str(),
+        ] {
+            push(&mut hash, value.as_bytes());
+        }
+        for optional in [&self.provenance.evaluator_ref, &self.provenance.receipt_ref] {
+            match optional {
+                Some(value) => {
+                    hash.update([1]);
+                    push(&mut hash, value.as_bytes());
+                }
+                None => hash.update([0]),
+            }
+        }
+        format!("sha256:{:x}", hash.finalize())
+    }
+
     pub fn effect_id(&self) -> &EffectId {
         &self.effect_id
     }

@@ -54,30 +54,7 @@ impl crate::SqliteStore {
             provenance,
         )
         .map_err(|error| StorageError::ConstraintViolation(error.to_string()))?;
-        let provenance = effect.provenance();
-        transaction
-            .execute(
-                "INSERT INTO observed_effects (
-                    effect_id, subject_ref, subject_fingerprint, effect_kind,
-                    captured_by, captured_at, payload_ref, execution_id,
-                    attempt_id, runtime_ref, evaluator_ref, receipt_ref
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                params![
-                    effect.effect_id().as_str(),
-                    effect.subject_ref().as_str(),
-                    effect.subject_fingerprint().as_str(),
-                    effect.effect_kind().as_str(),
-                    effect.captured_by().as_str(),
-                    effect.captured_at(),
-                    effect.payload().encode(),
-                    provenance.execution_id.as_str(),
-                    provenance.attempt_id.as_str(),
-                    provenance.runtime_ref,
-                    provenance.evaluator_ref,
-                    provenance.receipt_ref,
-                ],
-            )
-            .map_err(|error| crate::error::map_constraint(error, "store observed effect"))?;
+        insert_effect(&transaction, &effect, "store observed effect")?;
         transaction.commit()?;
         Ok(effect)
     }
@@ -87,7 +64,78 @@ impl crate::SqliteStore {
     }
 }
 
+/// Shared by every writer of `observed_effects` so the record fingerprint
+/// is always stored with the row.
+pub(crate) fn insert_effect(
+    connection: &rusqlite::Connection,
+    effect: &ObservedEffect,
+    what: &'static str,
+) -> StorageResult<()> {
+    let provenance = effect.provenance();
+    connection
+        .execute(
+            "INSERT INTO observed_effects (
+                effect_id, subject_ref, subject_fingerprint, effect_kind,
+                captured_by, captured_at, payload_ref, execution_id,
+                attempt_id, runtime_ref, evaluator_ref, receipt_ref,
+                record_fingerprint
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                effect.effect_id().as_str(),
+                effect.subject_ref().as_str(),
+                effect.subject_fingerprint().as_str(),
+                effect.effect_kind().as_str(),
+                effect.captured_by().as_str(),
+                effect.captured_at(),
+                effect.payload().encode(),
+                provenance.execution_id.as_str(),
+                provenance.attempt_id.as_str(),
+                provenance.runtime_ref,
+                provenance.evaluator_ref,
+                provenance.receipt_ref,
+                effect.record_fingerprint(),
+            ],
+        )
+        .map_err(|error| crate::error::map_constraint(error, what))?;
+    Ok(())
+}
+
+/// Migration 0025: fingerprints every pre-existing effect from its stored
+/// (already restore-validated) content.
+pub(crate) fn backfill_effect_fingerprints(connection: &rusqlite::Connection) -> StorageResult<()> {
+    let ids: Vec<String> = connection
+        .prepare("SELECT effect_id FROM observed_effects")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    for id in ids {
+        let effect = load_row(connection, &id)?
+            .ok_or_else(|| StorageError::Corrupt("observed effect vanished".to_owned()))?
+            .0;
+        connection.execute(
+            "UPDATE observed_effects SET record_fingerprint = ?1 WHERE effect_id = ?2",
+            params![effect.record_fingerprint(), id],
+        )?;
+    }
+    Ok(())
+}
+
 fn load(connection: &rusqlite::Connection, id: &str) -> StorageResult<Option<ObservedEffect>> {
+    let Some((effect, stored)) = load_row(connection, id)? else {
+        return Ok(None);
+    };
+    if stored.as_deref() != Some(effect.record_fingerprint().as_str()) {
+        return Err(StorageError::Corrupt(
+            "observed effect record fingerprint mismatch".to_owned(),
+        ));
+    }
+    Ok(Some(effect))
+}
+
+/// Decodes one row; returns the stored record fingerprint unverified.
+fn load_row(
+    connection: &rusqlite::Connection,
+    id: &str,
+) -> StorageResult<Option<(ObservedEffect, Option<String>)>> {
     type Row = (
         String,
         String,
@@ -101,12 +149,13 @@ fn load(connection: &rusqlite::Connection, id: &str) -> StorageResult<Option<Obs
         String,
         Option<String>,
         Option<String>,
+        Option<String>,
     );
     let row: Option<Row> = connection
         .query_row(
             "SELECT effect_id, subject_ref, subject_fingerprint, effect_kind,
                     captured_by, captured_at, payload_ref, execution_id,
-                    attempt_id, runtime_ref, evaluator_ref, receipt_ref
+                    attempt_id, runtime_ref, evaluator_ref, receipt_ref, record_fingerprint
              FROM observed_effects WHERE effect_id = ?1",
             params![id],
             |row| {
@@ -123,6 +172,7 @@ fn load(connection: &rusqlite::Connection, id: &str) -> StorageResult<Option<Obs
                     row.get(9)?,
                     row.get(10)?,
                     row.get(11)?,
+                    row.get(12)?,
                 ))
             },
         )
@@ -140,6 +190,7 @@ fn load(connection: &rusqlite::Connection, id: &str) -> StorageResult<Option<Obs
         runtime,
         evaluator,
         receipt,
+        stored_fingerprint,
     )) = row
     else {
         return Ok(None);
@@ -172,7 +223,7 @@ fn load(connection: &rusqlite::Connection, id: &str) -> StorageResult<Option<Obs
             "attempt/execution lineage mismatch".to_owned(),
         ));
     }
-    ObservedEffect::restore(
+    let effect = ObservedEffect::restore(
         EffectId::new(id).map_err(|_| StorageError::Corrupt("invalid effect id".to_owned()))?,
         EffectSubjectRef::new(subject)
             .map_err(|_| StorageError::Corrupt("invalid subject".to_owned()))?,
@@ -184,6 +235,6 @@ fn load(connection: &rusqlite::Connection, id: &str) -> StorageResult<Option<Obs
         payload,
         provenance,
     )
-    .map(Some)
-    .map_err(|error| StorageError::Corrupt(error.to_string()))
+    .map_err(|error| StorageError::Corrupt(error.to_string()))?;
+    Ok(Some((effect, stored_fingerprint)))
 }

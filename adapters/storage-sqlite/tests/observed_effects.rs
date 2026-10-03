@@ -752,7 +752,7 @@ fn cv_2_schema_18_migrates_to_19_with_closed_capture_authority() {
     }
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 24);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 25);
     let connection = rusqlite::Connection::open(&db.path).unwrap();
     let sql: String = connection
         .query_row(
@@ -1400,4 +1400,45 @@ fn candidate_result_without_a_recorded_selection_is_refused() {
         matches!(result, Err(StorageError::ConstraintViolation(_))),
         "got {result:?}"
     );
+}
+
+// F16: edits that keep the row type-valid (same kind, well-formed payload,
+// valid timestamp, plausible receipt) must still fail the record fingerprint.
+#[test]
+fn type_valid_edits_to_an_observed_effect_fail_the_record_fingerprint() {
+    let edits = [
+        (
+            "payload",
+            "payload_ref",
+            "'bytes=999;sha256=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'",
+        ),
+        ("captured_at", "captured_at", "'2026-09-24T12:00:00Z'"),
+        ("receipt", "receipt_ref", "'forged-receipt'"),
+        ("runtime", "runtime_ref", "'other-runtime'"),
+    ];
+    for (name, column, value) in edits {
+        let db = TestDb::new(&format!("fingerprint-{name}"));
+        let effect_id = {
+            let mut store = db.open();
+            let (execution, attempt) = seed_runtime(&mut store);
+            append_sample(&mut store, &execution, &attempt, "artifact:tamper")
+                .effect_id()
+                .clone()
+        };
+        rusqlite::Connection::open(&db.path)
+            .unwrap()
+            .execute(
+                &format!("UPDATE observed_effects SET {column} = {value} WHERE effect_id = ?1"),
+                [effect_id.as_str()],
+            )
+            .unwrap();
+        let store = db.open();
+        assert!(
+            matches!(
+                store.get_observed_effect(&effect_id),
+                Err(StorageError::Corrupt(_))
+            ),
+            "edit {name} was accepted"
+        );
+    }
 }
