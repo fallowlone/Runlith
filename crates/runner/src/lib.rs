@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+use zeroize::Zeroizing;
+
 use policy::{Capability, EffectiveCapabilities, ScopeId};
 
 /// Coarse outbound HTTPS authority currently enforceable by the macOS
@@ -64,6 +66,83 @@ pub const CHILD_ENV_ALLOWLIST: &[&str] = &[
     "APPDATA",
     "LOCALAPPDATA",
 ];
+
+/// Environment names that may carry a secret into a governed child
+/// (ADR-0039). Separate from [`CHILD_ENV_ALLOWLIST`]: these values are never
+/// part of a plan, its digest or any receipt. Extending this list is an
+/// architecture decision, not a composition detail.
+pub const CHILD_SECRET_ENV_ALLOWLIST: &[&str] = &["CLAUDE_CODE_OAUTH_TOKEN"];
+
+/// Upper bound for one child secret value, in bytes.
+pub const MAX_CHILD_SECRET_BYTES: usize = 4096;
+
+/// Late-bound secret environment for one governed child (ADR-0039).
+///
+/// Values live only here and are injected at spawn through
+/// [`SandboxedCommand::spawn_with_secrets`]. They are deliberately outside
+/// [`ChildEnvironment`], the [`IsolationPlan`], its digests and every receipt.
+/// The type is not `Clone` or `PartialEq`, `Debug` prints names only, and
+/// values are zeroized on drop.
+///
+/// Limits: `std::process::Command` keeps its own copy of each value until it
+/// is dropped, and that copy is not zeroized. Same-user processes may be able
+/// to read a child's environment on some platforms.
+#[derive(Default)]
+pub struct ChildSecretEnvironment {
+    vars: Vec<(&'static str, Zeroizing<Vec<u8>>)>,
+}
+
+impl ChildSecretEnvironment {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds one secret. Fails closed on a name outside
+    /// [`CHILD_SECRET_ENV_ALLOWLIST`], a duplicate name, and on an empty,
+    /// NUL-containing, platform-invalid or oversized value. A refused value is
+    /// zeroized before this returns.
+    pub fn insert(&mut self, name: &str, value: Vec<u8>) -> Result<(), RunnerError> {
+        let value = Zeroizing::new(value);
+        let Some(allowed) = CHILD_SECRET_ENV_ALLOWLIST
+            .iter()
+            .copied()
+            .find(|candidate| *candidate == name)
+        else {
+            return Err(RunnerError::SecretNameNotAllowed {
+                name: name.to_owned(),
+            });
+        };
+        if self.vars.iter().any(|(existing, _)| *existing == allowed) {
+            return Err(RunnerError::DuplicateSecretName {
+                name: allowed.to_owned(),
+            });
+        }
+        if value.is_empty()
+            || value.len() > MAX_CHILD_SECRET_BYTES
+            || value.contains(&0)
+            || (!cfg!(unix) && std::str::from_utf8(&value).is_err())
+        {
+            return Err(RunnerError::InvalidSecretValue);
+        }
+        self.vars.push((allowed, value));
+        Ok(())
+    }
+
+    /// Names only; values are never exposed.
+    pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.vars.iter().map(|(name, _)| *name)
+    }
+}
+
+impl fmt::Debug for ChildSecretEnvironment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChildSecretEnvironment")
+            .field("names", &self.names().collect::<Vec<_>>())
+            .finish_non_exhaustive()
+    }
+}
 
 /// Complete, explicit child environment for one isolation plan.
 ///
@@ -698,11 +777,46 @@ impl SandboxedCommand {
         &self,
         wire: impl FnOnce(&mut SpawnWiring<'_>),
     ) -> Result<std::process::Child, std::io::Error> {
+        self.spawn_inner(None, wire)
+    }
+
+    /// Like [`Self::spawn`], additionally installing the late-bound secrets
+    /// (ADR-0039) after the plan's environment. The secrets never enter the
+    /// plan, the recipe or any `Debug` output of this command.
+    pub fn spawn_with_secrets(
+        &self,
+        secrets: &ChildSecretEnvironment,
+        wire: impl FnOnce(&mut SpawnWiring<'_>),
+    ) -> Result<std::process::Child, std::io::Error> {
+        self.spawn_inner(Some(secrets), wire)
+    }
+
+    fn spawn_inner(
+        &self,
+        secrets: Option<&ChildSecretEnvironment>,
+        wire: impl FnOnce(&mut SpawnWiring<'_>),
+    ) -> Result<std::process::Child, std::io::Error> {
         let mut command = Command::new(self.recipe.program());
         command.args(self.recipe.args());
         command.env_clear();
         for (name, value) in self.recipe.environment() {
             command.env(name, value);
+        }
+        if let Some(secrets) = secrets {
+            for (name, value) in &secrets.vars {
+                if self
+                    .recipe
+                    .environment()
+                    .iter()
+                    .any(|(planned, _)| planned.as_os_str() == OsStr::new(name))
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "runner refused a child secret that collides with the plan environment",
+                    ));
+                }
+                command.env(name, secret_os_value(value));
+            }
         }
         wire(&mut SpawnWiring {
             command: &mut command,
@@ -710,6 +824,17 @@ impl SandboxedCommand {
         validate_spawn_cwd(&self.plan, &mut command)?;
         command.spawn()
     }
+}
+
+#[cfg(unix)]
+fn secret_os_value(value: &[u8]) -> OsString {
+    std::os::unix::ffi::OsStringExt::from_vec(value.to_vec())
+}
+
+#[cfg(not(unix))]
+fn secret_os_value(value: &[u8]) -> OsString {
+    // `ChildSecretEnvironment::insert` guarantees UTF-8 on non-unix targets.
+    OsString::from(String::from_utf8_lossy(value).into_owned())
 }
 
 fn validate_spawn_cwd(plan: &IsolationPlan, command: &mut Command) -> std::io::Result<()> {
@@ -868,6 +993,18 @@ pub enum RunnerError {
     /// The backend could not prove it cleared the ambient environment and
     /// installed exactly the plan's explicit child environment.
     EnvironmentNotIsolated,
+    /// A child secret name outside [`CHILD_SECRET_ENV_ALLOWLIST`].
+    SecretNameNotAllowed {
+        name: String,
+    },
+    /// The same child secret name was supplied twice.
+    DuplicateSecretName {
+        name: String,
+    },
+    /// A child secret value that is empty, contains NUL, is not valid for
+    /// the platform environment or exceeds [`MAX_CHILD_SECRET_BYTES`]. The
+    /// value itself is never part of the error.
+    InvalidSecretValue,
 }
 
 impl fmt::Display for RunnerError {
@@ -919,6 +1056,13 @@ impl fmt::Display for RunnerError {
                     "isolation backend cannot prove child environment isolation"
                 )
             }
+            Self::SecretNameNotAllowed { name } => {
+                write!(formatter, "child secret name is not allowlisted: {name}")
+            }
+            Self::DuplicateSecretName { name } => {
+                write!(formatter, "duplicate child secret name: {name}")
+            }
+            Self::InvalidSecretValue => write!(formatter, "child secret value is not acceptable"),
         }
     }
 }

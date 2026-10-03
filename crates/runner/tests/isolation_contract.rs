@@ -7,8 +7,9 @@ use std::sync::Arc;
 use policy::{Capability, EffectiveCapabilities, FileScope, ScopeId};
 use runner::{
     enforce_process_operation, prepare_process_launch, BackendIdentity, ChildEnvironment,
-    CommandSpec, EnforcementAxes, EnforcementReport, IsolationBackend, IsolationPlan,
-    IsolationRequirements, LaunchRecipe, Platform, RunnerError, RunnerKind,
+    ChildSecretEnvironment, CommandSpec, EnforcementAxes, EnforcementReport, IsolationBackend,
+    IsolationPlan, IsolationRequirements, LaunchRecipe, Platform, RunnerError, RunnerKind,
+    CHILD_SECRET_ENV_ALLOWLIST, MAX_CHILD_SECRET_BYTES,
 };
 
 fn file_read(workspace: &str, root: &str) -> Capability {
@@ -707,4 +708,133 @@ fn r1_h2_poisoned_or_duplicate_env_names_refuse_to_compile() {
             "minimal allowlist leaked {name:?}"
         );
     }
+}
+
+// -- ADR-0039 P2: late-bound child secret environment -----------------------
+
+const SECRET_NAME: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+const SECRET_CANARY: &str = "oat-canary-7f3a91c2d4e85b06";
+
+fn canary() -> Vec<u8> {
+    SECRET_CANARY.as_bytes().to_vec()
+}
+
+#[test]
+fn secret_allowlist_names_only_the_setup_token_variable() {
+    assert_eq!(CHILD_SECRET_ENV_ALLOWLIST, &[SECRET_NAME]);
+}
+
+#[test]
+fn secret_environment_refuses_unlisted_duplicate_and_invalid_values() {
+    let mut secrets = ChildSecretEnvironment::new();
+    assert!(matches!(
+        secrets.insert("AWS_SECRET_ACCESS_KEY", canary()),
+        Err(RunnerError::SecretNameNotAllowed { .. })
+    ));
+    assert!(matches!(
+        secrets.insert(SECRET_NAME, Vec::new()),
+        Err(RunnerError::InvalidSecretValue)
+    ));
+    assert!(matches!(
+        secrets.insert(SECRET_NAME, b"a\0b".to_vec()),
+        Err(RunnerError::InvalidSecretValue)
+    ));
+    assert!(matches!(
+        secrets.insert(SECRET_NAME, vec![b'x'; MAX_CHILD_SECRET_BYTES + 1]),
+        Err(RunnerError::InvalidSecretValue)
+    ));
+    assert_eq!(secrets.names().count(), 0, "refused inserts store nothing");
+
+    secrets.insert(SECRET_NAME, canary()).unwrap();
+    assert!(matches!(
+        secrets.insert(SECRET_NAME, b"another".to_vec()),
+        Err(RunnerError::DuplicateSecretName { .. })
+    ));
+    assert_eq!(secrets.names().collect::<Vec<_>>(), vec![SECRET_NAME]);
+}
+
+#[test]
+fn secret_environment_debug_and_errors_never_render_the_value() {
+    let mut secrets = ChildSecretEnvironment::new();
+    secrets.insert(SECRET_NAME, canary()).unwrap();
+    let rendered = format!("{secrets:?}");
+    assert!(rendered.contains(SECRET_NAME));
+    assert!(!rendered.contains(SECRET_CANARY));
+
+    let mut tainted = SECRET_CANARY.as_bytes().to_vec();
+    tainted.push(0);
+    let error = ChildSecretEnvironment::new()
+        .insert(SECRET_NAME, tainted)
+        .unwrap_err();
+    assert!(!format!("{error:?} {error}").contains(SECRET_CANARY));
+}
+
+/// The secret reaches the real child only through `spawn_with_secrets`, and
+/// never enters the plan, the recipe environment or any `Debug` rendering.
+#[cfg(unix)]
+#[test]
+fn secret_reaches_child_only_through_late_bound_spawn() {
+    let root = std::env::temp_dir().join(format!("runlith-runner-secret-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let workspace = root.canonicalize().unwrap();
+    let backend = FixedBackend {
+        recipe_program: Some(OsString::from("/usr/bin/env")),
+        ..FixedBackend::new(EnforcementAxes::all())
+    };
+    let effective = EffectiveCapabilities::new(vec![Capability::process("cargo").unwrap()]);
+    let launch = prepare_process_launch(
+        Arc::new(backend),
+        &effective,
+        workspace.to_string_lossy().into_owned(),
+        scope("cargo"),
+        IsolationRequirements::trusted_host(),
+        environment(),
+    )
+    .expect("verified launch context");
+    let sandboxed = launch
+        .bind(CommandSpec::new(OsString::from("cargo"), []))
+        .expect("backend recipe");
+
+    let mut secrets = ChildSecretEnvironment::new();
+    secrets.insert(SECRET_NAME, canary()).unwrap();
+
+    let run = |with_secrets: bool| {
+        let wire = |wire: &mut runner::SpawnWiring<'_>| {
+            wire.current_dir(&workspace)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .stdin(std::process::Stdio::null());
+        };
+        let child = if with_secrets {
+            sandboxed.spawn_with_secrets(&secrets, wire)
+        } else {
+            sandboxed.spawn(wire)
+        }
+        .expect("spawn");
+        let output = child.wait_with_output().expect("wait");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+
+    let without = run(false);
+    assert!(
+        !without.contains(SECRET_CANARY),
+        "plain spawn must not carry it"
+    );
+    let with = run(true);
+    assert!(
+        with.lines()
+            .any(|line| line == format!("{SECRET_NAME}={SECRET_CANARY}")),
+        "late-bound spawn must deliver the secret: {with}"
+    );
+    assert!(with.contains("PATH=/usr/bin:/bin"), "plan environment kept");
+
+    assert!(!format!("{sandboxed:?}").contains(SECRET_CANARY));
+    assert!(!format!("{launch:?}").contains(SECRET_CANARY));
+    assert!(!format!("{:?}", sandboxed.plan()).contains(SECRET_CANARY));
+    assert!(sandboxed
+        .environment()
+        .iter()
+        .all(|(name, _)| name != SECRET_NAME));
+    let _ = std::fs::remove_dir_all(root);
 }
