@@ -7,6 +7,12 @@ edition = "2021"
 name = "provider_claude"
 path = "src/lib.rs"
 
+[features]
+# F6: the unmanaged trusted-host constructors (no Runner sandbox) exist only
+# for contract fixtures. Production builds never enable this; tests do via
+# the dev-dependencies below.
+trusted-host = []
+
 [dependencies]
 agent-runtime = { path = "../../crates/agent-runtime" }
 task-domain = { path = "../../crates/task" }
@@ -19,3 +25,4 @@ plan-domain = { path = "../../crates/plan" }
 [dev-dependencies]
 execution-contract = { path = "../../crates/execution-contract" }
 planner-contract = { path = "../../crates/planner-contract" }
+provider-claude = { path = ".", features = ["trusted-host"] }

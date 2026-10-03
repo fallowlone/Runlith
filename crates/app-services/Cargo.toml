@@ -26,6 +26,6 @@ fake-agent = { path = "../../adapters/fake-agent" }
 fake-planner = { path = "../../adapters/fake-planner" }
 fake-evaluator = { path = "../../adapters/fake-evaluator" }
 git-cli = { path = "../../adapters/git-cli" }
-provider-claude = { path = "../../adapters/provider-claude" }
+provider-claude = { path = "../../adapters/provider-claude", features = ["trusted-host"] }
 runner-native = { path = "../../adapters/runner-native" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }

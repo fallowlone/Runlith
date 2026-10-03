@@ -8,6 +8,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(any(test, feature = "trusted-host"))]
 use std::process::Command;
 
 #[cfg(unix)]
@@ -133,6 +134,7 @@ impl ProviderEnvironment {
     /// Applies an allowlisted environment to the exact child command.
     /// Ambient API keys, cloud credentials, Git overrides, SSH agents and
     /// provider/plugin variables are intentionally not inherited.
+    #[cfg(any(test, feature = "trusted-host"))]
     pub(crate) fn apply(&self, command: &mut Command) {
         command.env_clear();
         for (name, value) in self.resolved_pairs() {

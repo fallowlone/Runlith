@@ -16,7 +16,9 @@
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+#[cfg(any(test, feature = "trusted-host"))]
+use std::process::Command;
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -112,7 +114,9 @@ pub(crate) enum ProviderLaunch {
     Unattached,
     /// Explicit trusted-host supervisor: the provider spawns the configured
     /// executable directly with its own allowlisted environment. This is the
-    /// test/development path and never the production G6 path.
+    /// test/development path and never the production G6 path; compiled
+    /// only for tests or the `trusted-host` feature (audit F6).
+    #[cfg(any(test, feature = "trusted-host"))]
     TrustedHost,
     /// Verified Runner launch: the only spawnable child is the one the backend
     /// installed restrictions for.
@@ -182,6 +186,7 @@ pub(crate) fn spawn_and_supervise(
     max_stream_bytes: usize,
     capture_grace: Duration,
 ) -> Result<ChildOutcome, ClaudeFailure> {
+    #[cfg_attr(not(any(test, feature = "trusted-host")), allow(unused_variables))]
     let ProcessInvocation {
         executable,
         argv,
@@ -216,6 +221,7 @@ pub(crate) fn spawn_and_supervise(
                 ),
             });
         }
+        #[cfg(any(test, feature = "trusted-host"))]
         ProviderLaunch::TrustedHost => {
             // Explicit trusted-host supervisor (provider contract tests and
             // trusted-host development runs). No policy authority exists to

@@ -37,6 +37,7 @@ fake-evaluator = { path = "../../adapters/fake-evaluator" }
 fake-planner = { path = "../../adapters/fake-planner" }
 git-cli = { path = "../../adapters/git-cli" }
 prost = "0.14.4"
+provider-claude = { path = "../../adapters/provider-claude", features = ["trusted-host"] }
 storage-sqlite = { path = "../../adapters/storage-sqlite" }
 task-domain = { path = "../../crates/task" }
 tokio = { version = "~1.51", features = ["macros", "rt", "net", "sync", "time"] }

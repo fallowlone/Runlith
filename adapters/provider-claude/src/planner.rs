@@ -15,6 +15,7 @@
 //! `Unmeasured` so the trusted service charges conservatively.
 
 use std::collections::BTreeMap;
+#[cfg(any(test, feature = "trusted-host"))]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -57,7 +58,9 @@ type Parsed<T> = Result<T, Malformed>;
 /// Private trust-mode selection for [`ClaudePlanner::bind_with_model`].
 enum PlannerLaunch {
     Unattached,
+    #[cfg(any(test, feature = "trusted-host"))]
     TrustedHost,
+    #[cfg(any(test, feature = "trusted-host"))]
     TrustedHostWithEnvironment(Vec<(OsString, OsString)>),
 }
 
@@ -80,6 +83,7 @@ impl ClaudePlanner {
 
     /// Explicit trusted-host constructor for deterministic adapter contract
     /// fixtures. Production composition must use [`Self::bind`].
+    #[cfg(any(test, feature = "trusted-host"))]
     pub fn bind_trusted_host(
         config: ClaudeConfig,
         workdir: impl Into<PathBuf>,
@@ -97,6 +101,7 @@ impl ClaudePlanner {
     /// [`Self::bind_trusted_host`] with the provider's host variables taken
     /// only from `host_environment`; see
     /// [`ClaudeExecutor::bind_trusted_host_with_host_environment`].
+    #[cfg(any(test, feature = "trusted-host"))]
     pub fn bind_trusted_host_with_host_environment(
         config: ClaudeConfig,
         workdir: impl Into<PathBuf>,
@@ -130,9 +135,11 @@ impl ClaudePlanner {
             PlannerLaunch::Unattached => {
                 ClaudeExecutor::bind(config, prompt, workdir, environment_base)?
             }
+            #[cfg(any(test, feature = "trusted-host"))]
             PlannerLaunch::TrustedHost => {
                 ClaudeExecutor::bind_trusted_host(config, prompt, workdir, environment_base)?
             }
+            #[cfg(any(test, feature = "trusted-host"))]
             PlannerLaunch::TrustedHostWithEnvironment(host_environment) => {
                 ClaudeExecutor::bind_trusted_host_with_host_environment(
                     config,

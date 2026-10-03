@@ -127,6 +127,7 @@ impl ClaudeExecutor {
     /// contract tests and trusted-host development runs — never the
     /// production G6 path, which goes through
     /// [`Self::with_sandboxed_launch`].
+    #[cfg(any(test, feature = "trusted-host"))]
     pub fn bind_trusted_host(
         config: ClaudeConfig,
         prompt: impl Into<String>,
@@ -149,6 +150,7 @@ impl ClaudeExecutor {
     /// on the runner's login session (TASK-0155). The HOME/USER requirement
     /// is unchanged. Runner environment/support accessors refuse this mode;
     /// attaching a sandboxed launch permanently invalidates its environment.
+    #[cfg(any(test, feature = "trusted-host"))]
     pub fn bind_trusted_host_with_host_environment(
         config: ClaudeConfig,
         prompt: impl Into<String>,
