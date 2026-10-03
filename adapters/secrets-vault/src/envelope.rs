@@ -13,9 +13,6 @@
 //! magic, version and KDF parameters plus a per-slot label as associated
 //! data. Salts are bound implicitly: a changed salt derives a different key.
 
-// The adapter that consumes this module lands in the next ADR-0039 P4 step.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{AeadInOut, KeyInit, XChaCha20Poly1305, XNonce};
 use zeroize::Zeroizing;
@@ -353,7 +350,7 @@ fn aad(params: &KdfParams, label: &[u8]) -> Vec<u8> {
     [&prefix(params)[..], label].concat()
 }
 
-fn random_array<const N: usize>() -> Result<[u8; N], VaultError> {
+pub(crate) fn random_array<const N: usize>() -> Result<[u8; N], VaultError> {
     let mut out = [0_u8; N];
     getrandom::fill(&mut out).map_err(|_| VaultError::Unavailable)?;
     Ok(out)

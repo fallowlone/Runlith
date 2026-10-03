@@ -10,9 +10,11 @@ use std::fmt;
 
 use zeroize::Zeroizing;
 
+mod backend;
 mod envelope;
 mod phrase;
 
+pub use backend::VaultBackend;
 pub use phrase::{RecoveryPhrase, DEFAULT_PHRASE_WORDS, MAX_PHRASE_WORDS, MIN_PHRASE_WORDS};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,6 +33,14 @@ pub enum VaultError {
     EntryRejected,
     /// The platform random source or a primitive failed.
     Unavailable,
+    /// The vault is locked; unlock it first.
+    Locked,
+    /// A vault file already exists at the path.
+    AlreadyExists,
+    /// No vault file exists at the path.
+    NotFound,
+    /// Reading or writing the vault file failed.
+    Io,
 }
 
 impl fmt::Display for VaultError {
@@ -43,6 +53,10 @@ impl fmt::Display for VaultError {
             Self::Corrupt => "vault data is invalid",
             Self::EntryRejected => "vault entry exceeds format limits",
             Self::Unavailable => "vault cryptography unavailable",
+            Self::Locked => "vault is locked",
+            Self::AlreadyExists => "vault already exists",
+            Self::NotFound => "vault not found",
+            Self::Io => "vault file access failed",
         };
         f.write_str(message)
     }
