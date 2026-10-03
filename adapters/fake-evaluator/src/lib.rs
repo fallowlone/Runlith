@@ -61,6 +61,14 @@ impl EvaluationPort for FakeEvaluator {
             EvaluatorMode::AlwaysRejected => EvaluationVerdict::Rejected,
         })
     }
+
+    // Test double: no deferred completion condition. Explicit `Ok` keeps
+    // the fail-closed port default from breaking unit tests that rely on
+    // this fake. Production evaluators must not copy this override without
+    // a real freshness check.
+    fn revalidate_before_completion(&self, _request: &EvaluationRequest) -> EvaluationResult<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -1696,8 +1696,8 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
             project_id: project_id.clone(),
             execution_id: execution.id().clone(),
             workspace_id: lease.id().clone(),
-            correlation_id: format!("op-{now}-{}", self.op_counter),
-            causation_id: format!("req-{now}-{}", self.op_counter),
+            correlation_id: crate::op_id::correlation_id(now, self.op_counter),
+            causation_id: crate::op_id::causation_id(now, self.op_counter),
             occurred_at: format_rfc3339(now),
             provenance: format!("{PROVENANCE_SERVICE}/{op}"),
         }

@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use plan_domain::{
     GateUpdate, PlanChangeSet, PlanDomainError, PlanGraph, PlanNode, PlanNodeId,
-    MAX_DECOMPOSITION_DEPTH,
+    MAX_DECOMPOSITION_DEPTH, MAX_NODES_PER_PLAN_BRANCH,
 };
 use scheduler::ScheduleReadiness;
 use storage_sqlite::{SqliteStore, StorageError};
@@ -85,6 +85,12 @@ fn graph_depth_from_parts<'a>(
     let nodes: BTreeSet<&str> = nodes.collect();
     if nodes.is_empty() {
         return 0;
+    }
+    if nodes.len() > MAX_NODES_PER_PLAN_BRANCH {
+        // F20 memory bound: no validated path can produce a larger graph
+        // (V6 refuses it), so fail closed with the unusable-depth sentinel
+        // the cyclic case already uses instead of traversing it.
+        return u32::MAX;
     }
     let mut indegree: BTreeMap<&str, usize> = nodes.iter().map(|node| (*node, 0)).collect();
     let mut outgoing: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
@@ -376,6 +382,17 @@ mod tests {
 
     fn pending(ids: &[&str]) -> BTreeSet<String> {
         ids.iter().map(|id| (*id).to_owned()).collect()
+    }
+
+    #[test]
+    fn oversized_graph_depth_fails_closed_without_traversal() {
+        // F20: no validated path can produce more than 64 branch nodes,
+        // so depth computation refuses with the unusable-depth sentinel
+        // instead of traversing an unbounded durable graph.
+        let ids: Vec<String> = (0..65).map(|i| format!("node-{i:02}")).collect();
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let candidate = graph(&refs, &[]);
+        assert_eq!(remaining_depth(&candidate), 0);
     }
 
     #[test]

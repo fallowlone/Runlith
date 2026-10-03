@@ -424,8 +424,8 @@ impl<C: Clock> TaskService<C> {
             // (correlation) and the request itself as the direct cause
             // (causation). Distinct values, real references — never derived
             // from adjacency, never fabricated from nothing.
-            correlation_id: format!("op-{now}-{}", self.op_counter),
-            causation_id: format!("req-{now}-{}", self.op_counter),
+            correlation_id: crate::op_id::correlation_id(now, self.op_counter),
+            causation_id: crate::op_id::causation_id(now, self.op_counter),
             occurred_at: format_rfc3339(now),
             provenance: format!("{PROVENANCE_SERVICE}/{op}", op = op_name(&command)),
             // Task lifecycle facts never carry runtime scope.
@@ -465,8 +465,8 @@ impl<C: Clock> TaskService<C> {
             from_state,
             to_state,
             reason,
-            correlation_id: format!("op-{now}-{}", self.op_counter),
-            causation_id: format!("req-{now}-{}", self.op_counter),
+            correlation_id: crate::op_id::correlation_id(now, self.op_counter),
+            causation_id: crate::op_id::causation_id(now, self.op_counter),
             occurred_at: format_rfc3339(now),
             provenance: format!("{PROVENANCE_SERVICE}/{op}"),
             // Creation/dependency facts never carry runtime scope.

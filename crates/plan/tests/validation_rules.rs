@@ -719,6 +719,50 @@ fn v6_budget_depth_fanout_limits_rejects_branch_node_breach() {
 }
 
 #[test]
+fn oversized_cyclic_graph_refuses_branch_nodes_before_traversal() {
+    // F20: the node-count bound precedes the V1 BFS, so an oversized
+    // graph reports the V6-equivalent branch-nodes refusal even when a
+    // cycle is present, and traversal memory stays bounded.
+    let mut nodes = vec![
+        node(
+            "a",
+            "ws1:src",
+            "c1",
+            VerificationMethod::AutomatedTest,
+            RiskClass::Low,
+        ),
+        node(
+            "b",
+            "ws1:src",
+            "c1",
+            VerificationMethod::AutomatedTest,
+            RiskClass::Low,
+        ),
+    ];
+    for i in 0..62 {
+        nodes.push(node(
+            &format!("n{i:02}"),
+            "ws1:src",
+            "c1",
+            VerificationMethod::AutomatedTest,
+            RiskClass::Low,
+        ));
+    }
+    let graph = PlanGraph::new(nodes, vec![(nid("a"), nid("b")), (nid("b"), nid("a"))]).unwrap();
+    let mut cs = valid_changeset();
+    cs.node_removals.clear();
+    cs.proposal_hash = compute_proposal_hash(&cs);
+    match validate_proposal(&graph, &cs, &ctx()) {
+        ValidationOutcome::Refused(r) => {
+            assert_eq!(r.code(), "LIMIT_EXCEEDED");
+            let d = r.limit_detail().unwrap();
+            assert_eq!((d.which, d.bound, d.observed), ("branch-nodes", 64, 65));
+        }
+        ValidationOutcome::Accepted { .. } => panic!("expected refusal"),
+    }
+}
+
+#[test]
 fn v6_budget_depth_fanout_limits_rejects_second_revision_in_cycle() {
     let graph = base_graph();
     let cs = valid_changeset();

@@ -272,7 +272,17 @@ pub fn validate_proposal(
         merged_edges.insert((edge.from.as_str(), edge.to.as_str()));
     }
 
-    // V1 ACYCLICITY.
+    // V1 ACYCLICITY. F20 memory bound first: merged graphs above the
+    // branch-node limit can never be accepted (V6 refuses them with the
+    // identical refusal below), so refuse before running the BFS instead
+    // of traversing an unbounded provider-supplied graph.
+    if vertices.len() > MAX_NODES_PER_PLAN_BRANCH {
+        return ValidationOutcome::Refused(ValidationRefusal::LimitExceeded {
+            which: "branch-nodes",
+            bound: MAX_NODES_PER_PLAN_BRANCH as u64,
+            observed: vertices.len() as u64,
+        });
+    }
     if let Some(detail) = first_cycle(&vertices, &merged_edges) {
         return ValidationOutcome::Refused(ValidationRefusal::CyclicProposal { detail });
     }

@@ -359,17 +359,23 @@ impl<'a> Decoder<'a> {
     }
 
     fn u32(&mut self) -> StorageResult<u32> {
-        let bytes: [u8; 4] = self.take(4)?.try_into().expect("exact decoder width");
+        let bytes: [u8; 4] = self.take(4)?.try_into().map_err(|_| {
+            StorageError::Corrupt("approved PlanChangeSet has bad u32 width".to_owned())
+        })?;
         Ok(u32::from_be_bytes(bytes))
     }
 
     fn u64(&mut self) -> StorageResult<u64> {
-        let bytes: [u8; 8] = self.take(8)?.try_into().expect("exact decoder width");
+        let bytes: [u8; 8] = self.take(8)?.try_into().map_err(|_| {
+            StorageError::Corrupt("approved PlanChangeSet has bad u64 width".to_owned())
+        })?;
         Ok(u64::from_be_bytes(bytes))
     }
 
     fn i64(&mut self) -> StorageResult<i64> {
-        let bytes: [u8; 8] = self.take(8)?.try_into().expect("exact decoder width");
+        let bytes: [u8; 8] = self.take(8)?.try_into().map_err(|_| {
+            StorageError::Corrupt("approved PlanChangeSet has bad i64 width".to_owned())
+        })?;
         Ok(i64::from_be_bytes(bytes))
     }
 

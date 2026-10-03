@@ -381,29 +381,23 @@ where
                     Some(composition) => execution::dispatch_execution(composition, request),
                     None => (execution::execution_unavailable(), None),
                 };
-                // Detached by design (see `execution::run_background`):
-                // shutdown/restart orphans the provider child and strands
-                // the attempt as reconcilable open state — never silent
-                // success. The handle is dropped immediately so the serve
-                // loop never blocks on provider time. A spawn failure is
-                // reported honestly with the committed execution named.
+                // Retained by design (F17, see `execution::run_background`):
+                // the serve loop never blocks on provider time, but the
+                // handle is kept in the composition registry and joined
+                // on daemon shutdown so in-flight runs conclude their
+                // bookkeeping instead of dying mid-write. A spawn failure
+                // is reported honestly with the committed execution named.
                 let response = match job {
                     Some(job) => {
                         let id = job.work_execution_id();
                         let owner = job.owner_token();
-                        match std::thread::Builder::new()
-                            .name(format!("exec-background-{id}"))
-                            .spawn(move || execution::run_background(job))
-                        {
-                            Ok(_) => response,
-                            Err(_) => match &services.execution {
-                                // A job exists only when composition is
-                                // present; the fallback keeps totality.
-                                Some(composition) => {
-                                    execution::abort_start(composition, &id, owner)
-                                }
-                                None => response,
-                            },
+                        let composition = services
+                            .execution
+                            .clone()
+                            .expect("job exists only with execution composition");
+                        match composition.spawn_background(job) {
+                            Ok(()) => response,
+                            Err(_) => execution::abort_start(&composition, &id, owner),
                         }
                     }
                     None => response,
@@ -472,11 +466,12 @@ where
 /// connection is closed, never a daemon failure. Only peer-authenticated
 /// streams ever arrive here — the pumps authenticate before sending.
 ///
-/// Background provider runs are detached threads, not tracked tasks:
+/// Background provider runs are retained threads, not tracked tasks:
 /// wind-down aborts connection tasks promptly while in-flight provider
-/// children are orphaned with their attempts left open (documented G5
-/// posture; post-attempt orphan recovery is G11 work). Pre-attempt
-/// strands are reported at startup for explicit resume (TASK-0054).
+/// runs are joined through the composition registry (F17) so their
+/// terminal bookkeeping lands before the endpoint is released.
+/// Pre-attempt strands are reported at startup for explicit resume
+/// (TASK-0054).
 async fn serve_streams<S>(
     mut accepted: tokio::sync::mpsc::Receiver<(S, Option<BytesMut>)>,
     config: &DaemonConfig,
@@ -539,9 +534,16 @@ where
     }
 
     // Wind down: acceptor output is ignored from here on, stragglers are
-    // aborted, tasks reaped. The owned endpoint is released by the caller.
+    // aborted, tasks reaped. Retained background provider runs (F17) are
+    // joined so in-flight runs conclude their bookkeeping instead of
+    // dying mid-write; each run is provider-timeout-bounded. The owned
+    // endpoint is released by the caller.
     joins.abort_all();
     while joins.join_next().await.is_some() {}
+    if let Some(composition) = execution.as_ref() {
+        let composition = composition.clone();
+        let _ = tokio::task::spawn_blocking(move || composition.join_background_runs()).await;
+    }
     RunOutcome::ShutdownCompleted { connections_served }
 }
 

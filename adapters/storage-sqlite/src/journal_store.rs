@@ -409,11 +409,28 @@ fn decode_plan_journal_payload(
             row.seq
         )));
     }
-    let plan_branch_id =
-        PlanBranchId::new(row.plan_branch_id.clone().unwrap()).map_err(|error| {
-            StorageError::DomainReconstruction(format!("journal plan branch reference: {error}"))
+    let plan_branch_id = row
+        .plan_branch_id
+        .clone()
+        .ok_or_else(|| {
+            StorageError::Corrupt(format!(
+                "journal seq {} stores plan event without plan branch",
+                row.seq
+            ))
+        })
+        .and_then(|branch| {
+            PlanBranchId::new(branch).map_err(|error| {
+                StorageError::DomainReconstruction(format!(
+                    "journal plan branch reference: {error}"
+                ))
+            })
         })?;
-    let raw_revision = row.plan_revision_seq.unwrap();
+    let raw_revision = row.plan_revision_seq.ok_or_else(|| {
+        StorageError::Corrupt(format!(
+            "journal seq {} stores plan event without revision sequence",
+            row.seq
+        ))
+    })?;
     let revision_seq = u64::try_from(raw_revision).map_err(|_| {
         StorageError::Corrupt(format!(
             "journal seq {} stores invalid plan revision sequence {raw_revision}",
@@ -426,7 +443,12 @@ fn decode_plan_journal_payload(
             row.seq
         )));
     }
-    let changeset_hash = row.plan_changeset_hash.clone().unwrap();
+    let changeset_hash = row.plan_changeset_hash.clone().ok_or_else(|| {
+        StorageError::Corrupt(format!(
+            "journal seq {} stores plan event without changeset hash",
+            row.seq
+        ))
+    })?;
     require_canonical_sha256(&changeset_hash).map_err(|error| {
         StorageError::Corrupt(format!(
             "journal seq {} stores invalid plan changeset hash: {error}",
@@ -435,29 +457,54 @@ fn decode_plan_journal_payload(
     })?;
     let proposed_by = RevisionProposedBy::new(
         PlannerIdentity::new(
-            PlannerAdapterId::new(row.plan_planner_adapter_id.clone().unwrap()).map_err(
-                |error| {
-                    StorageError::DomainReconstruction(format!(
-                        "journal planner adapter reference: {error}"
-                    ))
-                },
-            )?,
-            row.plan_model_ref.clone().unwrap(),
+            PlannerAdapterId::new(row.plan_planner_adapter_id.clone().ok_or_else(|| {
+                StorageError::Corrupt(format!(
+                    "journal seq {} stores plan event without planner adapter",
+                    row.seq
+                ))
+            })?)
+            .map_err(|error| {
+                StorageError::DomainReconstruction(format!(
+                    "journal planner adapter reference: {error}"
+                ))
+            })?,
+            row.plan_model_ref.clone().ok_or_else(|| {
+                StorageError::Corrupt(format!(
+                    "journal seq {} stores plan event without planner model",
+                    row.seq
+                ))
+            })?,
         )
         .map_err(|error| {
             StorageError::DomainReconstruction(format!("journal planner identity: {error}"))
         })?,
-        PlanningCostReceiptRef::new(row.plan_planning_cost_receipt_ref.clone().unwrap()).map_err(
-            |error| {
-                StorageError::DomainReconstruction(format!(
-                    "journal planning cost receipt reference: {error}"
+        PlanningCostReceiptRef::new(row.plan_planning_cost_receipt_ref.clone().ok_or_else(
+            || {
+                StorageError::Corrupt(format!(
+                    "journal seq {} stores plan event without planning cost receipt",
+                    row.seq
                 ))
             },
-        )?,
+        )?)
+        .map_err(|error| {
+            StorageError::DomainReconstruction(format!(
+                "journal planning cost receipt reference: {error}"
+            ))
+        })?,
     );
     let validated_by = ValidatedBy::new(
-        row.plan_validated_service_id.clone().unwrap(),
-        row.plan_policy_fingerprint.clone().unwrap(),
+        row.plan_validated_service_id.clone().ok_or_else(|| {
+            StorageError::Corrupt(format!(
+                "journal seq {} stores plan event without validator service",
+                row.seq
+            ))
+        })?,
+        row.plan_policy_fingerprint.clone().ok_or_else(|| {
+            StorageError::Corrupt(format!(
+                "journal seq {} stores plan event without policy fingerprint",
+                row.seq
+            ))
+        })?,
     )
     .map_err(|error| {
         StorageError::DomainReconstruction(format!("journal validation provenance: {error}"))
@@ -776,7 +823,11 @@ fn require_scope(event: &NewJournalEvent) -> StorageResult<()> {
             &event
                 .plan_revision
                 .as_ref()
-                .expect("plan scope presence checked above")
+                .ok_or_else(|| {
+                    StorageError::ConstraintViolation(
+                        "plan-scoped journal event requires typed plan revision scope".to_owned(),
+                    )
+                })?
                 .changeset_hash,
         )?;
     } else if event.project_id.is_none()

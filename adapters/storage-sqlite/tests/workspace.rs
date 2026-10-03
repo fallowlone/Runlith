@@ -817,6 +817,9 @@ fn corrupt_workspace_journal_rows_fail_on_read() {
     // Unsupported event version with otherwise valid scope (CHECK
     // bypassed to plant it; the SQL CHECK would stop this on write).
     db.raw()
+        .execute_batch("DROP TRIGGER IF EXISTS event_journal_no_update; DROP TRIGGER IF EXISTS event_journal_no_delete;")
+        .unwrap();
+    db.raw()
         .execute_batch(
             "PRAGMA ignore_check_constraints = ON;
              UPDATE event_journal SET event_version = 2

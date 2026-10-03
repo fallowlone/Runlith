@@ -426,6 +426,15 @@ impl EvaluationPort for PendingEvaluator {
             request.task_id, request.execution_id, request.attempt_id,
         )))
     }
+
+    // Fail-closed: without an automated verifier there is no freshness
+    // condition that could pass, so completion revalidation must refuse.
+    fn revalidate_before_completion(&self, request: &EvaluationRequest) -> EvaluationResult<()> {
+        Err(evaluation::EvaluationError::new(format!(
+            "no automated verifier; refusing completion for task {} (execution {}, attempt {})",
+            request.task_id, request.execution_id, request.attempt_id,
+        )))
+    }
 }
 
 /// Shared production execution composition, built once per daemon from
@@ -455,6 +464,13 @@ pub struct ExecutionComposition {
     /// (every production composition) resolves the real running `agentd`
     /// binary via `current_exe()`. Never client-supplied.
     candidate_evaluator_executable_override: Option<PathBuf>,
+    /// Retained background provider runs (F17). The serve loop never
+    /// blocks on provider time, but the handles are kept here — never
+    /// silently detached — and joined on daemon shutdown so in-flight
+    /// runs conclude their bookkeeping instead of dying mid-write.
+    /// `Arc`-shared like the tracker and cancel table so `Clone` keeps
+    /// sharing one registry.
+    background_runs: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>,
 }
 
 impl ExecutionComposition {
@@ -470,6 +486,7 @@ impl ExecutionComposition {
             candidate_git_executable: resolve_candidate_git_executable(),
             provider_executable,
             candidate_evaluator_executable_override: None,
+            background_runs: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -491,6 +508,39 @@ impl ExecutionComposition {
     #[must_use]
     pub fn db_path(&self) -> &Path {
         &self.db_path
+    }
+
+    /// Spawns one committed background run on a named thread and retains
+    /// its handle (F17). The caller never blocks on provider time; the
+    /// handle is joined on daemon shutdown so in-flight runs conclude
+    /// their bookkeeping instead of dying mid-write. Finished handles
+    /// are pruned on each spawn so the registry stays bounded.
+    pub fn spawn_background(&self, job: BackgroundJob) -> std::io::Result<()> {
+        let id = job.work_execution_id();
+        let handle = std::thread::Builder::new()
+            .name(format!("exec-background-{id}"))
+            .spawn(move || run_background(job))?;
+        if let Ok(mut runs) = self.background_runs.lock() {
+            runs.retain(|retained| !retained.is_finished());
+            runs.push(handle);
+        }
+        Ok(())
+    }
+
+    /// Joins all retained background runs (F17). Blocking: call after the
+    /// serve loop stops accepting work, never on a request path. Each
+    /// run is bounded by the provider timeout, so shutdown waits for
+    /// in-flight bookkeeping instead of orphaning provider children
+    /// with attempts left open mid-write.
+    pub fn join_background_runs(&self) {
+        let handles = self
+            .background_runs
+            .lock()
+            .map(|mut runs| std::mem::take(&mut *runs))
+            .unwrap_or_default();
+        for handle in handles {
+            let _ = handle.join();
+        }
     }
 
     fn git_cli(&self) -> Result<git_cli::GitCli, String> {
@@ -1024,14 +1074,14 @@ impl EvaluationPort for ProductionEvaluator {
         }
     }
 
-    // Without this override, `EvaluationPort`'s default no-op
-    // `revalidate_before_completion` silently wins for every
-    // `ProductionEvaluator` variant, including `Candidate`: the durable
-    // Completion freshness checkpoint and the `RESULT_ADMITTED` ->
-    // `COMPLETE` operation-status transition would never run.
-    // Neither variant currently reaches this from `finish()`; the delegation
-    // exists so a future claim-verification caller gets the Completion
-    // freshness gate for Candidate, and Pending uses the port's default no-op.
+    // Without this override, `EvaluationPort`'s fail-closed default would
+    // refuse completion for every `ProductionEvaluator` variant, including
+    // `Candidate`: the durable Completion freshness checkpoint and the
+    // `RESULT_ADMITTED` -> `COMPLETE` operation-status transition would never
+    // run. Neither variant currently reaches this from `finish()`; the
+    // delegation exists so a future claim-verification caller gets the
+    // Completion freshness gate for Candidate, and Pending stays fail-closed
+    // by delegating to its refusing override above.
     fn revalidate_before_completion(&self, request: &EvaluationRequest) -> EvaluationResult<()> {
         match self {
             Self::Candidate(evaluator) => evaluator.revalidate_before_completion(request),
@@ -2640,7 +2690,10 @@ fn run_candidate_process(
                 let _ = child.wait();
                 return Err(CheckError::Content("candidate process timed out".to_owned()));
             }
-            std::thread::sleep(Duration::from_millis(10));
+            // F18: sleep only until the deadline instead of a fixed 10ms,
+            // so the timeout cannot overshoot by a full quantum under load.
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            std::thread::sleep(remaining.min(Duration::from_millis(10)));
         };
         stdin_writer
             .join()

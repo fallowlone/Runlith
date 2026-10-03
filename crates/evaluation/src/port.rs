@@ -17,8 +17,12 @@ pub trait EvaluationPort {
 
     /// Revalidates any evaluator-specific freshness conditions immediately
     /// before the orchestration service applies a `Verified` verdict.
-    /// Evaluators without a deferred completion condition need no extra step.
+    /// Fail-closed default: evaluators without a deferred completion
+    /// condition must override with an explicit `Ok(())`. A missing
+    /// override refuses completion instead of silently passing it.
     fn revalidate_before_completion(&self, _request: &EvaluationRequest) -> EvaluationResult<()> {
-        Ok(())
+        Err(crate::EvaluationError::new(
+            "revalidation not implemented for this evaluator; refusing completion",
+        ))
     }
 }

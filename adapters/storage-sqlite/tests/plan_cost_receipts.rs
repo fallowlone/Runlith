@@ -71,7 +71,11 @@ fn schema_12_database_upgrades_to_current_without_plan_cost_data() {
         let connection = rusqlite::Connection::open(&db.path).expect("raw sqlite");
         connection
             .execute_batch(
-                "DROP TABLE task_prerequisites;
+                "DROP TRIGGER IF EXISTS event_journal_no_update;
+                 DROP TRIGGER IF EXISTS event_journal_no_delete;
+                 DROP TRIGGER IF EXISTS event_plan_causes_no_update;
+                 DROP TRIGGER IF EXISTS event_plan_causes_no_delete;
+                 DROP TABLE task_prerequisites;
                  DROP TABLE evaluated_policy_bases;
                  DROP TABLE test_mutation_policy_revisions;
                  DROP TABLE task_evidence_requirement_params;
@@ -102,7 +106,7 @@ fn schema_12_database_upgrades_to_current_without_plan_cost_data() {
     }
 
     let mut store = SqliteStore::open(&db.path).expect("migrate v12 to current");
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 22);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 23);
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
     let receipt_ref = PlanningCostReceiptRef::new("planning-receipt:after-upgrade").unwrap();
     let evidence = receipt(1);

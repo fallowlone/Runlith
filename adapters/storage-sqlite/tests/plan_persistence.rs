@@ -349,7 +349,7 @@ fn journal_evidence(seq: u64) -> PlanCommitJournalEvidence {
 fn fresh_database_reaches_schema_16() {
     let db = TestDb::new("schema");
     let store = db.open();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 22);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 23);
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
 }
 
@@ -670,6 +670,9 @@ fn journal_revision_hash_mismatch_fails_closed_on_reconstruction() {
     }
 
     db.raw()
+        .execute_batch("DROP TRIGGER IF EXISTS event_journal_no_update; DROP TRIGGER IF EXISTS event_journal_no_delete;")
+        .unwrap();
+    db.raw()
         .execute(
             "UPDATE event_journal SET plan_changeset_hash = ?1
              WHERE event_type = 'plan.revision_committed'",
@@ -731,6 +734,9 @@ fn journal_revision_provenance_mismatches_fail_closed_on_reconstruction() {
         }
 
         db.raw()
+            .execute_batch("DROP TRIGGER IF EXISTS event_journal_no_update; DROP TRIGGER IF EXISTS event_journal_no_delete;")
+            .unwrap();
+        db.raw()
             .execute(
                 &format!(
                     "UPDATE event_journal SET {column} = ?1
@@ -769,6 +775,9 @@ fn journal_revision_causes_mismatch_fails_closed_on_reconstruction() {
     }
 
     db.raw()
+        .execute_batch("DROP TRIGGER IF EXISTS event_plan_causes_no_update; DROP TRIGGER IF EXISTS event_plan_causes_no_delete;")
+        .unwrap();
+    db.raw()
         .execute(
             "UPDATE event_plan_causes SET evidence_ref = 'attempt-other' WHERE position = 0",
             [],
@@ -780,6 +789,38 @@ fn journal_revision_causes_mismatch_fails_closed_on_reconstruction() {
         store.list_events_ordered(),
         Err(StorageError::Corrupt(_))
     ));
+}
+
+#[test]
+fn plan_causes_table_rejects_update_and_delete_as_append_only() {
+    let db = TestDb::new("causes-append-only");
+    let branch = PlanBranchId::new("branch-main").unwrap();
+    let changeset = changeset(0, "first revision", &[evidence("attempt-1")]);
+    let revision = revision(&branch, 1, &changeset);
+    {
+        let mut store = db.open();
+        seed_child_parent(&mut store);
+        commit_revision(
+            &mut store,
+            &changeset,
+            &revision,
+            &graph_v1(),
+            &lineage(),
+            &journal_evidence(1),
+        )
+        .unwrap();
+    }
+
+    let raw = db.raw();
+    assert!(raw
+        .execute(
+            "UPDATE event_plan_causes SET evidence_ref = 'forged' WHERE position = 0",
+            []
+        )
+        .is_err());
+    assert!(raw
+        .execute("DELETE FROM event_plan_causes WHERE position = 0", [])
+        .is_err());
 }
 
 #[test]
@@ -802,6 +843,9 @@ fn journal_revision_noncanonical_hash_fails_closed_on_reconstruction() {
         .unwrap();
     }
 
+    db.raw()
+        .execute_batch("DROP TRIGGER IF EXISTS event_journal_no_update; DROP TRIGGER IF EXISTS event_journal_no_delete;")
+        .unwrap();
     db.raw()
         .execute(
             "UPDATE event_journal SET plan_changeset_hash = 'sha256:ABCDEF'
@@ -1772,7 +1816,11 @@ fn schema_13_revision_history_without_lineage_fails_closed_after_upgrade() {
     }
     db.raw()
         .execute_batch(
-            "DROP TABLE task_prerequisites;
+            "DROP TRIGGER IF EXISTS event_journal_no_update;
+             DROP TRIGGER IF EXISTS event_journal_no_delete;
+             DROP TRIGGER IF EXISTS event_plan_causes_no_update;
+             DROP TRIGGER IF EXISTS event_plan_causes_no_delete;
+             DROP TABLE task_prerequisites;
              DROP TABLE evaluated_policy_bases;
              DROP TABLE test_mutation_policy_revisions;
              DROP TABLE task_evidence_requirement_params;
@@ -2566,6 +2614,9 @@ fn malformed_persisted_child_retry_evidence_fails_closed_without_partial_state()
             .unwrap()
             .len();
 
+        db.raw()
+            .execute_batch("DROP TRIGGER IF EXISTS event_journal_no_update; DROP TRIGGER IF EXISTS event_journal_no_delete; DROP TRIGGER IF EXISTS event_plan_causes_no_update; DROP TRIGGER IF EXISTS event_plan_causes_no_delete;")
+            .unwrap();
         mutate(&db.raw());
         // The mutation deliberately corrupts the persisted evidence. Capture
         // that prepared state now; the retry itself must not add anything on

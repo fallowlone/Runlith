@@ -117,7 +117,7 @@ fn fresh_database_reaches_current_schema() {
     let db = TestDb::new("fresh-current");
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 22);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 23);
     assert!(store.list_events_ordered().unwrap().is_empty());
 }
 
@@ -808,6 +808,38 @@ fn malformed_event_identity_is_not_found() {
 // -- authority + schema review -----------------------------------------------------
 
 #[test]
+fn journal_tables_reject_update_and_delete_as_append_only() {
+    let db = TestDb::new("append-only");
+    let mut store = db.open();
+    let mut task = ready_task_via_store(&mut store);
+    task.claim().unwrap();
+    store
+        .apply_lifecycle_transition(
+            task.id(),
+            TaskState::Ready,
+            &task,
+            &new_event(
+                &task,
+                TaskState::Ready,
+                TaskState::Claimed,
+                EventType::Claimed,
+            ),
+        )
+        .unwrap();
+    drop(store);
+    let raw = db.raw();
+    assert!(raw
+        .execute(
+            "UPDATE event_journal SET reason = 'forged' WHERE seq = 1",
+            []
+        )
+        .is_err());
+    assert!(raw
+        .execute("DELETE FROM event_journal WHERE seq = 1", [])
+        .is_err());
+}
+
+#[test]
 fn current_state_survives_journal_loss() {
     let db = TestDb::new("authority");
     let mut store = db.open();
@@ -829,7 +861,7 @@ fn current_state_survives_journal_loss() {
     // Destroy the history behind the adapter's back: current-state reads
     // must not care, because they never replay the journal.
     db.raw()
-        .execute_batch("DELETE FROM event_journal;")
+        .execute_batch("DROP TRIGGER IF EXISTS event_journal_no_delete; DROP TRIGGER IF EXISTS event_journal_no_update; DELETE FROM event_journal;")
         .unwrap();
     drop(store);
     let store = db.open();

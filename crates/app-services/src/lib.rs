@@ -15,6 +15,7 @@ mod error;
 mod human_decision_service;
 mod managed_identity;
 mod observed_effect_service;
+mod op_id;
 mod orchestration_service;
 mod plan_graph;
 mod planned_orchestration;
