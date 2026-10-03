@@ -14,7 +14,7 @@ use std::path::Path;
 use agent_runtime::ExecutionId;
 use plan_domain::{PlanDomainError, TaskPlanningAuthority};
 use storage_sqlite::{EventType, JournalEvent, NewJournalEvent, SqliteStore, StorageError};
-use task_domain::{DomainError, Project, ProjectId, Task, TaskId, TransitionCommand};
+use task_domain::{DomainError, Project, ProjectId, Task, TaskId, TaskState, TransitionCommand};
 use workspace::{LeaseLifecycle, WorkspaceStore};
 
 use crate::clock::{format_rfc3339, Clock, SystemClock};
@@ -371,6 +371,42 @@ impl<C: Clock> TaskService<C> {
         )
     }
 
+    /// F1 startup sweep for tasks stranded by a crash between lifecycle
+    /// steps. Only `SUBMITTED → AWAITING_REVIEW` is routed: it is pure
+    /// bookkeeping through the validated transition and decides nothing.
+    /// `AWAITING_REVIEW`, `VERIFYING` and `RETRY_READY` are reported for
+    /// the operator: leaving them needs a trusted verdict or a new
+    /// execution, which a sweep must never invent. Idempotent; run once
+    /// at startup, when the single-instance daemon has no live runs.
+    pub fn reconcile_stranded(&mut self) -> ServiceResult<ReconcileReport> {
+        let mut report = ReconcileReport::default();
+        for project in self.store.list_projects()? {
+            for task in self.store.list_tasks_for_project(project.id())? {
+                match task.state() {
+                    TaskState::Submitted => {
+                        let mut planned = self.plan_on(&task, TransitionCommand::RouteToReview)?;
+                        planned.event.provenance =
+                            format!("{PROVENANCE_SERVICE}/reconcile/route_to_review");
+                        self.store.apply_lifecycle_transition(
+                            task.id(),
+                            TaskState::Submitted,
+                            &planned.task,
+                            &planned.event,
+                        )?;
+                        report.routed.push(task.id().clone());
+                    }
+                    state @ (TaskState::AwaitingReview
+                    | TaskState::Verifying
+                    | TaskState::RetryReady) => {
+                        report.needs_operator.push((task.id().clone(), state));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(report)
+    }
+
     /// Single choke point: load → validate via the canonical domain op →
     /// atomic guarded state write + journal append. Domain rejection fails
     /// before any SQL runs; storage failure rolls the whole transaction
@@ -487,6 +523,15 @@ fn missing_task(task_id: &TaskId) -> ServiceError {
     ServiceError::Storage(StorageError::NotFound(format!(
         "task {task_id} does not exist"
     )))
+}
+
+/// Outcome of [`TaskService::reconcile_stranded`].
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ReconcileReport {
+    /// `SUBMITTED` tasks the sweep routed to `AWAITING_REVIEW`.
+    pub routed: Vec<TaskId>,
+    /// Tasks left in a state only an operator or evaluator can advance.
+    pub needs_operator: Vec<(TaskId, TaskState)>,
 }
 
 /// Maps a validated command to its canonical journal type plus the bounded

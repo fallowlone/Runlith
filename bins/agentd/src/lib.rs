@@ -259,9 +259,18 @@ fn open_business_service(config: &DaemonConfig) -> Result<Option<BusinessHandle>
     })?;
     data_dir::ensure_data_dir(parent)?;
     let store = storage_sqlite::SqliteStore::open(path)?;
-    Ok(Some(Arc::new(tokio::sync::Mutex::new(
-        TaskService::attach(store, app_services::SystemClock),
-    ))))
+    let mut service = TaskService::attach(store, app_services::SystemClock);
+    // F1: recover tasks stranded mid-chain by a prior crash before serving.
+    let report = service
+        .reconcile_stranded()
+        .map_err(|error| DaemonError::DataDir(format!("stranded-task sweep failed: {error}")))?;
+    for id in &report.routed {
+        eprintln!("agentd: routed stranded task {id} SUBMITTED -> AWAITING_REVIEW");
+    }
+    for (id, state) in &report.needs_operator {
+        eprintln!("agentd: task {id} is stranded in {state}; operator action required");
+    }
+    Ok(Some(Arc::new(tokio::sync::Mutex::new(service))))
 }
 
 /// Opens the execution composition for a database-backed daemon: shares

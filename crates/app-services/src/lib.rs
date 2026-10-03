@@ -54,7 +54,7 @@ pub use runtime_service::{AppliedExecution, PlannedExecution, RuntimeService};
 pub use security_service::{
     G6Authorization, G6SecurityError, G6SecurityService, PrivilegedOperation, ProcessSecuritySpec,
 };
-pub use task_service::{AppliedTransition, PlannedTransition, TaskService};
+pub use task_service::{AppliedTransition, PlannedTransition, ReconcileReport, TaskService};
 pub use workspace_service::{
     CleanedWorkspace, CleanupOutcome, EnsureOutcome, EnsuredWorkspace, ManagedWorkspaceRoot,
     WorkspaceRequest, WorkspaceService,
