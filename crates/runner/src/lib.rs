@@ -56,6 +56,9 @@ pub const CHILD_ENV_ALLOWLIST: &[&str] = &[
     "XDG_STATE_HOME",
     "XDG_CACHE_HOME",
     "CLAUDE_CODE_TMPDIR",
+    // Private provider config directory (ADR-0039): a plain path variable
+    // under the per-execution runtime root, never a credential.
+    "CLAUDE_CONFIG_DIR",
     "TMP",
     "TEMP",
     // Windows process basics.

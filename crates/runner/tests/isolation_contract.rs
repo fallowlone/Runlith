@@ -838,3 +838,22 @@ fn secret_reaches_child_only_through_late_bound_spawn() {
         .all(|(name, _)| name != SECRET_NAME));
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// ADR-0039 P3: the provider's private config directory is a plain path
+/// variable the plan may carry; unlisted names are still refused.
+#[test]
+fn child_environment_allowlist_admits_the_claude_config_dir_only_as_a_path_variable() {
+    let accepted = ChildEnvironment::from_explicit([(
+        OsString::from("CLAUDE_CONFIG_DIR"),
+        OsString::from("/private/runtime/claude"),
+    )])
+    .expect("CLAUDE_CONFIG_DIR is allowlisted");
+    assert_eq!(accepted.vars().len(), 1);
+    assert!(matches!(
+        ChildEnvironment::from_explicit([(
+            OsString::from("CLAUDE_CODE_OAUTH_TOKEN"),
+            OsString::from("not-a-plan-variable"),
+        )]),
+        Err(RunnerError::EnvironmentNameNotAllowed { .. })
+    ));
+}

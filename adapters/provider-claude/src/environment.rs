@@ -24,7 +24,12 @@ pub struct ProviderEnvironment {
     xdg_state_home: PathBuf,
     xdg_cache_home: PathBuf,
     scratch_dir: PathBuf,
+    /// Private `HOME` handed to a governed (runner-path) child.
+    private_home: PathBuf,
+    /// Private `CLAUDE_CONFIG_DIR` handed to a governed child.
+    claude_config_dir: PathBuf,
     path: OsString,
+    /// Host `HOME`; used only by the feature-gated trusted-host supervisor.
     home: Option<OsString>,
     user: Option<OsString>,
     #[cfg(windows)]
@@ -78,6 +83,8 @@ impl ProviderEnvironment {
         let xdg_state_home = private_child(&runtime_root, "state")?;
         let xdg_cache_home = private_child(&runtime_root, "cache")?;
         let scratch_dir = private_child(&runtime_root, "scratch")?;
+        let private_home = private_child(&runtime_root, "home")?;
+        let claude_config_dir = private_child(&runtime_root, "claude")?;
 
         if workdir.exists() {
             let canonical_workdir = fs::canonicalize(workdir)
@@ -119,6 +126,8 @@ impl ProviderEnvironment {
             xdg_state_home,
             xdg_cache_home,
             scratch_dir,
+            private_home,
+            claude_config_dir,
             path,
             home,
             user,
@@ -137,7 +146,7 @@ impl ProviderEnvironment {
     #[cfg(any(test, feature = "trusted-host"))]
     pub(crate) fn apply(&self, command: &mut Command) {
         command.env_clear();
-        for (name, value) in self.resolved_pairs() {
+        for (name, value) in self.resolved_pairs(true) {
             command.env(name, value);
         }
     }
@@ -150,15 +159,31 @@ impl ProviderEnvironment {
     /// governed child sees is visible to the isolation plan and can be
     /// asserted against it.
     #[must_use]
+    ///
+    /// A governed child never sees the host `HOME`: it gets the private
+    /// `HOME` and `CLAUDE_CONFIG_DIR` under the runtime root (ADR-0039).
     pub fn child_environment(&self) -> Vec<(OsString, OsString)> {
-        self.resolved_pairs()
+        self.resolved_pairs(false)
     }
 
-    fn resolved_pairs(&self) -> Vec<(OsString, OsString)> {
+    /// `use_host_home` is true only for the feature-gated trusted-host
+    /// supervisor, which has no sandbox and keeps provider-owned host login.
+    fn resolved_pairs(&self, use_host_home: bool) -> Vec<(OsString, OsString)> {
         let mut pairs: Vec<(OsString, OsString)> = Vec::new();
         pairs.push((OsString::from("PATH"), self.path.clone()));
-        if let Some(home) = &self.home {
-            pairs.push((OsString::from("HOME"), home.clone()));
+        if use_host_home {
+            if let Some(home) = &self.home {
+                pairs.push((OsString::from("HOME"), home.clone()));
+            }
+        } else {
+            pairs.push((
+                OsString::from("HOME"),
+                self.private_home.as_os_str().to_owned(),
+            ));
+            pairs.push((
+                OsString::from("CLAUDE_CONFIG_DIR"),
+                self.claude_config_dir.as_os_str().to_owned(),
+            ));
         }
         if let Some(user) = &self.user {
             pairs.push((OsString::from("USER"), user.clone()));
@@ -190,8 +215,15 @@ impl ProviderEnvironment {
 
         #[cfg(windows)]
         {
-            if let Some(profile) = &self.user_profile {
-                pairs.push((OsString::from("USERPROFILE"), profile.clone()));
+            if use_host_home {
+                if let Some(profile) = &self.user_profile {
+                    pairs.push((OsString::from("USERPROFILE"), profile.clone()));
+                }
+            } else {
+                pairs.push((
+                    OsString::from("USERPROFILE"),
+                    self.private_home.as_os_str().to_owned(),
+                ));
             }
             if let Some(root) = &self.system_root {
                 pairs.push((OsString::from("SystemRoot"), root.clone()));
@@ -229,23 +261,15 @@ impl ProviderEnvironment {
     }
 
     /// Provider-owned paths the OS sandbox may read in addition to the task
-    /// workspace. The real HOME contribution is limited to Claude's explicit
-    /// authentication anchor rather than the whole user profile.
+    /// workspace: only the isolated runtime root. Host authentication anchors
+    /// (`~/.claude`, `~/.claude.json`) are deliberately not granted
+    /// (ADR-0039); the credential arrives through the Secrets Broker.
     pub fn isolation_support_read_roots(&self) -> Result<Vec<PathBuf>, String> {
-        let mut roots = vec![self.runtime_root.clone()];
-        if let Some(home) = &self.home {
-            let home = PathBuf::from(home);
-            for candidate in [home.join(".claude"), home.join(".claude.json")] {
-                if let Some(candidate) = existing_optional_support_root(candidate)? {
-                    roots.push(candidate);
-                }
-            }
-        }
-        Ok(roots)
+        Ok(vec![self.runtime_root.clone()])
     }
 
     /// Provider-writable sandbox support is limited to the isolated runtime
-    /// root. Authentication anchors remain read-only at the OS boundary.
+    /// root, which contains the private `HOME` and `CLAUDE_CONFIG_DIR`.
     #[must_use]
     pub fn isolation_support_write_roots(&self) -> Vec<PathBuf> {
         vec![self.runtime_root.clone()]
@@ -254,14 +278,6 @@ impl ProviderEnvironment {
 
 fn non_empty_env(name: &str) -> Option<OsString> {
     std::env::var_os(name).filter(|value| !value.is_empty())
-}
-
-fn existing_optional_support_root(path: PathBuf) -> Result<Option<PathBuf>, String> {
-    match fs::symlink_metadata(&path) {
-        Ok(_) => Ok(Some(path)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err("provider authentication support path cannot be inspected".to_owned()),
-    }
 }
 
 fn private_child(parent: &Path, name: &str) -> Result<PathBuf, String> {
@@ -408,9 +424,122 @@ mod tests {
                 .map(|(_, value)| value.clone())
         };
         assert_eq!(value("USER"), Some(OsString::from("runlith-fixture")));
-        assert_eq!(value("HOME"), Some(OsString::from("/nonexistent")));
+        // The runner path never carries the host HOME (ADR-0039 P3).
+        assert_eq!(
+            value("HOME"),
+            Some(environment.runtime_root().join("home").into_os_string())
+        );
         assert_eq!(value("PATH"), Some(OsString::from("/usr/bin:/bin")));
         assert_eq!(value("RUNLITH_UNALLOWLISTED_FIXTURE"), None);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn fake_host_with_auth_anchors(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "runlith-provider-env-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let workdir = root.join("work");
+        let host_home = root.join("host-home");
+        fs::create_dir_all(&workdir).unwrap();
+        fs::create_dir_all(host_home.join(".claude")).unwrap();
+        fs::write(host_home.join(".claude.json"), b"{}").unwrap();
+        (root, workdir, host_home)
+    }
+
+    fn lookup_for(host_home: &Path) -> impl Fn(&str) -> Option<OsString> {
+        let host_home = host_home.as_os_str().to_owned();
+        move |name: &str| match name {
+            "PATH" => Some(OsString::from("/usr/bin:/bin")),
+            "HOME" => Some(host_home.clone()),
+            "USER" => Some(OsString::from("runlith-fixture")),
+            _ => None,
+        }
+    }
+
+    /// ADR-0039 P3: the runner path gets a private HOME and CLAUDE_CONFIG_DIR
+    /// under the runtime root; nothing points into the host profile.
+    #[cfg(unix)]
+    #[test]
+    fn runner_environment_uses_private_home_and_config_dir() {
+        let (root, workdir, host_home) = fake_host_with_auth_anchors("private-home");
+        let environment = ProviderEnvironment::prepare_from(
+            &workdir,
+            &root.join("provider"),
+            &lookup_for(&host_home),
+        )
+        .expect("provider environment");
+        let pairs = environment.child_environment();
+        let value = |key: &str| {
+            pairs
+                .iter()
+                .find(|(name, _)| name == OsStr::new(key))
+                .map(|(_, value)| PathBuf::from(value))
+        };
+        let private_home = environment.runtime_root().join("home");
+        let config_dir = environment.runtime_root().join("claude");
+        assert_eq!(value("HOME"), Some(private_home.clone()));
+        assert_eq!(value("CLAUDE_CONFIG_DIR"), Some(config_dir.clone()));
+        for (name, path) in &pairs {
+            assert!(
+                !PathBuf::from(path).starts_with(&host_home),
+                "{name:?} points into the host profile"
+            );
+        }
+        for dir in [private_home, config_dir] {
+            let mode = fs::metadata(&dir)
+                .expect("private dir exists")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o7777, 0o700, "{} must be 0700", dir.display());
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// ADR-0039 P3: host authentication anchors are not sandbox support roots.
+    #[cfg(unix)]
+    #[test]
+    fn support_roots_exclude_host_authentication_anchors() {
+        let (root, workdir, host_home) = fake_host_with_auth_anchors("support-roots");
+        let environment = ProviderEnvironment::prepare_from(
+            &workdir,
+            &root.join("provider"),
+            &lookup_for(&host_home),
+        )
+        .expect("provider environment");
+        assert_eq!(
+            environment.isolation_support_read_roots().unwrap(),
+            vec![environment.runtime_root().to_path_buf()]
+        );
+        assert_eq!(
+            environment.isolation_support_write_roots(),
+            vec![environment.runtime_root().to_path_buf()]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The feature-gated trusted-host supervisor keeps the host HOME.
+    #[cfg(unix)]
+    #[test]
+    fn trusted_host_apply_keeps_the_host_home() {
+        let (root, workdir, host_home) = fake_host_with_auth_anchors("trusted-host");
+        let environment = ProviderEnvironment::prepare_from(
+            &workdir,
+            &root.join("provider"),
+            &lookup_for(&host_home),
+        )
+        .expect("provider environment");
+        let mut command = Command::new("/usr/bin/true");
+        environment.apply(&mut command);
+        let env = |key: &str| {
+            command
+                .get_envs()
+                .find(|(name, _)| *name == OsStr::new(key))
+                .and_then(|(_, value)| value.map(OsString::from))
+        };
+        assert_eq!(env("HOME"), Some(host_home.into_os_string()));
+        assert_eq!(env("CLAUDE_CONFIG_DIR"), None);
         let _ = fs::remove_dir_all(root);
     }
 
