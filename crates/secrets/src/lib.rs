@@ -143,6 +143,12 @@ impl std::error::Error for SecretMetadataError {}
 pub enum SecretBackendError {
     NotFound,
     Unavailable,
+    /// The store exists but refused access (for example it is locked).
+    Locked,
+    /// The platform store failed at runtime (I/O or transient fault).
+    Failure,
+    /// Stored data or store format is malformed or ambiguous.
+    Corrupt,
     Rejected,
 }
 
@@ -151,6 +157,9 @@ impl fmt::Display for SecretBackendError {
         let message = match self {
             Self::NotFound => "secret unavailable",
             Self::Unavailable => "credential backend unavailable",
+            Self::Locked => "credential backend locked or access denied",
+            Self::Failure => "credential backend failed",
+            Self::Corrupt => "credential backend data invalid",
             Self::Rejected => "credential backend rejected the operation",
         };
         f.write_str(message)

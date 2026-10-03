@@ -103,17 +103,21 @@ impl SecretBackend for NativeKeychain {
 }
 
 fn map_keyring_error(error: KeyringError) -> SecretBackendError {
-    match error {
-        KeyringError::NoEntry => SecretBackendError::NotFound,
-        KeyringError::NoDefaultStore => SecretBackendError::Unavailable,
-        _ => SecretBackendError::Rejected,
-    }
+    map_keyring_error_ref(&error)
 }
 
+/// Payload-free mapping: platform error text never reaches the result.
+/// `KeyringError` is non-exhaustive, so unknown kinds fail closed.
 fn map_keyring_error_ref(error: &KeyringError) -> SecretBackendError {
     match error {
         KeyringError::NoEntry => SecretBackendError::NotFound,
         KeyringError::NoDefaultStore => SecretBackendError::Unavailable,
+        KeyringError::NoStorageAccess(_) => SecretBackendError::Locked,
+        KeyringError::PlatformFailure(_) => SecretBackendError::Failure,
+        KeyringError::BadEncoding(_)
+        | KeyringError::BadDataFormat(..)
+        | KeyringError::BadStoreFormat(_)
+        | KeyringError::Ambiguous(_) => SecretBackendError::Corrupt,
         _ => SecretBackendError::Rejected,
     }
 }
@@ -205,5 +209,54 @@ mod tests {
             map_keyring_error(KeyringError::NoDefaultStore),
             SecretBackendError::Unavailable
         );
+    }
+
+    fn platform_fault() -> Box<dyn std::error::Error + Send + Sync> {
+        Box::new(std::io::Error::other("platform detail must not surface"))
+    }
+
+    /// F13: locked, platform-fault and corrupt-store failures stay distinct.
+    #[test]
+    fn keyring_error_mapping_distinguishes_locked_failure_and_corrupt() {
+        assert_eq!(
+            map_keyring_error(KeyringError::NoStorageAccess(platform_fault())),
+            SecretBackendError::Locked
+        );
+        assert_eq!(
+            map_keyring_error(KeyringError::PlatformFailure(platform_fault())),
+            SecretBackendError::Failure
+        );
+        for corrupt in [
+            KeyringError::BadEncoding(vec![0xff]),
+            KeyringError::BadDataFormat(vec![0xff], platform_fault()),
+            KeyringError::BadStoreFormat("x".to_owned()),
+            KeyringError::Ambiguous(Vec::new()),
+        ] {
+            assert_eq!(map_keyring_error(corrupt), SecretBackendError::Corrupt);
+        }
+        for rejected in [
+            KeyringError::TooLong("a".to_owned(), 1),
+            KeyringError::Invalid("a".to_owned(), "b".to_owned()),
+            KeyringError::NotSupportedByStore("x".to_owned()),
+        ] {
+            assert_eq!(map_keyring_error(rejected), SecretBackendError::Rejected);
+        }
+    }
+
+    #[test]
+    fn backend_error_messages_are_distinct_and_redacted() {
+        let all = [
+            SecretBackendError::NotFound,
+            SecretBackendError::Unavailable,
+            SecretBackendError::Locked,
+            SecretBackendError::Failure,
+            SecretBackendError::Corrupt,
+            SecretBackendError::Rejected,
+        ];
+        let messages: Vec<String> = all.iter().map(ToString::to_string).collect();
+        for (index, message) in messages.iter().enumerate() {
+            assert!(!message.contains("platform detail"));
+            assert!(!messages[..index].contains(message), "duplicate: {message}");
+        }
     }
 }
