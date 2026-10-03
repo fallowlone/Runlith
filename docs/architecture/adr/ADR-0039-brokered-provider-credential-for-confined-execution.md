@@ -92,12 +92,23 @@ the config directory and keys any stored credential to that directory.
    `/usr/bin/security` stay withheld. The Seatbelt profile is not widened.
 7. **Verdict.** `AUTH_CONFINEMENT_VERDICT` for macOS changes from `Unsupported`
    to `Compatible` only together with a measurement receipt for the Claude Code
-   version in use (see Evidence). The launch preflight checks that a brokered
-   credential exists and is not past its recorded age limit instead of probing
-   the host login. A missing, expired or unknown credential refuses closed with
-   a named operator action. The runtime records the credential's creation time
-   and warns before the one-year lifetime ends, because the token exposes no
-   expiry.
+   version in use (see Evidence). In brokered mode the host-login probe
+   (`claude auth status`, providers.md §9a) is not run: it observes the
+   operator's host login, not the brokered credential, and it spawns the CLI
+   unconfined with the daemon's inherited environment. The launch preflight
+   instead checks that a brokered credential exists, the vault is unlocked and
+   the credential is not past its recorded age limit. A missing, locked,
+   expired or unknown credential refuses closed with a named operator action.
+   There is **no fallback** from the brokered credential to the host login: if
+   the brokered credential is unusable the launch refuses, even when the host
+   is logged in. A provider rejection of the credential at run time maps to a
+   typed "credential rejected by provider" cause, is not retried
+   automatically, and marks the credential rejected until the operator
+   replaces it. The runtime records the credential's creation time and warns
+   one month before the one-year lifetime ends, because the token exposes no
+   expiry. The host-login probe stays only for the feature-gated
+   `trusted-host` binding. providers.md §9a is amended accordingly with the
+   implementing task.
 8. **Behavior model (direction, not implemented by this ADR).** Runs use the
    lowest tier by default and escalate through the existing G6 approval gate:
    Plan (no tools; `--tools ""`, `--disallowedTools "mcp__*"`), Edit (file edits,
@@ -207,12 +218,15 @@ the Claude Code version changes before the verdict is relied on.
 5. Re-run the P0 measurement for the Claude Code version in use before the
    verdict flips; live smoke through the production path passes.
 
-## Open questions for ratification
+## Owner answers to the open questions (2026-10-03)
 
-- Approve the new dependencies for Argon2id and the AEAD?
-- Unlock model (explicit unlock plus idle timeout) acceptable, including that
-  unattended runs need an unlocked vault?
-- Is the Phase 1 residual (credential readable by an injected agent) accepted
-  until Phase 2?
-- Is the host-login preflight (`claude auth status`) dropped for brokered mode
-  or kept as an additional check?
+- New dependencies for Argon2id and the AEAD: approved (`zeroize` was added
+  for the late-bound slot, ADR-0039 P2).
+- Unlock model (explicit unlock plus idle timeout, unattended runs need an
+  unlocked vault): accepted.
+- Phase 1 residual (credential readable by an injected agent until Phase 2):
+  accepted.
+- Host-login preflight: dropped for brokered mode, no fallback, kept only for
+  `trusted-host` (decision 7).
+
+Status remains Proposed until the owner formally ratifies the ADR.
