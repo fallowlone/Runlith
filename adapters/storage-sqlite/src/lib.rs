@@ -65,3 +65,30 @@ pub use security_audit::{
 };
 pub use task_store::SqliteStore;
 pub use test_mutation_store::EvaluatedPolicyBase;
+
+/// Fixture support for tamper tests. Re-chains the journal after a test has
+/// planted rows with raw SQL, so decode-level corruption stays reachable
+/// past the chain check. Not a production API: the chain is unkeyed, so
+/// anyone with raw DB access can do this too (see journal_store.rs).
+#[doc(hidden)]
+pub mod test_support {
+    use std::path::Path;
+
+    use crate::{StorageError, StorageResult};
+
+    pub fn reseal_journal_chain(path: &Path) -> StorageResult<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+        let connection = rusqlite::Connection::open(path)?;
+        let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version < 24 {
+            return Ok(());
+        }
+        connection.execute_batch("DROP TRIGGER IF EXISTS event_journal_no_update")?;
+        crate::journal_store::backfill_journal_chain(&connection)?;
+        connection
+            .execute_batch(crate::migration::MIGRATION_0024_GUARD)
+            .map_err(|error| StorageError::Migration(error.to_string()))
+    }
+}

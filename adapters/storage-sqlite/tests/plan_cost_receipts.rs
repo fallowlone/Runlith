@@ -72,6 +72,8 @@ fn schema_12_database_upgrades_to_current_without_plan_cost_data() {
         connection
             .execute_batch(
                 "DROP TRIGGER IF EXISTS event_journal_no_update;
+                 ALTER TABLE event_journal DROP COLUMN previous_hash;
+                 ALTER TABLE event_journal DROP COLUMN record_hash;
                  DROP TRIGGER IF EXISTS event_journal_no_delete;
                  DROP TRIGGER IF EXISTS event_plan_causes_no_update;
                  DROP TRIGGER IF EXISTS event_plan_causes_no_delete;
@@ -106,7 +108,7 @@ fn schema_12_database_upgrades_to_current_without_plan_cost_data() {
     }
 
     let mut store = SqliteStore::open(&db.path).expect("migrate v12 to current");
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 23);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 24);
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
     let receipt_ref = PlanningCostReceiptRef::new("planning-receipt:after-upgrade").unwrap();
     let evidence = receipt(1);

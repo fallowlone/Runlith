@@ -42,6 +42,7 @@ impl TestDb {
     }
 
     fn open(&self) -> SqliteStore {
+        storage_sqlite::test_support::reseal_journal_chain(&self.path).expect("reseal fixture");
         SqliteStore::open(&self.path).expect("open test db")
     }
 

@@ -10,9 +10,11 @@ use plan_domain::{
     RevisionProposedBy, ValidatedBy,
 };
 use rusqlite::{params, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
 use task_domain::{ProjectId, TaskId, TaskState};
 use workspace::{LeaseLifecycle, WorkspaceId};
 
+use crate::audit_store::{hash_field, GENESIS_HASH};
 use crate::error::{StorageError, StorageResult};
 use crate::event::{
     decode_state, AttemptOutcome, EventId, EventType, JournalEvent, NewJournalEvent,
@@ -64,6 +66,9 @@ fn list_events(
     sql: &str,
     params: impl rusqlite::Params,
 ) -> StorageResult<Vec<JournalEvent>> {
+    // Full-journal scan even for task/project-filtered reads: a filtered
+    // subset cannot prove the chain, and a break anywhere is evidence loss.
+    verify_journal_chain(connection)?;
     let mut statement = connection.prepare(sql)?;
     let rows = statement.query_map(params, JournalRow::read)?;
     let mut events = Vec::new();
@@ -973,66 +978,87 @@ pub(crate) fn insert_journal_event(
             })
         })
         .transpose()?;
+    let (previous_hash, seq) = chain_head(connection)?;
+    let plan = event.plan_revision.as_ref();
+    let row = JournalRow {
+        seq,
+        event_type: event.event_type.as_str().to_owned(),
+        event_version: EVENT_SCHEMA_VERSION,
+        task_id: event.task_id.as_ref().map(|id| id.as_str().to_owned()),
+        project_id: event.project_id.as_ref().map(|id| id.as_str().to_owned()),
+        from_state,
+        to_state,
+        reason: event.reason.clone(),
+        correlation_id: event.correlation_id.clone(),
+        causation_id: event.causation_id.clone(),
+        occurred_at: event.occurred_at.clone(),
+        provenance: event.provenance.clone(),
+        execution_id: event.execution_id.as_ref().map(|id| id.as_str().to_owned()),
+        attempt_id: event.attempt_id.as_ref().map(|id| id.as_str().to_owned()),
+        attempt_outcome: event
+            .attempt_outcome
+            .map(|outcome| outcome.as_str().to_owned()),
+        workspace_id: event.workspace_id.as_ref().map(|id| id.as_str().to_owned()),
+        plan_branch_id: plan.map(|payload| payload.plan_branch_id.as_str().to_owned()),
+        plan_revision_seq,
+        plan_changeset_hash: plan.map(|payload| payload.changeset_hash.as_str().to_owned()),
+        plan_planner_adapter_id: plan
+            .map(|payload| payload.proposed_by.planner.adapter_id.as_str().to_owned()),
+        plan_model_ref: plan
+            .map(|payload| payload.proposed_by.planner.model_ref.as_str().to_owned()),
+        plan_planning_cost_receipt_ref: plan.map(|payload| {
+            payload
+                .proposed_by
+                .planning_cost_receipt_ref
+                .as_str()
+                .to_owned()
+        }),
+        plan_validated_service_id: plan
+            .map(|payload| payload.validated_by.service_id.as_str().to_owned()),
+        plan_policy_fingerprint: plan
+            .map(|payload| payload.validated_by.policy_fingerprint.as_str().to_owned()),
+    };
+    let record_hash = hash_journal_row(&row, &previous_hash);
     connection.execute(
         "INSERT INTO event_journal
-         (event_type, event_version, task_id, project_id, from_state, to_state,
+         (seq, event_type, event_version, task_id, project_id, from_state, to_state,
           reason, correlation_id, causation_id, occurred_at, provenance,
           execution_id, attempt_id, attempt_outcome, workspace_id,
           plan_branch_id, plan_revision_seq, plan_changeset_hash,
           plan_planner_adapter_id, plan_model_ref, plan_planning_cost_receipt_ref,
-          plan_validated_service_id, plan_policy_fingerprint)
+          plan_validated_service_id, plan_policy_fingerprint,
+          previous_hash, record_hash)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                 ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                 ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
         params![
-            event.event_type.as_str(),
-            EVENT_SCHEMA_VERSION,
-            event.task_id.as_ref().map(|id| id.as_str()),
-            event.project_id.as_ref().map(|id| id.as_str()),
-            from_state,
-            to_state,
-            event.reason,
-            event.correlation_id,
-            event.causation_id,
-            event.occurred_at,
-            event.provenance,
-            event.execution_id.as_ref().map(|id| id.as_str()),
-            event.attempt_id.as_ref().map(|id| id.as_str()),
-            event.attempt_outcome.map(|outcome| outcome.as_str()),
-            event.workspace_id.as_ref().map(|id| id.as_str()),
-            event
-                .plan_revision
-                .as_ref()
-                .map(|payload| payload.plan_branch_id.as_str()),
-            plan_revision_seq,
-            event
-                .plan_revision
-                .as_ref()
-                .map(|payload| payload.changeset_hash.as_str()),
-            event.plan_revision.as_ref().map(|payload| payload
-                .proposed_by
-                .planner
-                .adapter_id
-                .as_str()),
-            event.plan_revision.as_ref().map(|payload| payload
-                .proposed_by
-                .planner
-                .model_ref
-                .as_str()),
-            event
-                .plan_revision
-                .as_ref()
-                .map(|payload| payload.proposed_by.planning_cost_receipt_ref.as_str()),
-            event
-                .plan_revision
-                .as_ref()
-                .map(|payload| payload.validated_by.service_id.as_str()),
-            event
-                .plan_revision
-                .as_ref()
-                .map(|payload| payload.validated_by.policy_fingerprint.as_str()),
+            row.seq,
+            row.event_type,
+            row.event_version,
+            row.task_id,
+            row.project_id,
+            row.from_state,
+            row.to_state,
+            row.reason,
+            row.correlation_id,
+            row.causation_id,
+            row.occurred_at,
+            row.provenance,
+            row.execution_id,
+            row.attempt_id,
+            row.attempt_outcome,
+            row.workspace_id,
+            row.plan_branch_id,
+            row.plan_revision_seq,
+            row.plan_changeset_hash,
+            row.plan_planner_adapter_id,
+            row.plan_model_ref,
+            row.plan_planning_cost_receipt_ref,
+            row.plan_validated_service_id,
+            row.plan_policy_fingerprint,
+            previous_hash,
+            record_hash,
         ],
     )?;
-    let seq = connection.last_insert_rowid();
     if let Some(payload) = &event.plan_revision {
         for (position, evidence) in payload.caused_by.iter().enumerate() {
             connection.execute(
@@ -1047,4 +1073,152 @@ pub(crate) fn insert_journal_event(
         event_version: EVENT_SCHEMA_VERSION,
         fact: event.clone(),
     })
+}
+
+/// Previous record hash (genesis when empty) and the next `seq`. Callers hold
+/// an IMMEDIATE transaction, so the head read and the INSERT cannot fork the
+/// chain. `seq` is chosen explicitly because it is part of the hash.
+fn chain_head(connection: &Connection) -> StorageResult<(String, i64)> {
+    let head: Option<(i64, Option<String>)> = connection
+        .query_row(
+            "SELECT seq, record_hash FROM event_journal ORDER BY seq DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let issued: Option<i64> = connection
+        .query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'event_journal'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let (head_seq, previous_hash) = match head {
+        None => (0, GENESIS_HASH.to_owned()),
+        Some((seq, Some(hash))) => (seq, hash),
+        Some((seq, None)) => {
+            return Err(StorageError::Corrupt(format!(
+                "event journal row {seq} has no record hash"
+            )))
+        }
+    };
+    Ok((previous_hash, head_seq.max(issued.unwrap_or(0)) + 1))
+}
+
+/// Fails closed with `StorageError::Corrupt` on any broken, missing, or
+/// reordered link. Empty journal is genesis, not a break.
+pub(crate) fn verify_journal_chain(connection: &Connection) -> StorageResult<()> {
+    let sql = format!(
+        "SELECT {JOURNAL_SELECT}, previous_hash, record_hash FROM event_journal ORDER BY seq"
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map([], |row| {
+        Ok((JournalRow::read(row)?, row.get(24)?, row.get(25)?))
+    })?;
+    let mut expected_previous = GENESIS_HASH.to_owned();
+    for row in rows {
+        let (row, previous, record): (JournalRow, Option<String>, Option<String>) = row?;
+        let (Some(previous), Some(record)) = (previous, record) else {
+            return Err(StorageError::Corrupt(format!(
+                "event journal row {} has no hash chain link",
+                row.seq
+            )));
+        };
+        if previous != expected_previous {
+            return Err(StorageError::Corrupt(format!(
+                "event journal chain break before seq {}",
+                row.seq
+            )));
+        }
+        if record != hash_journal_row(&row, &previous) {
+            return Err(StorageError::Corrupt(format!(
+                "event journal hash mismatch at seq {}",
+                row.seq
+            )));
+        }
+        expected_previous = record;
+    }
+    Ok(())
+}
+
+/// Migration 0024: chains every pre-chain row in `seq` order.
+pub(crate) fn backfill_journal_chain(connection: &Connection) -> StorageResult<()> {
+    let sql = format!("SELECT {JOURNAL_SELECT} FROM event_journal ORDER BY seq");
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement
+        .query_map([], JournalRow::read)?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut previous = GENESIS_HASH.to_owned();
+    for row in rows {
+        let record = hash_journal_row(&row, &previous);
+        connection.execute(
+            "UPDATE event_journal SET previous_hash = ?1, record_hash = ?2 WHERE seq = ?3",
+            params![previous, record, row.seq],
+        )?;
+        previous = record;
+    }
+    Ok(())
+}
+
+fn hash_journal_row(row: &JournalRow, previous_hash: &str) -> String {
+    let mut hasher = Sha256::new();
+    hash_field(&mut hasher, "contract", Some("event-journal-v1"));
+    hash_field(&mut hasher, "seq", Some(&row.seq.to_string()));
+    hash_field(&mut hasher, "previous_hash", Some(previous_hash));
+    hash_field(&mut hasher, "event_type", Some(&row.event_type));
+    hash_field(
+        &mut hasher,
+        "event_version",
+        Some(&row.event_version.to_string()),
+    );
+    hash_field(&mut hasher, "task_id", row.task_id.as_deref());
+    hash_field(&mut hasher, "project_id", row.project_id.as_deref());
+    hash_field(&mut hasher, "from_state", row.from_state.as_deref());
+    hash_field(&mut hasher, "to_state", row.to_state.as_deref());
+    hash_field(&mut hasher, "reason", row.reason.as_deref());
+    hash_field(&mut hasher, "correlation_id", Some(&row.correlation_id));
+    hash_field(&mut hasher, "causation_id", Some(&row.causation_id));
+    hash_field(&mut hasher, "occurred_at", Some(&row.occurred_at));
+    hash_field(&mut hasher, "provenance", Some(&row.provenance));
+    hash_field(&mut hasher, "execution_id", row.execution_id.as_deref());
+    hash_field(&mut hasher, "attempt_id", row.attempt_id.as_deref());
+    hash_field(
+        &mut hasher,
+        "attempt_outcome",
+        row.attempt_outcome.as_deref(),
+    );
+    hash_field(&mut hasher, "workspace_id", row.workspace_id.as_deref());
+    hash_field(&mut hasher, "plan_branch_id", row.plan_branch_id.as_deref());
+    hash_field(
+        &mut hasher,
+        "plan_revision_seq",
+        row.plan_revision_seq.map(|seq| seq.to_string()).as_deref(),
+    );
+    hash_field(
+        &mut hasher,
+        "plan_changeset_hash",
+        row.plan_changeset_hash.as_deref(),
+    );
+    hash_field(
+        &mut hasher,
+        "plan_planner_adapter_id",
+        row.plan_planner_adapter_id.as_deref(),
+    );
+    hash_field(&mut hasher, "plan_model_ref", row.plan_model_ref.as_deref());
+    hash_field(
+        &mut hasher,
+        "plan_planning_cost_receipt_ref",
+        row.plan_planning_cost_receipt_ref.as_deref(),
+    );
+    hash_field(
+        &mut hasher,
+        "plan_validated_service_id",
+        row.plan_validated_service_id.as_deref(),
+    );
+    hash_field(
+        &mut hasher,
+        "plan_policy_fingerprint",
+        row.plan_policy_fingerprint.as_deref(),
+    );
+    format!("sha256:{:x}", hasher.finalize())
 }

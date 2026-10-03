@@ -48,6 +48,7 @@ impl TestDb {
     /// Opens the store with the planning cost receipts the fixture revisions
     /// reference (commits require resolvable receipt refs).
     fn open(&self) -> SqliteStore {
+        storage_sqlite::test_support::reseal_journal_chain(&self.path).unwrap();
         let mut store = SqliteStore::open(&self.path).unwrap();
         for seq in 1..=3 {
             store
@@ -349,7 +350,7 @@ fn journal_evidence(seq: u64) -> PlanCommitJournalEvidence {
 fn fresh_database_reaches_schema_16() {
     let db = TestDb::new("schema");
     let store = db.open();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 23);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 24);
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
 }
 
@@ -1817,6 +1818,8 @@ fn schema_13_revision_history_without_lineage_fails_closed_after_upgrade() {
     db.raw()
         .execute_batch(
             "DROP TRIGGER IF EXISTS event_journal_no_update;
+             ALTER TABLE event_journal DROP COLUMN previous_hash;
+             ALTER TABLE event_journal DROP COLUMN record_hash;
              DROP TRIGGER IF EXISTS event_journal_no_delete;
              DROP TRIGGER IF EXISTS event_plan_causes_no_update;
              DROP TRIGGER IF EXISTS event_plan_causes_no_delete;
@@ -2618,6 +2621,7 @@ fn malformed_persisted_child_retry_evidence_fails_closed_without_partial_state()
             .execute_batch("DROP TRIGGER IF EXISTS event_journal_no_update; DROP TRIGGER IF EXISTS event_journal_no_delete; DROP TRIGGER IF EXISTS event_plan_causes_no_update; DROP TRIGGER IF EXISTS event_plan_causes_no_delete;")
             .unwrap();
         mutate(&db.raw());
+        storage_sqlite::test_support::reseal_journal_chain(&db.path).unwrap();
         // The mutation deliberately corrupts the persisted evidence. Capture
         // that prepared state now; the retry itself must not add anything on
         // top of it or alter the existing Task/facts.

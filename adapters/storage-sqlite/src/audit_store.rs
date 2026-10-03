@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{SqliteStore, StorageError, StorageResult};
 
-const GENESIS_HASH: &str =
+pub(crate) const GENESIS_HASH: &str =
     "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 impl SqliteStore {
@@ -365,7 +365,7 @@ fn hash_record(seq: i64, previous_hash: &str, fact: &NewSecurityAuditRecord) -> 
     format!("sha256:{:x}", hasher.finalize())
 }
 
-fn hash_field(hasher: &mut Sha256, label: &str, value: Option<&str>) {
+pub(crate) fn hash_field(hasher: &mut Sha256, label: &str, value: Option<&str>) {
     let label = label.as_bytes();
     hasher.update((label.len() as u64).to_be_bytes());
     hasher.update(label);

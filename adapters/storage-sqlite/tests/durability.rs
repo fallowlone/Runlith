@@ -675,7 +675,7 @@ fn fresh_database_migrates_to_current() {
     let db = TestDb::new("fresh");
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 23);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 24);
 }
 
 #[test]
@@ -702,11 +702,11 @@ fn schema_21_upgrades_once_to_candidate_assessments_22_and_reopens() {
     secure_raw_fixture(&db.path);
     {
         let upgraded = db.open();
-        assert_eq!(upgraded.schema_version().unwrap(), 23);
-        assert_eq!(SUPPORTED_SCHEMA_VERSION, 23);
+        assert_eq!(upgraded.schema_version().unwrap(), 24);
+        assert_eq!(SUPPORTED_SCHEMA_VERSION, 24);
     }
     let reopened = db.open();
-    assert_eq!(reopened.schema_version().unwrap(), 23);
+    assert_eq!(reopened.schema_version().unwrap(), 24);
     let assessment_columns: i64 = rusqlite::Connection::open(&db.path)
         .unwrap()
         .query_row(

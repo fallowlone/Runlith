@@ -117,7 +117,7 @@ fn fresh_database_reaches_current_schema() {
     let db = TestDb::new("fresh-current");
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 23);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 24);
     assert!(store.list_events_ordered().unwrap().is_empty());
 }
 
@@ -945,6 +945,8 @@ fn table_layout_matches_the_accepted_contract() {
             "plan_planning_cost_receipt_ref",
             "plan_validated_service_id",
             "plan_policy_fingerprint",
+            "previous_hash",
+            "record_hash",
         ]
     );
     assert_eq!(
@@ -1005,4 +1007,186 @@ fn journal_event_facts_have_no_secret_fields() {
             "journal fact must not carry {forbidden}"
         );
     }
+}
+
+// -- hash chain (F10) -------------------------------------------------------------
+
+const GENESIS_HASH: &str =
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
+fn chain_rows(db: &TestDb) -> Vec<(i64, Option<String>, Option<String>)> {
+    let raw = db.raw();
+    let mut statement = raw
+        .prepare("SELECT seq, previous_hash, record_hash FROM event_journal ORDER BY seq")
+        .unwrap();
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+fn claimed_task_journal(store: &mut SqliteStore) {
+    let mut task = ready_task_via_store(store);
+    task.claim().unwrap();
+    store
+        .apply_lifecycle_transition(
+            task.id(),
+            TaskState::Ready,
+            &task,
+            &new_event(
+                &task,
+                TaskState::Ready,
+                TaskState::Claimed,
+                EventType::Claimed,
+            ),
+        )
+        .unwrap();
+    task.start().unwrap();
+    store
+        .apply_lifecycle_transition(
+            task.id(),
+            TaskState::Claimed,
+            &task,
+            &new_event(
+                &task,
+                TaskState::Claimed,
+                TaskState::Running,
+                EventType::Started,
+            ),
+        )
+        .unwrap();
+}
+
+#[test]
+fn hash_chain_columns_link_consecutive_rows() {
+    let db = TestDb::new("hash-chain-link");
+    let mut store = db.open();
+    claimed_task_journal(&mut store);
+    drop(store);
+    let rows = chain_rows(&db);
+    assert!(rows.len() >= 2, "fixture must journal at least two events");
+    assert_eq!(rows[0].1.as_deref(), Some(GENESIS_HASH));
+    for pair in rows.windows(2) {
+        assert!(pair[0]
+            .2
+            .as_deref()
+            .is_some_and(|h| h.starts_with("sha256:")));
+        assert_eq!(pair[1].1, pair[0].2);
+    }
+}
+
+#[test]
+fn empty_journal_verifies_as_genesis() {
+    let db = TestDb::new("hash-chain-empty");
+    let store = db.open();
+    assert!(store.list_events_ordered().unwrap().is_empty());
+}
+
+#[test]
+fn tampered_chain_fails_closed_on_every_read_path() {
+    let db = TestDb::new("hash-chain-tamper");
+    let mut store = db.open();
+    claimed_task_journal(&mut store);
+    drop(store);
+    db.raw()
+        .execute_batch(
+            "DROP TRIGGER IF EXISTS event_journal_no_update;
+             UPDATE event_journal SET reason = 'forged' WHERE seq = 1;",
+        )
+        .unwrap();
+    let store = db.open();
+    assert!(matches!(
+        store.list_events_ordered(),
+        Err(StorageError::Corrupt(_))
+    ));
+    assert!(matches!(
+        store.list_events_for_task(&TaskId::new("T-1").unwrap()),
+        Err(StorageError::Corrupt(_))
+    ));
+    assert!(matches!(
+        store.list_events_for_project(&ProjectId::new("P-1").unwrap()),
+        Err(StorageError::Corrupt(_))
+    ));
+}
+
+#[test]
+fn deleted_middle_row_is_a_chain_break() {
+    let db = TestDb::new("hash-chain-gap");
+    let mut store = db.open();
+    claimed_task_journal(&mut store);
+    drop(store);
+    db.raw()
+        .execute_batch(
+            "DROP TRIGGER IF EXISTS event_journal_no_delete;
+             DELETE FROM event_journal WHERE seq = 1;",
+        )
+        .unwrap();
+    let store = db.open();
+    assert!(matches!(
+        store.list_events_ordered(),
+        Err(StorageError::Corrupt(_))
+    ));
+}
+
+#[test]
+fn hash_columns_are_immutable_while_triggers_stand() {
+    let db = TestDb::new("hash-chain-immutable");
+    let mut store = db.open();
+    claimed_task_journal(&mut store);
+    drop(store);
+    assert!(db
+        .raw()
+        .execute(
+            "UPDATE event_journal SET record_hash = 'x' WHERE seq = 1",
+            []
+        )
+        .is_err());
+}
+
+#[test]
+fn legacy_journal_without_hashes_is_backfilled_on_upgrade() {
+    let db = TestDb::new("hash-chain-legacy");
+    let mut store = db.open();
+    claimed_task_journal(&mut store);
+    drop(store);
+    // Rebuild the schema-23 shape: no hash columns, 0023 UPDATE guard intact.
+    db.raw()
+        .execute_batch(
+            "DROP TRIGGER event_journal_no_update;
+             ALTER TABLE event_journal DROP COLUMN previous_hash;
+             ALTER TABLE event_journal DROP COLUMN record_hash;
+             CREATE TRIGGER event_journal_no_update BEFORE UPDATE ON event_journal
+             BEGIN SELECT RAISE(ABORT, 'event journal is append-only'); END;
+             PRAGMA user_version = 23;",
+        )
+        .unwrap();
+    let mut store = db.open();
+    assert_eq!(store.list_events_ordered().unwrap().len(), 2);
+    let mut task = draft_task("P-1", "T-2");
+    task.mark_ready().unwrap();
+    store.create_task(&task).unwrap();
+    task.claim().unwrap();
+    store
+        .apply_lifecycle_transition(
+            task.id(),
+            TaskState::Ready,
+            &task,
+            &new_event(
+                &task,
+                TaskState::Ready,
+                TaskState::Claimed,
+                EventType::Claimed,
+            ),
+        )
+        .unwrap();
+    drop(store);
+    let rows = chain_rows(&db);
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|row| row.1.is_some() && row.2.is_some()));
+    assert!(db
+        .raw()
+        .execute("UPDATE event_journal SET reason = 'x' WHERE seq = 1", [])
+        .is_err());
+    assert_eq!(db.open().list_events_ordered().unwrap().len(), 3);
 }
