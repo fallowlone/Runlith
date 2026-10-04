@@ -5983,6 +5983,7 @@ mod tests {
             "a newly stored credential is released again"
         );
         assert!(!probe.exists());
+        assert_absent_under(&sandbox.dir.join("db"), BROKERED_TOKEN.as_bytes());
     }
 
     /// The planner path marks a rejection too.
@@ -6020,6 +6021,157 @@ mod tests {
         let detail = attempt_detail(&sandbox.db, "T-REJ-E");
         assert!(detail.contains("provider_credential_rejected"), "{detail}");
         assert_eq!(released_secret_count(&sandbox.db), 1);
+    }
+
+    /// Host credential files the brokered child must not open (ADR-0039
+    /// verification 2). Only files present on this host are probed; the test
+    /// process checks existence through metadata and never opens them.
+    fn host_credential_files() -> Vec<PathBuf> {
+        let home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+        [
+            ".claude.json",
+            ".claude/settings.json",
+            ".claude/.credentials.json",
+            ".ssh/known_hosts",
+            ".ssh/config",
+            ".ssh/id_ed25519",
+            ".ssh/id_rsa",
+            "Library/Keychains/login.keychain-db",
+        ]
+        .iter()
+        .map(|relative| home.join(relative))
+        .filter(|path| path.is_file())
+        .collect()
+    }
+
+    /// ADR-0039 P6d (adversarial): inside the brokered child the environment
+    /// holds only allowlisted names plus the one credential, `HOME` is not the
+    /// host home, host credential files cannot be opened, and the unconfined
+    /// detection probes never see the credential. The child uses shell
+    /// builtins only, so a denied file is not confused with a denied exec.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn brokered_child_sees_only_allowlisted_env_and_no_host_credentials() {
+        let sandbox = Sandbox::named("brokered-adversarial");
+        seed_ready(&sandbox.db, "P-BR-ADV", "T-BR-ADV");
+        let host_home = std::env::var("HOME").expect("HOME");
+        let targets = host_credential_files();
+        assert!(
+            !targets.is_empty(),
+            "no host credential file exists to probe; the test would prove nothing"
+        );
+        let login_probe = sandbox.dir.join("host-login-probed");
+        let detect_saw_token = sandbox.dir.join("detect-saw-token");
+        let probes: String = targets
+            .iter()
+            .map(|path| format!("$(opens '{}')", path.display()))
+            .collect();
+        let fixture = fixture_script(
+            &sandbox.dir,
+            "claude-adversarial.sh",
+            &format!(
+                "if [ \"$1\" = \"--version\" ] || [ \"$1\" = \"--help\" ]; then\n\
+                   if [ -n \"${{CLAUDE_CODE_OAUTH_TOKEN+x}}\" ]; then touch {detect_saw_token:?}; fi\n\
+                   if [ \"$1\" = \"--version\" ]; then printf '2.1.277 (Claude Code)\\n'; fi\n\
+                   exit 0\n\
+                 fi\n\
+                 if [ \"$1\" = \"auth\" ]; then touch {login_probe:?}; exit 0; fi\n\
+                 if [ \"$CLAUDE_CODE_OAUTH_TOKEN\" != '{BROKERED_TOKEN}' ]; then exit 97; fi\n\
+                 opens() {{ if {{ : < \"$1\"; }} 2>/dev/null; then printf 1; else printf 0; fi; }}\n\
+                 names=''\n\
+                 exports=$(export -p)\n\
+                 while IFS= read -r line; do\n\
+                   case \"$line\" in export\\ *) rest=${{line#export }}; names=\"$names${{rest%%=*}},\";; esac\n\
+                 done <<RUNLITH_EOF\n\
+                 $exports\n\
+                 RUNLITH_EOF\n\
+                 if [ \"$HOME\" = '{host_home}' ]; then home=1; else home=0; fi\n\
+                 report=\"env=$names;home_is_host=$home;control=$(opens .git);targets={probes};\"\n\
+                 printf '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"%s\",\"session_id\":\"dddddddd-0000-0000-0000-dddddddddddd\"}}' \"$report\"\n\
+                 exit 0\n"
+            ),
+        );
+        let vault = brokered_vault(&sandbox, BrokeredVault::Stored);
+        let composition = brokered_composition(&sandbox, fixture, vault);
+
+        let (response, job) =
+            run_via_dispatch(&composition, run_request("T-BR-ADV", &sandbox.repo));
+        let run = run_payload(&response);
+        run_background(job.expect("accepted run yields a background job"));
+
+        let store = storage_sqlite::SqliteStore::open(&sandbox.db).expect("open store");
+        let attempt = store
+            .get_attempt(&agent_runtime::AttemptId::new(run.attempt_id.as_str()).unwrap())
+            .expect("read attempt")
+            .expect("attempt exists");
+        assert_eq!(
+            attempt.outcome(),
+            Some(AttemptOutcome::Succeeded),
+            "{:?}",
+            attempt.detail()
+        );
+        let report = store
+            .list_events_for_task(&TaskId::new("T-BR-ADV").unwrap())
+            .expect("read journal")
+            .into_iter()
+            .filter_map(|event| event.fact.reason)
+            .find(|reason| reason.contains("env="))
+            .expect("child report recorded as the submission summary");
+        let field = |key: &str| -> String {
+            let start = report.find(&format!("{key}=")).expect(key) + key.len() + 1;
+            report[start..]
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        };
+
+        let names: Vec<String> = field("env")
+            .split(',')
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect();
+        // `/bin/sh` (bash) itself exports SHLVL, `_` and a valueless OLDPWD;
+        // everything else must come from the plan's allowlist or the one
+        // late-bound secret.
+        let shell_added = ["SHLVL", "_", "OLDPWD"];
+        for name in &names {
+            assert!(
+                runner::CHILD_ENV_ALLOWLIST.contains(&name.as_str())
+                    || name == provider_claude::OAUTH_TOKEN_ENV
+                    || shell_added.contains(&name.as_str()),
+                "child environment carries a non-allowlisted name: {name}"
+            );
+        }
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| *name == provider_claude::OAUTH_TOKEN_ENV)
+                .count(),
+            1
+        );
+        assert_eq!(field("home_is_host"), "0", "child HOME must be private");
+        assert_eq!(
+            field("control"),
+            "1",
+            "the open probe must work in the child"
+        );
+        let opened = field("targets");
+        assert_eq!(opened.len(), targets.len(), "{report}");
+        for (target, bit) in targets.iter().zip(opened.chars()) {
+            assert_eq!(bit, '0', "child opened host file {}", target.display());
+        }
+        assert!(
+            !login_probe.exists(),
+            "brokered mode must not probe the host login"
+        );
+        assert!(
+            !detect_saw_token.exists(),
+            "unconfined detection probes must never see the credential"
+        );
+        assert!(!report.contains(BROKERED_TOKEN));
+        drop(store);
+        assert_absent_under(&sandbox.dir.join("db"), BROKERED_TOKEN.as_bytes());
     }
 
     /// ADR-0039 P5d: the planner shares the execution composition, so its

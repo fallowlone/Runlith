@@ -354,5 +354,19 @@ on stdin).
   keeps the same token and keeps the mark; a daemon restart clears it.
   There is no automatic retry. `vault status` does not show the mark yet
   (needs a protocol field).
+- **P6d adversarial checks** (macOS, deterministic fixture through the same
+  brokered path and Seatbelt provider profile). The child's exported names
+  are only `CHILD_ENV_ALLOWLIST` plus `CLAUDE_CODE_OAUTH_TOKEN` (plus
+  `SHLVL`, `_`, `OLDPWD` exported by `/bin/sh` itself); its `HOME` is not
+  the host home; it cannot open `~/.claude.json`, `~/.claude/*`, `~/.ssh/*`
+  or `~/Library/Keychains/login.keychain-db` (only files present on the
+  host are probed, with shell builtins so a denied exec is not mistaken for
+  a denied read, plus a positive control); the unconfined detection probes
+  never see the credential; the value is absent from every file under the
+  data directory on the success and rejection paths. Mutations (no
+  `env_clear`, host `HOME` as a support read root) make the test fail. Not
+  covered: daemon stderr at binary level (the verdict cannot be overridden
+  in a binary), same-user reads of a process environment (accepted
+  residual), outbound destinations on `tcp:443` (A4, Phase 2).
 
 Status remains Proposed until the owner formally ratifies the ADR.
