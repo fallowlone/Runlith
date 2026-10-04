@@ -51,6 +51,7 @@ The four core invariants hold mechanically, not just by convention:
 | F18 | 7 | Medium | Candidate-verification loop uses 10ms sleep-poll (`execution.rs:2650`); deadline overshoot under load |
 | F19 | 7 | Low | Some `tokio::spawn` sites (`lib.rs:699`, `:793`) do not retain `JoinHandle` |
 | F20 | 7 | Low | `plan_graph` BFS has no node-count bound; unbounded graph = unbounded memory |
+| F21 | 4 | Low | Provider host probes (`claude --version`, `--help`, `auth status`) spawn the configured executable unconfined with the daemon's inherited environment (added 2026-10-04, see addendum) |
 
 ## Priority remediation
 
@@ -140,6 +141,34 @@ cross-task `--resume` guard doc note; implement or fail-closed the
 non-unix parent validation; distinct keyring error variants; document
 `seq` as storage-local; retain `JoinHandle` for all spawns;
 `MAX_PLAN_NODES` bound on plan-graph traversal.
+
+## Addendum — 2026-10-04
+
+**F21 (Low, module 4).** Three host-side probes run the configured Claude
+executable directly through `std::process::Command`, with no
+`env_clear`, no isolation backend and the daemon's working directory:
+
+- `detect::probe_version` (`adapters/provider-claude/src/detect.rs:193`),
+  `claude --version`;
+- `capabilities::probe_help` (`adapters/provider-claude/src/capabilities.rs:127`),
+  `claude --help`;
+- `authentication::probe` (`adapters/provider-claude/src/authentication.rs:140`),
+  `claude auth status`.
+
+Each probe has fixed argv, no shell, null stdin, bounded stdout and a short
+timeout (providers.md §2, §9a). The child still inherits every daemon
+variable, including any credential the operator exported, and the full
+host filesystem. The executable is operator-configured, not caller-chosen,
+so this is not an escalation path for an IPC peer. The concern is
+defense in depth: a replaced or compromised CLI binary runs once per launch
+outside the sandbox with the daemon's environment.
+
+Planned change: ADR-0039 P5 removes the `auth status` probe from the
+production path (kept only for the feature-gated `trusted-host` binding).
+The `--version` and `--help` probes stay on the production path; clearing
+their environment to the child allowlist is open hardening work, not
+scheduled. The Verdict counts above describe the 2026-10-03 baseline and
+do not include F21.
 
 ## Verification performed
 
