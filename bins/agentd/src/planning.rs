@@ -93,7 +93,7 @@ impl SecuredClaudePlanner {
         // zero spend; one after it ran (post-call audit) discarded that
         // evidence, so it is charged as unmeasured spend.
         let adapter_invoked = Cell::new(false);
-        prepared
+        let result = prepared
             .invoke(|sandboxed_launch, secrets| {
                 adapter_invoked.set(true);
                 let planner = self
@@ -109,7 +109,13 @@ impl SecuredClaudePlanner {
                 } else {
                     PlannerCallSpend::NotStarted
                 },
-            })?
+            })?;
+        if let (Ok(credential), Err(PlannerFault::ProviderFailure { typed_cause, .. })) =
+            (&self.credential, &result)
+        {
+            credential.observe_failure(typed_cause);
+        }
+        result
     }
 }
 

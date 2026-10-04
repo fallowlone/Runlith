@@ -91,6 +91,11 @@ pub struct VaultService {
     idle_deadline: Option<Instant>,
     failures: u32,
     retry_at: Option<Instant>,
+    /// `created_at` of the provider credential last released to a launch.
+    released: Option<u64>,
+    /// `created_at` of a provider credential the provider refused; it stays
+    /// refused until a new credential is stored (or the daemon restarts).
+    rejected: Option<u64>,
 }
 
 impl std::fmt::Debug for VaultService {
@@ -113,6 +118,8 @@ impl VaultService {
             idle_deadline: None,
             failures: 0,
             retry_at: None,
+            released: None,
+            rejected: None,
         }
     }
 
@@ -178,6 +185,9 @@ impl VaultService {
             .iter()
             .find(|entry| entry.name == PROVIDER_CREDENTIAL_ENTRY)
             .ok_or(CredentialRefusal::Missing)?;
+        if self.rejected == Some(credential.created_at) {
+            return Err(CredentialRefusal::Rejected);
+        }
         // Same day count as `agentctl vault status`: expired from day 365.
         let age_days = now_s.saturating_sub(credential.created_at) / SECONDS_PER_DAY;
         if age_days >= PROVIDER_CREDENTIAL_LIFETIME_DAYS {
@@ -195,13 +205,28 @@ impl VaultService {
         self.expire_if_idle(now);
         let credential =
             SecretRef::new(PROVIDER_CREDENTIAL_ENTRY).map_err(|_| SecretBackendError::Failure)?;
-        let value = self
+        let vault = self
             .backend()
             .map_err(|_| SecretBackendError::Unavailable)?
-            .ok_or(SecretBackendError::NotFound)?
-            .load(&credential)?;
+            .ok_or(SecretBackendError::NotFound)?;
+        let value = vault.load(&credential)?;
+        self.released = vault.entries().ok().and_then(|entries| {
+            entries
+                .into_iter()
+                .find(|entry| entry.name == PROVIDER_CREDENTIAL_ENTRY)
+                .map(|entry| entry.created_at)
+        });
         self.idle_deadline = Some(now + self.idle);
         Ok(value)
+    }
+
+    /// The provider refused the credential last released (ADR-0039
+    /// decision 7): later launches refuse until a new one is stored. Never
+    /// retried automatically.
+    pub fn mark_provider_credential_rejected(&mut self) {
+        if let Some(created_at) = self.released {
+            self.rejected = Some(created_at);
+        }
     }
 
     fn status(&mut self, now: Instant) -> Result<VaultStatusResponse, WireError> {
@@ -287,6 +312,7 @@ impl VaultService {
             .ok_or_else(|| wire(VaultError::NotFound))?
             .store(&name, &value)
             .map_err(backend_wire)?;
+        self.rejected = None;
         self.status_after_unlock(now)
     }
 
@@ -397,6 +423,7 @@ pub enum CredentialRefusal {
     VaultLocked,
     Missing,
     Expired,
+    Rejected,
 }
 
 impl CredentialRefusal {
@@ -422,6 +449,10 @@ impl CredentialRefusal {
                 "provider_credential_expired: the stored provider credential is past its \
                  one-year lifetime; create a new one with `claude setup-token` and run \
                  `agentctl vault store`"
+            }
+            Self::Rejected => {
+                "provider_credential_rejected: the provider refused the stored credential; \
+                 create a new one with `claude setup-token` and run `agentctl vault store`"
             }
         }
     }
@@ -497,6 +528,13 @@ impl SecretDelivery for ProviderCredentialDelivery {
         self.0
             .insert(provider_claude::OAUTH_TOKEN_ENV, value.to_vec())
             .map_err(|_| SecretDeliveryError::Rejected)
+    }
+}
+
+/// Records a provider refusal of the released credential, if a vault exists.
+pub fn mark_provider_credential_rejected(handle: Option<&VaultHandle>) {
+    if let Some(handle) = handle {
+        service(handle).mark_provider_credential_rejected();
     }
 }
 
@@ -1096,5 +1134,45 @@ mod tests {
             Err(SecretBackendError::Rejected)
         );
         assert_eq!(backend.load(&credential).unwrap(), TOKEN);
+    }
+
+    #[test]
+    fn rejected_credential_refuses_until_a_new_one_is_stored() {
+        let now = Instant::now();
+        let (_dir, mut service) = stored_service(now);
+        service.mark_provider_credential_rejected();
+        assert_eq!(service.check_provider_credential(now, unix_now_s()), Ok(()));
+
+        service.release_provider_credential(now).unwrap();
+        service.mark_provider_credential_rejected();
+        assert_eq!(
+            service.check_provider_credential(now, unix_now_s()),
+            Err(CredentialRefusal::Rejected)
+        );
+
+        let rotated = send(
+            &mut service,
+            Request::Rotate(ipc_contracts::proto::VaultRotateRequest {
+                password: PASSWORD.as_bytes().to_vec(),
+            }),
+            now,
+        );
+        assert!(matches!(rotated, Response::Phrase(_)));
+        assert_eq!(
+            service.check_provider_credential(now, unix_now_s()),
+            Err(CredentialRefusal::Rejected),
+            "rotation keeps the same token, so it stays refused"
+        );
+
+        send(
+            &mut service,
+            store(
+                PASSWORD,
+                PROVIDER_CREDENTIAL_ENTRY,
+                b"sk-ant-oat01-REPLACEMENT",
+            ),
+            now,
+        );
+        assert_eq!(service.check_provider_credential(now, unix_now_s()), Ok(()));
     }
 }

@@ -313,8 +313,12 @@ exists, is unlocked, holds the credential and that the credential is younger
 than its one-year lifetime. Each failure refuses closed with a stable cause
 naming the operator action: `provider_credential_vault_absent`,
 `provider_credential_vault_unavailable`, `provider_credential_vault_locked`,
-`provider_credential_missing`, `provider_credential_expired`. There is no
-fallback to the host login, even when the host is signed in. After policy
+`provider_credential_missing`, `provider_credential_expired`,
+`provider_credential_rejected`. The last one follows a provider refusal of
+the credential (the CLI's structured `api_error_status` 401): the launch
+that saw it fails with that cause, is not retried, and later launches refuse
+before release until a new credential is stored. There is no fallback to
+the host login, even when the host is signed in. After policy
 authorization the credential is released through the Secrets Broker
 (audited as `SecretAccess`) into the child's late-bound secret slot, never
 into the plan environment. A confinement verdict of `Unsupported` refuses

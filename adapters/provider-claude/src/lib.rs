@@ -51,7 +51,7 @@ pub use config::ClaudeConfig;
 pub use detect::{detect, find_on_path, CliVersion, Detection, ProviderAvailability};
 pub use environment::ProviderEnvironment;
 pub use executor::ClaudeExecutor;
-pub use failure::ClaudeFailure;
+pub use failure::{is_credential_rejected, ClaudeFailure};
 pub use output::{parse_provider_output, ParsedOutput};
 pub use planner::ClaudePlanner;
 pub use process::CancelFlag;

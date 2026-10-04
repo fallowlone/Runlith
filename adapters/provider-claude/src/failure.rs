@@ -35,6 +35,13 @@ pub enum ClaudeFailure {
         /// Bounded diagnostic (marker-derived, never credential content).
         detail: String,
     },
+    /// The provider refused the credential presented to it: the CLI
+    /// reported `api_error_status` 401 in its structured result (ADR-0039
+    /// P6b, measured on CLI 2.1.289). Provider response text is not kept.
+    CredentialRejected {
+        /// Bounded diagnostic (fixed text, never provider prose).
+        detail: String,
+    },
     /// The child process could not be spawned.
     SpawnFailed {
         /// Bounded diagnostic.
@@ -97,6 +104,7 @@ impl ClaudeFailure {
             Self::CliMissing { .. } => "cli_missing",
             Self::Incompatible { .. } => "incompatible",
             Self::AuthRequired { .. } => "auth_required",
+            Self::CredentialRejected { .. } => "credential_rejected",
             Self::SpawnFailed { .. } => "spawn_failed",
             Self::LaunchUnmanaged { .. } => "launch_unmanaged",
             Self::TimedOut { .. } => "timed_out",
@@ -127,6 +135,17 @@ impl ClaudeFailure {
         }
     }
 
+    /// The provider refused the presented credential. Fixed text only: the
+    /// provider's own response is never carried.
+    #[must_use]
+    pub fn credential_rejected() -> Self {
+        Self::CredentialRejected {
+            detail: "provider_credential_rejected: the provider refused the presented \
+                     credential (api_error_status 401)"
+                .to_owned(),
+        }
+    }
+
     /// Wraps an arbitrary detail string into malformed output, bounded.
     #[must_use]
     pub fn malformed(detail: impl Into<String>) -> Self {
@@ -143,6 +162,7 @@ impl std::fmt::Display for ClaudeFailure {
             Self::CliMissing { detail }
             | Self::Incompatible { detail }
             | Self::AuthRequired { detail }
+            | Self::CredentialRejected { detail }
             | Self::SpawnFailed { detail }
             | Self::TimedOut { detail }
             | Self::Failed { detail }
@@ -177,6 +197,18 @@ const AUTH_MARKERS: &[&str] = &[
     "Please run /login",
     "OAuth token",
 ];
+
+/// Display prefix of [`ClaudeFailure::CredentialRejected`].
+const CREDENTIAL_REJECTED_PREFIX: &str = "claude credential_rejected: ";
+
+/// Whether a failure rendered by this adapter (`ClaudeFailure` display, as
+/// carried by `ExecutionProblem::Failed` and planner `typed_cause`) is a
+/// provider credential rejection. Matches the adapter-owned prefix only, so
+/// provider text inside another failure's detail cannot forge it.
+#[must_use]
+pub fn is_credential_rejected(rendered: &str) -> bool {
+    rendered.starts_with(CREDENTIAL_REJECTED_PREFIX)
+}
 
 /// Checks bounded stderr text against the auth-marker table.
 /// Case-sensitive on purpose: these are CLI-prose fragments, and
@@ -236,6 +268,7 @@ mod tests {
             ClaudeFailure::CliMissing { detail: "x".into() },
             ClaudeFailure::Incompatible { detail: "x".into() },
             ClaudeFailure::AuthRequired { detail: "x".into() },
+            ClaudeFailure::CredentialRejected { detail: "x".into() },
             ClaudeFailure::SpawnFailed { detail: "x".into() },
             ClaudeFailure::TimedOut { detail: "x".into() },
             ClaudeFailure::Cancelled,
@@ -251,6 +284,7 @@ mod tests {
                 "cli_missing",
                 "incompatible",
                 "auth_required",
+                "credential_rejected",
                 "spawn_failed",
                 "timed_out",
                 "cancelled",

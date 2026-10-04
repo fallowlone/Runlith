@@ -316,4 +316,43 @@ Implementation: `adapters/secrets-vault` (`rotate`, `entries`),
   echo (`stty echo` repairs it). Hidden terminal input is not covered by an
   automated test.
 
+## Addendum C — Brokered launch measurement and credential rejection (2026-10-04, P6a-P6b)
+
+Implementation: `bins/agentd/src/provider_credential.rs`,
+`bins/agentd/src/vault.rs`, `adapters/provider-claude/src/executor.rs`;
+measurement test `p6a_brokered_real_claude_measurement` in
+`bins/agentd/src/execution.rs` (ignored; run by the operator with the token
+on stdin).
+
+- **P6a measurement.** Claude Code 2.1.289, macOS (Darwin 27.0.0), arm64.
+  The real CLI ran through the brokered production path (G6 authorization,
+  Secrets Broker release, macOS Seatbelt provider profile, late-bound slot)
+  with the confinement verdict overridden to `Compatible` inside the test
+  only. Receipt (classes and booleans only):
+
+  | condition | attempt | cause | secret released | submitted |
+  | --- | --- | --- | --- | --- |
+  | valid setup-token | Succeeded | none | yes | yes |
+  | random well-formed token | Failed | untyped before P6b | yes | no |
+  | no stored credential | Failed | `provider_credential_missing` | no | no |
+
+  The token value was absent from every file under the data directory in
+  all conditions. The second row measures an invalid token, not a revoked
+  one (owner choice, 2026-10-04). One host, one run per condition. The
+  verdict is not flipped by this addendum.
+- **Rejection signal.** For a refused token the CLI exits 1 with empty
+  stderr and prints one result document on stdout with `is_error: true`,
+  `subtype: "success"`, `terminal_reason: "api_error"` and
+  `api_error_status: 401` (observed with the random token). The adapter
+  maps `api_error_status == 401` to `credential_rejected`; the provider's
+  response text is not kept. Other statuses keep their previous
+  classification.
+- **Rejection handling.** A rejection observed on a brokered launch
+  (execution or planner) marks the released credential rejected in daemon
+  memory. Later launches refuse before release with
+  `provider_credential_rejected` until a new credential is stored; rotation
+  keeps the same token and keeps the mark; a daemon restart clears it.
+  There is no automatic retry. `vault status` does not show the mark yet
+  (needs a protocol field).
+
 Status remains Proposed until the owner formally ratifies the ADR.

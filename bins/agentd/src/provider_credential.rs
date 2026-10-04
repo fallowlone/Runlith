@@ -112,6 +112,16 @@ impl ProviderCredential {
             .ok_or_else(|| vault::CredentialRefusal::VaultAbsent.message().to_owned())?;
         release_from_vault(handle, security, operation, effective).map(Some)
     }
+
+    /// Records a provider refusal of the released brokered credential, read
+    /// from the adapter-rendered failure (ADR-0039 decision 7).
+    pub(crate) fn observe_failure(&self, rendered: &str) {
+        if self.mode == ProviderCredentialMode::Brokered
+            && provider_claude::is_credential_rejected(rendered)
+        {
+            vault::mark_provider_credential_rejected(self.vault.as_ref());
+        }
+    }
 }
 
 /// One audited Secrets Broker release: a launch-scoped binding of the

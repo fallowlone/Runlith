@@ -3391,14 +3391,20 @@ impl scheduler::ExecutionPort for SecuredClaudeExecutor {
             environment,
         )
         .map_err(|detail| scheduler::ExecutionProblem::Failed { detail })?;
-        prepared
+        let result = prepared
             .invoke(|prepared_launch, secrets| {
                 self.inner
                     .clone()
                     .with_sandboxed_launch_and_secrets(prepared_launch, secrets)
                     .execute(work)
             })
-            .map_err(|detail| scheduler::ExecutionProblem::Failed { detail })?
+            .map_err(|detail| scheduler::ExecutionProblem::Failed { detail })?;
+        if let (Ok(credential), Err(scheduler::ExecutionProblem::Failed { detail })) =
+            (&launch.credential, &result)
+        {
+            credential.observe_failure(detail);
+        }
+        result
     }
 }
 
@@ -5568,6 +5574,14 @@ mod tests {
     }
 
     fn brokered_vault(sandbox: &Sandbox, setup: BrokeredVault) -> Option<VaultHandle> {
+        brokered_vault_holding(sandbox, setup, BROKERED_TOKEN.as_bytes())
+    }
+
+    fn brokered_vault_holding(
+        sandbox: &Sandbox,
+        setup: BrokeredVault,
+        value: &[u8],
+    ) -> Option<VaultHandle> {
         use ipc_contracts::proto::{
             vault_core_request::Payload as Request, vault_core_response::Payload as Response,
             VaultCoreRequest, VaultCreateRequest, VaultLockRequest, VaultStoreRequest,
@@ -5599,7 +5613,7 @@ mod tests {
             send(Request::Store(VaultStoreRequest {
                 password: BROKERED_VAULT_PASSWORD.into(),
                 name: crate::vault::PROVIDER_CREDENTIAL_ENTRY.to_owned(),
-                value: BROKERED_TOKEN.into(),
+                value: value.to_vec(),
             }));
         }
         if matches!(setup, BrokeredVault::Locked) {
@@ -5868,6 +5882,146 @@ mod tests {
         assert!(!probe.exists());
     }
 
+    /// CLI 2.1.289 result for a refused OAuth token (ADR-0039 P6a): exit 1,
+    /// empty stderr, `api_error_status` 401 on stdout.
+    const BROKERED_REJECTED: &str = r#"printf '%s' '{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"terminal_reason":"api_error","result":"Failed to authenticate. API Error: 401 OAuth access token is invalid.","session_id":"cccccccc-cccc-cccc-cccc-cccccccccccc"}'; exit 1"#;
+
+    fn released_secret_count(db: &Path) -> usize {
+        storage_sqlite::SqliteStore::open(db)
+            .expect("open store")
+            .list_security_audit_ordered()
+            .expect("read audit")
+            .iter()
+            .filter(|record| {
+                record.fact.event == storage_sqlite::SecurityAuditEvent::SecretAccess
+                    && record.fact.outcome == Some(storage_sqlite::SecurityAuditOutcome::Succeeded)
+            })
+            .count()
+    }
+
+    fn attempt_detail(db: &Path, task: &str) -> String {
+        storage_sqlite::SqliteStore::open(db)
+            .expect("open store")
+            .get_attempt(&agent_runtime::AttemptId::new(format!("A-{task}")).unwrap())
+            .expect("read attempt")
+            .expect("attempt exists")
+            .detail()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// ADR-0039 P6b: a provider refusal of the brokered credential is a
+    /// typed cause, is not retried, and refuses later launches (execution
+    /// and planner) before any release until a new credential is stored.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rejected_brokered_credential_refuses_until_replaced() {
+        use ipc_contracts::proto::{
+            vault_core_request::Payload as Request, VaultCoreRequest, VaultStoreRequest,
+        };
+        use plan_domain::PlannerPort;
+
+        let sandbox = Sandbox::named("brokered-rejected");
+        for task in ["T-REJ-1", "T-REJ-2", "T-REJ-3", "T-REJ-PLAN"] {
+            seed_ready(&sandbox.db, &format!("P-{task}"), task);
+        }
+        let probe = sandbox.dir.join("host-login-probed");
+        let fixture = brokered_fixture(&sandbox.dir, &probe, BROKERED_REJECTED);
+        let vault = brokered_vault(&sandbox, BrokeredVault::Stored).unwrap();
+        let composition = brokered_composition(&sandbox, fixture, Some(vault.clone()));
+        let run = |task: &str| {
+            let (response, job) = run_via_dispatch(&composition, run_request(task, &sandbox.repo));
+            let _ = run_payload(&response);
+            run_background(job.expect("accepted run yields a background job"));
+            attempt_detail(&sandbox.db, task)
+        };
+
+        let first = run("T-REJ-1");
+        assert!(first.contains("provider_credential_rejected"), "{first}");
+        assert_eq!(released_secret_count(&sandbox.db), 1);
+
+        let second = run("T-REJ-2");
+        assert!(second.contains("provider_credential_rejected"), "{second}");
+        assert_eq!(
+            released_secret_count(&sandbox.db),
+            1,
+            "a rejected credential is not released again"
+        );
+        let planner = composition
+            .secured_claude_planner("T-REJ-PLAN")
+            .expect("secured planner");
+        match planner.assess_atomicity(plan_domain::AtomicityRequest {
+            task_ref: "T-REJ-PLAN".to_owned(),
+            acceptance_criteria_refs: Vec::new(),
+            scope_bound: plan_domain::ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+            evidence_refs: vec![plan_domain::EvidenceRef::new("evidence-brokered").unwrap()],
+            execution_policy_ref: "policy:brokered".to_owned(),
+        }) {
+            Err(plan_domain::PlannerFault::ProviderFailure { typed_cause, spend }) => {
+                assert!(typed_cause.contains("provider_credential_rejected"));
+                assert_eq!(spend, plan_domain::PlannerCallSpend::NotStarted);
+            }
+            other => panic!("rejected credential must refuse the planner call: {other:?}"),
+        }
+
+        let response = vault.lock().unwrap().handle(
+            VaultCoreRequest {
+                payload: Some(Request::Store(VaultStoreRequest {
+                    password: BROKERED_VAULT_PASSWORD.into(),
+                    name: crate::vault::PROVIDER_CREDENTIAL_ENTRY.to_owned(),
+                    value: BROKERED_TOKEN.into(),
+                })),
+            },
+            std::time::Instant::now(),
+        );
+        assert!(response.payload.is_some());
+        let third = run("T-REJ-3");
+        assert!(third.contains("provider_credential_rejected"), "{third}");
+        assert_eq!(
+            released_secret_count(&sandbox.db),
+            2,
+            "a newly stored credential is released again"
+        );
+        assert!(!probe.exists());
+    }
+
+    /// The planner path marks a rejection too.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rejected_brokered_credential_from_planner_is_marked() {
+        use plan_domain::PlannerPort;
+
+        let sandbox = Sandbox::named("brokered-rejected-planner");
+        seed_ready(&sandbox.db, "P-REJ-P", "T-REJ-P");
+        seed_ready(&sandbox.db, "P-REJ-E", "T-REJ-E");
+        let probe = sandbox.dir.join("host-login-probed");
+        let fixture = brokered_fixture(&sandbox.dir, &probe, BROKERED_REJECTED);
+        let vault = brokered_vault(&sandbox, BrokeredVault::Stored).unwrap();
+        let composition = brokered_composition(&sandbox, fixture, Some(vault));
+        let planner = composition
+            .secured_claude_planner("T-REJ-P")
+            .expect("secured planner");
+
+        let fault = planner
+            .assess_atomicity(plan_domain::AtomicityRequest {
+                task_ref: "T-REJ-P".to_owned(),
+                acceptance_criteria_refs: Vec::new(),
+                scope_bound: plan_domain::ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+                evidence_refs: vec![plan_domain::EvidenceRef::new("evidence-brokered").unwrap()],
+                execution_policy_ref: "policy:brokered".to_owned(),
+            })
+            .expect_err("401 fails the planner call");
+        assert!(format!("{fault:?}").contains("provider_credential_rejected"));
+        assert_eq!(released_secret_count(&sandbox.db), 1);
+
+        let (response, job) = run_via_dispatch(&composition, run_request("T-REJ-E", &sandbox.repo));
+        let _ = run_payload(&response);
+        run_background(job.expect("accepted run yields a background job"));
+        let detail = attempt_detail(&sandbox.db, "T-REJ-E");
+        assert!(detail.contains("provider_credential_rejected"), "{detail}");
+        assert_eq!(released_secret_count(&sandbox.db), 1);
+    }
+
     /// ADR-0039 P5d: the planner shares the execution composition, so its
     /// child receives the brokered credential and a locked vault refuses the
     /// call before any spend.
@@ -5907,6 +6061,145 @@ mod tests {
             other => panic!("locked vault must refuse before the call: {other:?}"),
         }
         assert!(!probe.exists());
+    }
+
+    /// ADR-0039 P6a measurement (owner choice B, 2026-10-04). The real CLI
+    /// runs through the brokered production path (G6 authorization, broker
+    /// release, macOS Seatbelt, late-bound slot) with the confinement verdict
+    /// overridden to `Compatible` for this test only. One receipt line per
+    /// condition carries classes and booleans: never provider output text,
+    /// never the credential. The valid token arrives on stdin (operator
+    /// script with `read -s`), never through argv, the environment or a file.
+    /// The rejected condition uses a random well-formed token: it measures an
+    /// invalid token, not a revoked one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "real provider: needs RUNLITH_CLAUDE_SMOKE=1, RUNLITH_P6_TOKEN_STDIN=1 and a setup-token on stdin"]
+    fn p6a_brokered_real_claude_measurement() {
+        if std::env::var("RUNLITH_CLAUDE_SMOKE").as_deref() != Ok("1")
+            || std::env::var("RUNLITH_P6_TOKEN_STDIN").as_deref() != Ok("1")
+        {
+            eprintln!(
+                "measurement skipped: set RUNLITH_CLAUDE_SMOKE=1 and RUNLITH_P6_TOKEN_STDIN=1"
+            );
+            return;
+        }
+        let detection = provider_claude::detect(OsStr::new("claude"));
+        assert_eq!(
+            detection.status,
+            provider_claude::ProviderAvailability::Available,
+            "measurement requires an available Claude CLI: {}",
+            detection.detail
+        );
+        let version = detection
+            .version
+            .map(|v| format!("{}.{}.{}", v.major, v.minor, v.patch))
+            .unwrap_or_else(|| "unknown".to_owned());
+        let mut token = zeroize::Zeroizing::new(Vec::new());
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut token).expect("read stdin");
+        while token.last().is_some_and(u8::is_ascii_whitespace) {
+            token.pop();
+        }
+        assert!(!token.is_empty(), "no token on stdin");
+        let invalid = zeroize::Zeroizing::new(random_wellformed_token());
+
+        let conditions: [(&str, Option<&[u8]>); 3] = [
+            ("valid", Some(token.as_slice())),
+            ("invalid", Some(invalid.as_bytes())),
+            ("missing", None),
+        ];
+        for (condition, value) in conditions {
+            let receipt = measure_brokered_condition(condition, value);
+            println!("P6A claude={version} {receipt}");
+        }
+    }
+
+    /// `sk-ant-oat01-` plus 95 random URL-safe characters: the shape of a
+    /// setup-token, accepted by no account.
+    fn random_wellformed_token() -> String {
+        use std::hash::{BuildHasher, Hasher};
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let state = std::collections::hash_map::RandomState::new();
+        let mut token = String::from("sk-ant-oat01-");
+        for index in 0_u64..95 {
+            let mut hasher = state.build_hasher();
+            hasher.write_u64(index);
+            token.push(char::from(ALPHABET[(hasher.finish() % 64) as usize]));
+        }
+        token
+    }
+
+    fn measure_brokered_condition(condition: &str, value: Option<&[u8]>) -> String {
+        let sandbox = Sandbox::named(&format!("p6a-{condition}"));
+        let task = format!("T-P6A-{}", condition.to_uppercase());
+        seed_ready(
+            &sandbox.db,
+            &format!("P-P6A-{}", condition.to_uppercase()),
+            &task,
+        );
+        let vault = match value {
+            Some(value) => brokered_vault_holding(&sandbox, BrokeredVault::Stored, value),
+            None => brokered_vault(&sandbox, BrokeredVault::Empty),
+        };
+        let composition = sandbox
+            .composition(None)
+            .with_auth_verdict(ConfinementAuthVerdict::Compatible)
+            .with_vault(vault.expect("vault handle"));
+
+        let (response, job) = run_via_dispatch(&composition, run_request(&task, &sandbox.repo));
+        let run = run_payload(&response);
+        run_background(job.expect("accepted run yields a background job"));
+
+        let store = storage_sqlite::SqliteStore::open(&sandbox.db).expect("open store");
+        let attempt = store
+            .get_attempt(&agent_runtime::AttemptId::new(run.attempt_id.as_str()).unwrap())
+            .expect("read attempt")
+            .expect("attempt exists");
+        let detail = attempt.detail().unwrap_or_default().to_owned();
+        let class = if detail.contains("missing/invalid authentication") {
+            "auth_required"
+        } else if detail.contains("transient") {
+            "transient"
+        } else if attempt.outcome() == Some(AttemptOutcome::Succeeded) {
+            "none"
+        } else {
+            "other"
+        };
+        let refusal = [
+            "provider_credential_vault_absent",
+            "provider_credential_vault_unavailable",
+            "provider_credential_vault_locked",
+            "provider_credential_missing",
+            "provider_credential_expired",
+            PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED,
+        ]
+        .into_iter()
+        .find(|cause| detail.contains(cause))
+        .unwrap_or("none");
+        let summary_recorded = store
+            .list_events_for_task(&TaskId::new(task.as_str()).unwrap())
+            .expect("read journal")
+            .iter()
+            .any(|event| event.fact.to_state == Some(TaskState::Submitted));
+        let secret_released = store
+            .list_security_audit_ordered()
+            .expect("read audit")
+            .iter()
+            .any(|record| {
+                record.fact.event == storage_sqlite::SecurityAuditEvent::SecretAccess
+                    && record.fact.outcome == Some(storage_sqlite::SecurityAuditOutcome::Succeeded)
+            });
+        drop(store);
+        if let Some(value) = value {
+            assert_absent_under(&sandbox.dir.join("db"), value);
+        }
+        format!(
+            "condition={condition} outcome={:?} class={class} refusal={refusal} \
+             secret_released={secret_released} submitted={summary_recorded} \
+             http_401={} value_absent_from_state=true",
+            attempt.outcome(),
+            detail.contains("401"),
+        )
     }
 
     #[cfg(target_os = "macos")]

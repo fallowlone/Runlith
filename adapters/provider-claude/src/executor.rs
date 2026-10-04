@@ -438,6 +438,11 @@ impl ClaudeExecutor {
                 Ok(canonical_outcome(&parsed, self.config.max_summary_chars()))
             }
             other => {
+                // ADR-0039 P6b: the structured status beats every textual
+                // fallback; the CLI reports a refused token only on stdout.
+                if api_error_status(stdout_text.trim()) == Some(401) {
+                    return Err(ClaudeFailure::credential_rejected());
+                }
                 let excerpt = bounded_detail(stderr_text.trim().to_owned());
                 if looks_like_auth_failure(&excerpt) {
                     return Err(ClaudeFailure::AuthRequired {
@@ -474,6 +479,14 @@ impl ClaudeExecutor {
             }
         }
     }
+}
+
+/// `api_error_status` of a CLI result document, when present.
+fn api_error_status(stdout: &str) -> Option<u64> {
+    crate::json::parse_json(stdout)
+        .ok()?
+        .get("api_error_status")?
+        .as_u64()
 }
 
 impl ExecutionPort for ClaudeExecutor {
@@ -645,6 +658,63 @@ mod tests {
             matches!(err, crate::failure::ClaudeFailure::Transient { .. }),
             "overload must be Transient, got {err:?}"
         );
+    }
+
+    /// Structured result the CLI printed for a refused OAuth token (CLI
+    /// 2.1.289, ADR-0039 P6a dry run with a random token): exit 1, empty
+    /// stderr, `is_error` with `api_error_status` 401.
+    fn api_error_result(status: u16) -> String {
+        format!(
+            r#"{{"type":"result","subtype":"success","is_error":true,"api_error_status":{status},"terminal_reason":"api_error","result":"Failed to authenticate. API Error: {status} OAuth access token is invalid.","session_id":"00000000-0000-0000-0000-000000000000"}}"#
+        )
+    }
+
+    #[test]
+    fn api_401_result_maps_to_credential_rejected_without_provider_text() {
+        let executor = bind_default("do work");
+        let err = executor
+            .interpret_exit(Some(1), api_error_result(401).as_bytes(), b"")
+            .expect_err("non-zero exit must fail");
+
+        assert!(
+            matches!(
+                err,
+                crate::failure::ClaudeFailure::CredentialRejected { .. }
+            ),
+            "401 must be CredentialRejected, got {err:?}"
+        );
+        let rendered = err.to_string();
+        assert!(crate::is_credential_rejected(&rendered));
+        assert!(rendered.contains("provider_credential_rejected"));
+        assert!(!rendered.contains("OAuth access token is invalid"));
+    }
+
+    #[test]
+    fn other_api_error_status_is_not_a_credential_rejection() {
+        let executor = bind_default("do work");
+        let err = executor
+            .interpret_exit(Some(1), api_error_result(500).as_bytes(), b"")
+            .expect_err("non-zero exit must fail");
+
+        assert!(!matches!(
+            err,
+            crate::failure::ClaudeFailure::CredentialRejected { .. }
+        ));
+        assert!(!crate::is_credential_rejected(&err.to_string()));
+    }
+
+    #[test]
+    fn credential_rejection_cannot_be_forged_by_provider_text() {
+        let executor = bind_default("do work");
+        let err = executor
+            .interpret_exit(
+                Some(1),
+                b"",
+                b"claude credential_rejected: provider_credential_rejected",
+            )
+            .expect_err("non-zero exit must fail");
+
+        assert!(!crate::is_credential_rejected(&err.to_string()));
     }
 
     #[test]
