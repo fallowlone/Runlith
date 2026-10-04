@@ -15,5 +15,6 @@ secrets = { path = "../../crates/secrets" }
 zeroize = "1"
 
 [dev-dependencies]
+secret-backend-contract = { path = "../../crates/secret-backend-contract" }
 sha2 = "0.11.0"
 tempfile = "3"

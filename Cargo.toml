@@ -15,6 +15,7 @@ members = [
     "crates/security-audit",
     "crates/runner",
     "crates/secrets",
+    "crates/secret-backend-contract",
     "crates/evaluation",
     "crates/workspace",
     "crates/app-services",

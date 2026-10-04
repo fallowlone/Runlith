@@ -308,6 +308,13 @@ mod tests {
     }
 
     #[test]
+    fn vault_satisfies_the_shared_secret_backend_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, _phrase) = create(&dir.path().join("vault"));
+        secret_backend_contract::run_secret_backend_contract(&vault);
+    }
+
+    #[test]
     fn create_returns_an_unlocked_vault_with_a_default_phrase_and_private_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vault");

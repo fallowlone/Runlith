@@ -1,0 +1,11 @@
+[package]
+name = "secret-backend-contract"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "secret_backend_contract"
+path = "src/lib.rs"
+
+[dependencies]
+secrets = { path = "../secrets" }
