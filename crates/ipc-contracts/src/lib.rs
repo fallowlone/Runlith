@@ -42,14 +42,18 @@ pub const IPC_PROTOCOL_VERSION_V5: u32 = 5;
 /// planning metadata through the bounded `task_authoring_core` envelope.
 pub const IPC_PROTOCOL_VERSION_V6: u32 = 6;
 
+/// ADR-0039 operator credential vault: adds the bounded `vault_core`
+/// envelope (unlock, lock, store, status, rotate, password and recovery).
+pub const IPC_PROTOCOL_VERSION_V7: u32 = 7;
+
 /// Current IPC protocol version: the highest version this build speaks.
-pub const IPC_PROTOCOL_VERSION: u32 = IPC_PROTOCOL_VERSION_V6;
+pub const IPC_PROTOCOL_VERSION: u32 = IPC_PROTOCOL_VERSION_V7;
 
 /// Alias making "current" explicit at call sites.
-pub const IPC_PROTOCOL_VERSION_CURRENT: u32 = IPC_PROTOCOL_VERSION_V6;
+pub const IPC_PROTOCOL_VERSION_CURRENT: u32 = IPC_PROTOCOL_VERSION_V7;
 
 /// Every protocol version this build negotiates, oldest first.
-pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 7] = [
+pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 8] = [
     IPC_PROTOCOL_VERSION_V0,
     IPC_PROTOCOL_VERSION_V1,
     IPC_PROTOCOL_VERSION_V2,
@@ -57,6 +61,7 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 7] = [
     IPC_PROTOCOL_VERSION_V4,
     IPC_PROTOCOL_VERSION_V5,
     IPC_PROTOCOL_VERSION_V6,
+    IPC_PROTOCOL_VERSION_V7,
 ];
 
 /// Maximum length of a client-supplied human/request `reason` (block
@@ -104,6 +109,7 @@ pub fn supports_business_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V4
             | IPC_PROTOCOL_VERSION_V5
             | IPC_PROTOCOL_VERSION_V6
+            | IPC_PROTOCOL_VERSION_V7
     )
 }
 
@@ -119,6 +125,7 @@ pub fn supports_execution_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V4
             | IPC_PROTOCOL_VERSION_V5
             | IPC_PROTOCOL_VERSION_V6
+            | IPC_PROTOCOL_VERSION_V7
     )
 }
 
@@ -132,6 +139,7 @@ pub fn supports_policy_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V4
             | IPC_PROTOCOL_VERSION_V5
             | IPC_PROTOCOL_VERSION_V6
+            | IPC_PROTOCOL_VERSION_V7
     )
 }
 
@@ -142,17 +150,20 @@ pub fn supports_policy_ipc(negotiated_version: u32) -> bool {
 pub fn supports_human_decision_ipc(negotiated_version: u32) -> bool {
     matches!(
         negotiated_version,
-        IPC_PROTOCOL_VERSION_V4 | IPC_PROTOCOL_VERSION_V5 | IPC_PROTOCOL_VERSION_V6
+        IPC_PROTOCOL_VERSION_V4
+            | IPC_PROTOCOL_VERSION_V5
+            | IPC_PROTOCOL_VERSION_V6
+            | IPC_PROTOCOL_VERSION_V7
     )
 }
 
 /// Planning operations are new authority and are never enabled for v0-v4.
-/// Version 6 preserves them.
+/// Every later version preserves them.
 #[must_use]
 pub fn supports_planning_ipc(negotiated_version: u32) -> bool {
     matches!(
         negotiated_version,
-        IPC_PROTOCOL_VERSION_V5 | IPC_PROTOCOL_VERSION_V6
+        IPC_PROTOCOL_VERSION_V5 | IPC_PROTOCOL_VERSION_V6 | IPC_PROTOCOL_VERSION_V7
     )
 }
 
@@ -160,8 +171,41 @@ pub fn supports_planning_ipc(negotiated_version: u32) -> bool {
 /// v0-v5, whose `CreateTaskRequest` keeps its original objective-only shape.
 #[must_use]
 pub fn supports_task_authoring_ipc(negotiated_version: u32) -> bool {
-    negotiated_version == IPC_PROTOCOL_VERSION_V6
+    matches!(
+        negotiated_version,
+        IPC_PROTOCOL_VERSION_V6 | IPC_PROTOCOL_VERSION_V7
+    )
 }
+
+/// The operator credential vault is new authority and is never enabled for
+/// v0-v6 (ADR-0039).
+#[must_use]
+pub fn supports_vault_ipc(negotiated_version: u32) -> bool {
+    negotiated_version == IPC_PROTOCOL_VERSION_V7
+}
+
+/// Generated `Debug` is skipped for these messages (see `build.rs`); this one
+/// names the type and nothing else, so a logged request or response cannot
+/// carry a password, recovery phrase or credential value.
+macro_rules! redacted_debug {
+    ($($name:ident),+ $(,)?) => {
+        $(impl std::fmt::Debug for proto::$name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct(stringify!($name)).finish_non_exhaustive()
+            }
+        })+
+    };
+}
+
+redacted_debug!(
+    VaultCreateRequest,
+    VaultUnlockRequest,
+    VaultStoreRequest,
+    VaultChangePasswordRequest,
+    VaultRecoverRequest,
+    VaultRotateRequest,
+    VaultPhraseResponse,
+);
 
 #[cfg(test)]
 mod tests {
@@ -184,16 +228,17 @@ mod tests {
     }
 
     #[test]
-    fn historical_versions_remain_supported_and_v6_is_current() {
+    fn historical_versions_remain_supported_and_v7_is_current() {
         assert_eq!(IPC_PROTOCOL_VERSION_V0, 0);
         assert_eq!(IPC_PROTOCOL_VERSION_V1, 1);
         assert_eq!(IPC_PROTOCOL_VERSION_V2, 2);
         assert_eq!(IPC_PROTOCOL_VERSION_V3, 3);
         assert_eq!(IPC_PROTOCOL_VERSION_V5, 5);
         assert_eq!(IPC_PROTOCOL_VERSION_V6, 6);
-        assert_eq!(IPC_PROTOCOL_VERSION, 6);
-        assert_eq!(IPC_PROTOCOL_VERSION_CURRENT, 6);
-        assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, [0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(IPC_PROTOCOL_VERSION_V7, 7);
+        assert_eq!(IPC_PROTOCOL_VERSION, 7);
+        assert_eq!(IPC_PROTOCOL_VERSION_CURRENT, 7);
+        assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, [0, 1, 2, 3, 4, 5, 6, 7]);
         assert!(is_supported_version(0));
         assert!(is_supported_version(1));
         assert!(is_supported_version(2));
@@ -201,7 +246,8 @@ mod tests {
         assert!(is_supported_version(4));
         assert!(is_supported_version(5));
         assert!(is_supported_version(6));
-        assert!(!is_supported_version(7));
+        assert!(is_supported_version(7));
+        assert!(!is_supported_version(8));
         assert!(is_compatible(0));
         assert!(is_compatible(1));
         assert!(is_compatible(2));
@@ -209,6 +255,7 @@ mod tests {
         assert!(is_compatible(4));
         assert!(is_compatible(5));
         assert!(is_compatible(6));
+        assert!(is_compatible(7));
     }
 
     #[test]
@@ -252,6 +299,84 @@ mod tests {
         assert!(supports_policy_ipc(IPC_PROTOCOL_VERSION_V6));
         assert!(supports_human_decision_ipc(IPC_PROTOCOL_VERSION_V6));
         assert!(supports_planning_ipc(IPC_PROTOCOL_VERSION_V6));
+    }
+
+    #[test]
+    fn v7_adds_the_vault_without_granting_it_to_historical_sessions() {
+        for historical in IPC_PROTOCOL_VERSION_V0..=IPC_PROTOCOL_VERSION_V6 {
+            assert!(
+                !supports_vault_ipc(historical),
+                "v{historical} never gains vault authority"
+            );
+        }
+        assert!(supports_vault_ipc(IPC_PROTOCOL_VERSION_V7));
+        assert!(!supports_vault_ipc(99));
+        assert!(supports_business_ipc(IPC_PROTOCOL_VERSION_V7));
+        assert!(supports_execution_ipc(IPC_PROTOCOL_VERSION_V7));
+        assert!(supports_policy_ipc(IPC_PROTOCOL_VERSION_V7));
+        assert!(supports_human_decision_ipc(IPC_PROTOCOL_VERSION_V7));
+        assert!(supports_planning_ipc(IPC_PROTOCOL_VERSION_V7));
+        assert!(supports_task_authoring_ipc(IPC_PROTOCOL_VERSION_V7));
+    }
+
+    /// Every secret-bearing vault message, reached through the envelopes a
+    /// session or log line would format, renders without its secret bytes.
+    #[test]
+    fn vault_secrets_never_render_in_debug() {
+        use crate::proto::{
+            control_request, control_response, vault_core_request, vault_core_response,
+            ControlRequest, ControlResponse, VaultChangePasswordRequest, VaultCoreRequest,
+            VaultCoreResponse, VaultCreateRequest, VaultPhraseResponse, VaultRecoverRequest,
+            VaultRotateRequest, VaultStoreRequest, VaultUnlockRequest,
+        };
+        use vault_core_request::Payload;
+
+        const MARKER: &str = "SECRET-MARKER-7f3a";
+        let secret = || MARKER.as_bytes().to_vec();
+        let requests = [
+            Payload::Create(VaultCreateRequest {
+                password: secret(),
+                idle_minutes: 0,
+            }),
+            Payload::Unlock(VaultUnlockRequest {
+                password: secret(),
+                idle_minutes: 0,
+            }),
+            Payload::Store(VaultStoreRequest {
+                password: secret(),
+                name: "provider.claude.oauth_token".to_owned(),
+                value: secret(),
+            }),
+            Payload::ChangePassword(VaultChangePasswordRequest {
+                current_password: secret(),
+                new_password: secret(),
+            }),
+            Payload::Recover(VaultRecoverRequest {
+                recovery_phrase: secret(),
+                new_password: secret(),
+                idle_minutes: 0,
+            }),
+            Payload::Rotate(VaultRotateRequest { password: secret() }),
+        ];
+        for payload in requests {
+            let envelope = ControlRequest {
+                payload: Some(control_request::Payload::VaultCore(VaultCoreRequest {
+                    payload: Some(payload),
+                })),
+            };
+            let rendered = format!("{envelope:?}");
+            assert!(!rendered.contains(MARKER), "leaked: {rendered}");
+            assert!(rendered.contains("Vault"), "type still named: {rendered}");
+        }
+        let response = ControlResponse {
+            payload: Some(control_response::Payload::VaultCore(VaultCoreResponse {
+                payload: Some(vault_core_response::Payload::Phrase(VaultPhraseResponse {
+                    recovery_phrase: secret(),
+                    status: None,
+                })),
+            })),
+        };
+        assert!(!format!("{response:?}").contains(MARKER));
     }
 
     #[test]

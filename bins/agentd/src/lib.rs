@@ -463,6 +463,17 @@ where
                     return ConnectionOutcome::Ended;
                 }
             }
+            Ok(ReadyRequest::Vault(_request)) => {
+                // The vault service lands in ADR-0039 P5c; until then a
+                // negotiated v7 session gets a typed refusal.
+                if session
+                    .respond_vault(dispatch::vault_unavailable())
+                    .await
+                    .is_err()
+                {
+                    return ConnectionOutcome::Ended;
+                }
+            }
             Err(_) => return ConnectionOutcome::Ended,
         }
     }

@@ -22,6 +22,7 @@ use ipc_contracts::proto::{
     GetTaskResponse, LifecycleResponse, ListDependenciesResponse, ListProjectsResponse,
     ListTasksResponse, PlanningTaskDto, ProjectDto, TaskAuthoringCoreRequest,
     TaskAuthoringCoreResponse, TaskCoreRequest, TaskCoreResponse, TaskDto, TaskLifecycleOp,
+    VaultCoreResponse,
 };
 use storage_sqlite::StorageError;
 use task_domain::{DomainError, Project, ProjectId, Task, TaskId};
@@ -323,6 +324,17 @@ pub fn task_authoring_unavailable() -> TaskAuthoringCoreResponse {
                 message: "business service unavailable".to_owned(),
             },
         )),
+    }
+}
+
+pub fn vault_unavailable() -> VaultCoreResponse {
+    use ipc_contracts::proto::{vault_core_response, VaultError, VaultErrorCode};
+    VaultCoreResponse {
+        payload: Some(vault_core_response::Payload::Error(VaultError {
+            code: VaultErrorCode::VaultErrorUnavailable as i32,
+            message: "vault service unavailable".to_owned(),
+            retry_after_ms: None,
+        })),
     }
 }
 

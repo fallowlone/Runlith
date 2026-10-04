@@ -27,7 +27,7 @@ use crate::error::{ControlError, ControlResult};
 use crate::negotiation::{
     default_client_build_version, evaluate_handshake, rejection_for, validate_business_allowed,
     validate_execution_allowed, validate_human_decision_allowed, validate_planning_allowed,
-    validate_policy_allowed, validate_task_authoring_allowed, ServerConfig,
+    validate_policy_allowed, validate_task_authoring_allowed, validate_vault_allowed, ServerConfig,
 };
 
 /// Deadline for a full client/server handshake exchange.
@@ -77,6 +77,9 @@ pub enum ReadyRequest {
     Planning(ipc_contracts::proto::PlanningCoreRequest),
     /// Decoded G7 Task planning-metadata authoring on a version-6 session.
     TaskAuthoring(ipc_contracts::proto::TaskAuthoringCoreRequest),
+    /// Decoded ADR-0039 vault request on a version-7 session. Carries secret
+    /// bytes; its `Debug` is redacted by `ipc-contracts`.
+    Vault(ipc_contracts::proto::VaultCoreRequest),
 }
 
 /// Client-side handshake outcome.
@@ -207,6 +210,16 @@ impl ClientConfig {
             .push(ipc_contracts::IPC_PROTOCOL_VERSION_V6);
         config
     }
+
+    /// ADR-0039 vault client profile. Offers every version through v7 and
+    /// requires `vault_allowed` before use.
+    pub fn vault_default(client_kind: impl Into<String>) -> Self {
+        let mut config = Self::task_authoring_default(client_kind);
+        config
+            .supported_versions
+            .push(ipc_contracts::IPC_PROTOCOL_VERSION_V7);
+        config
+    }
 }
 
 /// Client side of the bootstrap control protocol.
@@ -294,6 +307,12 @@ where
     pub fn task_authoring_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_task_authoring_allowed)
+    }
+
+    #[must_use]
+    pub fn vault_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_vault_allowed)
     }
 
     /// Unwraps into the framed transport for lifecycle-owned exchanges
@@ -517,6 +536,23 @@ where
         }
     }
 
+    pub async fn respond_vault(
+        &mut self,
+        response: ipc_contracts::proto::VaultCoreResponse,
+    ) -> ControlResult<()> {
+        self.require_ready()?;
+        let frame = bytes::Bytes::from(
+            ControlResponse {
+                payload: Some(control_response::Payload::VaultCore(response)),
+            }
+            .encode_to_vec(),
+        );
+        match self.transport.write_frame(frame).await {
+            Ok(()) => Ok(()),
+            Err(error) => self.fail(error.into()),
+        }
+    }
+
     pub async fn respond_task_authoring(
         &mut self,
         response: ipc_contracts::proto::TaskAuthoringCoreResponse,
@@ -603,6 +639,12 @@ where
     pub fn task_authoring_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_task_authoring_allowed)
+    }
+
+    #[must_use]
+    pub fn vault_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_vault_allowed)
     }
 
     /// Reads the first request (within [`HANDSHAKE_TIMEOUT`]), requires it
@@ -779,6 +821,15 @@ where
                     .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
                 match validate_task_authoring_allowed(negotiated) {
                     Ok(()) => Ok(ReadyRequest::TaskAuthoring(request)),
+                    Err(error) => self.fail(error),
+                }
+            }
+            Some(control_request::Payload::VaultCore(request)) => {
+                let negotiated = self
+                    .negotiated_version
+                    .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
+                match validate_vault_allowed(negotiated) {
+                    Ok(()) => Ok(ReadyRequest::Vault(request)),
                     Err(error) => self.fail(error),
                 }
             }
@@ -1560,6 +1611,59 @@ mod tests {
             server.next_request().await,
             Ok(ReadyRequest::TaskAuthoring(_))
         ));
+    }
+
+    fn vault_core_frame() -> Bytes {
+        use ipc_contracts::proto::{vault_core_request, VaultCoreRequest, VaultStatusRequest};
+        Bytes::from(
+            ControlRequest {
+                payload: Some(control_request::Payload::VaultCore(VaultCoreRequest {
+                    payload: Some(vault_core_request::Payload::Status(VaultStatusRequest {})),
+                })),
+            }
+            .encode_to_vec(),
+        )
+    }
+
+    #[tokio::test]
+    async fn v6_session_rejects_vault_and_v7_surfaces_it_without_executing() {
+        let (mut raw_client, mut server) =
+            g7_session_after_handshake(vec![0, 1, 2, 3, 4, 5, 6]).await;
+        assert_eq!(server.negotiated_version(), Some(6));
+        assert!(!server.vault_allowed());
+        raw_client
+            .write_frame(vault_core_frame())
+            .await
+            .expect("write");
+        assert!(matches!(
+            server.next_request().await,
+            Err(ControlError::UnsupportedProtocol {
+                negotiated: 6,
+                required: 7
+            })
+        ));
+
+        let (mut raw_client, mut server) =
+            g7_session_after_handshake(vec![0, 1, 2, 3, 4, 5, 6, 7]).await;
+        assert_eq!(server.negotiated_version(), Some(7));
+        assert!(server.vault_allowed());
+        assert!(server.task_authoring_allowed());
+        raw_client
+            .write_frame(vault_core_frame())
+            .await
+            .expect("write");
+        assert!(matches!(
+            server.next_request().await,
+            Ok(ReadyRequest::Vault(_))
+        ));
+    }
+
+    #[test]
+    fn vault_client_profile_extends_the_task_authoring_profile_with_v7() {
+        let config = ClientConfig::vault_default(CLIENT_KIND_AGENTCTL);
+        assert_eq!(config.supported_versions, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        let historical = ClientConfig::task_authoring_default(CLIENT_KIND_AGENTCTL);
+        assert_eq!(historical.supported_versions, vec![0, 1, 2, 3, 4, 5, 6]);
     }
 
     #[test]

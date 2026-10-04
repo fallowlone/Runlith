@@ -1,0 +1,130 @@
+syntax = "proto3";
+
+package ai_engineering_os.ipc;
+
+// ADR-0039 operator credential vault control plane (protocol v7).
+//
+// Secret material travels only client -> daemon, in the `bytes` fields of the
+// requests below, and once daemon -> client as the generated recovery phrase.
+// No response ever carries a stored credential value. Every message with a
+// secret field has a redacting `Debug` (see `ipc-contracts` build script).
+// Requests that change the vault carry the password even while unlocked.
+
+enum VaultState {
+  VAULT_STATE_UNSPECIFIED = 0;
+  // No vault file exists yet.
+  VAULT_ABSENT = 1;
+  VAULT_LOCKED = 2;
+  VAULT_UNLOCKED = 3;
+}
+
+// Stored entry metadata; never the value.
+message VaultEntryDto {
+  string name = 1;
+  // Unix seconds when the value was stored.
+  uint64 created_at_s = 2;
+}
+
+message VaultStatusRequest {}
+
+// Creates the vault and leaves it unlocked. `idle_minutes = 0` selects the
+// daemon default idle timeout.
+message VaultCreateRequest {
+  bytes password = 1;
+  uint32 idle_minutes = 2;
+}
+
+message VaultUnlockRequest {
+  bytes password = 1;
+  uint32 idle_minutes = 2;
+}
+
+message VaultLockRequest {}
+
+// Stores (or replaces) one allowlisted entry.
+message VaultStoreRequest {
+  bytes password = 1;
+  string name = 2;
+  bytes value = 3;
+}
+
+message VaultChangePasswordRequest {
+  bytes current_password = 1;
+  bytes new_password = 2;
+}
+
+// Replaces a forgotten password with the recovery phrase; leaves the vault
+// unlocked.
+message VaultRecoverRequest {
+  bytes recovery_phrase = 1;
+  bytes new_password = 2;
+  uint32 idle_minutes = 3;
+}
+
+// New data key and a new recovery phrase; the password is unchanged.
+message VaultRotateRequest {
+  bytes password = 1;
+}
+
+message VaultCoreRequest {
+  oneof payload {
+    VaultStatusRequest status = 1;
+    VaultCreateRequest create = 2;
+    VaultUnlockRequest unlock = 3;
+    VaultLockRequest lock = 4;
+    VaultStoreRequest store = 5;
+    VaultChangePasswordRequest change_password = 6;
+    VaultRecoverRequest recover = 7;
+    VaultRotateRequest rotate = 8;
+  }
+}
+
+message VaultStatusResponse {
+  VaultState state = 1;
+  // Present only while unlocked.
+  repeated VaultEntryDto entries = 2;
+  // Idle deadline while unlocked (Unix milliseconds).
+  optional uint64 unlocked_until_ms = 3;
+}
+
+// Answer to create and rotate: the generated recovery phrase, shown to the
+// operator once, plus the resulting status.
+message VaultPhraseResponse {
+  bytes recovery_phrase = 1;
+  VaultStatusResponse status = 2;
+}
+
+enum VaultErrorCode {
+  VAULT_ERROR_CODE_UNSPECIFIED = 0;
+  VAULT_ERROR_ABSENT = 1;
+  VAULT_ERROR_ALREADY_EXISTS = 2;
+  VAULT_ERROR_LOCKED = 3;
+  // Wrong password or phrase (indistinguishable by design).
+  VAULT_ERROR_UNLOCK_FAILED = 4;
+  // Too many failed attempts; see `retry_after_ms`.
+  VAULT_ERROR_RATE_LIMITED = 5;
+  VAULT_ERROR_WEAK_PASSWORD = 6;
+  VAULT_ERROR_INVALID_PHRASE = 7;
+  // The entry name is not on the daemon's allowlist.
+  VAULT_ERROR_ENTRY_NOT_ALLOWED = 8;
+  // The entry exceeds the vault format limits.
+  VAULT_ERROR_ENTRY_REJECTED = 9;
+  VAULT_ERROR_CORRUPT = 10;
+  VAULT_ERROR_INVALID_REQUEST = 11;
+  VAULT_ERROR_UNAVAILABLE = 12;
+}
+
+message VaultError {
+  VaultErrorCode code = 1;
+  // Human- and log-readable diagnostic; never secret material.
+  string message = 2;
+  optional uint64 retry_after_ms = 3;
+}
+
+message VaultCoreResponse {
+  oneof payload {
+    VaultStatusResponse status = 1;
+    VaultPhraseResponse phrase = 2;
+    VaultError error = 3;
+  }
+}
