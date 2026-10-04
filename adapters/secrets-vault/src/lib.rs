@@ -14,7 +14,7 @@ mod backend;
 mod envelope;
 mod phrase;
 
-pub use backend::VaultBackend;
+pub use backend::{EntryInfo, VaultBackend};
 pub use phrase::{RecoveryPhrase, DEFAULT_PHRASE_WORDS, MAX_PHRASE_WORDS, MIN_PHRASE_WORDS};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

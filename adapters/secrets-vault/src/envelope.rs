@@ -308,6 +308,19 @@ impl Envelope {
         })
     }
 
+    /// Fresh data key and fresh slots for both secrets, same KDF parameters,
+    /// same entries (including their creation times).
+    pub(crate) fn rotate(
+        &self,
+        dek: &Dek,
+        password: &Password,
+        phrase: &RecoveryPhrase,
+    ) -> Result<(Self, Dek), VaultError> {
+        let entries = self.entries(dek)?;
+        let (fresh, new_dek) = Self::create(password, phrase, self.params)?;
+        Ok((fresh.with_entries(&new_dek, &entries)?, new_dek))
+    }
+
     pub(crate) fn entries(&self, dek: &Dek) -> Result<Entries, VaultError> {
         let aad = aad(&self.params, PAYLOAD_LABEL);
         let plaintext = open(&dek.0, &self.payload_nonce, &aad, &self.payload)

@@ -18,6 +18,14 @@ use crate::{Password, RecoveryPhrase, VaultError};
 /// The v1 format tops out near 16.8 MiB; anything larger is not a vault.
 const MAX_FILE_LEN: u64 = 32 * 1024 * 1024;
 
+/// Stored entry metadata for operator status; carries no value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EntryInfo {
+    pub name: String,
+    /// Unix seconds when the value was stored.
+    pub created_at: u64,
+}
+
 pub struct VaultBackend {
     path: PathBuf,
     dek: Mutex<Option<Dek>>,
@@ -96,6 +104,41 @@ impl VaultBackend {
         replace_file(&self.path, &envelope.rewrap_password(&dek, new)?.to_bytes())?;
         *state = Some(dek);
         Ok(())
+    }
+
+    /// Replaces the data key, re-encrypts the entries and re-wraps both slots
+    /// under the current password and a new recovery phrase. A copy of the
+    /// file taken before the rotation, opened with an old secret, no longer
+    /// decrypts later versions. Requires the current password even when
+    /// unlocked.
+    pub fn rotate(
+        &self,
+        current: &Password,
+        word_count: usize,
+    ) -> Result<RecoveryPhrase, VaultError> {
+        let mut state = self.state();
+        let envelope = read_envelope(&self.path)?;
+        let dek = envelope.unlock_with_password(current)?;
+        let phrase = RecoveryPhrase::generate(word_count)?;
+        let (rotated, new_dek) = envelope.rotate(&dek, current, &phrase)?;
+        replace_file(&self.path, &rotated.to_bytes())?;
+        *state = Some(new_dek);
+        Ok(phrase)
+    }
+
+    /// Names and creation times of the stored entries, never their values.
+    pub fn entries(&self) -> Result<Vec<EntryInfo>, VaultError> {
+        let state = self.state();
+        let dek = state.as_ref().ok_or(VaultError::Locked)?;
+        let entries = read_envelope(&self.path)?.entries(dek)?;
+        Ok(entries
+            .0
+            .iter()
+            .map(|entry| EntryInfo {
+                name: entry.name.clone(),
+                created_at: entry.created_at,
+            })
+            .collect())
     }
 
     /// Drops (and so zeroizes) the data key.
@@ -461,6 +504,69 @@ mod tests {
 
         let reopened = VaultBackend::open(&path).unwrap();
         reopened.unlock(&new).unwrap();
+    }
+
+    #[test]
+    fn rotate_requires_the_current_password_and_leaves_the_file_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault");
+        let (vault, _phrase) = create(&path);
+        let before = fs::read(&path).unwrap();
+
+        let result = vault.rotate(&password("incorrect-horse"), crate::DEFAULT_PHRASE_WORDS);
+
+        assert_eq!(result.err(), Some(VaultError::UnlockFailed));
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    /// The reason rotation exists: a copy of the old file plus its password
+    /// yields the old data key, which must not open the rotated file.
+    #[test]
+    fn rotate_replaces_the_data_key_and_both_slots() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault");
+        let current = password("correct-horse-battery");
+        let (vault, old_phrase) = create(&path);
+        vault.store(&secret("claude-token"), MATERIAL).unwrap();
+        let created_at = vault.entries().unwrap()[0].created_at;
+        let old_copy = Envelope::parse(&fs::read(&path).unwrap()).unwrap();
+        let old_dek = old_copy.unlock_with_password(&current).unwrap();
+
+        let new_phrase = vault.rotate(&current, crate::DEFAULT_PHRASE_WORDS).unwrap();
+
+        assert!(vault.is_unlocked());
+        assert_ne!(new_phrase.as_bytes(), old_phrase.as_bytes());
+        let rotated = Envelope::parse(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(rotated.entries(&old_dek).err(), Some(VaultError::Corrupt));
+        assert_eq!(vault.load(&secret("claude-token")).unwrap(), MATERIAL);
+        assert_eq!(vault.entries().unwrap()[0].created_at, created_at);
+        let reopened = VaultBackend::open(&path).unwrap();
+        assert_eq!(
+            reopened.recover(&old_phrase, &password("a-new-long-password")),
+            Err(VaultError::UnlockFailed)
+        );
+        reopened.unlock(&current).unwrap();
+        reopened
+            .recover(&new_phrase, &password("a-new-long-password"))
+            .unwrap();
+        assert_eq!(directory_names(&path), ["vault"]);
+    }
+
+    #[test]
+    fn entries_lists_names_and_times_only_while_unlocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault");
+        let (vault, _phrase) = create(&path);
+        assert_eq!(vault.entries().unwrap(), []);
+        vault.store(&secret("claude-token"), MATERIAL).unwrap();
+
+        let entries = vault.entries().unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "claude-token");
+        assert!(entries[0].created_at > 0);
+        vault.lock();
+        assert_eq!(vault.entries().err(), Some(VaultError::Locked));
     }
 
     #[test]
