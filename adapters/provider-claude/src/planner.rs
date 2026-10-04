@@ -31,7 +31,7 @@ use plan_domain::{
     PlanningCostReceipt, ReplanRequest, RiskClass, RiskDelta, VerificationMethod,
     MAX_PLANNER_INPUT_TOKENS, MAX_PLANNER_WALL_CLOCK_SECS,
 };
-use runner::SandboxedLaunch;
+use runner::{ChildSecretEnvironment, SandboxedLaunch};
 
 use crate::config::{ClaudeConfig, MAX_PROMPT_CHARS};
 use crate::executor::{ClaudeExecutor, ObservedPromptRun};
@@ -161,8 +161,21 @@ impl ClaudePlanner {
     /// Attaches the G6/Runner-verified launch recipe used for every planner
     /// provider call.
     #[must_use]
-    pub fn with_sandboxed_launch(mut self, launch: Arc<SandboxedLaunch>) -> Self {
-        self.executor = self.executor.with_sandboxed_launch(launch);
+    pub fn with_sandboxed_launch(self, launch: Arc<SandboxedLaunch>) -> Self {
+        self.with_sandboxed_launch_and_secrets(launch, None)
+    }
+
+    /// [`Self::with_sandboxed_launch`] plus late-bound secrets (ADR-0039)
+    /// for the one planner child this launch spawns.
+    #[must_use]
+    pub fn with_sandboxed_launch_and_secrets(
+        mut self,
+        launch: Arc<SandboxedLaunch>,
+        secrets: Option<ChildSecretEnvironment>,
+    ) -> Self {
+        self.executor = self
+            .executor
+            .with_sandboxed_launch_and_secrets(launch, secrets);
         self
     }
 

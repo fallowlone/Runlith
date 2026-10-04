@@ -296,8 +296,8 @@ Implementation: `adapters/secrets-vault` (`rotate`, `entries`),
 - **Idle lock.** Default 30 minutes, `--idle-minutes` 1-720, chosen when the
   vault is created, unlocked or recovered. A watch task checks every 5
   seconds, so the vault locks up to 5 seconds after its deadline. The daemon
-  locks the vault on shutdown. Extending the deadline on credential release
-  follows with the launch wiring.
+  locks the vault on shutdown. Each credential release to a launch extends
+  the deadline by the chosen idle period (P5d).
 - **Online attempts.** Three failed secret checks are free; after that each
   attempt waits 2^(n-3) seconds, capped at 300 seconds. A limited attempt is
   refused before any derivation (`RATE_LIMITED` with `retry_after_ms`).

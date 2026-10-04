@@ -30,6 +30,7 @@ use crate::execution::{
     build_provider_launch_security_for_context, prepare_provider_launch, ExecutionComposition,
     ProviderLaunchContext, ProviderWorkspaceAccess,
 };
+use crate::provider_credential::ProviderCredential;
 
 const PLANNER_LAUNCH_REQUESTER: &str = "planning-service";
 static PLANNER_OPERATION_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -40,6 +41,7 @@ pub struct SecuredClaudePlanner {
     inner: provider_claude::ClaudePlanner,
     db_path: PathBuf,
     authority_task_ref: String,
+    credential: Result<ProviderCredential, String>,
 }
 
 impl SecuredClaudePlanner {
@@ -65,6 +67,7 @@ impl SecuredClaudePlanner {
             workspace: self.inner.workdir(),
             executable: self.inner.executable(),
             workspace_access: ProviderWorkspaceAccess::ReadOnly,
+            credential: self.credential.clone(),
         })
         .map_err(not_started)?;
         let support_read = self
@@ -91,9 +94,12 @@ impl SecuredClaudePlanner {
         // evidence, so it is charged as unmeasured spend.
         let adapter_invoked = Cell::new(false);
         prepared
-            .invoke(|sandboxed_launch| {
+            .invoke(|sandboxed_launch, secrets| {
                 adapter_invoked.set(true);
-                let planner = self.inner.clone().with_sandboxed_launch(sandboxed_launch);
+                let planner = self
+                    .inner
+                    .clone()
+                    .with_sandboxed_launch_and_secrets(sandboxed_launch, secrets);
                 invoke(&planner)
             })
             .map_err(|detail| PlannerFault::ProviderFailure {
@@ -175,6 +181,7 @@ impl ExecutionComposition {
 
         let workdir = planner_workdir(self.db_path(), &task_id)?;
         let executable = self.resolved_provider_executable()?;
+        let credential = self.provider_credential(executable.as_os_str());
         let config = provider_claude::ClaudeConfig::default()
             .with_executable(executable)
             .map_err(|error| format!("planner provider configuration refused: {error}"))?;
@@ -187,6 +194,7 @@ impl ExecutionComposition {
             inner,
             db_path: self.db_path().to_path_buf(),
             authority_task_ref,
+            credential,
         })
     }
 
@@ -208,6 +216,7 @@ impl ExecutionComposition {
             workspace: &workdir,
             executable: executable.as_os_str(),
             workspace_access: ProviderWorkspaceAccess::ReadOnly,
+            credential: self.provider_credential(executable.as_os_str()),
         })?;
         Ok(launch.policy_fingerprint().to_owned())
     }

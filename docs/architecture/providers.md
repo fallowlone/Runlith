@@ -303,6 +303,24 @@ path and refused those fixtures, which is how the gate was found.
 The cost is one extra bounded local probe per provider launch. Both probes
 obey §2: fixed argv, no shell, bounded capture, short timeout.
 
+Brokered mode (ADR-0039 decision 7): where the platform's confinement
+verdict is `Compatible`, the real CLI authenticates with a dedicated
+operator-created credential released from the operator vault, not with the
+host login. The host probe above is **not** run in that mode: it observes the
+host login, not the brokered credential, and it spawns the CLI unconfined.
+Instead the launch checks, before any G6 or provider work, that the vault
+exists, is unlocked, holds the credential and that the credential is younger
+than its one-year lifetime. Each failure refuses closed with a stable cause
+naming the operator action: `provider_credential_vault_absent`,
+`provider_credential_vault_unavailable`, `provider_credential_vault_locked`,
+`provider_credential_missing`, `provider_credential_expired`. There is no
+fallback to the host login, even when the host is signed in. After policy
+authorization the credential is released through the Secrets Broker
+(audited as `SecretAccess`) into the child's late-bound secret slot, never
+into the plan environment. A confinement verdict of `Unsupported` refuses
+without probing. The host probe remains for platforms without mandatory
+confinement and for the feature-gated `trusted-host` binding.
+
 Rationale and external corroboration: the surveyed orchestrators and the
 Agent Client Protocol all separate an interactive login phase from the
 working launch, and all represent an unauthenticated provider as a typed

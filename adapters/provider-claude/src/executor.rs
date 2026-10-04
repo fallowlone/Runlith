@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use agent_runtime::ProviderRef;
 use evaluation::{ProcessExitObservation, ProcessExitObservationSink};
-use runner::SandboxedLaunch;
+use runner::{ChildSecretEnvironment, SandboxedLaunch};
 use scheduler::{ExecutionPort, ExecutionProblem, WorkEvidence, WorkItem};
 
 use crate::argv::build_argv;
@@ -247,13 +247,24 @@ impl ClaudeExecutor {
     /// recipe: there is no pre-sandbox command the provider could spawn by
     /// forgetting a step.
     #[must_use]
-    pub fn with_sandboxed_launch(mut self, launch: Arc<SandboxedLaunch>) -> Self {
+    pub fn with_sandboxed_launch(self, launch: Arc<SandboxedLaunch>) -> Self {
+        self.with_sandboxed_launch_and_secrets(launch, None)
+    }
+
+    /// [`Self::with_sandboxed_launch`] plus late-bound secrets (ADR-0039)
+    /// installed into the first spawned child only, outside the plan.
+    #[must_use]
+    pub fn with_sandboxed_launch_and_secrets(
+        mut self,
+        launch: Arc<SandboxedLaunch>,
+        secrets: Option<ChildSecretEnvironment>,
+    ) -> Self {
         if self.trusted_host_only {
             // Discard fixture values and refuse before spawn; never retain
             // the trusted-host launch as a fallback after this composition.
             self.environment = Err(TRUSTED_HOST_ENVIRONMENT_ONLY.to_owned());
         }
-        self.launch = ProviderLaunch::Sandboxed(launch);
+        self.launch = ProviderLaunch::sandboxed(launch, secrets);
         self
     }
 

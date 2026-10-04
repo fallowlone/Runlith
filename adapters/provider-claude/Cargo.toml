@@ -23,6 +23,7 @@ evaluation = { path = "../../crates/evaluation" }
 plan-domain = { path = "../../crates/plan" }
 
 [dev-dependencies]
+policy = { path = "../../crates/policy" }
 execution-contract = { path = "../../crates/execution-contract" }
 planner-contract = { path = "../../crates/planner-contract" }
 provider-claude = { path = ".", features = ["trusted-host"] }

@@ -20,13 +20,13 @@ use std::path::Path;
 use std::process::Command;
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::config::bounded_detail;
 use crate::environment::ProviderEnvironment;
 use crate::failure::ClaudeFailure;
-use runner::{CommandSpec, SandboxedLaunch};
+use runner::{ChildSecretEnvironment, CommandSpec, SandboxedLaunch, SpawnWiring};
 
 /// Poll quantum for the wait loop. Correctness never depends on its
 /// value: exit, cancellation, and deadline are all level-checked every
@@ -120,7 +120,26 @@ pub(crate) enum ProviderLaunch {
     TrustedHost,
     /// Verified Runner launch: the only spawnable child is the one the backend
     /// installed restrictions for.
-    Sandboxed(Arc<SandboxedLaunch>),
+    Sandboxed {
+        launch: Arc<SandboxedLaunch>,
+        secrets: SecretSlot,
+    },
+}
+
+/// Late-bound secrets released for one verified launch (ADR-0039). The first
+/// spawn takes them; a later spawn of the same launch runs without them.
+pub(crate) type SecretSlot = Arc<Mutex<Option<ChildSecretEnvironment>>>;
+
+impl ProviderLaunch {
+    pub(crate) fn sandboxed(
+        launch: Arc<SandboxedLaunch>,
+        secrets: Option<ChildSecretEnvironment>,
+    ) -> Self {
+        Self::Sandboxed {
+            launch,
+            secrets: Arc::new(Mutex::new(secrets)),
+        }
+    }
 }
 
 pub(crate) struct ProcessInvocation<'a> {
@@ -152,6 +171,7 @@ fn spawn_failure(error: std::io::Error, executable: &OsStr) -> ClaudeFailure {
 /// backed by a verified Runner sandbox recipe.
 fn wire_sandboxed_child(
     launch: &SandboxedLaunch,
+    secrets: &SecretSlot,
     executable: &OsStr,
     argv: &[OsString],
     workdir: &Path,
@@ -165,18 +185,26 @@ fn wire_sandboxed_child(
     // The child environment travels inside the verified recipe (ambient state
     // cleared, exactly the plan's explicit pairs installed): the provider does
     // not re-apply its own environment on this path.
-    sandboxed
-        .spawn(|wire| {
-            wire.current_dir(workdir)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            // Own process group (unix): timeout/cancel kills the whole child
-            // tree; harmless for normal exits.
-            #[cfg(unix)]
-            wire.process_group(0);
-        })
-        .map_err(|error| spawn_failure(error, executable))
+    let wiring = |wire: &mut SpawnWiring<'_>| {
+        wire.current_dir(workdir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        // Own process group (unix): timeout/cancel kills the whole child
+        // tree; harmless for normal exits.
+        #[cfg(unix)]
+        wire.process_group(0);
+    };
+    // Taken, not copied: the secrets are zeroized when this spawn returns.
+    let secrets = secrets
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
+    match &secrets {
+        Some(secrets) => sandboxed.spawn_with_secrets(secrets, wiring),
+        None => sandboxed.spawn(wiring),
+    }
+    .map_err(|error| spawn_failure(error, executable))
 }
 
 pub(crate) fn spawn_and_supervise(
@@ -209,8 +237,8 @@ pub(crate) fn spawn_and_supervise(
         return Ok(ChildOutcome::Cancelled);
     }
     let mut child: Child = match launch {
-        ProviderLaunch::Sandboxed(launch) => {
-            wire_sandboxed_child(launch, executable, argv, workdir)?
+        ProviderLaunch::Sandboxed { launch, secrets } => {
+            wire_sandboxed_child(launch, secrets, executable, argv, workdir)?
         }
         ProviderLaunch::Unattached => {
             return Err(ClaudeFailure::LaunchUnmanaged {
@@ -535,6 +563,107 @@ mod tests {
             Some(42),
             "cooperative child must exit 42 on SIGTERM, not die of SIGKILL"
         );
+    }
+
+    /// Host backend for the secret-slot test: no OS restriction, explicit
+    /// environment only (the shape of `runner-native`).
+    struct HostBackend;
+
+    impl runner::IsolationBackend for HostBackend {
+        fn identity(&self) -> runner::BackendIdentity {
+            runner::BackendIdentity {
+                name: "provider-claude-test-host",
+                runner: runner::RunnerKind::Native,
+                platform: runner::Platform::current(),
+            }
+        }
+
+        fn enforce(
+            &self,
+            plan: &runner::IsolationPlan,
+        ) -> Result<runner::EnforcementReport, runner::RunnerError> {
+            Ok(runner::EnforcementReport::new(
+                self.identity(),
+                plan.clone(),
+                runner::EnforcementAxes::none(),
+                true,
+            ))
+        }
+
+        fn sandbox(
+            &self,
+            plan: &runner::IsolationPlan,
+            spec: &CommandSpec,
+        ) -> Result<runner::LaunchRecipe, runner::RunnerError> {
+            Ok(runner::LaunchRecipe::new(
+                spec.program(),
+                spec.args().iter().cloned(),
+                plan.environment().vars().to_vec(),
+            ))
+        }
+    }
+
+    fn host_launch(workdir: &Path, executable: &str) -> Arc<SandboxedLaunch> {
+        let scope = policy::ScopeId::new(executable).unwrap();
+        Arc::new(
+            runner::prepare_process_launch(
+                Arc::new(HostBackend),
+                &policy::EffectiveCapabilities::new(vec![policy::Capability::ProcessExecute(
+                    scope.clone(),
+                )]),
+                workdir.to_string_lossy().into_owned(),
+                scope,
+                runner::IsolationRequirements::trusted_host(),
+                runner::ChildEnvironment::empty(),
+            )
+            .expect("host launch"),
+        )
+    }
+
+    /// ADR-0039 P5d: the released credential reaches exactly the first child
+    /// of a verified launch; a second spawn of the same launch runs without it.
+    #[test]
+    fn launch_secret_reaches_only_the_first_spawn() {
+        let dir = std::env::temp_dir().canonicalize().unwrap();
+        let mut secrets = ChildSecretEnvironment::new();
+        secrets
+            .insert(crate::OAUTH_TOKEN_ENV, b"p5d-slot-test-value".to_vec())
+            .unwrap();
+        let launch = ProviderLaunch::sandboxed(host_launch(&dir, "/bin/sh"), Some(secrets));
+        let argv = [
+            OsString::from("-c"),
+            OsString::from(
+                "if [ \"$CLAUDE_CODE_OAUTH_TOKEN\" = p5d-slot-test-value ]; then echo present; \
+                 else echo absent; fi",
+            ),
+        ];
+        let spawn = || {
+            spawn_and_supervise(
+                ProcessInvocation {
+                    executable: OsStr::new("/bin/sh"),
+                    argv: &argv,
+                    workdir: &dir,
+                    environment: &test_environment(),
+                    launch: &launch,
+                },
+                &CancelFlag::fresh(),
+                Duration::from_secs(5),
+                1024,
+                crate::config::DEFAULT_CAPTURE_GRACE,
+            )
+        };
+        for expected in [&b"present\n"[..], &b"absent\n"[..]] {
+            match spawn() {
+                Ok(ChildOutcome::Exited {
+                    code: Some(0),
+                    stdout,
+                    ..
+                }) => {
+                    assert_eq!(stdout, expected);
+                }
+                other => panic!("unexpected outcome: {other:?}"),
+            }
+        }
     }
 
     #[test]

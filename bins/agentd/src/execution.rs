@@ -72,7 +72,10 @@ use policy::{
     Capability, CompiledPolicy, EffectiveCapabilities, FileScope, PolicyLayer, PolicyOutcome,
     PolicyRequest, PolicyRule, RequestOrigin, RequestedCapabilities, ScopeId,
 };
-use runner::{ChildEnvironment, IsolationBackend, IsolationRequirements};
+use runner::{ChildEnvironment, ChildSecretEnvironment, IsolationBackend, IsolationRequirements};
+
+use crate::provider_credential::ProviderCredential;
+use crate::vault::VaultHandle;
 
 /// Wall-clock bound for one production provider execution. Matches the
 /// adapter default: the daemon does not invent its own timeout policy.
@@ -85,7 +88,7 @@ pub const CAPTURE_GRACE: Duration = Duration::from_secs(5);
 const PROVIDER_LAUNCH_REQUESTER: &str = "agent-runtime";
 static NEXT_CANDIDATE_OPERATION: AtomicU64 = AtomicU64::new(1);
 static NEXT_CANDIDATE_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
-const PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED: &str =
+pub(crate) const PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED: &str =
     "provider_authentication_unsupported_in_mandatory_confinement";
 
 /// What this platform's production isolation backend implies for the
@@ -95,15 +98,15 @@ const PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED: &str =
 /// variants are necessarily unconstructed in that build.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
-enum ConfinementAuthVerdict {
+pub(crate) enum ConfinementAuthVerdict {
     /// No mandatory confinement is installed here. The shared runner verifier
     /// refuses a confined launch on its own axis before any provider work, so
     /// there is no separate authentication question to answer.
     NoMandatoryConfinement,
     /// Measured: the provider can authenticate from inside this platform's
-    /// confinement. No platform reports this today; the variant exists so a
-    /// confining platform must choose it deliberately rather than inherit
-    /// silence.
+    /// confinement with a brokered credential (ADR-0039). No platform reports
+    /// this today; the variant exists so a confining platform must choose it
+    /// deliberately rather than inherit silence.
     Compatible,
     /// Measured: the provider's mechanism needs authority the confinement
     /// withholds, so the launch is refused before any provider work.
@@ -471,6 +474,15 @@ pub struct ExecutionComposition {
     /// `Arc`-shared like the tracker and cancel table so `Clone` keeps
     /// sharing one registry.
     background_runs: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>,
+    /// Operator vault shared with `vault_core` (ADR-0039); `None` until the
+    /// daemon attaches it.
+    vault: Option<VaultHandle>,
+    /// This platform's provider-authentication verdict. Production keeps
+    /// `production_platform::AUTH_CONFINEMENT_VERDICT`; only unit tests
+    /// substitute it.
+    auth_verdict: ConfinementAuthVerdict,
+    /// Wall clock (Unix seconds) for the credential age check; tests move it.
+    credential_clock: fn() -> u64,
 }
 
 impl ExecutionComposition {
@@ -487,7 +499,42 @@ impl ExecutionComposition {
             provider_executable,
             candidate_evaluator_executable_override: None,
             background_runs: Arc::new(Mutex::new(Vec::new())),
+            vault: None,
+            auth_verdict: production_platform::AUTH_CONFINEMENT_VERDICT,
+            credential_clock: crate::vault::unix_now_s,
         }
+    }
+
+    /// Attaches the daemon's operator vault, the brokered credential source.
+    #[must_use]
+    pub fn with_vault(mut self, vault: VaultHandle) -> Self {
+        self.vault = Some(vault);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_auth_verdict(mut self, verdict: ConfinementAuthVerdict) -> Self {
+        self.auth_verdict = verdict;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_credential_clock(mut self, now_s: fn() -> u64) -> Self {
+        self.credential_clock = now_s;
+        self
+    }
+
+    /// How a launch of `executable` authenticates on this platform.
+    pub(crate) fn provider_credential(
+        &self,
+        executable: &OsStr,
+    ) -> Result<ProviderCredential, String> {
+        ProviderCredential::resolve(
+            executable,
+            self.auth_verdict,
+            self.vault.clone(),
+            self.credential_clock,
+        )
     }
 
     /// Test-only builder: overrides the binary the candidate-input
@@ -674,6 +721,7 @@ pub(crate) struct ProviderLaunchSecurity {
     policy: CompiledPolicy,
     workspace: String,
     executable: ScopeId,
+    credential: Result<ProviderCredential, String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -794,6 +842,9 @@ fn build_candidate_launch_security(
         policy,
         workspace,
         executable,
+        // Candidate-input processes are never the provider (see
+        // `prepare_candidate_process`); this field is not read for them.
+        credential: Err("candidate input launches carry no provider credential".to_owned()),
     })
 }
 
@@ -818,6 +869,8 @@ pub(crate) struct ProviderLaunchContext<'a> {
     pub(crate) workspace: &'a Path,
     pub(crate) executable: &'a std::ffi::OsStr,
     pub(crate) workspace_access: ProviderWorkspaceAccess,
+    /// A resolution error refuses at launch preparation, before G6 work.
+    pub(crate) credential: Result<ProviderCredential, String>,
 }
 
 pub(crate) struct PreparedProviderLaunch {
@@ -827,21 +880,27 @@ pub(crate) struct PreparedProviderLaunch {
     effective: EffectiveCapabilities,
     spec: ProcessSecuritySpec,
     launch: Arc<runner::SandboxedLaunch>,
+    /// Late-bound secrets released for this launch only (ADR-0039).
+    secrets: Option<ChildSecretEnvironment>,
 }
 
 impl PreparedProviderLaunch {
     pub(crate) fn invoke<T, E>(
         mut self,
-        invoke: impl FnOnce(Arc<runner::SandboxedLaunch>) -> Result<T, E>,
+        invoke: impl FnOnce(
+            Arc<runner::SandboxedLaunch>,
+            Option<ChildSecretEnvironment>,
+        ) -> Result<T, E>,
     ) -> Result<Result<T, E>, String> {
         let launch = Arc::clone(&self.launch);
+        let secrets = self.secrets.take();
         self.security
             .enforce_process_operation(
                 &self.operation,
                 self.backend.as_ref(),
                 &self.effective,
                 &self.spec,
-                || invoke(launch),
+                || invoke(launch, secrets),
             )
             .map_err(|error| format!("G6 security boundary refused provider launch: {error}"))
     }
@@ -854,27 +913,12 @@ pub(crate) fn prepare_provider_launch(
     support_write: Vec<PathBuf>,
     environment_pairs: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 ) -> Result<PreparedProviderLaunch, String> {
-    // providers.md §9a: authentication is verified before the launch, never
-    // discovered during it. Only a provider detection recognizes as the real,
-    // compatible CLI is asked: a fixture or an unrecognized binary has not
-    // claimed to be the working provider and owns no credential, and §9
-    // already answers those. Scope limit: this observes the operator's state
-    // on the host, not a confined child's ability to reach the credential
-    // mechanism from inside an isolation profile.
-    let provider_executable = std::ffi::OsStr::new(launch.executable.as_str());
-    if provider_claude::detect(provider_executable).status
-        == provider_claude::ProviderAvailability::Available
-    {
-        let authentication = provider_claude::probe_authentication(provider_executable);
-        if !authentication.state.permits_launch() {
-            return Err(authentication.refusal());
-        }
-        if let ConfinementAuthVerdict::Unsupported(reason) =
-            production_platform::AUTH_CONFINEMENT_VERDICT
-        {
-            return Err(format!("{PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED}: {reason}"));
-        }
-    }
+    // providers.md §9a / ADR-0039 decision 7: authentication is verified
+    // before the launch, never discovered during it. Only a provider that
+    // detection recognizes as the real, compatible CLI is asked; a brokered
+    // launch checks the vault credential instead of the host login.
+    let credential = launch.credential.as_ref().map_err(Clone::clone)?;
+    credential.preflight(OsStr::new(launch.executable.as_str()))?;
 
     let mut security = G6SecurityService::open(db_path, app_services::SystemClock)
         .map_err(|error| format!("G6 security boundary refused provider launch: {error}"))?;
@@ -891,6 +935,7 @@ pub(crate) fn prepare_provider_launch(
         }
     };
     let operation = PrivilegedOperation::from_policy_request(&launch.request);
+    let secrets = credential.release(&mut security, &operation, &effective)?;
     let backend =
         production_runner_backend(support_read, support_write, RunnerLaunchPurpose::Provider)?;
     let environment = ChildEnvironment::from_explicit(environment_pairs)
@@ -919,6 +964,7 @@ pub(crate) fn prepare_provider_launch(
         effective,
         spec,
         launch: Arc::new(prepared_launch),
+        secrets,
     })
 }
 
@@ -1005,6 +1051,7 @@ fn prepare_candidate_process(
         effective,
         spec,
         launch: Arc::new(prepared),
+        secrets: None,
     })
 }
 
@@ -2618,7 +2665,7 @@ fn run_candidate_process(
     let max_stdout = request.max_stdout;
     let operation = request.operation;
     let op_label = candidate_operation_label(operation, &args);
-    let output = prepared.invoke(|launch| {
+    let output = prepared.invoke(|launch, _secrets| {
         let backend = launch.backend();
         let axes = launch.enforced_axes();
         let runner = CandidateRunnerReceipt {
@@ -3345,10 +3392,10 @@ impl scheduler::ExecutionPort for SecuredClaudeExecutor {
         )
         .map_err(|detail| scheduler::ExecutionProblem::Failed { detail })?;
         prepared
-            .invoke(|prepared_launch| {
+            .invoke(|prepared_launch, secrets| {
                 self.inner
                     .clone()
-                    .with_sandboxed_launch(prepared_launch)
+                    .with_sandboxed_launch_and_secrets(prepared_launch, secrets)
                     .execute(work)
             })
             .map_err(|detail| scheduler::ExecutionProblem::Failed { detail })?
@@ -3362,8 +3409,9 @@ fn secure_provider_executor(
     work: &scheduler::WorkItem,
     inner: provider_claude::ClaudeExecutor,
     executable: &std::ffi::OsStr,
+    credential: Result<ProviderCredential, String>,
 ) -> SecuredClaudeExecutor {
-    let launch = build_provider_launch_security(task, lease, work, executable);
+    let launch = build_provider_launch_security(task, lease, work, executable, credential);
     SecuredClaudeExecutor {
         inner,
         db_path: db_path.to_path_buf(),
@@ -3376,6 +3424,7 @@ fn build_provider_launch_security(
     lease: &workspace::WorkspaceLease,
     work: &scheduler::WorkItem,
     executable: &std::ffi::OsStr,
+    credential: Result<ProviderCredential, String>,
 ) -> Result<ProviderLaunchSecurity, String> {
     build_provider_launch_security_for_context(ProviderLaunchContext {
         task_id: task.id().as_str(),
@@ -3390,6 +3439,7 @@ fn build_provider_launch_security(
         workspace: Path::new(lease.worktree_ref()),
         executable,
         workspace_access: ProviderWorkspaceAccess::ReadWrite,
+        credential,
     })
 }
 
@@ -3430,6 +3480,10 @@ pub(crate) fn build_provider_launch_security_for_context(
                 .map_err(|error| format!("provider launch network scope: {error}"))?,
         ),
     ]);
+    // ADR-0039: only a brokered launch may have the credential released.
+    if let Ok(credential) = &context.credential {
+        capabilities.extend(credential.secret_capability()?);
+    }
     let requested = RequestedCapabilities::new(capabilities.clone());
     let request = PolicyRequest::new(
         context.operation_id,
@@ -3462,6 +3516,7 @@ pub(crate) fn build_provider_launch_security_for_context(
         policy,
         workspace,
         executable,
+        credential: context.credential,
     })
 }
 
@@ -3647,6 +3702,7 @@ fn run_background_inner(
     let candidate_capture = effect_capture.clone();
     let cancel = cancel.clone();
     let environment_base = composition.provider_environment_base()?;
+    let credential = composition.provider_credential(executable.as_os_str());
     // R4 (owner review 2026-09-25): decide evaluator selection first,
     // through the `OrchestrationService`'s own already-open store handle
     // rather than opening a second `SqliteStore` connection just for this
@@ -3739,6 +3795,7 @@ fn run_background_inner(
                     &security_work,
                     executor,
                     &launch_executable,
+                    credential,
                 )
             },
             &selected_evaluator,
@@ -5336,6 +5393,7 @@ mod tests {
             &lease,
             &work,
             std::ffi::OsStr::new("/usr/bin/true"),
+            Err("credential is not reached".to_owned()),
         );
         assert!(result.is_err(), "unresolvable workspace must fail closed");
         assert!(
@@ -5475,6 +5533,380 @@ mod tests {
             }),
             "pre-launch refusal must not record a provider invocation"
         );
+    }
+
+    /// ADR-0039 P5d fixture token. Only the fixture compares it; no test
+    /// output, audit row or durable state may contain it.
+    const BROKERED_TOKEN: &str = "sk-ant-oat01-P5D-BROKERED-MARKER-7f3a";
+    const BROKERED_VAULT_PASSWORD: &str = "p5d-brokered-vault-password";
+    const BROKERED_EXECUTION_SUCCESS: &str = r#"printf '{"type":"result","subtype":"success","is_error":false,"result":"brokered run finished","session_id":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"}'; exit 0"#;
+    const BROKERED_PLANNER_SUCCESS: &str = r#"printf '%s' '{"type":"result","subtype":"success","is_error":false,"result":"{\"verdict\":\"ATOMIC\",\"rationale\":\"brokered fixture\",\"evidence_refs\":[\"evidence-brokered\"]}","session_id":"brokered-planner-session","usage":{"input_tokens":10,"output_tokens":10}}'; exit 0"#;
+
+    /// Real-like Claude CLI: detection sees a compatible version; a host
+    /// login probe (it runs unconfined) leaves `probe_marker`; provider work
+    /// succeeds only when the child holds exactly the brokered token.
+    fn brokered_fixture(dir: &Path, probe_marker: &Path, success: &str) -> PathBuf {
+        fixture_script(
+            dir,
+            "claude-brokered.sh",
+            &format!(
+                "if [ \"$1\" = \"--version\" ]; then printf '2.1.277 (Claude Code)\\n'; exit 0; fi\n\
+                 if [ \"$1\" = \"auth\" ]; then touch {probe_marker:?}; printf '{{\"loggedIn\":true}}\\n'; exit 0; fi\n\
+                 if [ \"$CLAUDE_CODE_OAUTH_TOKEN\" != '{BROKERED_TOKEN}' ]; then exit 97; fi\n\
+                 {success}\n"
+            ),
+        )
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum BrokeredVault {
+        NoHandle,
+        NoFile,
+        Locked,
+        Empty,
+        Stored,
+    }
+
+    fn brokered_vault(sandbox: &Sandbox, setup: BrokeredVault) -> Option<VaultHandle> {
+        use ipc_contracts::proto::{
+            vault_core_request::Payload as Request, vault_core_response::Payload as Response,
+            VaultCoreRequest, VaultCreateRequest, VaultLockRequest, VaultStoreRequest,
+        };
+        if matches!(setup, BrokeredVault::NoHandle) {
+            return None;
+        }
+        let handle =
+            crate::vault::open_handle(crate::vault::vault_path(Some(&sandbox.db)).unwrap());
+        let send = |request| {
+            let response = handle.lock().unwrap().handle(
+                VaultCoreRequest {
+                    payload: Some(request),
+                },
+                std::time::Instant::now(),
+            );
+            if let Some(Response::Error(error)) = response.payload {
+                panic!("vault setup failed: {}", error.message);
+            }
+        };
+        if matches!(setup, BrokeredVault::NoFile) {
+            return Some(handle);
+        }
+        send(Request::Create(VaultCreateRequest {
+            password: BROKERED_VAULT_PASSWORD.into(),
+            idle_minutes: 0,
+        }));
+        if !matches!(setup, BrokeredVault::Empty) {
+            send(Request::Store(VaultStoreRequest {
+                password: BROKERED_VAULT_PASSWORD.into(),
+                name: crate::vault::PROVIDER_CREDENTIAL_ENTRY.to_owned(),
+                value: BROKERED_TOKEN.into(),
+            }));
+        }
+        if matches!(setup, BrokeredVault::Locked) {
+            send(Request::Lock(VaultLockRequest {}));
+        }
+        Some(handle)
+    }
+
+    fn brokered_composition(
+        sandbox: &Sandbox,
+        fixture: PathBuf,
+        vault: Option<VaultHandle>,
+    ) -> ExecutionComposition {
+        let composition = sandbox
+            .composition(Some(fixture))
+            .with_auth_verdict(ConfinementAuthVerdict::Compatible);
+        match vault {
+            Some(vault) => composition.with_vault(vault),
+            None => composition,
+        }
+    }
+
+    fn past_credential_lifetime() -> u64 {
+        crate::vault::unix_now_s() + (ipc_contracts::PROVIDER_CREDENTIAL_LIFETIME_DAYS + 1) * 86_400
+    }
+
+    /// Every file under `root`, recursively, must not contain `needle`.
+    fn assert_absent_under(root: &Path, needle: &[u8]) {
+        for entry in std::fs::read_dir(root).expect("read dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                assert_absent_under(&path, needle);
+            } else if let Ok(bytes) = std::fs::read(&path) {
+                assert!(
+                    !bytes.windows(needle.len()).any(|window| window == needle),
+                    "credential value found in {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    /// ADR-0039 P5d: each unusable brokered credential refuses closed with its
+    /// named cause before any G6 or provider work; the host login is never
+    /// probed and never used as a fallback.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn brokered_launch_refuses_each_unusable_credential_before_provider_work() {
+        let cases = [
+            (
+                "NOHANDLE",
+                BrokeredVault::NoHandle,
+                false,
+                "provider_credential_vault_absent",
+            ),
+            (
+                "NOFILE",
+                BrokeredVault::NoFile,
+                false,
+                "provider_credential_vault_absent",
+            ),
+            (
+                "LOCKED",
+                BrokeredVault::Locked,
+                false,
+                "provider_credential_vault_locked",
+            ),
+            (
+                "MISSING",
+                BrokeredVault::Empty,
+                false,
+                "provider_credential_missing",
+            ),
+            (
+                "EXPIRED",
+                BrokeredVault::Stored,
+                true,
+                "provider_credential_expired",
+            ),
+        ];
+        for (name, setup, past_lifetime, cause) in cases {
+            let sandbox = Sandbox::named(&format!("brokered-refusal-{name}"));
+            let task = format!("T-BR-{name}");
+            seed_ready(&sandbox.db, &format!("P-BR-{name}"), &task);
+            let probe = sandbox.dir.join("host-login-probed");
+            let fixture = brokered_fixture(&sandbox.dir, &probe, BROKERED_EXECUTION_SUCCESS);
+            let vault = brokered_vault(&sandbox, setup);
+            let mut composition = brokered_composition(&sandbox, fixture, vault);
+            if past_lifetime {
+                composition = composition.with_credential_clock(past_credential_lifetime);
+            }
+
+            let (response, job) = run_via_dispatch(&composition, run_request(&task, &sandbox.repo));
+            let _ = run_payload(&response);
+            run_background(job.expect("accepted run yields a background job"));
+
+            let store = storage_sqlite::SqliteStore::open(&sandbox.db).expect("open store");
+            let attempt = store
+                .get_attempt(&agent_runtime::AttemptId::new(format!("A-{task}")).unwrap())
+                .expect("read attempt")
+                .expect("attempt exists");
+            assert_eq!(attempt.outcome(), Some(AttemptOutcome::Failed), "{name}");
+            let detail = attempt.detail().unwrap_or_default();
+            assert!(
+                detail.contains(cause),
+                "{name}: expected {cause}, got {detail}"
+            );
+            assert!(
+                !probe.exists(),
+                "{name}: brokered mode must not probe the host login"
+            );
+            let audit = store.list_security_audit_ordered().expect("read audit");
+            assert!(
+                !audit.iter().any(|record| matches!(
+                    record.fact.event,
+                    storage_sqlite::SecurityAuditEvent::ProviderInvocation
+                        | storage_sqlite::SecurityAuditEvent::SecretAccess
+                )),
+                "{name}: refusal precedes credential release and provider invocation"
+            );
+        }
+    }
+
+    /// ADR-0039 P5d: a usable brokered credential is released through the
+    /// audited broker into the child only. The child sees the exact value;
+    /// no durable state under the data directory contains it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn brokered_launch_releases_the_credential_only_into_the_child() {
+        let sandbox = Sandbox::named("brokered-release");
+        seed_ready(&sandbox.db, "P-BR-OK", "T-BR-OK");
+        let probe = sandbox.dir.join("host-login-probed");
+        let fixture = brokered_fixture(&sandbox.dir, &probe, BROKERED_EXECUTION_SUCCESS);
+        let vault = brokered_vault(&sandbox, BrokeredVault::Stored);
+        let composition = brokered_composition(&sandbox, fixture, vault);
+
+        let (response, job) = run_via_dispatch(&composition, run_request("T-BR-OK", &sandbox.repo));
+        let run = run_payload(&response);
+        run_background(job.expect("accepted run yields a background job"));
+
+        let store = storage_sqlite::SqliteStore::open(&sandbox.db).expect("open store");
+        let attempt = store
+            .get_attempt(&agent_runtime::AttemptId::new(run.attempt_id.as_str()).unwrap())
+            .expect("read attempt")
+            .expect("attempt exists");
+        assert_eq!(
+            attempt.outcome(),
+            Some(AttemptOutcome::Succeeded),
+            "fixture succeeds only with the brokered token: {:?}",
+            attempt.detail()
+        );
+        assert!(
+            !probe.exists(),
+            "brokered mode must not probe the host login"
+        );
+        let audit = store.list_security_audit_ordered().expect("read audit");
+        let secret_outcomes: Vec<_> = audit
+            .iter()
+            .filter(|record| {
+                record.fact.event == storage_sqlite::SecurityAuditEvent::SecretAccess
+                    && record.fact.execution_id.as_deref() == Some(run.execution_id.as_str())
+            })
+            .map(|record| {
+                assert_eq!(
+                    record
+                        .fact
+                        .subject
+                        .as_ref()
+                        .map(|subject| subject.id.as_str()),
+                    Some(crate::vault::PROVIDER_CREDENTIAL_ENTRY)
+                );
+                record.fact.outcome
+            })
+            .collect();
+        assert_eq!(
+            secret_outcomes,
+            [
+                Some(storage_sqlite::SecurityAuditOutcome::Requested),
+                Some(storage_sqlite::SecurityAuditOutcome::Succeeded)
+            ]
+        );
+        assert!(audit.iter().any(|record| {
+            record.fact.event == storage_sqlite::SecurityAuditEvent::ProviderInvocation
+                && record.fact.execution_id.as_deref() == Some(run.execution_id.as_str())
+        }));
+        for record in &audit {
+            assert!(!format!("{record:?}").contains(BROKERED_TOKEN));
+        }
+        assert!(!attempt
+            .detail()
+            .unwrap_or_default()
+            .contains(BROKERED_TOKEN));
+        drop(store);
+        assert_absent_under(&sandbox.dir.join("db"), BROKERED_TOKEN.as_bytes());
+    }
+
+    /// ADR-0039 P5d: the released value lives only in the late-bound slot,
+    /// never in the plan, its environment or `Debug`; a non-brokered launch
+    /// does not even request the credential capability.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn brokered_prepare_keeps_the_credential_out_of_the_plan() {
+        let sandbox = Sandbox::named("brokered-plan");
+        seed_ready(&sandbox.db, "P-BR-PLAN", "T-BR-PLAN");
+        let probe = sandbox.dir.join("host-login-probed");
+        let fixture = brokered_fixture(&sandbox.dir, &probe, BROKERED_EXECUTION_SUCCESS);
+        let plain = fixture_script(&sandbox.dir, "plain.sh", "exit 0\n");
+        let vault = brokered_vault(&sandbox, BrokeredVault::Stored);
+        let composition = brokered_composition(&sandbox, fixture.clone(), vault);
+        let secret = Capability::secret(crate::vault::PROVIDER_CREDENTIAL_ENTRY).unwrap();
+        fn context<'a>(
+            composition: &ExecutionComposition,
+            workspace: &'a Path,
+            executable: &'a Path,
+        ) -> ProviderLaunchContext<'a> {
+            ProviderLaunchContext {
+                task_id: "T-BR-PLAN",
+                execution_id: None,
+                attempt_id: None,
+                operation_id: format!("provider.launch:plan-test:{}", executable.display()),
+                requester: PROVIDER_LAUNCH_REQUESTER,
+                workspace,
+                executable: executable.as_os_str(),
+                workspace_access: ProviderWorkspaceAccess::ReadOnly,
+                credential: composition.provider_credential(executable.as_os_str()),
+            }
+        }
+
+        let plain_launch = build_provider_launch_security_for_context(context(
+            &composition,
+            &sandbox.repo,
+            &plain,
+        ))
+        .unwrap();
+        assert!(!plain_launch.parent.permits(&secret));
+
+        let launch = build_provider_launch_security_for_context(context(
+            &composition,
+            &sandbox.repo,
+            &fixture,
+        ))
+        .unwrap();
+        assert!(launch.parent.permits(&secret));
+        let prepared = prepare_provider_launch(
+            &sandbox.db,
+            &launch,
+            Vec::new(),
+            Vec::new(),
+            vec![("PATH".into(), "/usr/bin:/bin".into())],
+        )
+        .expect("brokered launch prepared");
+
+        let secrets = prepared.secrets.as_ref().expect("credential released");
+        assert_eq!(
+            secrets.names().collect::<Vec<_>>(),
+            [provider_claude::OAUTH_TOKEN_ENV]
+        );
+        assert!(!format!("{secrets:?}").contains(BROKERED_TOKEN));
+        let plan = prepared.launch.plan();
+        assert!(!format!("{plan:?}").contains(BROKERED_TOKEN));
+        assert!(!plan
+            .environment()
+            .vars()
+            .iter()
+            .any(|(name, _)| name == provider_claude::OAUTH_TOKEN_ENV));
+        assert!(!probe.exists());
+    }
+
+    /// ADR-0039 P5d: the planner shares the execution composition, so its
+    /// child receives the brokered credential and a locked vault refuses the
+    /// call before any spend.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn brokered_planner_call_receives_the_credential() {
+        use plan_domain::PlannerPort;
+
+        let sandbox = Sandbox::named("brokered-planner");
+        seed_ready(&sandbox.db, "P-BR-PLANNER", "T-BR-PLANNER");
+        let probe = sandbox.dir.join("host-login-probed");
+        let fixture = brokered_fixture(&sandbox.dir, &probe, BROKERED_PLANNER_SUCCESS);
+        let vault = brokered_vault(&sandbox, BrokeredVault::Stored).unwrap();
+        let composition = brokered_composition(&sandbox, fixture, Some(vault.clone()));
+        let planner = composition
+            .secured_claude_planner("T-BR-PLANNER")
+            .expect("secured planner");
+        let request = || plan_domain::AtomicityRequest {
+            task_ref: "T-BR-PLANNER".to_owned(),
+            acceptance_criteria_refs: Vec::new(),
+            scope_bound: plan_domain::ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+            evidence_refs: vec![plan_domain::EvidenceRef::new("evidence-brokered").unwrap()],
+            execution_policy_ref: "policy:brokered".to_owned(),
+        };
+
+        let assessment = planner
+            .assess_atomicity(request())
+            .expect("planner child holds the brokered token");
+        assert_eq!(assessment.verdict, plan_domain::AtomicityVerdict::Atomic);
+
+        vault.lock().unwrap().lock();
+        match planner.assess_atomicity(request()) {
+            Err(plan_domain::PlannerFault::ProviderFailure { typed_cause, spend }) => {
+                assert!(typed_cause.contains("provider_credential_vault_locked"));
+                assert_eq!(spend, plan_domain::PlannerCallSpend::NotStarted);
+            }
+            other => panic!("locked vault must refuse before the call: {other:?}"),
+        }
+        assert!(!probe.exists());
     }
 
     #[cfg(target_os = "macos")]

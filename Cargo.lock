@@ -1405,6 +1405,7 @@ dependencies = [
  "execution-contract",
  "plan-domain",
  "planner-contract",
+ "policy",
  "provider-claude",
  "runner",
  "scheduler",

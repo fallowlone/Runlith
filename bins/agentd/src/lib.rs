@@ -40,6 +40,7 @@ pub mod dispatch;
 pub mod execution;
 pub mod human_decision;
 pub mod planning;
+mod provider_credential;
 pub mod vault;
 
 pub use data_dir::{resolve_data_dir, resolve_database_path};
@@ -213,6 +214,7 @@ pub type BusinessHandle = Arc<tokio::sync::Mutex<TaskService>>;
 pub type ApprovalHandle = Arc<tokio::sync::Mutex<ApprovalService<SystemClock>>>;
 pub type HumanDecisionHandle = Arc<tokio::sync::Mutex<HumanDecisionService<SystemClock>>>;
 
+#[derive(Clone)]
 struct ConnectionServices {
     business: Option<BusinessHandle>,
     execution: Option<execution::ExecutionHandle>,
@@ -282,13 +284,25 @@ fn open_business_service(config: &DaemonConfig) -> Result<Option<BusinessHandle>
 /// root is ensured per `run`. Control-only daemons (`None` database)
 /// get no execution composition — execution requests answer typed
 /// unavailable, exactly like business requests.
-fn open_execution(config: &DaemonConfig) -> Option<execution::ExecutionHandle> {
+fn open_execution(
+    config: &DaemonConfig,
+    vault: Option<&vault::VaultHandle>,
+) -> Option<execution::ExecutionHandle> {
     config.database_path.as_ref().map(|db| {
-        Arc::new(execution::ExecutionComposition::new(
-            db.clone(),
-            config.provider_executable.clone(),
-        ))
+        let composition =
+            execution::ExecutionComposition::new(db.clone(), config.provider_executable.clone());
+        Arc::new(match vault {
+            Some(vault) => composition.with_vault(vault.clone()),
+            None => composition,
+        })
     })
+}
+
+/// ADR-0039: the operator vault lives beside the database and is shared by
+/// `vault_core` and brokered provider launches; control-only daemons have
+/// none.
+fn open_vault(config: &DaemonConfig) -> Option<vault::VaultHandle> {
+    vault::vault_path(config.database_path.as_deref()).map(vault::open_handle)
 }
 
 fn open_approval_service(config: &DaemonConfig) -> Result<Option<ApprovalHandle>, DaemonError> {
@@ -496,19 +510,14 @@ async fn serve_streams<S>(
     mut accepted: tokio::sync::mpsc::Receiver<(S, Option<BytesMut>)>,
     acceptor: tokio::task::JoinHandle<()>,
     config: &DaemonConfig,
-    business: Option<BusinessHandle>,
-    execution: Option<execution::ExecutionHandle>,
-    approval: Option<ApprovalHandle>,
-    human_decision: Option<HumanDecisionHandle>,
+    services: ConnectionServices,
 ) -> RunOutcome
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
-    // ADR-0039: the operator vault lives beside the database; control-only
-    // daemons have none.
-    let vault = vault::vault_path(config.database_path.as_deref()).map(vault::open_handle);
-    let vault_idle = vault
+    let vault_idle = services
+        .vault
         .clone()
         .map(|handle| tokio::spawn(vault::idle_watch(handle)));
     let admissions = Arc::new(tokio::sync::Semaphore::new(MAX_CONTROL_CLIENTS));
@@ -536,27 +545,10 @@ where
                 connections_served += 1;
                 let sender = shutdown_tx.clone();
                 let server_config = config.server_config.clone();
-                let business = business.clone();
-                let execution = execution.clone();
-                let approval = approval.clone();
-                let human_decision = human_decision.clone();
-                let vault = vault.clone();
+                let services = services.clone();
                 joins.spawn(async move {
                     let _permit = permit;
-                    serve_connection(
-                        stream,
-                        &server_config,
-                        ConnectionServices {
-                            business,
-                            execution,
-                            approval,
-                            human_decision,
-                            vault,
-                        },
-                        sender,
-                        prefetched,
-                    )
-                    .await
+                    serve_connection(stream, &server_config, services, sender, prefetched).await
                 });
             }
         }
@@ -577,10 +569,10 @@ where
         task.abort();
         let _ = task.await;
     }
-    if let Some(handle) = vault.as_ref() {
+    if let Some(handle) = services.vault.as_ref() {
         vault::lock_handle(handle);
     }
-    if let Some(composition) = execution.as_ref() {
+    if let Some(composition) = services.execution.as_ref() {
         let composition = composition.clone();
         let _ = tokio::task::spawn_blocking(move || composition.join_background_runs()).await;
     }
@@ -763,14 +755,18 @@ mod unix_daemon {
         });
         let approval = open_approval_service(&config)?;
         let human_decision = open_human_decision_service(&config)?;
+        let vault = open_vault(&config);
         let outcome = serve_streams(
             accepted_rx,
             acceptor,
             &config,
-            business,
-            open_execution(&config),
-            approval,
-            human_decision,
+            ConnectionServices {
+                business,
+                execution: open_execution(&config, vault.as_ref()),
+                approval,
+                human_decision,
+                vault,
+            },
         )
         .await;
         if let Some(snapshot) = owned.as_ref() {
@@ -864,14 +860,18 @@ mod windows_daemon {
         });
         let approval = super::open_approval_service(&config)?;
         let human_decision = super::open_human_decision_service(&config)?;
+        let vault = super::open_vault(&config);
         Ok(serve_streams(
             accepted_rx,
             acceptor,
             &config,
-            business,
-            open_execution(&config),
-            approval,
-            human_decision,
+            ConnectionServices {
+                business,
+                execution: open_execution(&config, vault.as_ref()),
+                approval,
+                human_decision,
+                vault,
+            },
         )
         .await)
     }

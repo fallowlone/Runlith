@@ -59,6 +59,10 @@ pub use prompt::build_task_prompt;
 pub use tracker::LiveProcessTracker;
 pub use usage::{UsageProvenance, UsageSample};
 
+/// Environment name under which a brokered Claude credential reaches the
+/// confined child (ADR-0039). Never part of the child environment plan.
+pub const OAUTH_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+
 /// Opaque executor reference recorded on durable Attempts created for
 /// Claude-driven executions. Identity only — never branched on in domain
 /// logic, never a credential, never completion evidence.

@@ -14,13 +14,17 @@ use ipc_contracts::proto::{
     vault_core_request, vault_core_response, VaultCoreRequest, VaultCoreResponse, VaultEntryDto,
     VaultError as WireError, VaultErrorCode, VaultPhraseResponse, VaultState, VaultStatusResponse,
 };
-use secrets::{SecretBackend, SecretBackendError, SecretRef};
+use secrets::{
+    SecretBackend, SecretBackendError, SecretBinding, SecretBindingId, SecretDelivery,
+    SecretDeliveryError, SecretDeliveryTarget, SecretMetadataError, SecretMetadataStore, SecretRef,
+};
 use secrets_vault::{Password, RecoveryPhrase, VaultBackend, VaultError};
 use zeroize::Zeroizing;
 
 /// Vault file, in the daemon data directory beside the database.
 pub const VAULT_FILE_NAME: &str = "vault.rlv";
 
+use ipc_contracts::PROVIDER_CREDENTIAL_LIFETIME_DAYS;
 pub use ipc_contracts::VAULT_PROVIDER_CREDENTIAL_ENTRY as PROVIDER_CREDENTIAL_ENTRY;
 
 const ALLOWED_ENTRIES: [&str; 1] = [PROVIDER_CREDENTIAL_ENTRY];
@@ -33,6 +37,8 @@ const MAX_BACKOFF: Duration = Duration::from_secs(300);
 /// How often the idle watch checks the deadline; the vault locks at most
 /// this long after its deadline.
 const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
+const SECONDS_PER_DAY: u64 = 86_400;
 
 pub type VaultHandle = Arc<Mutex<VaultService>>;
 
@@ -87,6 +93,15 @@ pub struct VaultService {
     retry_at: Option<Instant>,
 }
 
+impl std::fmt::Debug for VaultService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VaultService")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
 impl VaultService {
     /// Opening is lazy: a missing or unreadable file is reported per request,
     /// never as a daemon startup failure.
@@ -137,6 +152,56 @@ impl VaultService {
             vault.lock();
         }
         self.idle_deadline = None;
+    }
+
+    /// Brokered launch preflight (ADR-0039 decision 7): the vault exists and
+    /// is unlocked, the provider credential is stored and younger than its
+    /// lifetime. Reads names and creation times only, never the value.
+    pub fn check_provider_credential(
+        &mut self,
+        now: Instant,
+        now_s: u64,
+    ) -> Result<(), CredentialRefusal> {
+        self.expire_if_idle(now);
+        let vault = self
+            .backend()
+            .map_err(|_| CredentialRefusal::VaultUnavailable)?
+            .ok_or(CredentialRefusal::VaultAbsent)?;
+        if !vault.is_unlocked() {
+            return Err(CredentialRefusal::VaultLocked);
+        }
+        let entries = vault.entries().map_err(|failure| match failure {
+            VaultError::Locked => CredentialRefusal::VaultLocked,
+            _ => CredentialRefusal::VaultUnavailable,
+        })?;
+        let credential = entries
+            .iter()
+            .find(|entry| entry.name == PROVIDER_CREDENTIAL_ENTRY)
+            .ok_or(CredentialRefusal::Missing)?;
+        // Same day count as `agentctl vault status`: expired from day 365.
+        let age_days = now_s.saturating_sub(credential.created_at) / SECONDS_PER_DAY;
+        if age_days >= PROVIDER_CREDENTIAL_LIFETIME_DAYS {
+            return Err(CredentialRefusal::Expired);
+        }
+        Ok(())
+    }
+
+    /// Loads the provider credential for one brokered launch and extends the
+    /// idle deadline: a release counts as vault use.
+    pub fn release_provider_credential(
+        &mut self,
+        now: Instant,
+    ) -> Result<Vec<u8>, SecretBackendError> {
+        self.expire_if_idle(now);
+        let credential =
+            SecretRef::new(PROVIDER_CREDENTIAL_ENTRY).map_err(|_| SecretBackendError::Failure)?;
+        let value = self
+            .backend()
+            .map_err(|_| SecretBackendError::Unavailable)?
+            .ok_or(SecretBackendError::NotFound)?
+            .load(&credential)?;
+        self.idle_deadline = Some(now + self.idle);
+        Ok(value)
     }
 
     fn status(&mut self, now: Instant) -> Result<VaultStatusResponse, WireError> {
@@ -321,6 +386,134 @@ impl VaultService {
         }
         Ok(self.vault.as_ref())
     }
+}
+
+/// Why a brokered provider launch is refused before any provider work. Each
+/// cause names the operator action; there is no fallback to the host login.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CredentialRefusal {
+    VaultAbsent,
+    VaultUnavailable,
+    VaultLocked,
+    Missing,
+    Expired,
+}
+
+impl CredentialRefusal {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::VaultAbsent => {
+                "provider_credential_vault_absent: no operator vault exists; run \
+                 `agentctl vault init`, then `agentctl vault store`"
+            }
+            Self::VaultUnavailable => {
+                "provider_credential_vault_unavailable: the operator vault cannot be read; \
+                 run `agentctl vault status`"
+            }
+            Self::VaultLocked => {
+                "provider_credential_vault_locked: the operator vault is locked; run \
+                 `agentctl vault unlock`"
+            }
+            Self::Missing => {
+                "provider_credential_missing: no provider credential is stored; create one \
+                 with `claude setup-token` and run `agentctl vault store`"
+            }
+            Self::Expired => {
+                "provider_credential_expired: the stored provider credential is past its \
+                 one-year lifetime; create a new one with `claude setup-token` and run \
+                 `agentctl vault store`"
+            }
+        }
+    }
+}
+
+/// Launch-scoped secret metadata for one brokered release: the provider
+/// credential reference and its single binding, never persisted.
+#[derive(Default)]
+pub struct LaunchSecretMetadata {
+    refs: Vec<SecretRef>,
+    bindings: Vec<SecretBinding>,
+}
+
+impl SecretMetadataStore for LaunchSecretMetadata {
+    fn ensure_ref(&mut self, secret: &SecretRef) -> Result<(), SecretMetadataError> {
+        if !self.refs.contains(secret) {
+            self.refs.push(secret.clone());
+        }
+        Ok(())
+    }
+
+    fn has_ref(&self, secret: &SecretRef) -> Result<bool, SecretMetadataError> {
+        Ok(self.refs.contains(secret))
+    }
+
+    fn put_binding(&mut self, binding: &SecretBinding) -> Result<(), SecretMetadataError> {
+        if self.bindings.iter().any(|known| known.id() == binding.id()) {
+            return Err(SecretMetadataError::Conflict);
+        }
+        self.bindings.push(binding.clone());
+        Ok(())
+    }
+
+    fn get_binding(
+        &self,
+        id: &SecretBindingId,
+    ) -> Result<Option<SecretBinding>, SecretMetadataError> {
+        Ok(self.bindings.iter().find(|known| known.id() == id).cloned())
+    }
+}
+
+/// Read-only view of the daemon vault for the Secrets Broker. Only the
+/// provider credential can be loaded; writes go through `vault_core`.
+pub struct VaultCredentialBackend(pub VaultHandle);
+
+impl SecretBackend for VaultCredentialBackend {
+    fn store(&self, _secret: &SecretRef, _value: &[u8]) -> Result<(), SecretBackendError> {
+        Err(SecretBackendError::Rejected)
+    }
+
+    fn load(&self, secret: &SecretRef) -> Result<Vec<u8>, SecretBackendError> {
+        if secret.as_str() != PROVIDER_CREDENTIAL_ENTRY {
+            return Err(SecretBackendError::NotFound);
+        }
+        service(&self.0).release_provider_credential(Instant::now())
+    }
+
+    fn delete(&self, _secret: &SecretRef) -> Result<(), SecretBackendError> {
+        Err(SecretBackendError::Rejected)
+    }
+}
+
+/// Delivers the released credential into the late-bound child secret slot.
+#[derive(Default)]
+pub struct ProviderCredentialDelivery(pub runner::ChildSecretEnvironment);
+
+impl SecretDelivery for ProviderCredentialDelivery {
+    fn deliver(
+        &mut self,
+        _target: &SecretDeliveryTarget,
+        value: &[u8],
+    ) -> Result<(), SecretDeliveryError> {
+        self.0
+            .insert(provider_claude::OAUTH_TOKEN_ENV, value.to_vec())
+            .map_err(|_| SecretDeliveryError::Rejected)
+    }
+}
+
+/// Preflight for a brokered launch against the daemon vault, if any.
+pub fn check_provider_credential(
+    handle: Option<&VaultHandle>,
+    now_s: u64,
+) -> Result<(), CredentialRefusal> {
+    let handle = handle.ok_or(CredentialRefusal::VaultAbsent)?;
+    service(handle).check_provider_credential(Instant::now(), now_s)
+}
+
+pub fn unix_now_s() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
 }
 
 type Response = vault_core_response::Payload;
@@ -776,5 +969,132 @@ mod tests {
             code(response.payload.unwrap()),
             VaultErrorCode::VaultErrorInvalidRequest
         );
+    }
+
+    fn stored_service(now: Instant) -> (tempfile::TempDir, VaultService) {
+        let (dir, mut service) = service();
+        send(&mut service, create(PASSWORD), now);
+        send(
+            &mut service,
+            store(PASSWORD, PROVIDER_CREDENTIAL_ENTRY, TOKEN),
+            now,
+        );
+        (dir, service)
+    }
+
+    #[test]
+    fn provider_credential_preflight_names_each_refusal() {
+        let now = Instant::now();
+        let now_s = unix_now_s();
+        let (_absent_dir, mut absent) = service();
+        assert_eq!(
+            absent.check_provider_credential(now, now_s),
+            Err(CredentialRefusal::VaultAbsent)
+        );
+        assert_eq!(
+            check_provider_credential(None, now_s),
+            Err(CredentialRefusal::VaultAbsent)
+        );
+
+        let (_locked_dir, mut locked) = locked_service(now);
+        assert_eq!(
+            locked.check_provider_credential(now, now_s),
+            Err(CredentialRefusal::VaultLocked)
+        );
+
+        let (_empty_dir, mut empty) = service();
+        send(&mut empty, create(PASSWORD), now);
+        assert_eq!(
+            empty.check_provider_credential(now, now_s),
+            Err(CredentialRefusal::Missing)
+        );
+
+        let (_dir, mut stored) = stored_service(now);
+        let created = stored.backend().unwrap().unwrap().entries().unwrap()[0].created_at;
+        assert_eq!(stored.check_provider_credential(now, created), Ok(()));
+        let lifetime = PROVIDER_CREDENTIAL_LIFETIME_DAYS * SECONDS_PER_DAY;
+        assert_eq!(
+            stored.check_provider_credential(now, created + lifetime - 1),
+            Ok(())
+        );
+        assert_eq!(
+            stored.check_provider_credential(now, created + lifetime),
+            Err(CredentialRefusal::Expired)
+        );
+
+        std::fs::write(&stored.path, b"not a vault").unwrap();
+        let mut reopened = VaultService::new(stored.path.clone());
+        assert_eq!(
+            reopened.check_provider_credential(now, now_s),
+            Err(CredentialRefusal::VaultUnavailable)
+        );
+    }
+
+    #[test]
+    fn preflight_applies_the_idle_deadline_first() {
+        let start = Instant::now();
+        let (_dir, mut service) = stored_service(start);
+
+        assert_eq!(
+            service.check_provider_credential(start + minutes(DEFAULT_IDLE_MINUTES), unix_now_s()),
+            Err(CredentialRefusal::VaultLocked)
+        );
+    }
+
+    #[test]
+    fn release_returns_the_value_and_extends_the_idle_deadline() {
+        let start = Instant::now();
+        let (_dir, mut service) = stored_service(start);
+        let later = start + minutes(20);
+
+        let value = service.release_provider_credential(later).unwrap();
+
+        assert_eq!(value, TOKEN);
+        service.expire_if_idle(start + minutes(DEFAULT_IDLE_MINUTES));
+        assert_eq!(
+            service.check_provider_credential(start + minutes(DEFAULT_IDLE_MINUTES), unix_now_s()),
+            Ok(())
+        );
+        service.expire_if_idle(later + minutes(DEFAULT_IDLE_MINUTES));
+        assert_eq!(
+            service.release_provider_credential(later + minutes(DEFAULT_IDLE_MINUTES)),
+            Err(SecretBackendError::Locked)
+        );
+    }
+
+    #[test]
+    fn release_refuses_an_absent_or_locked_vault() {
+        let now = Instant::now();
+        let (_absent_dir, mut absent) = service();
+        assert_eq!(
+            absent.release_provider_credential(now),
+            Err(SecretBackendError::NotFound)
+        );
+        let (_dir, mut locked) = locked_service(now);
+        assert_eq!(
+            locked.release_provider_credential(now),
+            Err(SecretBackendError::Locked)
+        );
+    }
+
+    #[test]
+    fn credential_backend_is_read_only_and_serves_one_name() {
+        let now = Instant::now();
+        let (_dir, stored) = stored_service(now);
+        let backend = VaultCredentialBackend(Arc::new(Mutex::new(stored)));
+        let credential = SecretRef::new(PROVIDER_CREDENTIAL_ENTRY).unwrap();
+        let other = SecretRef::new("provider.other.token").unwrap();
+
+        assert_eq!(backend.load(&credential).unwrap(), TOKEN);
+        assert_eq!(backend.load(&other), Err(SecretBackendError::NotFound));
+        assert_eq!(
+            backend.store(&credential, b"replacement"),
+            Err(SecretBackendError::Rejected)
+        );
+        assert_eq!(
+            backend.delete(&credential),
+            Err(SecretBackendError::Rejected)
+        );
+        assert_eq!(backend.load(&credential).unwrap(), TOKEN);
     }
 }
