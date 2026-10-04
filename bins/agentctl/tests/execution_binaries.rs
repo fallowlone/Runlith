@@ -92,6 +92,41 @@ impl Sandbox {
             .expect("spawn agentd")
     }
 
+    /// Like [`Self::spawn_agentd`], with the daemon's stderr kept in `log`.
+    fn spawn_agentd_logging(&self, log: &Path) -> Child {
+        Command::new(workspace_bin("agentd"))
+            .env("AI_ENGINEERING_OS_RUNTIME_DIR", self.root.join("run"))
+            .env("AI_ENGINEERING_OS_DATA_DIR", self.root.join("data"))
+            .env("PATH", &self.path_env)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(log).expect("daemon log"))
+            .spawn()
+            .expect("spawn agentd")
+    }
+
+    /// One protocol-v7 vault request against this sandbox's running daemon.
+    fn vault(
+        &self,
+        request: ipc_contracts::proto::vault_core_request::Payload,
+    ) -> ipc_contracts::proto::vault_core_response::Payload {
+        let endpoint = self.endpoint();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("vault runtime")
+            .block_on(agentctl::vault_request(
+                &endpoint,
+                || Err(std::io::Error::other("test never starts a daemon here")),
+                ipc_contracts::proto::VaultCoreRequest {
+                    payload: Some(request),
+                },
+            ))
+            .expect("vault request")
+            .payload
+            .expect("vault payload")
+    }
+
     fn replace_provider_body(&self, provider_body: &str) {
         let exe = self.root.join("bin/claude");
         let mut file = std::fs::File::create(&exe).expect("replace fixture provider");
@@ -1197,4 +1232,99 @@ fn v5_planning_ignores_client_authored_authority_and_persists_canonical_task_pol
         accepted.revision().validated_by.policy_fingerprint,
         persisted_policy_fingerprint
     );
+}
+
+/// ADR-0039 P6c: through the shipped binaries, the production macOS daemon
+/// (no verdict override) releases the vault credential into a real-like
+/// provider child; the value never appears in the daemon's stderr or in any
+/// file under the data directory, and the host login is never probed.
+#[cfg(target_os = "macos")]
+#[test]
+fn brokered_launch_keeps_the_credential_out_of_daemon_logs_and_state() {
+    use ipc_contracts::proto::{
+        vault_core_request::Payload as Request, vault_core_response::Payload as Response,
+        VaultCreateRequest, VaultStoreRequest,
+    };
+    const TOKEN: &str = "sk-ant-oat01-P6C-BINARY-MARKER-91d2";
+    const PASSWORD: &str = "p6c-binary-vault-password";
+
+    let probe_marker = std::env::temp_dir().join(format!(
+        "runlith-p6c-host-login-probed-{}",
+        std::process::id()
+    ));
+    let body = format!(
+        "if [ \"$1\" = \"--version\" ]; then printf '2.1.277 (Claude Code)\\n'; exit 0; fi\n\
+         if [ \"$1\" = \"auth\" ]; then touch {probe_marker:?}; exit 0; fi\n\
+         if [ \"$CLAUDE_CODE_OAUTH_TOKEN\" != '{TOKEN}' ]; then exit 97; fi\n\
+         {SUCCESS_BODY}"
+    );
+    let sandbox = Sandbox::new("brokered", &body);
+    let log = sandbox.root.join("agentd.stderr");
+    let mut daemon = DaemonGuard {
+        child: Some(sandbox.spawn_agentd_logging(&log)),
+    };
+    sandbox.wait_ready();
+    seed_ready(&sandbox, "P-BR", "T-BR");
+    for request in [
+        Request::Create(VaultCreateRequest {
+            password: PASSWORD.into(),
+            idle_minutes: 0,
+        }),
+        Request::Store(VaultStoreRequest {
+            password: PASSWORD.into(),
+            name: ipc_contracts::VAULT_PROVIDER_CREDENTIAL_ENTRY.to_owned(),
+            value: TOKEN.into(),
+        }),
+    ] {
+        if let Response::Error(error) = sandbox.vault(request) {
+            panic!("vault setup failed: {}", error.message);
+        }
+    }
+
+    let run = sandbox.agentctl(&[
+        "execution",
+        "run",
+        "T-BR",
+        &sandbox.repo.to_string_lossy(),
+        "--execution",
+        "E-BR",
+        "--attempt",
+        "A-BR",
+    ]);
+    assert!(
+        run.status.success() && stdout(&run).contains("SUCCEEDED"),
+        "brokered run succeeds only with the vault token: stdout={} stderr={}",
+        stdout(&run),
+        stderr(&run)
+    );
+    daemon.kill();
+
+    let daemon_log = std::fs::read(&log).expect("daemon log");
+    assert!(
+        !daemon_log
+            .windows(TOKEN.len())
+            .any(|window| window == TOKEN.as_bytes()),
+        "credential value in daemon stderr"
+    );
+    assert!(!stdout(&run).contains(TOKEN) && !stderr(&run).contains(TOKEN));
+    assert_absent_under(&sandbox.root.join("data"), TOKEN.as_bytes());
+    assert!(
+        !probe_marker.exists(),
+        "brokered mode must not probe the host login"
+    );
+}
+
+fn assert_absent_under(root: &Path, needle: &[u8]) {
+    for entry in std::fs::read_dir(root).expect("read dir") {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            assert_absent_under(&path, needle);
+        } else if let Ok(bytes) = std::fs::read(&path) {
+            assert!(
+                !bytes.windows(needle.len()).any(|window| window == needle),
+                "credential value found in {}",
+                path.display()
+            );
+        }
+    }
 }

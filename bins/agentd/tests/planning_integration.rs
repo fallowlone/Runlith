@@ -618,15 +618,15 @@ fn authenticated_claude_planner_refuses_with_not_started_spend_before_provider_w
             request("fixture:auth-confinement"),
             &policy("TASK-0114", "policy:auth-confinement"),
         )
-        .expect_err("confinement-incompatible auth must refuse before planner work");
+        .expect_err("a brokered launch without a vault must refuse before planner work");
     match error {
         app_services::PlanningServiceError::Planner(PlannerFault::ProviderFailure {
             typed_cause,
             spend,
         }) => {
+            // ADR-0039 P6c: production macOS is brokered; no vault exists.
             assert!(
-                typed_cause
-                    .contains("provider_authentication_unsupported_in_mandatory_confinement"),
+                typed_cause.contains("provider_credential_vault_absent"),
                 "unexpected typed cause: {typed_cause}"
             );
             assert_eq!(spend, PlannerCallSpend::NotStarted);

@@ -104,12 +104,11 @@ pub(crate) enum ConfinementAuthVerdict {
     /// there is no separate authentication question to answer.
     NoMandatoryConfinement,
     /// Measured: the provider can authenticate from inside this platform's
-    /// confinement with a brokered credential (ADR-0039). No platform reports
-    /// this today; the variant exists so a confining platform must choose it
-    /// deliberately rather than inherit silence.
+    /// confinement with a brokered credential (ADR-0039; macOS since P6c).
     Compatible,
     /// Measured: the provider's mechanism needs authority the confinement
-    /// withholds, so the launch is refused before any provider work.
+    /// withholds, so the launch is refused before any provider work. No
+    /// platform reports this since ADR-0039 P6c; it is the rollback value.
     Unsupported(&'static str),
 }
 
@@ -160,15 +159,14 @@ mod production_platform {
         Ok(Arc::new(backend))
     }
 
-    /// TASK-0112 measured the provider-owned macOS authentication path as
-    /// requiring Keychain authority G6 deliberately withholds, so TASK-0114
-    /// refuses an otherwise valid authenticated CLI before provider work.
+    /// ADR-0039 P6c: the provider authenticates inside the Seatbelt profile
+    /// with the brokered vault credential, never through the host login
+    /// Keychain (which TASK-0112 measured as needing authority G6 withholds).
+    /// Receipts: ADR-0039 Addendum C (P6a measurement on Claude Code 2.1.289,
+    /// P6d adversarial checks) and Addendum D. Rollback: restore
+    /// `Unsupported` with the TASK-0112 reason; no data changes.
     pub(super) const AUTH_CONFINEMENT_VERDICT: ConfinementAuthVerdict =
-        ConfinementAuthVerdict::Unsupported(
-            "authenticated Claude CLI state is host-valid, but TASK-0112 measured that the \
-             current provider-owned macOS authentication path requires Keychain authority \
-             intentionally unavailable to the mandatory G6 sandbox",
-        );
+        ConfinementAuthVerdict::Compatible;
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -5493,23 +5491,17 @@ mod tests {
         }
     }
 
+    /// ADR-0039 P6c: the production macOS composition (no verdict override)
+    /// runs a real-like CLI in brokered mode. Without an operator vault it
+    /// refuses with the named vault cause before provider work, and the
+    /// host login is never probed.
     #[cfg(target_os = "macos")]
     #[test]
-    fn authenticated_real_like_claude_refuses_before_provider_work() {
-        let sandbox = Sandbox::named("g6-auth-confinement-refusal");
+    fn production_macos_launch_is_brokered_and_never_probes_the_host_login() {
+        let sandbox = Sandbox::named("g6-production-brokered");
         seed_ready(&sandbox.db, "P-AUTH", "T-AUTH");
-        let marker = sandbox.dir.join("provider-work-started");
-        let fixture = fixture_script(
-            &sandbox.dir,
-            "claude-authenticated.sh",
-            &format!(
-                "if [ \"$1\" = \"--version\" ]; then printf '2.1.277 (Claude Code)\\n'; exit 0; fi\n\
-                 if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then printf '{{\"loggedIn\":true}}\\n'; exit 0; fi\n\
-                 touch {:?}\n\
-                 exit 99\n",
-                marker
-            ),
-        );
+        let probe = sandbox.dir.join("host-login-probed");
+        let fixture = brokered_fixture(&sandbox.dir, &probe, BROKERED_EXECUTION_SUCCESS);
         let composition = sandbox.composition(Some(fixture));
         let (response, job) = run_via_dispatch(&composition, run_request("T-AUTH", &sandbox.repo));
         let _ = run_payload(&response);
@@ -5521,14 +5513,15 @@ mod tests {
             .expect("read attempt")
             .expect("attempt exists");
         assert_eq!(attempt.outcome(), Some(AttemptOutcome::Failed));
+        let detail = attempt.detail().unwrap_or_default();
         assert!(
-            attempt
-                .detail()
-                .unwrap_or_default()
-                .contains(PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED),
-            "refusal must carry the stable confinement-auth cause"
+            detail.contains("provider_credential_vault_absent"),
+            "production macOS must take the brokered path: {detail}"
         );
-        assert!(!marker.exists(), "provider work must not start");
+        assert!(
+            !probe.exists(),
+            "brokered mode must not probe the host login"
+        );
         let audit = store
             .list_security_audit_ordered()
             .expect("read security audit");
@@ -6293,9 +6286,9 @@ mod tests {
             Some(value) => brokered_vault_holding(&sandbox, BrokeredVault::Stored, value),
             None => brokered_vault(&sandbox, BrokeredVault::Empty),
         };
+        // Production composition: no verdict override (ADR-0039 P6c).
         let composition = sandbox
             .composition(None)
-            .with_auth_verdict(ConfinementAuthVerdict::Compatible)
             .with_vault(vault.expect("vault handle"));
 
         let (response, job) = run_via_dispatch(&composition, run_request(&task, &sandbox.repo));
@@ -6308,7 +6301,13 @@ mod tests {
             .expect("read attempt")
             .expect("attempt exists");
         let detail = attempt.detail().unwrap_or_default().to_owned();
-        let class = if detail.contains("missing/invalid authentication") {
+        let class = if provider_claude::is_credential_rejected(
+            detail
+                .split_once("failed: ")
+                .map_or("", |(_, rendered)| rendered),
+        ) {
+            "credential_rejected"
+        } else if detail.contains("missing/invalid authentication") {
             "auth_required"
         } else if detail.contains("transient") {
             "transient"
@@ -6323,6 +6322,7 @@ mod tests {
             "provider_credential_vault_locked",
             "provider_credential_missing",
             "provider_credential_expired",
+            "provider_credential_rejected",
             PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED,
         ]
         .into_iter()

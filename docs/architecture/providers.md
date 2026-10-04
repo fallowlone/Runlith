@@ -286,6 +286,9 @@ configuration before provider work with the stable cause
 does not widen Seatbelt to make the call succeed. The host precondition still
 has separate value: an operator who is simply not signed in gets a named
 authentication-required refusal instead of an opaque provider exit.
+Since ADR-0039 P6c the macOS production verdict is `Compatible`: the real
+CLI runs in brokered mode (below) with the Seatbelt profile unchanged, and
+the TASK-0114 refusal is kept only as the rollback value.
 
 Enforcement point: the requirement applies **only to a provider that
 detection recognizes as the real, compatible CLI** — `detect()` reporting

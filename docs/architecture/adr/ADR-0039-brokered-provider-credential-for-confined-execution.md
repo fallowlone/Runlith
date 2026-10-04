@@ -1,8 +1,8 @@
 # ADR-0039 — Brokered Provider Credential for Confined Claude Execution
 
-Status: **Proposed** (2026-10-03; not ratified. Phase 1 only. Needs owner
-ratification and architecture/security review before any implementation task
-starts.)
+Status: **Accepted** (ratified by the owner 2026-10-04 after the P6c
+production-path smoke, Addendum D; proposed 2026-10-03. Phase 1 only;
+Phase 2, the credential-injecting proxy, needs its own decision.)
 Gate: G6 follow-up (provider authentication under mandatory confinement)
 
 > This decision lets the production macOS path run the real Claude Code CLI
@@ -369,4 +369,37 @@ on stdin).
   in a binary), same-user reads of a process environment (accepted
   residual), outbound destinations on `tcp:443` (A4, Phase 2).
 
-Status remains Proposed until the owner formally ratifies the ADR.
+## Addendum D — macOS verdict flipped to Compatible (2026-10-04, P6c)
+
+- `production_platform::AUTH_CONFINEMENT_VERDICT` (macOS) is `Compatible`,
+  on the receipts of Addendum C (P6a measurement, P6d adversarial checks).
+  The Seatbelt profile is unchanged. A real CLI on macOS now always takes
+  the brokered path; `Unsupported` is constructed by no platform and is the
+  rollback value (restore it with the TASK-0112 reason; no data changes).
+- **Version drift (owner choice a2).** A brokered launch on a Claude Code
+  version other than the measured 2.1.289 still runs and writes a warning
+  to the daemon's stderr asking for the measurement to be repeated. It does
+  not refuse, because the CLI updates itself often.
+- **Binary-level leak check.** Through the shipped `agentd` and `agentctl`
+  (no override), a real-like provider receives the vault credential; the
+  value is absent from the daemon's stderr, the client output and every file
+  under the data directory, and the host login is not probed.
+- **Live smoke.** The P6a test no longer overrides the verdict, so the
+  operator's run of it is the production-path smoke. Receipt (2026-10-04,
+  Claude Code 2.1.289, macOS, production composition, operator token on
+  stdin):
+
+  | condition | attempt | secret released | submitted | 401 in cause |
+  | --- | --- | --- | --- | --- |
+  | valid setup-token | Succeeded | yes | yes | no |
+  | random well-formed token | Failed | yes | no | yes |
+  | no stored credential | Failed (`provider_credential_missing`) | no | no | no |
+
+  The value was absent from every file under the data directory in all
+  conditions. In this run the harness printed `class=other` for the second
+  row because it did not yet know the `credential_rejected` class; the
+  cause carried the adapter's fixed `api_error_status 401` text, which only
+  `CredentialRejected` produces. The harness was corrected afterwards and a
+  dry run with a random token reports `class=credential_rejected`.
+
+The owner ratified this ADR on 2026-10-04 on these receipts.

@@ -17,6 +17,9 @@ use secrets::{SecretBinding, SecretBindingId, SecretDeliveryTarget, SecretRef, S
 use crate::execution::{ConfinementAuthVerdict, PROVIDER_AUTH_CONFINEMENT_UNSUPPORTED};
 use crate::vault::{self, VaultHandle, PROVIDER_CREDENTIAL_ENTRY};
 
+/// Claude Code version of the ADR-0039 brokered measurement (Addendum C).
+const MEASURED_CLI_VERSION: (u64, u64, u64) = (2, 1, 289);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProviderCredentialMode {
     /// Not the real, compatible CLI (fixture, unrecognized binary): it has
@@ -36,6 +39,8 @@ pub(crate) struct ProviderCredential {
     mode: ProviderCredentialMode,
     vault: Option<VaultHandle>,
     now_s: fn() -> u64,
+    /// Brokered launches on an unmeasured CLI version warn (owner choice a2).
+    version_note: Option<String>,
 }
 
 impl ProviderCredential {
@@ -47,9 +52,8 @@ impl ProviderCredential {
         vault: Option<VaultHandle>,
         now_s: fn() -> u64,
     ) -> Result<Self, String> {
-        let mode = if provider_claude::detect(executable).status
-            != provider_claude::ProviderAvailability::Available
-        {
+        let detection = provider_claude::detect(executable);
+        let mode = if detection.status != provider_claude::ProviderAvailability::Available {
             ProviderCredentialMode::NotRequired
         } else {
             match verdict {
@@ -60,7 +64,15 @@ impl ProviderCredential {
                 }
             }
         };
-        Ok(Self { mode, vault, now_s })
+        let version_note = (mode == ProviderCredentialMode::Brokered)
+            .then(|| unmeasured_version_note(detection.version.as_ref()))
+            .flatten();
+        Ok(Self {
+            mode,
+            vault,
+            now_s,
+            version_note,
+        })
     }
 
     /// The broker capability a brokered launch must hold; `None` otherwise.
@@ -89,6 +101,9 @@ impl ProviderCredential {
                 }
             }
             ProviderCredentialMode::Brokered => {
+                if let Some(note) = &self.version_note {
+                    eprintln!("agentd: warning: {note}");
+                }
                 vault::check_provider_credential(self.vault.as_ref(), (self.now_s)())
                     .map_err(|refusal| refusal.message().to_owned())
             }
@@ -166,4 +181,45 @@ fn release_from_vault(
         )
         .map_err(|error| refused(&error))?;
     Ok(delivery.0)
+}
+
+/// Warning for a brokered launch on a Claude Code version other than the
+/// one measured for ADR-0039 (owner choice a2: warn, do not refuse).
+fn unmeasured_version_note(version: Option<&provider_claude::CliVersion>) -> Option<String> {
+    let (major, minor, patch) = MEASURED_CLI_VERSION;
+    let observed = match version {
+        Some(version) if (version.major, version.minor, version.patch) == MEASURED_CLI_VERSION => {
+            return None;
+        }
+        Some(version) => format!("{}.{}.{}", version.major, version.minor, version.patch),
+        None => "unknown".to_owned(),
+    };
+    Some(format!(
+        "claude CLI {observed} differs from {major}.{minor}.{patch}, the version measured for \
+         brokered confinement (ADR-0039); repeat the measurement"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn version(patch: u64) -> provider_claude::CliVersion {
+        provider_claude::CliVersion {
+            major: 2,
+            minor: 1,
+            patch,
+        }
+    }
+
+    #[test]
+    fn only_the_measured_cli_version_launches_without_a_warning() {
+        assert_eq!(unmeasured_version_note(Some(&version(289))), None);
+        let note = unmeasured_version_note(Some(&version(290))).expect("warning");
+        assert!(
+            note.contains("2.1.290") && note.contains("2.1.289"),
+            "{note}"
+        );
+        assert!(unmeasured_version_note(None).is_some());
+    }
 }
