@@ -45,10 +45,13 @@ dependencies = [
  "plan-domain",
  "policy",
  "prost",
+ "rustix",
  "storage-sqlite",
  "task-domain",
+ "tempfile",
  "tokio",
  "workspace",
+ "zeroize",
 ]
 
 [[package]]
@@ -74,10 +77,14 @@ dependencies = [
  "runner-macos-seatbelt",
  "runner-native",
  "scheduler",
+ "secrets",
+ "secrets-vault",
  "storage-sqlite",
  "task-domain",
+ "tempfile",
  "tokio",
  "workspace",
+ "zeroize",
 ]
 
 [[package]]

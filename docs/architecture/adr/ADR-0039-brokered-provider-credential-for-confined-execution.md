@@ -266,4 +266,54 @@ Implementation: `adapters/secrets-vault` (`src/envelope.rs`, `src/phrase.rs`).
 - **Limits of this addendum.** Timing was measured on one host. The adapter,
   lock model and file I/O follow in the next P4 step.
 
+## Addendum B — Vault control plane (2026-10-04, P5a-P5c)
+
+Implementation: `adapters/secrets-vault` (`rotate`, `entries`),
+`crates/ipc-contracts/proto/vault_core.proto`, `bins/agentd/src/vault.rs`,
+`bins/agentctl/src/vault.rs`.
+
+- **Rotation.** `rotate` needs the current password, generates a new data
+  key and a new recovery phrase, re-encrypts the entries (creation times
+  kept) and re-wraps both slots. Reason: a password change or a recovery
+  re-wraps only the password slot, so a copy of the old file plus an old
+  password yields the data key that also decrypts every later version of
+  the file. The previous recovery phrase stops working.
+- **IPC.** Protocol v7 adds `vault_core = 10` (`Status`, `Create`, `Unlock`,
+  `Lock`, `Store`, `ChangePassword`, `Recover`, `Rotate`). v0-v6 sessions
+  keep their authority and cannot reach the vault. Secrets travel only
+  client to daemon in `bytes` fields; the recovery phrase is the one secret
+  sent back (on `Create` and `Rotate`). No response carries a stored value.
+  Every message with a secret field has a redacting `Debug`.
+- **Mutations need the password.** `Store`, `ChangePassword` and `Rotate`
+  check the password even while the vault is unlocked, so a same-user IPC
+  peer cannot replace the credential. `Store` accepts only the allowlisted
+  name `provider.claude.oauth_token` and refuses a locked vault.
+- **File.** `<data_dir>/vault.rlv` beside the database, mode 0600, opened
+  lazily (a missing or corrupt file is reported per request, never as a
+  daemon startup failure). Control-only daemons have no vault.
+- **Concurrency.** One service lock serializes all vault requests, run off
+  the async runtime, so at most one 256 MiB derivation runs at a time.
+- **Idle lock.** Default 30 minutes, `--idle-minutes` 1-720, chosen when the
+  vault is created, unlocked or recovered. A watch task checks every 5
+  seconds, so the vault locks up to 5 seconds after its deadline. The daemon
+  locks the vault on shutdown. Extending the deadline on credential release
+  follows with the launch wiring.
+- **Online attempts.** Three failed secret checks are free; after that each
+  attempt waits 2^(n-3) seconds, capped at 300 seconds. A limited attempt is
+  refused before any derivation (`RATE_LIMITED` with `retry_after_ms`).
+  Success resets the counter. The counter lives in daemon memory and resets
+  with a daemon restart.
+- **Terminal input.** `agentctl vault` reads the password, phrase and token
+  with echo off (`rustix` termios) and refuses a non-terminal stdin before
+  any daemon contact. Creating and rotating also refuse a non-terminal
+  stdout, so the phrase is never written to a pipe or a log. Secrets are
+  never accepted as arguments.
+- **Credential age.** `vault status` shows the age of the stored token and
+  warns from day 335; the token counts as expired from day 365.
+- **Limits.** Transport and Protobuf frame buffers are not zeroized; decoded
+  secret fields are moved into zeroizing types and dropped after use. A
+  signal that kills `agentctl` while echo is off leaves the terminal without
+  echo (`stty echo` repairs it). Hidden terminal input is not covered by an
+  automated test.
+
 Status remains Proposed until the owner formally ratifies the ADR.

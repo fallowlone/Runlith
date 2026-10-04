@@ -24,10 +24,13 @@ runner = { path = "../../crates/runner" }
 runner-native = { path = "../../adapters/runner-native" }
 runner-macos-seatbelt = { path = "../../adapters/runner-macos-seatbelt" }
 scheduler = { path = "../../crates/scheduler" }
+secrets = { path = "../../crates/secrets" }
+secrets-vault = { path = "../../adapters/secrets-vault" }
 storage-sqlite = { path = "../../adapters/storage-sqlite" }
 task-domain = { path = "../../crates/task" }
 tokio = { version = "~1.51", features = ["macros", "rt", "net", "sync", "time"] }
 workspace = { path = "../../crates/workspace" }
+zeroize = "1"
 
 [dev-dependencies]
 app-services = { path = "../../crates/app-services" }
@@ -38,7 +41,9 @@ fake-planner = { path = "../../adapters/fake-planner" }
 git-cli = { path = "../../adapters/git-cli" }
 prost = "0.14.4"
 provider-claude = { path = "../../adapters/provider-claude", features = ["trusted-host"] }
+secrets-vault = { path = "../../adapters/secrets-vault", features = ["test-params"] }
 storage-sqlite = { path = "../../adapters/storage-sqlite" }
 task-domain = { path = "../../crates/task" }
+tempfile = "3"
 tokio = { version = "~1.51", features = ["macros", "rt", "net", "sync", "time"] }
 workspace = { path = "../../crates/workspace" }

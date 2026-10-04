@@ -42,6 +42,17 @@ impl VaultBackend {
         Self::create_with_params(path.into(), password, word_count, KdfParams::V1)
     }
 
+    /// Like [`Self::create`] with cheap KDF parameters that give no
+    /// protection, for tests of crates that compose the vault.
+    #[cfg(feature = "test-params")]
+    pub fn create_with_test_params(
+        path: impl Into<PathBuf>,
+        password: &Password,
+        word_count: usize,
+    ) -> Result<(Self, RecoveryPhrase), VaultError> {
+        Self::create_with_params(path.into(), password, word_count, KdfParams::new(8, 1, 1)?)
+    }
+
     fn create_with_params(
         path: PathBuf,
         password: &Password,

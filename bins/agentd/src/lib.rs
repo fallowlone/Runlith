@@ -40,6 +40,7 @@ pub mod dispatch;
 pub mod execution;
 pub mod human_decision;
 pub mod planning;
+pub mod vault;
 
 pub use data_dir::{resolve_data_dir, resolve_database_path};
 
@@ -217,6 +218,7 @@ struct ConnectionServices {
     execution: Option<execution::ExecutionHandle>,
     approval: Option<ApprovalHandle>,
     human_decision: Option<HumanDecisionHandle>,
+    vault: Option<vault::VaultHandle>,
 }
 
 /// Terminal outcome of a daemon run.
@@ -463,14 +465,12 @@ where
                     return ConnectionOutcome::Ended;
                 }
             }
-            Ok(ReadyRequest::Vault(_request)) => {
-                // The vault service lands in ADR-0039 P5c; until then a
-                // negotiated v7 session gets a typed refusal.
-                if session
-                    .respond_vault(dispatch::vault_unavailable())
-                    .await
-                    .is_err()
-                {
+            Ok(ReadyRequest::Vault(request)) => {
+                let response = match &services.vault {
+                    Some(handle) => vault::dispatch(handle.clone(), request).await,
+                    None => dispatch::vault_unavailable(),
+                };
+                if session.respond_vault(response).await.is_err() {
                     return ConnectionOutcome::Ended;
                 }
             }
@@ -505,6 +505,12 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    // ADR-0039: the operator vault lives beside the database; control-only
+    // daemons have none.
+    let vault = vault::vault_path(config.database_path.as_deref()).map(vault::open_handle);
+    let vault_idle = vault
+        .clone()
+        .map(|handle| tokio::spawn(vault::idle_watch(handle)));
     let admissions = Arc::new(tokio::sync::Semaphore::new(MAX_CONTROL_CLIENTS));
     let mut joins = tokio::task::JoinSet::new();
     let mut connections_served: u64 = 0;
@@ -534,6 +540,7 @@ where
                 let execution = execution.clone();
                 let approval = approval.clone();
                 let human_decision = human_decision.clone();
+                let vault = vault.clone();
                 joins.spawn(async move {
                     let _permit = permit;
                     serve_connection(
@@ -544,6 +551,7 @@ where
                             execution,
                             approval,
                             human_decision,
+                            vault,
                         },
                         sender,
                         prefetched,
@@ -565,6 +573,13 @@ where
     let _ = acceptor.await;
     joins.abort_all();
     while joins.join_next().await.is_some() {}
+    if let Some(task) = vault_idle {
+        task.abort();
+        let _ = task.await;
+    }
+    if let Some(handle) = vault.as_ref() {
+        vault::lock_handle(handle);
+    }
     if let Some(composition) = execution.as_ref() {
         let composition = composition.clone();
         let _ = tokio::task::spawn_blocking(move || composition.join_background_runs()).await;
@@ -1523,6 +1538,119 @@ mod tests {
             },
             other => panic!("expected task_core envelope, got {other:?}"),
         }
+        drop(transport);
+        shutdown_and_await(handle, &sandbox.endpoint).await;
+    }
+
+    /// ADR-0039 P5c: the vault round trip over a negotiated v7 session.
+    /// No response frame ever carries the stored value, and the file sits
+    /// beside the database, owner-only.
+    #[tokio::test]
+    async fn vault_round_trip_over_v7_never_returns_the_value() {
+        use ipc_contracts::proto::{
+            vault_core_request::Payload as Request, vault_core_response::Payload as Response,
+            VaultCoreRequest, VaultCreateRequest, VaultLockRequest, VaultState, VaultStatusRequest,
+            VaultStoreRequest, VaultUnlockRequest,
+        };
+
+        const PASSWORD: &[u8] = b"correct-horse-battery";
+        const TOKEN: &[u8] = b"sk-ant-oat01-TOKEN-MARKER-91b2";
+        let sandbox = Sandbox::new("vault");
+        let db = test_db_path(&sandbox.root);
+        let endpoint = sandbox.endpoint.clone();
+        let config = DaemonConfig {
+            server_config: ServerConfig::g7_default(),
+            database_path: Some(db.clone()),
+            provider_executable: None,
+        };
+        let handle =
+            tokio::spawn(
+                async move { run_on_endpoint_with(&endpoint, config, OsPeerSource).await },
+            );
+        wait_ready(&sandbox.endpoint).await;
+        let stream = transport_connect(&sandbox.endpoint).await.expect("connect");
+        let mut session = ClientSession::new(
+            FramedTransport::new(stream),
+            ClientConfig::vault_default(ipc_control::CLIENT_KIND_AGENTCTL),
+        );
+        session.perform_handshake().await.expect("v7 handshake");
+        assert!(session.vault_allowed());
+        let mut transport = session.into_inner();
+        async fn exchange(
+            transport: &mut FramedTransport<UnixStream>,
+            request: Request,
+        ) -> Response {
+            let frame = Bytes::from(
+                ControlRequest {
+                    payload: Some(control_request::Payload::VaultCore(VaultCoreRequest {
+                        payload: Some(request),
+                    })),
+                }
+                .encode_to_vec(),
+            );
+            transport.write_frame(frame).await.expect("write");
+            let reply = transport.read_frame().await.expect("reply");
+            assert!(
+                !reply.windows(TOKEN.len()).any(|window| window == TOKEN),
+                "a response frame carried the stored value"
+            );
+            match ControlResponse::decode(&reply[..]).expect("decode").payload {
+                Some(control_response::Payload::VaultCore(vault)) => {
+                    vault.payload.expect("vault payload")
+                }
+                other => panic!("expected vault_core envelope, got {other:?}"),
+            }
+        }
+        let state = |response: Response| match response {
+            Response::Status(status) => status,
+            Response::Phrase(phrase) => phrase.status.expect("status"),
+            Response::Error(error) => panic!("unexpected vault error: {}", error.message),
+        };
+
+        let absent = state(exchange(&mut transport, Request::Status(VaultStatusRequest {})).await);
+        assert_eq!(absent.state(), VaultState::VaultAbsent);
+        let created = exchange(
+            &mut transport,
+            Request::Create(VaultCreateRequest {
+                password: PASSWORD.to_vec(),
+                idle_minutes: 0,
+            }),
+        )
+        .await;
+        assert!(matches!(&created, Response::Phrase(phrase) if !phrase.recovery_phrase.is_empty()));
+        exchange(
+            &mut transport,
+            Request::Store(VaultStoreRequest {
+                password: PASSWORD.to_vec(),
+                name: vault::PROVIDER_CREDENTIAL_ENTRY.to_owned(),
+                value: TOKEN.to_vec(),
+            }),
+        )
+        .await;
+        let locked = state(exchange(&mut transport, Request::Lock(VaultLockRequest {})).await);
+        assert_eq!(locked.state(), VaultState::VaultLocked);
+        let unlocked = state(
+            exchange(
+                &mut transport,
+                Request::Unlock(VaultUnlockRequest {
+                    password: PASSWORD.to_vec(),
+                    idle_minutes: 5,
+                }),
+            )
+            .await,
+        );
+
+        assert_eq!(unlocked.state(), VaultState::VaultUnlocked);
+        assert_eq!(unlocked.entries.len(), 1);
+        assert_eq!(unlocked.entries[0].name, vault::PROVIDER_CREDENTIAL_ENTRY);
+        let file = db.with_file_name(vault::VAULT_FILE_NAME);
+        let mode = std::fs::metadata(&file)
+            .expect("vault file")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let bytes = std::fs::read(&file).expect("read vault");
+        assert!(!bytes.windows(TOKEN.len()).any(|window| window == TOKEN));
         drop(transport);
         shutdown_and_await(handle, &sandbox.endpoint).await;
     }

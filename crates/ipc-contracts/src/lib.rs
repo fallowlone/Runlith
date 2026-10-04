@@ -184,6 +184,17 @@ pub fn supports_vault_ipc(negotiated_version: u32) -> bool {
     negotiated_version == IPC_PROTOCOL_VERSION_V7
 }
 
+/// The one vault entry an operator may store (ADR-0039): the Claude Code
+/// setup-token. The daemon refuses every other name.
+pub const VAULT_PROVIDER_CREDENTIAL_ENTRY: &str = "provider.claude.oauth_token";
+
+/// The setup-token exposes no expiry; it is treated as valid for one year
+/// from the time it was stored.
+pub const PROVIDER_CREDENTIAL_LIFETIME_DAYS: u64 = 365;
+
+/// Operators are warned this many days before the lifetime ends.
+pub const PROVIDER_CREDENTIAL_WARN_DAYS: u64 = 30;
+
 /// Generated `Debug` is skipped for these messages (see `build.rs`); this one
 /// names the type and nothing else, so a logged request or response cannot
 /// carry a password, recovery phrase or credential value.

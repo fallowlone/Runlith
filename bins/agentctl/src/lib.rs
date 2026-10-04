@@ -21,7 +21,7 @@ use ipc_contracts::proto::{
     ExecutionCoreResponse, HumanDecisionCoreRequest, HumanDecisionCoreResponse,
     PlanningCoreRequest, PlanningCoreResponse, PolicyCoreRequest, PolicyCoreResponse,
     ShutdownRequest, TaskAuthoringCoreRequest, TaskAuthoringCoreResponse, TaskCoreRequest,
-    TaskCoreResponse,
+    TaskCoreResponse, VaultCoreRequest, VaultCoreResponse,
 };
 use ipc_control::{ClientConfig, ClientSession, ControlError, CLIENT_KIND_AGENTCTL};
 use ipc_transport::{FramedTransport, TransportError};
@@ -50,6 +50,10 @@ pub const DISAPPEAR_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Deadline for a business response after the request is written.
 pub const BUSINESS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Deadline for a vault response: an Argon2id derivation (256 MiB) is part
+/// of most requests and is slow in unoptimized builds.
+pub const VAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Deadline for an execution response after the request is written.
 /// `run` commits its durable entry synchronously (service open plus
@@ -916,6 +920,83 @@ where
         Some(control_response::Payload::PlanningCore(response)) => Ok(response),
         other => Err(ClientError::HumanDecisionAmbiguous(format!(
             "unexpected planning reply ({other:?}); endpoint {absence}; not replaying"
+        ))),
+    }
+}
+
+/// Performs a protocol-v7 handshake for the ADR-0039 operator vault.
+#[cfg(unix)]
+async fn handshake_stream_v7<S>(stream: S) -> Result<ClientSession<S>, ClientError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut session = ClientSession::new(
+        FramedTransport::new(stream),
+        ClientConfig::vault_default(CLIENT_KIND_AGENTCTL),
+    );
+    session
+        .perform_handshake()
+        .await
+        .map_err(classify_control)?;
+    if !session.vault_allowed() {
+        return Err(ClientError::Control(ControlError::UnsupportedProtocol {
+            negotiated: session.negotiated_version().unwrap_or(0),
+            required: ipc_contracts::IPC_PROTOCOL_VERSION_V7,
+        }));
+    }
+    Ok(session)
+}
+
+/// Sends one protocol-v7 vault request. A lost or ambiguous reply is
+/// [`ClientError::BusinessAmbiguous`] and is never replayed; the caller
+/// re-probes with `vault status`.
+#[cfg(unix)]
+pub async fn vault_request(
+    endpoint: &UnixEndpoint,
+    spawn: impl FnOnce() -> io::Result<Child>,
+    request: VaultCoreRequest,
+) -> Result<VaultCoreResponse, ClientError> {
+    let session = connect_or_start_with(spawn, || async {
+        let stream = transport_connect(endpoint)
+            .await
+            .map_err(classify_transport)?;
+        handshake_stream_v7(stream).await
+    })
+    .await?;
+    let absence = absence_note(endpoint);
+    let mut transport = session.into_inner();
+    let frame = Bytes::from(
+        ControlRequest {
+            payload: Some(control_request::Payload::VaultCore(request)),
+        }
+        .encode_to_vec(),
+    );
+    transport.write_frame(frame).await.map_err(|error| {
+        ClientError::BusinessAmbiguous(format!(
+            "VaultCoreRequest send failed ({error}); endpoint {absence}; not replaying"
+        ))
+    })?;
+    let frame = tokio::time::timeout(VAULT_RESPONSE_TIMEOUT, transport.read_frame())
+        .await
+        .map_err(|_| {
+            ClientError::BusinessAmbiguous(format!(
+                "vault response timeout; endpoint {absence}; not replaying"
+            ))
+        })?
+        .map_err(|error| {
+            ClientError::BusinessAmbiguous(format!(
+                "vault response lost ({error}); endpoint {absence}; not replaying"
+            ))
+        })?;
+    let response = ControlResponse::decode(&frame[..]).map_err(|error| {
+        ClientError::BusinessAmbiguous(format!(
+            "vault response undecodable ({error}); endpoint {absence}; not replaying"
+        ))
+    })?;
+    match response.payload {
+        Some(control_response::Payload::VaultCore(response)) => Ok(response),
+        _ => Err(ClientError::BusinessAmbiguous(format!(
+            "unexpected vault reply; endpoint {absence}; not replaying"
         ))),
     }
 }

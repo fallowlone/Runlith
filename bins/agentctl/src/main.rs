@@ -28,6 +28,8 @@ use ipc_contracts::proto::{
     TriggerPlanningRequest,
 };
 
+mod vault;
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -41,8 +43,10 @@ async fn main() -> ExitCode {
         Some("approval") => cmd_approval(args.collect()).await,
         Some("human-decision") => cmd_human_decision(args.collect()).await,
         Some("planning") => cmd_planning(args.collect()).await,
+        Some("vault") => vault::cmd(args.collect()).await,
         _ => {
-            eprintln!("usage: agentctl <start|ping|shutdown|project|task|execution|approval|human-decision|planning> ...");
+            eprintln!("usage: agentctl <start|ping|shutdown|project|task|execution|approval|human-decision|planning|vault> ...");
+            eprintln!("  {}", vault::USAGE);
             eprintln!("  agentctl project create <id> <name>");
             eprintln!("  agentctl project get <id>");
             eprintln!("  agentctl project list");

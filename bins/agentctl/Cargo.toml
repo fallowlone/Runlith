@@ -14,6 +14,11 @@ ipc-control = { path = "../../crates/ipc-control" }
 ipc-transport = { path = "../../crates/ipc-transport" }
 prost = "0.14.4"
 tokio = { version = "~1.51", features = ["macros", "rt", "net", "time"] }
+zeroize = "1"
+
+[target.'cfg(unix)'.dependencies]
+# Hidden terminal input for vault secrets (echo off via termios).
+rustix = { version = "1.1.4", features = ["termios"] }
 
 [dev-dependencies]
 agentd = { path = "../agentd" }
@@ -30,4 +35,5 @@ ipc-transport = { path = "../../crates/ipc-transport" }
 prost = "0.14.4"
 storage-sqlite = { path = "../../adapters/storage-sqlite" }
 task-domain = { path = "../../crates/task" }
+tempfile = "3"
 tokio = { version = "~1.51", features = ["macros", "rt", "net", "time"] }
