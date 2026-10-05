@@ -408,10 +408,12 @@ where
                 };
                 // Retained by design (F17, see `execution::run_background`):
                 // the serve loop never blocks on provider time, but the
-                // handle is kept in the composition registry and joined
-                // on daemon shutdown so in-flight runs conclude their
-                // bookkeeping instead of dying mid-write. A spawn failure
-                // is reported honestly with the committed execution named.
+                // handle is kept in the composition registry; on daemon
+                // shutdown wind-down cancels in-flight runs first and
+                // then joins them, so runs conclude their bookkeeping
+                // through the cancel path instead of dying mid-write.
+                // A spawn failure is reported honestly with the
+                // committed execution named.
                 let response = match job {
                     Some(job) => {
                         let id = job.work_execution_id();
@@ -555,10 +557,11 @@ where
     }
 
     // Wind down: acceptor output is ignored from here on, stragglers are
-    // aborted, tasks reaped. Retained background provider runs (F17) are
-    // joined so in-flight runs conclude their bookkeeping instead of
-    // dying mid-write; each run is provider-timeout-bounded. The owned
-    // endpoint is released by the caller.
+    // aborted, tasks reaped. In-flight provider runs are cancelled first
+    // through the composition registry, then joined: the cancel path
+    // concludes their bookkeeping instead of dying mid-write, and the
+    // join cannot stall behind provider time. The owned endpoint is
+    // released by the caller.
     // The accept task (F19) is stopped first so the listener closes
     // before the endpoint is released.
     acceptor.abort();
@@ -574,7 +577,11 @@ where
     }
     if let Some(composition) = services.execution.as_ref() {
         let composition = composition.clone();
-        let _ = tokio::task::spawn_blocking(move || composition.join_background_runs()).await;
+        let _ = tokio::task::spawn_blocking(move || {
+            composition.cancel_inflight_runs();
+            composition.join_background_runs();
+        })
+        .await;
     }
     RunOutcome::ShutdownCompleted { connections_served }
 }
@@ -1099,6 +1106,217 @@ mod tests {
             .expect("ping");
         shutdown_and_await(handle, &sandbox.endpoint).await;
         assert!(!sandbox.endpoint.socket_path.exists());
+    }
+
+    fn fixture_git(repo: &std::path::Path) {
+        let output = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "init",
+                "-q",
+            ])
+            .current_dir(repo)
+            .stdin(std::process::Stdio::null())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("fixture git init");
+        assert!(output.status.success(), "git init failed");
+        let output = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .current_dir(repo)
+            .stdin(std::process::Stdio::null())
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("fixture git commit");
+        assert!(output.status.success(), "git commit failed");
+    }
+
+    fn fixture_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+        use std::io::Write;
+        let path = dir.join(name);
+        let mut file = std::fs::File::create(&path).expect("fixture file");
+        file.write_all(b"#!/bin/sh\n").expect("shebang");
+        file.write_all(body.as_bytes()).expect("fixture body");
+        drop(file);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("fixture chmod");
+        path
+    }
+
+    /// Seeds a READY task through an accepted fixture plan, mirroring the
+    /// execution-composition fixtures: a planning parent carrying the
+    /// objective, published with this task as its only child.
+    fn seed_ready_task(db: &std::path::Path, project: &str, task: &str) {
+        let mut tasks = app_services::TaskService::open(db, app_services::SystemClock)
+            .expect("open task service");
+        let project_id = task_domain::ProjectId::new(project).unwrap();
+        tasks
+            .create_project(
+                &task_domain::Project::new(project_id.clone(), format!("project {project}"))
+                    .unwrap(),
+            )
+            .unwrap();
+        let parent_id = task_domain::TaskId::new(format!("{task}-PARENT")).unwrap();
+        tasks
+            .create_task(
+                &task_domain::Task::draft(
+                    parent_id.clone(),
+                    project_id,
+                    format!("objective {task}"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        tasks.mark_ready(&parent_id).unwrap();
+        let mut planning = app_services::PlanningService::open(db, app_services::SystemClock)
+            .expect("open planning service");
+        let scope = plan_domain::ScopeBound::new(vec!["repo:src".to_owned()]).unwrap();
+        let evidence = plan_domain::EvidenceRef::new(format!("fixture-plan:{task}")).unwrap();
+        let branch = plan_domain::PlanBranchId::new(format!("fixture-plan-{task}")).unwrap();
+        let planner =
+            fake_planner::FakePlanner::for_single_leaf(plan_domain::PlanNodeId::new(task).unwrap());
+        let request = plan_domain::DecompositionRequest {
+            parent_task_ref: format!("{task}-PARENT"),
+            base_plan_revision: 0,
+            acceptance_criteria_refs: vec![],
+            scope_bound: scope.clone(),
+            evidence_refs: vec![evidence],
+            depth_remaining: plan_domain::MAX_DECOMPOSITION_DEPTH,
+            baseline_risk: plan_domain::RiskClass::Low,
+            budget_remaining: plan_domain::PlanningBudget {
+                calls_remaining: plan_domain::MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
+                input_tokens_remaining: plan_domain::MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
+            },
+        };
+        let policy = app_services::PlanningPolicyContext {
+            scope_bound: scope,
+            baseline_risk: plan_domain::RiskClass::Low,
+            affected_parent_criteria: vec![],
+            parent_task_ref: format!("{task}-PARENT"),
+            canonical_task_authority: false,
+            lineage_fingerprints: vec![],
+            risk_grant: None,
+            risk_decision_id: None,
+            policy_fingerprint: format!("policy:fixture:{task}"),
+        };
+        let outcome = planning
+            .propose_decomposition(&planner, &branch, request, &policy)
+            .expect("seed accepted plan");
+        assert!(
+            matches!(outcome, app_services::PlanningProposalOutcome::Accepted(_)),
+            "fixture plan must be accepted"
+        );
+    }
+
+    fn wait_for_attempt(db: &std::path::Path, execution_id: &agent_runtime::ExecutionId) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let store = storage_sqlite::SqliteStore::open(db).expect("open test db");
+            if let Ok(Some(execution)) = store.get_execution(execution_id) {
+                if !execution.attempts().is_empty() {
+                    return;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("provider run never went in flight");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// Shutdown with an in-flight provider run must release the endpoint
+    /// promptly instead of pinning the daemon until the provider finishes.
+    /// The fixture provider never exits on its own, so without a
+    /// wind-down cancel this hangs past the shutdown budget below.
+    #[tokio::test]
+    async fn shutdown_with_inflight_provider_run_exits_promptly() {
+        use ipc_contracts::proto::{
+            control_request, control_response, execution_core_request, execution_core_response,
+            ControlRequest, ControlResponse, ExecutionCoreRequest, RunExecutionRequest,
+        };
+
+        let sandbox = Sandbox::new("shutdown-inflight");
+        let db = test_db_path(&sandbox.root);
+        let db_parent = db.parent().expect("db parent");
+        std::fs::create_dir_all(db_parent).expect("db parent dir");
+        std::fs::set_permissions(db_parent, std::fs::Permissions::from_mode(0o700))
+            .expect("db parent mode");
+        let repo = sandbox.root.join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        fixture_git(&repo);
+        let fixture = fixture_script(&sandbox.root, "slow-provider.sh", "while :; do :; done\n");
+        seed_ready_task(&db, "P-SHUT", "T-SHUT");
+        let endpoint = sandbox.endpoint.clone();
+        let config = DaemonConfig::with_execution(db.clone()).with_provider_executable(fixture);
+        let handle =
+            tokio::spawn(
+                async move { run_on_endpoint_with(&endpoint, config, OsPeerSource).await },
+            );
+        wait_ready(&sandbox.endpoint).await;
+
+        let stream = transport_connect(&sandbox.endpoint).await.expect("connect");
+        let mut session = ClientSession::new(
+            FramedTransport::new(stream),
+            ClientConfig::execution_default(ipc_control::CLIENT_KIND_AGENTCTL),
+        );
+        session.perform_handshake().await.expect("v2 handshake");
+        assert!(session.execution_allowed());
+        let mut transport = session.into_inner();
+        let frame = Bytes::from(
+            ControlRequest {
+                payload: Some(control_request::Payload::ExecutionCore(
+                    ExecutionCoreRequest {
+                        payload: Some(execution_core_request::Payload::Run(RunExecutionRequest {
+                            task_id: "T-SHUT".to_owned(),
+                            execution_id: "E-SHUT".to_owned(),
+                            attempt_id: "A-SHUT".to_owned(),
+                            repository_ref: "repo-local:shutdown-test".to_owned(),
+                            repository_path: repo.to_string_lossy().into_owned(),
+                            base_revision: "HEAD".to_owned(),
+                        })),
+                    },
+                )),
+            }
+            .encode_to_vec(),
+        );
+        transport.write_frame(frame).await.expect("write run");
+        let reply = transport.read_frame().await.expect("run reply");
+        let response = ControlResponse::decode(&reply[..]).expect("decode");
+        let run = match response.payload {
+            Some(control_response::Payload::ExecutionCore(body)) => match body.payload {
+                Some(execution_core_response::Payload::Run(run)) => run,
+                other => panic!("expected run payload, got {other:?}"),
+            },
+            other => panic!("expected execution envelope, got {other:?}"),
+        };
+        assert_eq!(run.task_state, "RUNNING");
+        drop(transport);
+
+        let execution_id =
+            agent_runtime::ExecutionId::new(run.execution_id.clone()).expect("execution id");
+        wait_for_attempt(&db, &execution_id);
+        shutdown_and_await(handle, &sandbox.endpoint).await;
+        assert!(
+            !sandbox.endpoint.socket_path.exists(),
+            "owned endpoint must be released"
+        );
     }
 
     #[tokio::test]

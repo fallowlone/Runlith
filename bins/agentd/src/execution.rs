@@ -409,6 +409,23 @@ impl CancelRegistry {
             None => false,
         }
     }
+
+    /// Signals every live run. Used only by daemon wind-down: shutdown
+    /// cancels in-flight provider work first, so joining background runs
+    /// cannot pin the daemon past the provider timeout (or forever when
+    /// a provider child ignores termination). Returns the number of
+    /// runs signalled.
+    pub fn signal_all(&self) -> usize {
+        let owners = self
+            .inner
+            .lock()
+            .map(|inner| inner.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for owner in &owners {
+            owner.flag.cancel();
+        }
+        owners.len()
+    }
 }
 
 /// G5 verification posture: there is no automated verifier yet (G8 owns
@@ -572,11 +589,21 @@ impl ExecutionComposition {
         Ok(())
     }
 
+    /// Cancels every in-flight run through the composition registry.
+    /// Daemon wind-down calls this before [`Self::join_background_runs`]
+    /// so shutdown concludes runs through the cancel path (durable
+    /// terminal bookkeeping) instead of waiting out provider time.
+    /// Returns the number of runs signalled.
+    pub fn cancel_inflight_runs(&self) -> usize {
+        self.cancels.signal_all()
+    }
+
     /// Joins all retained background runs (F17). Blocking: call after the
-    /// serve loop stops accepting work, never on a request path. Each
-    /// run is bounded by the provider timeout, so shutdown waits for
-    /// in-flight bookkeeping instead of orphaning provider children
-    /// with attempts left open mid-write.
+    /// serve loop stops accepting work, never on a request path. Call
+    /// [`Self::cancel_inflight_runs`] first on the shutdown path: each
+    /// uncancelled run is bounded only by the provider timeout, so a
+    /// bare join pins daemon exit behind provider time instead of
+    /// concluding in-flight bookkeeping promptly.
     pub fn join_background_runs(&self) {
         let handles = self
             .background_runs
