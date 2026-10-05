@@ -434,6 +434,7 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
     fn fake_host_with_auth_anchors(name: &str) -> (PathBuf, PathBuf, PathBuf) {
         let root = std::env::temp_dir().join(format!(
             "runlith-provider-env-{name}-{}",
@@ -448,6 +449,7 @@ mod tests {
         (root, workdir, host_home)
     }
 
+    #[cfg(unix)]
     fn lookup_for(host_home: &Path) -> impl Fn(&str) -> Option<OsString> {
         let host_home = host_home.as_os_str().to_owned();
         move |name: &str| match name {

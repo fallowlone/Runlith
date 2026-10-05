@@ -1,6 +1,8 @@
 //! Descriptor-relative candidate snapshot I/O (ADR-0035).
 
-use evaluation::{CandidateFile, MAX_CANDIDATE_BLOB_BYTES, MAX_CANDIDATE_ENTRIES};
+use evaluation::CandidateFile;
+#[cfg(target_os = "macos")]
+use evaluation::{MAX_CANDIDATE_BLOB_BYTES, MAX_CANDIDATE_ENTRIES};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19,6 +21,7 @@ pub enum DescriptorReadOperation {
     ReadFile,
 }
 
+#[cfg(target_os = "macos")]
 type ReadAuthorizer<'a> =
     dyn FnMut(&[u8], DescriptorReadOperation) -> Result<(), evaluation::EffectError> + 'a;
 
