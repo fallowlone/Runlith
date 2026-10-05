@@ -421,9 +421,11 @@ impl ClaudeExecutor {
     }
 
     /// Maps one observed child exit onto canonical evidence or failure.
-    /// Classification uses structured signals (exit code, JSON fields);
-    /// the auth-marker table is the only textual fallback, and it can
-    /// only ever produce `AuthRequired` (unknown-safe).
+    /// Classification uses structured signals first (exit code, JSON
+    /// `api_error_status`: 401 → `CredentialRejected`, 429/5xx →
+    /// `Transient`); the marker tables are bounded textual fallbacks
+    /// (auth → `AuthRequired`, transient prose → `Transient`), and anything
+    /// unrecognized stays a generic failure (unknown-safe).
     fn interpret_exit(
         &self,
         code: Option<i32>,
@@ -440,8 +442,19 @@ impl ClaudeExecutor {
             other => {
                 // ADR-0039 P6b: the structured status beats every textual
                 // fallback; the CLI reports a refused token only on stdout.
-                if api_error_status(stdout_text.trim()) == Some(401) {
+                // Same principle for rate-limit/5xx: a structured
+                // `api_error_status` 429 or 5xx maps to Transient directly
+                // with fixed text (never provider prose).
+                let status = api_error_status(stdout_text.trim());
+                if status == Some(401) {
                     return Err(ClaudeFailure::credential_rejected());
+                }
+                if let Some(transient_status) = status {
+                    if transient_status == 429 || (500..=599).contains(&transient_status) {
+                        return Err(ClaudeFailure::transient(format!(
+                            "transient upstream failure (api_error_status {transient_status})"
+                        )));
+                    }
                 }
                 let excerpt = bounded_detail(stderr_text.trim().to_owned());
                 if looks_like_auth_failure(&excerpt) {
@@ -701,6 +714,47 @@ mod tests {
             crate::failure::ClaudeFailure::CredentialRejected { .. }
         ));
         assert!(!crate::is_credential_rejected(&err.to_string()));
+    }
+
+    #[test]
+    fn structured_429_and_5xx_map_to_transient() {
+        let executor = bind_default("do work");
+        for status in [429, 500, 503] {
+            let err = executor
+                .interpret_exit(Some(1), api_error_result(status).as_bytes(), b"")
+                .expect_err("non-zero exit must fail");
+            assert!(
+                matches!(err, crate::failure::ClaudeFailure::Transient { .. }),
+                "{status} must be Transient, got {err:?}"
+            );
+            let rendered = err.to_string();
+            assert!(rendered.contains("transient"), "got {rendered:?}");
+            assert!(
+                !rendered.contains("OAuth access token is invalid"),
+                "provider text must not leak, got {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_api_error_status_is_not_transient() {
+        let executor = bind_default("do work");
+        for status in [400, 403, 418] {
+            let err = executor
+                .interpret_exit(Some(1), api_error_result(status).as_bytes(), b"")
+                .expect_err("non-zero exit must fail");
+            assert!(
+                !matches!(err, crate::failure::ClaudeFailure::Transient { .. }),
+                "{status} must not be Transient, got {err:?}"
+            );
+            assert!(
+                !matches!(
+                    err,
+                    crate::failure::ClaudeFailure::CredentialRejected { .. }
+                ),
+                "{status} must not be CredentialRejected, got {err:?}"
+            );
+        }
     }
 
     #[test]
