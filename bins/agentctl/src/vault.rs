@@ -90,6 +90,13 @@ pub fn status_lines(status: &VaultStatusResponse, now_ms: u64) -> Vec<String> {
                 if entry.name == VAULT_PROVIDER_CREDENTIAL_ENTRY {
                     lines.extend(age_warning(&entry.name, age_days));
                 }
+                if entry.rejected {
+                    lines.push(format!(
+                        "warning: {} was rejected by the provider; create a new token with \
+                         `claude setup-token` and run `agentctl vault store`",
+                        entry.name
+                    ));
+                }
             }
             lines
         }
@@ -370,6 +377,15 @@ mod tests {
         VaultEntryDto {
             name: VAULT_PROVIDER_CREDENTIAL_ENTRY.to_owned(),
             created_at_s: NOW_MS / 1000 - days * SECONDS_PER_DAY,
+            rejected: false,
+        }
+    }
+
+    fn token_rejected() -> VaultEntryDto {
+        VaultEntryDto {
+            name: VAULT_PROVIDER_CREDENTIAL_ENTRY.to_owned(),
+            created_at_s: NOW_MS / 1000 - 10 * SECONDS_PER_DAY,
+            rejected: true,
         }
     }
 
@@ -465,6 +481,24 @@ mod tests {
         assert!(expired[2].starts_with("warning:"));
         assert!(expired[2].contains("past its one-year lifetime"));
         assert!(expired[2].contains("claude setup-token"));
+    }
+
+    #[test]
+    fn rejected_credential_is_flagged_in_status() {
+        let plain = status_lines(&unlocked(vec![token_aged(10)], None), NOW_MS);
+        assert!(
+            !plain.iter().any(|line| line.contains("rejected")),
+            "{plain:?}"
+        );
+
+        let flagged = status_lines(&unlocked(vec![token_rejected()], None), NOW_MS);
+        assert!(
+            flagged
+                .iter()
+                .any(|line| line.contains("rejected")
+                    && line.contains(VAULT_PROVIDER_CREDENTIAL_ENTRY)),
+            "{flagged:?}"
+        );
     }
 
     #[test]

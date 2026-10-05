@@ -23,6 +23,10 @@ message VaultEntryDto {
   string name = 1;
   // Unix seconds when the value was stored.
   uint64 created_at_s = 2;
+  // The provider refused this stored credential (ADR-0039 decision 7);
+  // cleared when a new credential is stored. Absent (false) by default,
+  // so older clients ignore it.
+  bool rejected = 3;
 }
 
 message VaultStatusRequest {}

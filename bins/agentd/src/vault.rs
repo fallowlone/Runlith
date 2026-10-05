@@ -249,6 +249,8 @@ impl VaultService {
             .map_err(wire)?
             .into_iter()
             .map(|entry| VaultEntryDto {
+                rejected: entry.name == PROVIDER_CREDENTIAL_ENTRY
+                    && self.rejected == Some(entry.created_at),
                 name: entry.name,
                 created_at_s: entry.created_at,
             })
@@ -1174,5 +1176,76 @@ mod tests {
             now,
         );
         assert_eq!(service.check_provider_credential(now, unix_now_s()), Ok(()));
+    }
+
+    #[test]
+    fn status_marks_the_rejected_provider_credential() {
+        let now = Instant::now();
+        let (_dir, mut service) = stored_service(now);
+
+        let fresh = state_of(send(&mut service, status(), now));
+        assert_eq!(fresh.state(), VaultState::VaultUnlocked);
+        let fresh_entry = fresh
+            .entries
+            .iter()
+            .find(|entry| entry.name == PROVIDER_CREDENTIAL_ENTRY)
+            .expect("provider entry");
+        assert!(!fresh_entry.rejected);
+
+        service.release_provider_credential(now).unwrap();
+        service.mark_provider_credential_rejected();
+
+        let marked = state_of(send(&mut service, status(), now));
+        let marked_entry = marked
+            .entries
+            .iter()
+            .find(|entry| entry.name == PROVIDER_CREDENTIAL_ENTRY)
+            .expect("provider entry");
+        assert!(marked_entry.rejected);
+    }
+
+    #[test]
+    fn status_clears_the_rejected_mark_after_a_new_credential_is_stored() {
+        let now = Instant::now();
+        let (_dir, mut service) = stored_service(now);
+        service.release_provider_credential(now).unwrap();
+        service.mark_provider_credential_rejected();
+
+        send(
+            &mut service,
+            store(PASSWORD, PROVIDER_CREDENTIAL_ENTRY, b"[REDACTED]"),
+            now,
+        );
+
+        let status = state_of(send(&mut service, status(), now));
+        assert!(!status.entries.iter().any(|entry| entry.rejected));
+    }
+
+    #[test]
+    fn status_keeps_the_rejected_mark_across_rotation() {
+        let now = Instant::now();
+        let (_dir, mut service) = stored_service(now);
+        service.release_provider_credential(now).unwrap();
+        service.mark_provider_credential_rejected();
+
+        let rotated = send(
+            &mut service,
+            Request::Rotate(ipc_contracts::proto::VaultRotateRequest {
+                password: PASSWORD.as_bytes().to_vec(),
+            }),
+            now,
+        );
+        assert!(matches!(rotated, Response::Phrase(_)));
+
+        let status = state_of(send(&mut service, status(), now));
+        let entry = status
+            .entries
+            .iter()
+            .find(|entry| entry.name == PROVIDER_CREDENTIAL_ENTRY)
+            .expect("provider entry");
+        assert!(
+            entry.rejected,
+            "rotation keeps the same token, so it stays refused"
+        );
     }
 }
