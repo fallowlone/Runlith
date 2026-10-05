@@ -9,7 +9,6 @@
 //! the resulting booleans, never CLI versions or flag spellings.
 
 use std::ffi::OsStr;
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::config::bounded_detail;
@@ -126,11 +125,7 @@ pub fn probe_capabilities(executable: &OsStr, version: Option<CliVersion>) -> Cl
 /// `None` on any transport failure (spawn, timeout, over-bound output).
 fn probe_help(executable: &OsStr) -> Option<String> {
     let resolved = crate::detect::find_on_path(executable)?;
-    let mut child = Command::new(&resolved)
-        .arg("--help")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+    let mut child = crate::detect::probe_command(resolved.as_os_str(), "--help")
         .spawn()
         .ok()?;
     let start = Instant::now();
@@ -238,5 +233,43 @@ mod tests {
         let caps = ClaudeCapabilities::degraded("test".to_owned());
         let debug = format!("{caps:?}");
         assert!(!debug.contains("claude"));
+    }
+
+    /// F21: the `--help` probe carries the same cleared-environment
+    /// guarantee as the `--version` probe.
+    #[cfg(unix)]
+    #[test]
+    fn help_probe_runs_with_a_cleared_environment() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const SENTINEL_NAME: &str = "RUNLITH_F21_PROBE_SENTINEL";
+        const SENTINEL_VALUE: &str = "operator-exported-secret";
+        let dir = std::env::temp_dir().join(format!("runlith-f21-help-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dump = dir.join("probe.env");
+        let stub = dir.join("fake-claude");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nexport -p > '{}'\necho '--print --output-format json --resume --safe-mode'\n",
+                dump.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        std::env::set_var(SENTINEL_NAME, SENTINEL_VALUE);
+        let caps = probe_capabilities(stub.as_os_str(), None);
+        std::env::remove_var(SENTINEL_NAME);
+
+        assert!(caps.non_interactive);
+        assert!(caps.structured_json);
+        let dumped = std::fs::read_to_string(&dump).unwrap();
+        assert!(
+            !dumped.contains(SENTINEL_VALUE),
+            "probe child inherited the daemon environment"
+        );
+        assert!(dumped.contains("PATH="), "probe child keeps PATH");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

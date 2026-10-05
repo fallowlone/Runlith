@@ -189,13 +189,36 @@ pub fn detect(executable: &OsStr) -> Detection {
     }
 }
 
-/// Runs the version probe with a short timeout and parses the answer.
-fn probe_version(executable: &OsString) -> Result<(CliVersion, String), String> {
-    let mut child = Command::new(executable)
-        .arg("--version")
+/// Builds a host-probe child with a cleared environment (F21): probes run
+/// the operator-configured executable, so they must not inherit ambient
+/// daemon state (exported credentials, cloud keys, agent variables). Only
+/// `PATH` survives — the executable is already resolved — plus the Windows
+/// spawn prerequisites, which the OS loader requires. The daemon working
+/// directory is still inherited; probes take no path arguments, so it
+/// carries no authority.
+pub(crate) fn probe_command(executable: &OsStr, arg: &str) -> Command {
+    let mut command = Command::new(executable);
+    command
+        .arg(arg)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    command.env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
+    #[cfg(windows)]
+    for name in ["SystemRoot", "WINDIR", "PATHEXT"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    command
+}
+
+/// Runs the version probe with a short timeout and parses the answer.
+fn probe_version(executable: &OsString) -> Result<(CliVersion, String), String> {
+    let mut child = probe_command(executable, "--version")
         .spawn()
         .map_err(|error| {
             bounded_detail(format!("claude version probe failed to spawn: {error}"))
@@ -429,5 +452,43 @@ mod tests {
         }
         assert_eq!(detection.status, ProviderAvailability::Available);
         assert!(detection.version.is_some_and(|v| v.is_compatible()));
+    }
+
+    /// F21: the `--version` probe must not inherit the daemon environment
+    /// (ambient exported credentials). The stub dumps its own environment
+    /// to a file; the sentinel must not reach it, while PATH survives.
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_runs_with_a_cleared_environment() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const SENTINEL_NAME: &str = "RUNLITH_F21_PROBE_SENTINEL";
+        const SENTINEL_VALUE: &str = "operator-exported-secret";
+        let dir = std::env::temp_dir().join(format!("runlith-f21-version-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dump = dir.join("probe.env");
+        let stub = dir.join("fake-claude");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nexport -p > '{}'\necho '2.1.99'\n",
+                dump.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        std::env::set_var(SENTINEL_NAME, SENTINEL_VALUE);
+        let detection = detect(stub.as_os_str());
+        std::env::remove_var(SENTINEL_NAME);
+
+        assert_eq!(detection.status, ProviderAvailability::Available);
+        let dumped = std::fs::read_to_string(&dump).unwrap();
+        assert!(
+            !dumped.contains(SENTINEL_VALUE),
+            "probe child inherited the daemon environment"
+        );
+        assert!(dumped.contains("PATH="), "probe child keeps PATH");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
