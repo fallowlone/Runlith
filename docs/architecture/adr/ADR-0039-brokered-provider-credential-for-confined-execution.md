@@ -339,7 +339,12 @@ on stdin).
   The token value was absent from every file under the data directory in
   all conditions. The second row measures an invalid token, not a revoked
   one (owner choice, 2026-10-04). One host, one run per condition. The
-  verdict is not flipped by this addendum.
+  verdict is not flipped by this addendum. The harness keeps the real token
+  in a temporary vault with cheap test KDF parameters; since 2026-10-04 that
+  vault uses a random per-run password that is never stored or printed, so
+  a vault file left behind by a killed run cannot be decrypted (before, the
+  password was a source constant; both operator runs cleaned up, and no
+  such file was found).
 - **Rejection signal.** For a refused token the CLI exits 1 with empty
   stderr and prints one result document on stdout with `is_error: true`,
   `subtype: "success"`, `terminal_reason: "api_error"` and

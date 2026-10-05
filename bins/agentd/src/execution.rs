@@ -5534,9 +5534,12 @@ mod tests {
         );
     }
 
-    /// ADR-0039 P5d fixture token. Only the fixture compares it; no test
+    /// ADR-0039 P5d fixture token: fake, valid for no account (secret
+    /// scanners may flag its shape). Only the fixture compares it; no test
     /// output, audit row or durable state may contain it.
     const BROKERED_TOKEN: &str = "sk-ant-oat01-P5D-BROKERED-MARKER-7f3a";
+    /// Fixture vaults only. A vault holding a real credential (the P6a
+    /// measurement) uses a random per-run password instead.
     const BROKERED_VAULT_PASSWORD: &str = "p5d-brokered-vault-password";
     const BROKERED_EXECUTION_SUCCESS: &str = r#"printf '{"type":"result","subtype":"success","is_error":false,"result":"brokered run finished","session_id":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"}'; exit 0"#;
     const BROKERED_PLANNER_SUCCESS: &str = r#"printf '%s' '{"type":"result","subtype":"success","is_error":false,"result":"{\"verdict\":\"ATOMIC\",\"rationale\":\"brokered fixture\",\"evidence_refs\":[\"evidence-brokered\"]}","session_id":"brokered-planner-session","usage":{"input_tokens":10,"output_tokens":10}}'; exit 0"#;
@@ -5567,13 +5570,19 @@ mod tests {
     }
 
     fn brokered_vault(sandbox: &Sandbox, setup: BrokeredVault) -> Option<VaultHandle> {
-        brokered_vault_holding(sandbox, setup, BROKERED_TOKEN.as_bytes())
+        brokered_vault_holding(
+            sandbox,
+            setup,
+            BROKERED_TOKEN.as_bytes(),
+            BROKERED_VAULT_PASSWORD,
+        )
     }
 
     fn brokered_vault_holding(
         sandbox: &Sandbox,
         setup: BrokeredVault,
         value: &[u8],
+        password: &str,
     ) -> Option<VaultHandle> {
         use ipc_contracts::proto::{
             vault_core_request::Payload as Request, vault_core_response::Payload as Response,
@@ -5599,12 +5608,12 @@ mod tests {
             return Some(handle);
         }
         send(Request::Create(VaultCreateRequest {
-            password: BROKERED_VAULT_PASSWORD.into(),
+            password: password.into(),
             idle_minutes: 0,
         }));
         if !matches!(setup, BrokeredVault::Empty) {
             send(Request::Store(VaultStoreRequest {
-                password: BROKERED_VAULT_PASSWORD.into(),
+                password: password.into(),
                 name: crate::vault::PROVIDER_CREDENTIAL_ENTRY.to_owned(),
                 value: value.to_vec(),
             }));
@@ -6247,6 +6256,10 @@ mod tests {
         }
         assert!(!token.is_empty(), "no token on stdin");
         let invalid = zeroize::Zeroizing::new(random_wellformed_token());
+        // The real token sits in a temporary vault with cheap test KDF
+        // parameters. A random per-run password, never stored or printed,
+        // keeps a vault file left behind by a killed run undecryptable.
+        let vault_password = zeroize::Zeroizing::new(random_chars(40));
 
         let conditions: [(&str, Option<&[u8]>); 3] = [
             ("valid", Some(token.as_slice())),
@@ -6254,7 +6267,7 @@ mod tests {
             ("missing", None),
         ];
         for (condition, value) in conditions {
-            let receipt = measure_brokered_condition(condition, value);
+            let receipt = measure_brokered_condition(condition, value, &vault_password);
             println!("P6A claude={version} {receipt}");
         }
     }
@@ -6262,19 +6275,29 @@ mod tests {
     /// `sk-ant-oat01-` plus 95 random URL-safe characters: the shape of a
     /// setup-token, accepted by no account.
     fn random_wellformed_token() -> String {
+        format!("sk-ant-oat01-{}", random_chars(95))
+    }
+
+    /// `len` URL-safe characters from per-process OS-seeded `RandomState`
+    /// keys (not a CSPRNG API, but unpredictable outside this process).
+    fn random_chars(len: u64) -> String {
         use std::hash::{BuildHasher, Hasher};
         const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
         let state = std::collections::hash_map::RandomState::new();
-        let mut token = String::from("sk-ant-oat01-");
-        for index in 0_u64..95 {
-            let mut hasher = state.build_hasher();
-            hasher.write_u64(index);
-            token.push(char::from(ALPHABET[(hasher.finish() % 64) as usize]));
-        }
-        token
+        (0..len)
+            .map(|index| {
+                let mut hasher = state.build_hasher();
+                hasher.write_u64(index);
+                char::from(ALPHABET[(hasher.finish() % 64) as usize])
+            })
+            .collect()
     }
 
-    fn measure_brokered_condition(condition: &str, value: Option<&[u8]>) -> String {
+    fn measure_brokered_condition(
+        condition: &str,
+        value: Option<&[u8]>,
+        vault_password: &str,
+    ) -> String {
         let sandbox = Sandbox::named(&format!("p6a-{condition}"));
         let task = format!("T-P6A-{}", condition.to_uppercase());
         seed_ready(
@@ -6283,8 +6306,10 @@ mod tests {
             &task,
         );
         let vault = match value {
-            Some(value) => brokered_vault_holding(&sandbox, BrokeredVault::Stored, value),
-            None => brokered_vault(&sandbox, BrokeredVault::Empty),
+            Some(value) => {
+                brokered_vault_holding(&sandbox, BrokeredVault::Stored, value, vault_password)
+            }
+            None => brokered_vault_holding(&sandbox, BrokeredVault::Empty, b"", vault_password),
         };
         // Production composition: no verdict override (ADR-0039 P6c).
         let composition = sandbox
