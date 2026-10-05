@@ -43,5 +43,6 @@
 | [ADR-0036](./ADR-0036-g8-evidence-requirement-parameter-binding-authority.md) | G8 EvidenceRequirement parameter binding authority | Accepted | evidence requirement params, candidate-input selector authority, binding boundary |
 | [ADR-0038](./ADR-0038-product-licensing.md) | Product licensing: Apache License, Version 2.0 with open-source License Grant | Accepted | licensing, monetization, open source, governance |
 | [ADR-0039](./ADR-0039-brokered-provider-credential-for-confined-execution.md) | Brokered provider credential for confined Claude execution (setup-token via Secrets Broker, password vault, private HOME) | Accepted | provider authentication, secrets broker, seatbelt, HOME inheritance, g6 follow-up |
+| [ADR-0040](./ADR-0040-phase2-egress-pinning-over-mitm-proxy.md) | Phase 2 credential egress: runner destination pinning over MITM proxy | Proposed | phase 2, egress pinning, apiKeyHelper spike, mitm rejection, g6 follow-up |
 
 Coverage register (not an ADR): [COVERAGE.md](./COVERAGE.md).
