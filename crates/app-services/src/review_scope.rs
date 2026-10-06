@@ -37,6 +37,8 @@ mod tests {
             affected_checks: vec!["cargo-test-unit".to_owned()],
             policy_revision: 7,
             policy_fingerprint: sha(b'c'),
+            profile_id: "owner-primary".to_owned(),
+            profile_revision: 4,
             setting_revision: 3,
             setting_path: evaluation::ReviewPathName::B1,
             reviewer_nonce: "nonce-1".to_owned(),
