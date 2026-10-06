@@ -28,6 +28,7 @@ mod review_scope;
 mod runtime_service;
 mod security_service;
 mod task_service;
+mod verification_levels;
 mod workspace_service;
 
 pub use approval_service::ApprovalService;
@@ -72,6 +73,11 @@ pub use security_service::{
     G6Authorization, G6SecurityError, G6SecurityService, PrivilegedOperation, ProcessSecuritySpec,
 };
 pub use task_service::{AppliedTransition, PlannedTransition, TaskService};
+pub use verification_levels::{
+    derive_commands, detect_ecosystem, plan_verification, required_kinds_for_level,
+    select_verification_level, Ecosystem, RiskTier, VerificationCommand, VerificationLevel,
+    VerificationPlan,
+};
 pub use workspace_service::{
     CleanedWorkspace, CleanupOutcome, EnsureOutcome, EnsuredWorkspace, ManagedWorkspaceRoot,
     WorkspaceRequest, WorkspaceService,

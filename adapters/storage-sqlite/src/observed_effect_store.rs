@@ -89,6 +89,8 @@ impl crate::SqliteStore {
     /// Lists every observed effect captured for one attempt in insertion
     /// order. Read-only; used by candidate-only verdict minting to bind
     /// verdicts to capture-pipeline measurement (never synthesized).
+    /// Quarantined rows (TASK-0151: effects of an invalidated candidate
+    /// operation) resolve to nothing and are skipped, never surfaced.
     pub fn list_observed_effects_for_attempt(
         &self,
         execution_id: &agent_runtime::ExecutionId,
@@ -105,10 +107,9 @@ impl crate::SqliteStore {
             .collect::<Result<Vec<_>, _>>()?;
         let mut effects = Vec::with_capacity(ids.len());
         for id in &ids {
-            let effect = load(self.connection(), id)?.ok_or_else(|| {
-                StorageError::Corrupt(format!("observed effect {id} disappeared"))
-            })?;
-            effects.push(effect);
+            if let Some(effect) = load(self.connection(), id)? {
+                effects.push(effect);
+            }
         }
         Ok(effects)
     }
@@ -132,12 +133,22 @@ pub(crate) fn load(
         Option<String>,
         Option<String>,
     );
+    // TASK-0151 findings 3+4: effects of an invalidated candidate
+    // operation never resolve as evidence. The quarantine is part of
+    // this single statement (not a second read plus a check), so no
+    // interleaving invalidation can slip between read and verdict.
     let row: Option<Row> = connection
         .query_row(
             "SELECT effect_id, subject_ref, subject_fingerprint, effect_kind,
                     captured_by, captured_at, payload_ref, execution_id,
                     attempt_id, runtime_ref, evaluator_ref, receipt_ref
-             FROM observed_effects WHERE effect_id = ?1",
+             FROM observed_effects WHERE effect_id = ?1
+             AND NOT EXISTS (
+                 SELECT 1 FROM candidate_input_operations o
+                 WHERE o.execution_id = observed_effects.execution_id
+                   AND o.attempt_id = observed_effects.attempt_id
+                   AND o.invalidated_at_ms IS NOT NULL
+             )",
             params![id],
             |row| {
                 Ok((
