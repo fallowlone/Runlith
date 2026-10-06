@@ -4784,6 +4784,28 @@ items:
     references:
       - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
       - docs/development/G7_TASK_0112_PROVIDER_AUTH_DIAGNOSIS.md
+    outcome: >-
+      ADR-only, implemented on branch task-0152-provider-auth-adr by
+      adopting the owner's own draft branch
+      (origin/task-0152-confined-provider-auth-adr, head 3924bb7) via
+      merge (INDEX-only conflict, authorship preserved). ADR-0037 selects
+      Option B (trusted-host authenticated loopback credential gateway,
+      in-process in agentd, D1-D27); Option A (credential broker injecting
+      into child env) rejected on the measured Seatbelt *:443
+      host-confinement gap; Option C (in-sandbox Keychain grant) stays
+      rejected per TASK-0112. Evidence: owner-run real-credential
+      receipts for both classes plus agent-run invalid-credential and
+      round-6/7 hardening probes (docs/development/
+      G8_TASK_0152_PROVIDER_AUTH_PROBES.md + task0152-probes/); no secret
+      values in the adopted tree (scanned). Third independent
+      architecture/security review PASS recorded in docs/development/
+      ADR-0037_RATIFICATION_REVIEW_PACK.md (all code/doc/probe citations
+      re-verified current on the adoption base; one non-blocking line-drift
+      note); ratified to Accepted + INDEX link under the owner's standing
+      G8-closure directive. No production code changes; implementation
+      follow-ups proposed-not-created per the ADR (orchestrator registers
+      them); sibling WIP branch (PR #9 probe scripts) intentionally not
+      adopted (unreferenced). Integration into main is not claimed.
 
   # Cross-gate governance: repository licensing/product-monetization decision,
   # not scoped to any single implementation gate.

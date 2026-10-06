@@ -41,7 +41,7 @@
 | [ADR-0034](./ADR-0034-g8-candidate-bound-test-execution.md) | G8 candidate-bound governed test execution | Accepted | candidate snapshot, exact test artifact, governed test evidence |
 | [ADR-0035](./ADR-0035-g8-immutable-git-candidate-proposal.md) | G8 immutable Git candidate input | Accepted | commit/tree subject, verified blobs, candidate-input freshness |
 | [ADR-0036](./ADR-0036-g8-evidence-requirement-parameter-binding-authority.md) | G8 EvidenceRequirement parameter binding authority | Accepted | evidence requirement params, candidate-input selector authority, binding boundary |
-| [ADR-0037](./ADR-0037-confined-provider-credential-gateway.md) | Confined Claude provider authentication through a trusted-host credential gateway | Proposed | provider authentication, G6 confinement, secrets broker, credential gateway, loopback proxy |
+| [ADR-0037](./ADR-0037-confined-provider-credential-gateway.md) | Confined Claude provider authentication through a trusted-host credential gateway | Accepted | provider authentication, G6 confinement, secrets broker, credential gateway, loopback proxy |
 | [ADR-0038](./ADR-0038-product-licensing.md) | Product licensing: Apache License, Version 2.0 with open-source License Grant | Accepted | licensing, monetization, open source, governance |
 | [ADR-0041](./ADR-0041-g8-candidate-only-verdict-minting.md) | G8 candidate-only verdict minting authority | Accepted | verification, claims, observed effects, completion authority, g8 sequencing |
 
