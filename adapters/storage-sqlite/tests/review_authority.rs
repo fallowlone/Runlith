@@ -296,6 +296,47 @@ fn review_record_round_trip_restores_with_verified_fingerprint() {
 }
 
 #[test]
+fn review_state_survives_reopen() {
+    let db = TestDb::new("record-reopen");
+    let fingerprint = {
+        let mut store = db.open();
+        let task = seed_task(&mut store);
+        let (_execution, _attempt) = seed_attempt(&mut store, &task);
+        seed_setting_and_profile(&mut store, &task);
+        let record = sample_record("review-r", None);
+        store
+            .record_presence_proof(
+                record.reviewer_nonce(),
+                "b1-review:record=review-r",
+                record.reviewer_input_digest(),
+                1_700_000_000_000,
+            )
+            .unwrap();
+        store.record_review(&record).unwrap();
+        store
+            .invalidate_review_record("review-r", "superseded-policy", 1_700_000_100_000)
+            .unwrap();
+        record.fingerprint().to_owned()
+    };
+    let store = db.open();
+    let restored = store
+        .get_review_record("review-r")
+        .unwrap()
+        .expect("record survives reopen");
+    assert_eq!(restored.fingerprint(), fingerprint);
+    let state = store
+        .review_record_state("review-r")
+        .unwrap()
+        .expect("state survives reopen");
+    assert_eq!(
+        state.invalidation_code.as_deref(),
+        Some("superseded-policy")
+    );
+    let head = store.live_review_record_head("T-REVIEW").unwrap();
+    assert!(head.is_none(), "invalidated record is not the live head");
+}
+
+#[test]
 fn review_with_mismatched_proof_operation_refuses() {
     let db = TestDb::new("record-op");
     let mut store = db.open();

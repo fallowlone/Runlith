@@ -230,6 +230,30 @@ impl<C: Clock> ReviewService<C> {
             .prove(&operation, &input.reviewer_input_digest)
             .map_err(ReviewServiceError::Presence)?;
         self.consume_proof(&proof)?;
+        // Typed actors from independently proven values: the reviewer
+        // from the minted presence proof (never caller text) and the
+        // implementer from product refs whose execution/attempt rows
+        // the store FKs verify. Distinct types (human/v1 vs
+        // implementation/v1) make reviewer == implementer
+        // unrepresentable in a B1 pair. The admission ref is bound
+        // opaquely: no durable runner-admission registry exists yet
+        // to cross-verify it against.
+        let reviewer = policy::HumanPrincipal::new(
+            proof.nonce(),
+            proof.input_digest(),
+            match input.reviewer_verdict {
+                evaluation::ReviewVerdictName::Approved => policy::ReviewVerdict::Approved,
+                evaluation::ReviewVerdictName::Rejected => policy::ReviewVerdict::Rejected,
+            },
+        )
+        .map_err(|error| ReviewServiceError::InvalidRecord(error.to_string()))?;
+        let implementer = policy::ImplementationPrincipal::new(
+            &input.implementer_execution_id,
+            &input.implementer_attempt_id,
+            &input.implementer_admission_ref,
+        )
+        .map_err(|error| ReviewServiceError::InvalidRecord(error.to_string()))?;
+        debug_assert_ne!(reviewer.namespace(), implementer.namespace());
         let captured_at_ms = self.clock.now_millis();
         let fields = evaluation::ReviewRecordFields {
             record_id: input.record_id,
