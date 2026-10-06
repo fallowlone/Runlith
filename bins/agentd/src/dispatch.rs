@@ -14,6 +14,7 @@
 //! and backtraces never cross this boundary (internal logs may retain
 //! safe diagnostics).
 
+use crate::execution::ExecutionComposition;
 use app_services::{ServiceError, TaskService};
 use ipc_contracts::proto::{
     task_authoring_core_request, task_authoring_core_response, task_core_request,
@@ -41,6 +42,7 @@ const MAX_REASON_LEN: usize = 4096;
 pub fn dispatch<C: app_services::Clock>(
     service: &mut TaskService<C>,
     request: TaskCoreRequest,
+    composition: Option<&ExecutionComposition>,
 ) -> TaskCoreResponse {
     match request.payload {
         Some(task_core_request::Payload::CreateProject(req)) => {
@@ -150,7 +152,9 @@ pub fn dispatch<C: app_services::Clock>(
                 Err(error) => error_response(error),
             }
         }
-        Some(task_core_request::Payload::Lifecycle(req)) => dispatch_lifecycle(service, req),
+        Some(task_core_request::Payload::Lifecycle(req)) => {
+            dispatch_lifecycle(service, req, composition)
+        }
         None => internal("empty business request"),
     }
 }
@@ -158,6 +162,7 @@ pub fn dispatch<C: app_services::Clock>(
 fn dispatch_lifecycle<C: app_services::Clock>(
     service: &mut TaskService<C>,
     req: ipc_contracts::proto::LifecycleRequest,
+    composition: Option<&ExecutionComposition>,
 ) -> TaskCoreResponse {
     use std::convert::TryFrom;
     let task_id = match TaskId::new(req.task_id) {
@@ -182,7 +187,18 @@ fn dispatch_lifecycle<C: app_services::Clock>(
         TaskLifecycleOp::BeginVerification => service.begin_verification(&task_id),
         TaskLifecycleOp::VerificationFailed => service.verification_failed(&task_id, req.reason),
         TaskLifecycleOp::VerificationSucceeded => {
-            service.verification_succeeded(&task_id, req.reason)
+            // CV-7 current policy, derived from the same composition the
+            // planner stamped with. Derivation failure (or a control-only
+            // daemon, where nothing stamps) yields `None`, which fails
+            // closed for policy-derived requirements and stays neutral
+            // for authored ones.
+            let current_policy =
+                composition.and_then(|c| c.planning_policy_fingerprint(task_id.as_str()).ok());
+            service.verification_succeeded_under_policy(
+                &task_id,
+                req.reason,
+                current_policy.as_deref(),
+            )
         }
     };
     match applied {
@@ -545,7 +561,7 @@ mod tests {
     #[test]
     fn create_and_get_project_round_trip() {
         let mut service = service();
-        let created = dispatch(&mut service, create_project_request("P-1", "Runlith"));
+        let created = dispatch(&mut service, create_project_request("P-1", "Runlith"), None);
         match created.payload {
             Some(task_core_response::Payload::CreateProject(response)) => {
                 let project = response.project.expect("project dto");
@@ -563,6 +579,7 @@ mod tests {
                     },
                 )),
             },
+            None,
         );
         assert!(matches!(
             get.payload,
@@ -577,6 +594,7 @@ mod tests {
                     },
                 )),
             },
+            None,
         );
         match missing.payload {
             Some(task_core_response::Payload::Error(error)) => {
@@ -589,8 +607,8 @@ mod tests {
     #[test]
     fn duplicate_create_maps_to_already_exists() {
         let mut service = service();
-        dispatch(&mut service, create_project_request("P-1", "One"));
-        let again = dispatch(&mut service, create_project_request("P-1", "Two"));
+        dispatch(&mut service, create_project_request("P-1", "One"), None);
+        let again = dispatch(&mut service, create_project_request("P-1", "Two"), None);
         match again.payload {
             Some(task_core_response::Payload::Error(error)) => {
                 assert_eq!(error.code, BusinessErrorCode::AlreadyExists as i32);
@@ -603,7 +621,7 @@ mod tests {
     #[test]
     fn invalid_lifecycle_maps_to_invalid_transition_without_mutation() {
         let mut service = service();
-        dispatch(&mut service, create_project_request("P-1", "P"));
+        dispatch(&mut service, create_project_request("P-1", "P"), None);
         let task = Task::draft(
             TaskId::new("T-1").unwrap(),
             ProjectId::new("P-1").unwrap(),
@@ -622,6 +640,7 @@ mod tests {
                     },
                 )),
             },
+            None,
         );
         match bad.payload {
             Some(task_core_response::Payload::Error(error)) => {
@@ -653,12 +672,13 @@ mod tests {
                     },
                 )),
             },
+            None,
         );
         assert!(matches!(
             unknown.payload,
             Some(task_core_response::Payload::Error(_))
         ));
-        let empty = dispatch(&mut service, TaskCoreRequest { payload: None });
+        let empty = dispatch(&mut service, TaskCoreRequest { payload: None }, None);
         match empty.payload {
             Some(task_core_response::Payload::Error(error)) => {
                 assert_eq!(error.code, BusinessErrorCode::Internal as i32);
@@ -726,7 +746,7 @@ mod tests {
     #[test]
     fn lifecycle_success_returns_from_and_to_states() {
         let mut service = service();
-        dispatch(&mut service, create_project_request("P-1", "P"));
+        dispatch(&mut service, create_project_request("P-1", "P"), None);
         let task = Task::draft(
             TaskId::new("T-1").unwrap(),
             ProjectId::new("P-1").unwrap(),
@@ -745,6 +765,7 @@ mod tests {
                     },
                 )),
             },
+            None,
         );
         match response.payload {
             Some(task_core_response::Payload::Lifecycle(lifecycle)) => {
@@ -824,7 +845,7 @@ mod tests {
     #[test]
     fn v6_authoring_commits_canonical_planning_metadata_with_server_evidence() {
         let mut service = service();
-        dispatch(&mut service, create_project_request("P-1", "Runlith"));
+        dispatch(&mut service, create_project_request("P-1", "Runlith"), None);
         let response = dispatch_task_authoring(
             &mut service,
             planning_task_request(
@@ -864,7 +885,7 @@ mod tests {
     #[test]
     fn v6_authoring_refuses_invalid_metadata_without_persistence() {
         let mut service = service();
-        dispatch(&mut service, create_project_request("P-1", "Runlith"));
+        dispatch(&mut service, create_project_request("P-1", "Runlith"), None);
         for (id, paths, acceptance, risk) in [
             ("T-NO-SCOPE", &[][..], &["c"][..], "low"),
             ("T-NO-ACCEPTANCE", &["repo:src"][..], &[][..], "low"),

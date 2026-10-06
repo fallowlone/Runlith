@@ -480,7 +480,7 @@ fn bounded_text(value: String, what: &'static str) -> Result<String, EffectError
     Ok(value)
 }
 
-fn canonical_timestamp(value: String) -> Result<String, EffectError> {
+pub(crate) fn canonical_timestamp(value: String) -> Result<String, EffectError> {
     let value = value.trim().to_owned();
     let bytes = value.as_bytes();
     let shape = bytes.len() == 20

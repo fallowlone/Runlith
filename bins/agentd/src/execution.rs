@@ -3653,6 +3653,13 @@ fn run_background_inner(
     } else {
         ProductionEvaluator::Pending(PendingEvaluator)
     };
+    // CV-7 current policy for the completing task, derived from the
+    // same composition the planner stamped with (D1'). Derived before
+    // `work` moves into the cycle. Derivation failure yields `None`,
+    // which fails closed for policy-derived requirements.
+    let current_policy = composition
+        .planning_policy_fingerprint(work.task_id.as_str())
+        .ok();
     let orchestration_result = orchestration
         .continue_workspace_cycle(
             &mut workspace,
@@ -3689,6 +3696,7 @@ fn run_background_inner(
                 )
             },
             &selected_evaluator,
+            current_policy.as_deref(),
         )
         .map_err(|error| format!("orchestration cycle: {error}"));
 

@@ -3,15 +3,15 @@
 //!
 //! Authority split (ADR-0018): the agent-facing operation is
 //! [`TaskService::submit_result`], which only reaches `SUBMITTED`.
-//! [`TaskService::verification_succeeded`] is the trusted Evaluation-path
-//! operation and the sole route to `COMPLETED`. There is no
+//! [`TaskService::verification_succeeded_under_policy`] is the trusted
+//! Evaluation-path operation and the sole route to `COMPLETED`. There is no
 //! `agent_complete_task()`, no `set_task_state()`, and no FAILED/CANCELLED
 //! policy beyond what `task-domain` already decides (nothing — those edges
 //! stay unresolved, so no such methods exist here either).
 
 use std::path::Path;
 
-use agent_runtime::ExecutionId;
+use agent_runtime::{AttemptId, ExecutionId};
 use plan_domain::{PlanDomainError, TaskPlanningAuthority};
 use storage_sqlite::{EventType, JournalEvent, NewJournalEvent, SqliteStore, StorageError};
 use task_domain::{DomainError, Project, ProjectId, Task, TaskId, TransitionCommand};
@@ -358,17 +358,249 @@ impl<C: Clock> TaskService<C> {
 
     /// `VERIFYING → COMPLETED`: trusted VERIFIED verdict. Evaluation path
     /// only — the sole route to `COMPLETED`.
-    pub fn verification_succeeded(
+    ///
+    /// TASK-0125 gate (ADR-0030 CV-1..CV-8, as implemented): the verdict
+    /// string is journal context, never authority. Admission is derived from
+    /// durable state only — the task's own `EvidenceRequirement`s, the
+    /// current trusted subject fingerprint read from observed effects, and
+    /// the durable `ClaimVerification` / exemption / approval-discharge
+    /// records. Nothing a caller supplies can substitute for durable
+    /// evidence (CV-2). A criterion without a current VERIFIED verdict (or
+    /// an eligible CV-4 exemption / CV-8 discharge) refuses the transition
+    /// with a domain error and the task stays VERIFYING.
+    /// The trusted Evaluation-path operation and the sole route to
+    /// `COMPLETED`, under an explicit current policy fingerprint (`None`
+    /// = no policy derivation in force, which fails closed for any
+    /// requirement or exemption derived under a policy). The fingerprint
+    /// participates in CV-7 staleness. There is no policy-free alias: a
+    /// caller that cannot derive the current policy says so with `None`
+    /// and accepts the fail-closed consequence.
+    pub fn verification_succeeded_under_policy(
         &mut self,
         task_id: &TaskId,
         verdict: impl Into<String>,
+        policy_fp: Option<&str>,
     ) -> ServiceResult<AppliedTransition> {
-        self.mutate(
-            task_id,
+        let verdict_text = verdict.into();
+        let task = self.store.get_task(task_id)?.ok_or_else(|| {
+            ServiceError::Storage(StorageError::NotFound(format!(
+                "task {task_id} does not exist"
+            )))
+        })?;
+        let from = task.state();
+        let planned = self.plan_on(
+            &task,
             TransitionCommand::VerificationSucceeded {
-                verdict: verdict.into(),
+                verdict: verdict_text,
             },
-        )
+        )?;
+        let now = format_rfc3339(self.clock.now_millis());
+        let gate = self.admission_report(&task, policy_fp, &now)?;
+        if !gate.is_admit() {
+            return Err(ServiceError::Domain(DomainError::InvalidTransition(
+                gate.refusal_summary(),
+            )));
+        }
+        let consumed = self.consumed_discharges(task_id)?;
+        let (event, _admission) = self.store.admit_completion(
+            task_id,
+            from,
+            &planned.task,
+            &planned.event,
+            policy_fp,
+            &gate.outcomes,
+            &consumed,
+            &now,
+        )?;
+        Ok(AppliedTransition {
+            task: planned.task,
+            event,
+        })
+    }
+    /// Derives the pure admission report from durable state only
+    /// (CV-1..CV-8): the task's own requirements, the latest trusted
+    /// observed-effect fingerprint as the current subject reading, and the
+    /// durable claim/verdict/exemption/discharge rows. No caller-supplied
+    /// value participates — the in-memory shape of an evidence record can
+    /// never disagree with what admission actually read.
+    fn admission_report(
+        &self,
+        task: &Task,
+        policy_fp: Option<&str>,
+        now: &str,
+    ) -> ServiceResult<evaluation::AdmissionReport> {
+        use evaluation::{
+            AdmissionContext, CandidateSelector, ClaimVerdict, CriterionEvidence, EffectId,
+            ResolvedEffect,
+        };
+        let task_risk = task.snapshot().risk;
+        let current = self
+            .store
+            .latest_observed_subject_fingerprint_for_task(task.id())?;
+        let durable_claims = self.store.list_agent_claims_for_task(task.id())?;
+        let durable_verdicts = self.store.list_claim_verifications_for_task(task.id())?;
+        let durable_exemptions = self.store.list_policy_exemptions_for_task(task.id())?;
+        let durable_discharges = self.store.list_approval_discharges_for_task(task.id())?;
+        let mut criteria = Vec::with_capacity(task.acceptance().len());
+        for criterion in task.acceptance() {
+            let requirement = task
+                .evidence_requirements()
+                .iter()
+                .find(|req| req.criterion_id == *criterion)
+                .ok_or_else(|| {
+                    ServiceError::Storage(StorageError::Corrupt(format!(
+                        "task {} has no requirement for {criterion}",
+                        task.id()
+                    )))
+                })?;
+            // CV-2: a verdict is eligible only against a durable claim for
+            // the same criterion whose asserter differs from the verifier
+            // (the trusted identity). Loading the durable claims here is
+            // what makes that check meaningful at the service boundary.
+            let claims: Vec<&evaluation::AgentClaim> = durable_claims
+                .iter()
+                .filter(|claim| claim.criterion_id == criterion.as_str())
+                .collect();
+            let claim_ids: Vec<&str> = claims.iter().map(|claim| claim.claim_id.as_str()).collect();
+            let verdicts: Vec<&evaluation::ClaimVerification> = durable_verdicts
+                .iter()
+                .filter(|verdict| claim_ids.contains(&verdict.claim_id.as_str()))
+                .collect();
+            let exemptions: Vec<&evaluation::PolicyExemption> = durable_exemptions
+                .iter()
+                .filter(|e| {
+                    e.criterion_id
+                        .as_deref()
+                        .is_none_or(|c| c == criterion.as_str())
+                })
+                .collect();
+            let discharge = durable_discharges.iter().find(|d| {
+                d.criterion_id == *criterion
+                    && d.consumed_by.is_none()
+                    && current
+                        .as_ref()
+                        .is_some_and(|fp| fp == &d.subject_fingerprint)
+            });
+            // CV-9 rule 4: resolve the basis of every relied-on VERIFIED
+            // verdict to task-bound observed effects. Unresolvable,
+            // malformed, or foreign refs are skipped, never substituted —
+            // the core then fails closed for the verdicts that named them.
+            // Store failures propagate loud (fail closed with a hard
+            // error, not a quiet refusal).
+            let mut resolved_effects = Vec::new();
+            let mut relied_on = Vec::new();
+            for verdict in verdicts
+                .iter()
+                .filter(|v| v.verdict == ClaimVerdict::Verified && v.superseded_by.is_none())
+            {
+                for reference in &verdict.basis.effect_refs {
+                    let Ok(effect_id) = EffectId::new(reference) else {
+                        continue;
+                    };
+                    let Some(effect) = self.store.get_observed_effect(&effect_id)? else {
+                        continue;
+                    };
+                    let bound = self
+                        .store
+                        .get_execution(&effect.provenance().execution_id)?
+                        .is_some_and(|execution| execution.task_id() == task.id());
+                    if !bound {
+                        continue;
+                    }
+                    if !relied_on.iter().any(|(execution_id, attempt_id)| {
+                        *execution_id == effect.provenance().execution_id
+                            && *attempt_id == effect.provenance().attempt_id
+                    }) {
+                        relied_on.push((
+                            effect.provenance().execution_id.clone(),
+                            effect.provenance().attempt_id.clone(),
+                        ));
+                    }
+                    if resolved_effects
+                        .iter()
+                        .all(|resolved: &ResolvedEffect| resolved.effect_id != *reference)
+                    {
+                        resolved_effects.push(ResolvedEffect {
+                            effect_id: reference.clone(),
+                            subject_fingerprint: effect.subject_fingerprint().clone(),
+                        });
+                    }
+                }
+            }
+            // The gate mirrors the core's: empty params or non-candidate
+            // selectors never consult integrity, so `None` here only
+            // reaches the core where the core ignores it.
+            let integrity = if requirement.params.is_empty()
+                || CandidateSelector::from_requirement(requirement).is_err()
+            {
+                None
+            } else {
+                self.integrity_basis(&relied_on)?
+            };
+            criteria.push(CriterionEvidence {
+                requirement: Some(requirement),
+                current_fingerprint: current.as_ref(),
+                claims,
+                verdicts,
+                exemptions,
+                discharge,
+                integrity,
+                resolved_effects,
+            });
+        }
+        let context = AdmissionContext {
+            task_risk: task_risk.as_deref(),
+            current_policy_fingerprint: policy_fp,
+            now,
+        };
+        Ok(evaluation::evaluate_admission(&criteria, &context))
+    }
+    /// Current integrity basis for one candidate-shaped criterion (CV-9
+    /// rule 4): the integrity assessment of the relied-on candidate
+    /// execution, bound to its evaluated base. `candidates` arrive in
+    /// basis order; the first execution with both an assessment and a
+    /// bound base wins. `None` (no assessment, no base) fails closed in
+    /// the core. Joins the same pre-commit read snapshot as verdicts and
+    /// effects — the commit guard is the atomic state write in
+    /// `admit_completion`.
+    fn integrity_basis(
+        &self,
+        candidates: &[(ExecutionId, AttemptId)],
+    ) -> ServiceResult<Option<evaluation::IntegrityBasis>> {
+        use evaluation::{CandidateIntegrityOutcome, IntegrityBasis};
+        for (execution_id, attempt_id) in candidates {
+            let assessment = self
+                .store
+                .get_candidate_integrity_assessment(execution_id.as_str(), attempt_id.as_str())?;
+            let base = self
+                .store
+                .get_evaluated_policy_base(execution_id.as_str())?;
+            if let (Some(assessment), Some(base)) = (assessment, base) {
+                return Ok(Some(IntegrityBasis {
+                    clean: assessment.outcome == CandidateIntegrityOutcome::Intact,
+                    requirement_revision: assessment.requirement_revision.clone(),
+                    policy_fingerprint: assessment.policy_fingerprint.clone(),
+                    evaluated_base: base.policy.fingerprint().to_owned(),
+                }));
+            }
+        }
+        Ok(None)
+    }
+    /// Unconsumed discharges the atomic commit must consume, if any.
+    fn consumed_discharges(&self, task_id: &TaskId) -> ServiceResult<Vec<evaluation::DischargeId>> {
+        let Some(current) = self
+            .store
+            .latest_observed_subject_fingerprint_for_task(task_id)?
+        else {
+            return Ok(Vec::new());
+        };
+        let mut found = Vec::new();
+        for discharge in self.store.list_approval_discharges_for_task(task_id)? {
+            if discharge.consumed_by.is_none() && discharge.subject_fingerprint == current {
+                found.push(discharge.discharge_id.clone());
+            }
+        }
+        Ok(found)
     }
 
     /// Single choke point: load → validate via the canonical domain op →
