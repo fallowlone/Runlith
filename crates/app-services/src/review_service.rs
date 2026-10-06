@@ -23,6 +23,10 @@ pub const PRESENCE_FRESHNESS_MS: u64 = 300_000;
 /// Caller-owned values for one B1 review. The service fills the
 /// current setting binding, the minted proof nonce, and the capture
 /// timestamp; `supersedes: None` auto-chains to the live head.
+/// `reviewer_input_digest` must come from the trusted review UI (the
+/// digest of the exact input the human judged), never from an IPC
+/// caller or provider text; the service cannot re-verify its
+/// provenance.
 #[derive(Clone, Debug)]
 pub struct B1ReviewInput {
     pub record_id: String,
@@ -166,7 +170,9 @@ impl<C: Clock> ReviewService<C> {
 
     /// Appends the next review-path setting revision for a task. The
     /// proof binds this exact change (revision + path); a denied or
-    /// stale presence refuses before anything is stored.
+    /// stale presence refuses before anything is stored. A switch
+    /// invalidates the live head review, if any: prior reviews bind
+    /// the old revision and must never admit under the new one.
     pub fn change_review_path(
         &mut self,
         presence: &dyn PresenceAuthority,
@@ -190,6 +196,10 @@ impl<C: Clock> ReviewService<C> {
             .map_err(|_| ReviewServiceError::TimestampOutOfRange)?;
         self.store
             .record_review_path_setting(task_id, &setting, proof.nonce(), now)?;
+        if let Some(head) = self.store.live_review_record_head(task_id)? {
+            self.store
+                .invalidate_review_record(head.record_id(), "review-setting-changed", now)?;
+        }
         Ok(setting)
     }
 

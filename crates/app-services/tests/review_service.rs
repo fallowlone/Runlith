@@ -288,8 +288,16 @@ fn admission_flows_through_service() {
     service
         .change_review_path(&presence, "T-SVC", policy::ReviewPath::B1)
         .unwrap();
-    assert!(matches!(
+    assert_eq!(
         service.admission_for_task(query()).unwrap(),
-        ReviewAdmissionDecision::Deny { .. }
-    ));
+        ReviewAdmissionDecision::BlockedOnReview
+    );
+    let fresh = service
+        .record_b1_review(&presence, review_input("review-2", None))
+        .unwrap();
+    assert_eq!(fresh.supersedes(), None);
+    assert_eq!(
+        service.admission_for_task(query()).unwrap(),
+        ReviewAdmissionDecision::Admit
+    );
 }
