@@ -4,7 +4,7 @@ use evaluation::{
     CaptureAuthority, EffectId, EffectKind, EffectPayload, EffectProvenance, EffectSubjectRef,
     ObservedEffect, SubjectFingerprint,
 };
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use security_audit::{SecurityAuditEvent, SecurityAuditOutcome, SecurityAuditSubjectKind};
 
 use crate::{StorageError, StorageResult};
@@ -73,20 +73,7 @@ impl crate::SqliteStore {
         execution_id: &str,
         attempt_id: &str,
     ) -> StorageResult<Option<(u64, String)>> {
-        match self.connection().query_row(
-            "SELECT invalidated_at_ms, invalidation_code FROM candidate_input_operations WHERE execution_id = ?1 AND attempt_id = ?2",
-            params![execution_id, attempt_id],
-            |row| {
-                let invalidated_at_ms: Option<i64> = row.get(0)?;
-                let invalidation_code: Option<String> = row.get(1)?;
-                Ok((invalidated_at_ms, invalidation_code))
-            },
-        ) {
-            Ok((Some(ms), Some(code))) => Ok(Some((u64::try_from(ms).unwrap_or(0), code))),
-            Ok(_) => Ok(None),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        candidate_operation_invalidation_on(self.connection(), execution_id, attempt_id)
     }
 
     /// Durably binds the selected subject before object graph resolution. An
@@ -529,201 +516,7 @@ impl crate::SqliteStore {
         execution_id: &str,
         attempt_id: &str,
     ) -> StorageResult<Option<CandidateIntegrityAssessment>> {
-        // Check if the operation is invalidated before attempting to load assessment
-        if let Some((_, code)) = self.candidate_operation_invalidation(execution_id, attempt_id)? {
-            return Err(StorageError::ConstraintViolation(format!(
-                "candidate evidence invalidated: {code}"
-            )));
-        }
-        type Row = (
-            String,
-            String,
-            String,
-            i64,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            i64,
-            i64,
-            String,
-            i64,
-            String,
-            String,
-            String,
-            String,
-            String,
-            i64,
-            i64,
-        );
-        let row: Option<Row> = self
-            .connection()
-            .query_row(
-                "SELECT task_id, subject_ref, requirement_revision, policy_revision,
-                    policy_fingerprint, criterion_id, selector, selector_path,
-                    selector_literal, invocation_id,
-                    evaluator_ref, runtime_ref, enforcement_ref, base_commit_oid,
-                    base_tree_oid, base_manifest_sha256, candidate_commit_oid,
-                    candidate_tree_oid, candidate_manifest_sha256, checkpoints,
-                    integrity_outcome, started_at_ms, completed_at_ms, deletions,
-                    invocation_descriptor_version, invocation_descriptor_sha256,
-                    evaluator_executable, toolchain_ref, runner_backend,
-                    runner_plan_sha256, runner_enforced_axes, runner_env_isolated
-             FROM candidate_input_assessments WHERE execution_id = ?1 AND attempt_id = ?2
-             ORDER BY completed_at_ms DESC, assessment_id DESC LIMIT 1",
-                params![execution_id, attempt_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get(7)?,
-                        row.get(8)?,
-                        row.get(9)?,
-                        row.get(10)?,
-                        row.get(11)?,
-                        row.get(12)?,
-                        row.get(13)?,
-                        row.get(14)?,
-                        row.get(15)?,
-                        row.get(16)?,
-                        row.get(17)?,
-                        row.get(18)?,
-                        row.get(19)?,
-                        row.get(20)?,
-                        row.get(21)?,
-                        row.get(22)?,
-                        row.get(23)?,
-                        row.get(24)?,
-                        row.get(25)?,
-                        row.get(26)?,
-                        row.get(27)?,
-                        row.get(28)?,
-                        row.get(29)?,
-                        row.get(30)?,
-                        row.get(31)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((
-            task_id,
-            subject_ref,
-            requirement_revision,
-            policy_revision,
-            policy_fingerprint,
-            criterion_id,
-            selector,
-            selector_path,
-            selector_literal,
-            invocation_id,
-            evaluator_ref,
-            runtime_ref,
-            enforcement_ref,
-            base_commit_oid,
-            base_tree_oid,
-            base_manifest_sha256,
-            candidate_commit_oid,
-            candidate_tree_oid,
-            candidate_manifest_sha256,
-            checkpoints,
-            outcome,
-            started_at_ms,
-            completed_at_ms,
-            deletions,
-            invocation_descriptor_version,
-            invocation_descriptor_sha256,
-            evaluator_executable,
-            toolchain_ref,
-            runner_backend,
-            runner_plan_sha256,
-            runner_enforced_axes,
-            runner_env_isolated,
-        )) = row
-        else {
-            return Ok(None);
-        };
-        let policy_revision = u64::try_from(policy_revision)
-            .map_err(|_| StorageError::Corrupt("invalid candidate policy revision".into()))?;
-        let started_at_ms = u64::try_from(started_at_ms)
-            .map_err(|_| StorageError::Corrupt("invalid candidate start time".into()))?;
-        let completed_at_ms = u64::try_from(completed_at_ms)
-            .map_err(|_| StorageError::Corrupt("invalid candidate completion time".into()))?;
-        let invocation_descriptor_version = u32::try_from(invocation_descriptor_version)
-            .map_err(|_| StorageError::Corrupt("invalid candidate descriptor version".into()))?;
-        let runner_enforced_axes = u8::try_from(runner_enforced_axes)
-            .map_err(|_| StorageError::Corrupt("invalid candidate Runner axes".into()))?;
-        let runner_env_isolated = match runner_env_isolated {
-            0 => false,
-            1 => true,
-            _ => {
-                return Err(StorageError::Corrupt(
-                    "invalid Runner env isolation flag".into(),
-                ))
-            }
-        };
-        let outcome = match outcome.as_str() {
-            "INTACT" => CandidateIntegrityOutcome::Intact,
-            "MISMATCH" => CandidateIntegrityOutcome::Mismatch,
-            _ => return Err(StorageError::Corrupt("invalid candidate outcome".into())),
-        };
-        let assessment = CandidateIntegrityAssessment {
-            task_id,
-            execution_id: execution_id.to_owned(),
-            attempt_id: attempt_id.to_owned(),
-            subject_ref,
-            requirement_revision,
-            policy_revision,
-            policy_fingerprint,
-            criterion_id,
-            selector,
-            selector_path,
-            selector_literal,
-            invocation_id,
-            evaluator_ref,
-            runtime_ref,
-            enforcement_ref,
-            invocation_descriptor_version,
-            invocation_descriptor_sha256,
-            evaluator_executable,
-            toolchain_ref,
-            runner_backend,
-            runner_plan_sha256,
-            runner_enforced_axes,
-            runner_env_isolated,
-            base_commit_oid,
-            base_tree_oid,
-            base_manifest_sha256,
-            candidate_commit_oid,
-            candidate_tree_oid,
-            candidate_manifest_sha256,
-            deletions: decode_deletions(&deletions)?,
-            checkpoints: decode_checkpoints(&checkpoints)?,
-            outcome,
-            started_at_ms,
-            completed_at_ms,
-        };
-        assessment
-            .validate()
-            .map_err(|error| StorageError::Corrupt(error.to_string()))?;
-        Ok(Some(assessment))
+        get_candidate_integrity_assessment_on(self.connection(), execution_id, attempt_id)
     }
 
     /// Appends a matching completion or post-restart reuse checkpoint.
@@ -1087,4 +880,228 @@ fn decode_checkpoints(value: &str) -> StorageResult<Vec<CandidateFreshnessCheckp
         });
     }
     Ok(result)
+}
+
+pub(crate) fn candidate_operation_invalidation_on(
+    connection: &Connection,
+    execution_id: &str,
+    attempt_id: &str,
+) -> StorageResult<Option<(u64, String)>> {
+    match connection.query_row(
+        "SELECT invalidated_at_ms, invalidation_code FROM candidate_input_operations WHERE execution_id = ?1 AND attempt_id = ?2",
+        params![execution_id, attempt_id],
+        |row| {
+            let invalidated_at_ms: Option<i64> = row.get(0)?;
+            let invalidation_code: Option<String> = row.get(1)?;
+            Ok((invalidated_at_ms, invalidation_code))
+        },
+    ) {
+        Ok((Some(ms), Some(code))) => Ok(Some((u64::try_from(ms).unwrap_or(0), code))),
+        Ok(_) => Ok(None),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub(crate) fn get_candidate_integrity_assessment_on(
+    connection: &Connection,
+    execution_id: &str,
+    attempt_id: &str,
+) -> StorageResult<Option<CandidateIntegrityAssessment>> {
+    // Check if the operation is invalidated before attempting to load assessment
+    if let Some((_, code)) =
+        candidate_operation_invalidation_on(connection, execution_id, attempt_id)?
+    {
+        return Err(StorageError::ConstraintViolation(format!(
+            "candidate evidence invalidated: {code}"
+        )));
+    }
+    type Row = (
+        String,
+        String,
+        String,
+        i64,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        String,
+        i64,
+        String,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+    );
+    let row: Option<Row> = connection
+        .query_row(
+            "SELECT task_id, subject_ref, requirement_revision, policy_revision,
+                policy_fingerprint, criterion_id, selector, selector_path,
+                selector_literal, invocation_id,
+                evaluator_ref, runtime_ref, enforcement_ref, base_commit_oid,
+                base_tree_oid, base_manifest_sha256, candidate_commit_oid,
+                candidate_tree_oid, candidate_manifest_sha256, checkpoints,
+                integrity_outcome, started_at_ms, completed_at_ms, deletions,
+                invocation_descriptor_version, invocation_descriptor_sha256,
+                evaluator_executable, toolchain_ref, runner_backend,
+                runner_plan_sha256, runner_enforced_axes, runner_env_isolated
+         FROM candidate_input_assessments WHERE execution_id = ?1 AND attempt_id = ?2
+         ORDER BY completed_at_ms DESC, assessment_id DESC LIMIT 1",
+            params![execution_id, attempt_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                    row.get(13)?,
+                    row.get(14)?,
+                    row.get(15)?,
+                    row.get(16)?,
+                    row.get(17)?,
+                    row.get(18)?,
+                    row.get(19)?,
+                    row.get(20)?,
+                    row.get(21)?,
+                    row.get(22)?,
+                    row.get(23)?,
+                    row.get(24)?,
+                    row.get(25)?,
+                    row.get(26)?,
+                    row.get(27)?,
+                    row.get(28)?,
+                    row.get(29)?,
+                    row.get(30)?,
+                    row.get(31)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        task_id,
+        subject_ref,
+        requirement_revision,
+        policy_revision,
+        policy_fingerprint,
+        criterion_id,
+        selector,
+        selector_path,
+        selector_literal,
+        invocation_id,
+        evaluator_ref,
+        runtime_ref,
+        enforcement_ref,
+        base_commit_oid,
+        base_tree_oid,
+        base_manifest_sha256,
+        candidate_commit_oid,
+        candidate_tree_oid,
+        candidate_manifest_sha256,
+        checkpoints,
+        outcome,
+        started_at_ms,
+        completed_at_ms,
+        deletions,
+        invocation_descriptor_version,
+        invocation_descriptor_sha256,
+        evaluator_executable,
+        toolchain_ref,
+        runner_backend,
+        runner_plan_sha256,
+        runner_enforced_axes,
+        runner_env_isolated,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    let policy_revision = u64::try_from(policy_revision)
+        .map_err(|_| StorageError::Corrupt("invalid candidate policy revision".into()))?;
+    let started_at_ms = u64::try_from(started_at_ms)
+        .map_err(|_| StorageError::Corrupt("invalid candidate start time".into()))?;
+    let completed_at_ms = u64::try_from(completed_at_ms)
+        .map_err(|_| StorageError::Corrupt("invalid candidate completion time".into()))?;
+    let invocation_descriptor_version = u32::try_from(invocation_descriptor_version)
+        .map_err(|_| StorageError::Corrupt("invalid candidate descriptor version".into()))?;
+    let runner_enforced_axes = u8::try_from(runner_enforced_axes)
+        .map_err(|_| StorageError::Corrupt("invalid candidate Runner axes".into()))?;
+    let runner_env_isolated = match runner_env_isolated {
+        0 => false,
+        1 => true,
+        _ => {
+            return Err(StorageError::Corrupt(
+                "invalid Runner env isolation flag".into(),
+            ))
+        }
+    };
+    let outcome = match outcome.as_str() {
+        "INTACT" => CandidateIntegrityOutcome::Intact,
+        "MISMATCH" => CandidateIntegrityOutcome::Mismatch,
+        _ => return Err(StorageError::Corrupt("invalid candidate outcome".into())),
+    };
+    let assessment = CandidateIntegrityAssessment {
+        task_id,
+        execution_id: execution_id.to_owned(),
+        attempt_id: attempt_id.to_owned(),
+        subject_ref,
+        requirement_revision,
+        policy_revision,
+        policy_fingerprint,
+        criterion_id,
+        selector,
+        selector_path,
+        selector_literal,
+        invocation_id,
+        evaluator_ref,
+        runtime_ref,
+        enforcement_ref,
+        invocation_descriptor_version,
+        invocation_descriptor_sha256,
+        evaluator_executable,
+        toolchain_ref,
+        runner_backend,
+        runner_plan_sha256,
+        runner_enforced_axes,
+        runner_env_isolated,
+        base_commit_oid,
+        base_tree_oid,
+        base_manifest_sha256,
+        candidate_commit_oid,
+        candidate_tree_oid,
+        candidate_manifest_sha256,
+        deletions: decode_deletions(&deletions)?,
+        checkpoints: decode_checkpoints(&checkpoints)?,
+        outcome,
+        started_at_ms,
+        completed_at_ms,
+    };
+    assessment
+        .validate()
+        .map_err(|error| StorageError::Corrupt(error.to_string()))?;
+    Ok(Some(assessment))
 }
