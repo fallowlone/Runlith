@@ -13,6 +13,7 @@
 
 mod candidate;
 mod capture;
+mod claim_verification;
 mod error;
 mod observed_effect;
 mod port;
@@ -20,15 +21,22 @@ mod request;
 mod verdict;
 
 pub use candidate::{
-    candidate_sha256, CandidateCheckpointPhase, CandidateDeletion, CandidateError, CandidateFile,
-    CandidateFreshnessCheckpoint, CandidateIntegrityAssessment, CandidateIntegrityOutcome,
-    CandidateManifest, CandidateManifestEntry, CandidateSelector, CandidateTestResult,
-    GitObjectFormat, VerifiedCandidate, MAX_CANDIDATE_BLOB_BYTES, MAX_CANDIDATE_ENTRIES,
-    MAX_CANDIDATE_TREE_DEPTH,
+    candidate_sha256, requirement_revision, CandidateCheckpointPhase, CandidateDeletion,
+    CandidateError, CandidateFile, CandidateFreshnessCheckpoint, CandidateIntegrityAssessment,
+    CandidateIntegrityOutcome, CandidateManifest, CandidateManifestEntry, CandidateSelector,
+    CandidateTestResult, GitObjectFormat, VerifiedCandidate, MAX_CANDIDATE_BLOB_BYTES,
+    MAX_CANDIDATE_ENTRIES, MAX_CANDIDATE_TREE_DEPTH,
 };
 pub use capture::{
     CaptureRequest, CapturedObservation, EffectCapturePort, ProcessExitObservation,
     ProcessExitObservationSink, SubjectMaterial, MAX_CAPTURE_PATH, MAX_CAPTURE_SUBJECT,
+};
+pub use claim_verification::{
+    evaluate_admission, AdmissionContext, AdmissionDecision, AdmissionId, AdmissionReport,
+    AgentClaim, ApprovalDischarge, ClaimId, ClaimVerdict, ClaimVerification, ClaimedOutcome,
+    ClaimedSubject, CriterionEvidence, CriterionOutcome, CriterionStatus, DischargeId,
+    EvidenceRefs, ExemptionId, IntegrityBasis, PolicyExemption, ResolvedEffect, VerificationId,
+    MAX_CLAIM_TEXT, MAX_EVIDENCE_REFS, TRUSTED_VERIFIER_IDENTITY,
 };
 pub use error::{EvaluationError, EvaluationResult};
 pub use observed_effect::{

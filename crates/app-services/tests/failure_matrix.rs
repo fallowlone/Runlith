@@ -244,7 +244,7 @@ fn run_scenario(
 ) -> OrchestrationOutcome {
     let executor = FakeExecutor::with_control(scenario, control);
     let outcome = service
-        .schedule(task_id, ids(execution, attempt), &executor, evaluator)
+        .schedule(task_id, ids(execution, attempt), &executor, evaluator, None)
         .expect("schedule must return a typed outcome");
     // The executor is dropped here; invocation counts are asserted by the
     // caller through the evaluator and durable state instead.
@@ -263,7 +263,7 @@ fn success_verified_end_to_end_is_exactly_once_and_survives_reopen() {
     let executor = FakeExecutor::for_scenario(FakeScenario::Success);
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
     let outcome = service
-        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator)
+        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator, None)
         .unwrap();
     assert_eq!(
         outcome,
@@ -335,7 +335,7 @@ fn review_rejection_keeps_succeeded_attempt_and_never_completes_on_fixture() {
     let executor = FakeExecutor::for_scenario(FakeScenario::ReviewRejection);
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysRejected);
     let outcome = service
-        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator)
+        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator, None)
         .unwrap();
     assert_eq!(
         outcome,
@@ -382,6 +382,7 @@ fn review_rejection_keeps_succeeded_attempt_and_never_completes_on_fixture() {
             ids("E-1", "A-1"),
             &FakeExecutor::for_scenario(FakeScenario::ReviewRejection),
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .unwrap();
     assert!(matches!(
@@ -401,7 +402,7 @@ fn crash_records_failed_attempt_with_no_evaluation_and_no_completion() {
     let executor = FakeExecutor::for_scenario(FakeScenario::Crash);
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
     let outcome = service
-        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator)
+        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator, None)
         .unwrap();
     assert_eq!(
         outcome,
@@ -449,7 +450,7 @@ fn timeout_records_timed_out_with_no_retry_and_no_evaluation() {
     let executor = FakeExecutor::for_scenario(FakeScenario::Timeout);
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
     let outcome = service
-        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator)
+        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator, None)
         .unwrap();
     assert_eq!(
         outcome,
@@ -501,7 +502,7 @@ fn hang_precancelled_is_cancelled_without_second_attempt() {
     let executor = FakeExecutor::with_control(FakeScenario::Hang, control);
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
     let outcome = service
-        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator)
+        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator, None)
         .unwrap();
     assert_eq!(
         outcome,
@@ -539,7 +540,7 @@ fn hang_release_becomes_submittable_evidence_not_a_failure() {
     let executor = FakeExecutor::with_control(FakeScenario::Hang, control);
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
     let outcome = service
-        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator)
+        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator, None)
         .unwrap();
     assert!(
         matches!(
@@ -569,7 +570,7 @@ fn hang_threaded_cancel_regains_orchestrator_control_with_no_mega_transaction() 
     let handle = std::thread::spawn(move || {
         let executor = FakeExecutor::with_control(FakeScenario::Hang, worker_control);
         let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
-        let outcome = service.schedule(&task_clone, ids("E-1", "A-1"), &executor, &evaluator);
+        let outcome = service.schedule(&task_clone, ids("E-1", "A-1"), &executor, &evaluator, None);
         let _ = tx.send(outcome);
     });
 
@@ -654,7 +655,7 @@ fn malformed_result_is_rejected_at_the_boundary_and_cannot_be_blessed() {
     let executor = FakeExecutor::for_scenario(FakeScenario::MalformedResult);
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
     let outcome = service
-        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator)
+        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator, None)
         .unwrap();
     assert_eq!(
         outcome,
@@ -683,7 +684,7 @@ fn partial_result_stays_failed_and_distinguishable_from_success() {
     let executor = FakeExecutor::for_scenario(FakeScenario::PartialResult);
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
     let outcome = service
-        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator)
+        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator, None)
         .unwrap();
     assert!(
         matches!(
@@ -721,7 +722,7 @@ fn quota_reached_performs_no_retry_no_routing_and_no_completion() {
     let executor = FakeExecutor::for_scenario(FakeScenario::QuotaReached);
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
     let outcome = service
-        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator)
+        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator, None)
         .unwrap();
     assert!(
         matches!(
@@ -764,6 +765,7 @@ fn quota_reached_performs_no_retry_no_routing_and_no_completion() {
             ids("E-2", "A-2"),
             &FakeExecutor::for_scenario(FakeScenario::Success),
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .unwrap();
     assert!(matches!(
@@ -782,7 +784,7 @@ fn network_failure_touches_no_network_and_never_replays() {
     let executor = FakeExecutor::for_scenario(FakeScenario::NetworkFailure);
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
     let outcome = service
-        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator)
+        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator, None)
         .unwrap();
     assert!(
         matches!(
@@ -821,7 +823,7 @@ fn forbidden_path_write_mutates_no_filesystem_state() {
     let executor = FakeExecutor::for_scenario(FakeScenario::ForbiddenPathWrite);
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
     let outcome = service
-        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator)
+        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator, None)
         .unwrap();
     assert!(
         matches!(
@@ -859,7 +861,7 @@ fn forbidden_command_launches_no_process() {
     let executor = FakeExecutor::for_scenario(FakeScenario::ForbiddenCommand);
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
     let outcome = service
-        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator)
+        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator, None)
         .unwrap();
     assert!(
         matches!(
@@ -904,6 +906,7 @@ fn evaluator_runs_only_for_eligible_complete_evidence() {
                 ids("E-1", "A-1"),
                 &FakeExecutor::for_scenario(scenario),
                 &evaluator,
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -935,6 +938,7 @@ fn evaluator_runs_only_for_eligible_complete_evidence() {
                 ids("E-1", "A-1"),
                 &FakeExecutor::for_scenario(scenario),
                 &evaluator,
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -965,6 +969,7 @@ fn evaluator_runs_only_for_eligible_complete_evidence() {
             ids("E-1", "A-1"),
             &FakeExecutor::with_control(FakeScenario::Hang, control),
             &evaluator,
+            None,
         )
         .unwrap();
     assert_eq!(evaluator.call_count(), 0);
@@ -993,6 +998,7 @@ fn always_verified_evaluator_cannot_bless_absent_or_malformed_work() {
                 ids("E-1", "A-1"),
                 &FakeExecutor::for_scenario(scenario),
                 &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+                None,
             )
             .unwrap();
         assert_ne!(
@@ -1115,7 +1121,7 @@ fn completion_requires_eligible_work_plus_verdict_plus_trusted_transition() {
 
     // Only eligible work + Verified + trusted transition completes.
     tasks
-        .verification_succeeded(&task_id, "VERIFIED via independent evaluation")
+        .verification_succeeded_under_policy(&task_id, "VERIFIED via independent evaluation", None)
         .unwrap();
     assert_eq!(
         tasks.get_task(&task_id).unwrap().unwrap().state(),
@@ -1137,6 +1143,7 @@ fn terminal_state_resists_blind_second_execution() {
             ids("E-1", "A-1"),
             &FakeExecutor::for_scenario(FakeScenario::Success),
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .unwrap();
     let events_before = service
@@ -1150,6 +1157,7 @@ fn terminal_state_resists_blind_second_execution() {
             ids("E-2", "A-2"),
             &FakeExecutor::for_scenario(FakeScenario::Success),
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -1189,6 +1197,7 @@ fn terminal_state_resists_blind_second_execution() {
             ids("E-1", "A-1"),
             &FakeExecutor::for_scenario(FakeScenario::Crash),
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .unwrap();
     assert_eq!(task_state(&service2, &failed), TaskState::Running);
@@ -1203,6 +1212,7 @@ fn terminal_state_resists_blind_second_execution() {
             ids("E-2", "A-2"),
             &FakeExecutor::for_scenario(FakeScenario::Success),
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -1239,6 +1249,7 @@ fn terminal_state_resists_blind_second_execution() {
             ids("E-1", "A-1"),
             &FakeExecutor::for_scenario(FakeScenario::Success),
             &FakeEvaluator::new(EvaluatorMode::AlwaysRejected),
+            None,
         )
         .unwrap();
     assert_eq!(task_state(&service3, &rejected), TaskState::RetryReady);
@@ -1248,6 +1259,7 @@ fn terminal_state_resists_blind_second_execution() {
             ids("E-2", "A-2"),
             &FakeExecutor::for_scenario(FakeScenario::Success),
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -1279,6 +1291,7 @@ fn explicit_retry_from_retry_ready_creates_a_new_attempt_and_preserves_history()
             ids("E-1", "A-1"),
             &FakeExecutor::for_scenario(FakeScenario::Success),
             &FakeEvaluator::new(EvaluatorMode::AlwaysRejected),
+            None,
         )
         .unwrap();
     assert_eq!(task_state(&service, &task_id), TaskState::RetryReady);
@@ -1345,7 +1358,7 @@ fn explicit_retry_from_retry_ready_creates_a_new_attempt_and_preserves_history()
     assert_eq!(verdict, app_services::EvaluationVerdict::Verified);
     service
         .tasks_mut()
-        .verification_succeeded(&task_id, "VERIFIED via independent evaluation")
+        .verification_succeeded_under_policy(&task_id, "VERIFIED via independent evaluation", None)
         .unwrap();
     assert_eq!(task_state(&service, &task_id), TaskState::Completed);
 
@@ -1385,6 +1398,7 @@ fn durable_reopen_matrix_for_each_outcome_class() {
             ids("E-1", "A-1"),
             &FakeExecutor::for_scenario(FakeScenario::Success),
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .unwrap();
     drop(service);
@@ -1411,6 +1425,7 @@ fn durable_reopen_matrix_for_each_outcome_class() {
             ids("E-1", "A-1"),
             &FakeExecutor::for_scenario(FakeScenario::Success),
             &FakeEvaluator::new(EvaluatorMode::AlwaysRejected),
+            None,
         )
         .unwrap();
     drop(service2);
@@ -1437,6 +1452,7 @@ fn durable_reopen_matrix_for_each_outcome_class() {
             ids("E-1", "A-1"),
             &FakeExecutor::for_scenario(FakeScenario::Crash),
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .unwrap();
     drop(service3);
@@ -1463,6 +1479,7 @@ fn durable_reopen_matrix_for_each_outcome_class() {
             ids("E-1", "A-1"),
             &FakeExecutor::for_scenario(FakeScenario::Timeout),
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .unwrap();
     drop(service4);
@@ -1491,6 +1508,7 @@ fn durable_reopen_matrix_for_each_outcome_class() {
             ids("E-1", "A-1"),
             &FakeExecutor::with_control(FakeScenario::Hang, control),
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .unwrap();
     drop(service5);
@@ -1523,6 +1541,7 @@ fn event_journal_agrees_with_relational_state_and_reads_create_nothing() {
             ids("E-1", "A-1"),
             &FakeExecutor::for_scenario(FakeScenario::Crash),
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .unwrap();
     let history = service.tasks().list_events_for_task(&task_id).unwrap();
@@ -1741,6 +1760,7 @@ fn cancellation_affects_only_the_intended_execution() {
             ids("E-A", "A-A"),
             &FakeExecutor::with_control(FakeScenario::Hang, control_a),
             &evaluator_a,
+            None,
         )
         .unwrap();
     assert!(matches!(outcome_a, OrchestrationOutcome::Cancelled { .. }));
@@ -1753,6 +1773,7 @@ fn cancellation_affects_only_the_intended_execution() {
             ids("E-B", "A-B"),
             &FakeExecutor::for_scenario(FakeScenario::Success),
             &evaluator_b,
+            None,
         )
         .unwrap();
     assert!(matches!(
@@ -1791,7 +1812,7 @@ fn unfinished_dependency_blocks_every_scenario_without_invocation() {
         let executor = FakeExecutor::for_scenario(scenario);
         let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
         let outcome = service
-            .schedule(&blocked, ids("E-1", "A-1"), &executor, &evaluator)
+            .schedule(&blocked, ids("E-1", "A-1"), &executor, &evaluator, None)
             .unwrap();
         assert_eq!(
             outcome,
@@ -1878,6 +1899,7 @@ fn non_ready_states_invoke_nothing_and_create_no_runtime_facts() {
             ids("E-RETRY", "A-RETRY"),
             &FakeExecutor::for_scenario(FakeScenario::Success),
             &FakeEvaluator::new(EvaluatorMode::AlwaysRejected),
+            None,
         )
         .unwrap();
     assert_eq!(task_state(&service, &retry), TaskState::RetryReady);
@@ -1888,6 +1910,7 @@ fn non_ready_states_invoke_nothing_and_create_no_runtime_facts() {
             ids("E-DONE", "A-DONE"),
             &FakeExecutor::for_scenario(FakeScenario::Success),
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .unwrap();
     assert_eq!(task_state(&service, &completed), TaskState::Completed);
@@ -1915,6 +1938,7 @@ fn non_ready_states_invoke_nothing_and_create_no_runtime_facts() {
                 ids(&format!("E-X{index}"), &format!("A-X{index}")),
                 &executor,
                 &evaluator,
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -1964,6 +1988,7 @@ fn no_scenario_expands_the_durable_taxonomy() {
                 ids("E-1", "A-1"),
                 &FakeExecutor::with_control(scenario, control),
                 &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+                None,
             )
             .unwrap();
         for event in service.tasks().list_events_for_task(&task_id).unwrap() {
@@ -1990,7 +2015,7 @@ fn no_scenario_expands_the_durable_taxonomy() {
         // Schema version is asserted structurally by the storage adapter
         // (SUPPORTED_SCHEMA_VERSION); the closed workload-bearing migration
         // sequence through 0016 is proven by the storage census tests.
-        assert_eq!(storage_sqlite::SUPPORTED_SCHEMA_VERSION, 22);
+        assert_eq!(storage_sqlite::SUPPORTED_SCHEMA_VERSION, 23);
     }
 }
 
@@ -2014,6 +2039,7 @@ fn one_orchestration_invocation_creates_at_most_one_attempt() {
                 ids("E-1", "A-1"),
                 &FakeExecutor::with_control(scenario, control),
                 &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+                None,
             )
             .unwrap();
         let execution = service

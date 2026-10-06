@@ -195,6 +195,7 @@ fn workspace_bound_cycle_verifies_through_independent_evaluation() {
                 executor
             },
             &evaluator,
+            None,
         )
         .expect("workspace-bound cycle");
     assert!(
@@ -239,6 +240,7 @@ fn provider_success_without_verification_never_completes() {
             workspace_request(&env, &ExecutionId::new("E-1").unwrap()),
             |_, _| executor,
             &evaluator,
+            None,
         )
         .expect("workspace-bound cycle");
     assert!(
@@ -290,6 +292,7 @@ fn provider_failure_is_attempt_failure_never_task_failure() {
             workspace_request(&env, &ExecutionId::new("E-1").unwrap()),
             |_, _| executor,
             &evaluator,
+            None,
         )
         .expect("cycle reports failure");
     assert!(
@@ -336,6 +339,7 @@ fn execution_id_mismatch_fails_before_any_mutation() {
             bad_request,
             |_, _| executor,
             &evaluator,
+            None,
         )
         .expect_err("mismatched execution must fail");
     let state = orchestration
@@ -374,6 +378,7 @@ fn lease_failure_leaves_honest_recoverable_intermediate() {
             bad_request,
             |_, _| executor,
             &evaluator,
+            None,
         )
         .expect_err("bad base must fail at the lease step");
     // Honest intermediate: RUNNING + execution committed, no attempt, no
@@ -407,8 +412,20 @@ fn lease_failure_leaves_honest_recoverable_intermediate() {
 mod unix {
     use super::*;
     use provider_claude::{build_task_prompt, ClaudeConfig, ClaudeExecutor};
+    use std::ffi::OsString;
     use std::io::Write;
     use std::time::Duration;
+
+    /// Explicit provider host environment for the fixture executables, so the
+    /// tests do not depend on the runner's ambient login session: containers
+    /// commonly have no USER, which the provider requires (TASK-0155).
+    fn host_environment(env: &TestEnv) -> Vec<(OsString, OsString)> {
+        vec![
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("HOME".into(), env.dir.clone().into_os_string()),
+            ("USER".into(), "runlith-fixture".into()),
+        ]
+    }
 
     fn fixture(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
@@ -420,6 +437,153 @@ mod unix {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
             .expect("fixture chmod");
         path
+    }
+
+    #[test]
+    fn explicit_fixture_environment_refuses_runner_composition() {
+        use plan_domain::{
+            AtomicityRequest, PlannerCallSpend, PlannerFault, PlannerPort, ScopeBound,
+        };
+        use policy::{Capability, EffectiveCapabilities, ScopeId};
+        use provider_claude::{ClaudeFailure, ClaudePlanner};
+        use runner::{prepare_process_launch, ChildEnvironment, IsolationRequirements};
+        use std::sync::Arc;
+
+        let env = TestEnv::new("explicit-host-boundary");
+        let workdir = std::fs::canonicalize(&env.repo).unwrap();
+        let exe = fixture(
+            &env.dir,
+            "boundary.sh",
+            r#"echo spawned > spawned
+printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture success","session_id":"boundary"}'
+"#,
+        );
+        let config = ClaudeConfig::default().with_executable(&exe).unwrap();
+        // A real Runner launch object, with honest zero-axis trusted-host
+        // enforcement. This exercises attachment without requiring Seatbelt.
+        let prepare = |pairs| {
+            Arc::new(
+                prepare_process_launch(
+                    Arc::new(runner_native::NativeRunner),
+                    &EffectiveCapabilities::new(vec![
+                        Capability::process(exe.to_str().unwrap()).unwrap()
+                    ]),
+                    workdir.to_str().unwrap(),
+                    ScopeId::new(exe.to_str().unwrap()).unwrap(),
+                    IsolationRequirements::trusted_host(),
+                    ChildEnvironment::from_explicit(pairs).unwrap(),
+                )
+                .unwrap(),
+            )
+        };
+        let launch = prepare(host_environment(&env));
+        let executor = ClaudeExecutor::bind_trusted_host_with_host_environment(
+            config.clone(),
+            "fixture prompt",
+            &workdir,
+            env.dir.join("provider-env"),
+            host_environment(&env),
+        )
+        .unwrap();
+        let planner = ClaudePlanner::bind_trusted_host_with_host_environment(
+            config.clone(),
+            &workdir,
+            env.dir.join("planner-env"),
+            host_environment(&env),
+        )
+        .unwrap();
+        let refusal = "explicit host environment is restricted to trusted-host execution";
+        // Test direct attachment first: a launch prepared elsewhere must not
+        // bypass the boundary, and reattachment/cloning must not restore it.
+        let forbidden = executor.clone().with_sandboxed_launch(launch.clone());
+        let work = WorkItem {
+            task_id: TaskId::new("T-BOUNDARY").unwrap(),
+            execution_id: ExecutionId::new("E-BOUNDARY").unwrap(),
+            attempt_id: AttemptId::new("A-BOUNDARY").unwrap(),
+        };
+        for executor in [
+            forbidden.clone(),
+            forbidden.with_sandboxed_launch(launch.clone()),
+        ] {
+            assert_eq!(
+                executor.execute_detailed(&work).unwrap_err(),
+                ClaudeFailure::EnvironmentIsolation {
+                    detail: refusal.into()
+                }
+            );
+            assert_eq!(executor.child_environment().unwrap_err(), refusal);
+            assert_eq!(
+                executor.isolation_support_read_roots().unwrap_err(),
+                refusal
+            );
+            assert_eq!(
+                executor.isolation_support_write_roots().unwrap_err(),
+                refusal
+            );
+        }
+        let forbidden_planner = planner.clone().with_sandboxed_launch(launch.clone());
+        assert!(matches!(
+            forbidden_planner.assess_atomicity(AtomicityRequest {
+                task_ref: "T-BOUNDARY".into(),
+                acceptance_criteria_refs: vec![],
+                scope_bound: ScopeBound::new(vec!["repo:src".into()]).unwrap(),
+                evidence_refs: vec![],
+                execution_policy_ref: "fixture-policy".into(),
+            }),
+            Err(PlannerFault::ProviderFailure { typed_cause, spend: PlannerCallSpend::NotStarted })
+                if typed_cause.contains(refusal)
+        ));
+        assert_eq!(executor.child_environment().unwrap_err(), refusal);
+        assert_eq!(
+            executor.isolation_support_read_roots().unwrap_err(),
+            refusal
+        );
+        assert_eq!(
+            executor.isolation_support_write_roots().unwrap_err(),
+            refusal
+        );
+        for planner in [&planner, &forbidden_planner] {
+            assert_eq!(planner.child_environment().unwrap_err(), refusal);
+            assert_eq!(planner.isolation_support_read_roots().unwrap_err(), refusal);
+            assert_eq!(
+                planner.isolation_support_write_roots().unwrap_err(),
+                refusal
+            );
+        }
+        assert!(
+            !env.repo.join("spawned").exists(),
+            "no sandbox or trusted-host fallback spawn"
+        );
+
+        // Trusted-host fixtures still run; production bind remains ambient
+        // and accepts Runner attachment only if HOME/USER are present.
+        assert!(executor.execute(&work).is_ok());
+        std::fs::remove_file(env.repo.join("spawned")).unwrap();
+        let production = ClaudeExecutor::bind(
+            config.clone(),
+            "prompt",
+            &workdir,
+            env.dir.join("production-env"),
+        )
+        .unwrap();
+        match production.child_environment() {
+            Ok(pairs) => {
+                let user = pairs.iter().find(|(name, _)| name == "USER").unwrap();
+                assert_eq!(Some(user.1.clone()), std::env::var_os("USER"));
+                let production_launch = prepare(pairs);
+                assert!(production
+                    .with_sandboxed_launch(production_launch)
+                    .execute(&work)
+                    .is_ok());
+            }
+            Err(detail) => {
+                assert!(detail.contains("requires HOME") || detail.contains("requires USER"));
+                assert!(production
+                    .with_sandboxed_launch(launch)
+                    .execute(&work)
+                    .is_err());
+            }
+        }
     }
 
     #[test]
@@ -450,15 +614,17 @@ mod unix {
                         .expect("fixture exe")
                         .with_timeout(Duration::from_secs(30))
                         .expect("timeout");
-                    ClaudeExecutor::bind_trusted_host(
+                    ClaudeExecutor::bind_trusted_host_with_host_environment(
                         config,
                         prompt,
                         lease.worktree_ref().to_owned(),
                         env.dir.join("provider-env"),
+                        host_environment(&env),
                     )
                     .expect("bind executor to lease path")
                 },
                 &evaluator,
+                None,
             )
             .expect("claude-shaped cycle");
         assert!(
@@ -543,15 +709,17 @@ mod unix {
                         .expect("fixture exe")
                         .with_timeout(Duration::from_secs(30))
                         .expect("timeout");
-                    ClaudeExecutor::bind_trusted_host(
+                    ClaudeExecutor::bind_trusted_host_with_host_environment(
                         config,
                         prompt,
                         lease.worktree_ref().to_owned(),
                         environment_base.clone(),
+                        host_environment(&env),
                     )
                     .expect("bind isolated executor")
                 },
                 &evaluator,
+                None,
             )
             .expect("isolated claude-shaped cycle");
         assert!(matches!(
@@ -676,6 +844,7 @@ fn failed_prerequisites_block_before_provider_invocation_with_durable_report() {
             workspace_request(&env, &ExecutionId::new("E-1").unwrap()),
             |_, _| executor,
             &evaluator,
+            None,
         )
         .expect("preflight block is a decided outcome, not an error");
     let OrchestrationOutcome::BlockedByPrerequisite {
@@ -774,6 +943,7 @@ fn satisfied_prerequisites_let_the_workspace_cycle_proceed() {
             workspace_request(&env, &ExecutionId::new("E-1").unwrap()),
             |_, _| executor,
             &evaluator,
+            None,
         )
         .expect("satisfied prerequisites never block the cycle");
     assert!(
@@ -807,6 +977,7 @@ fn task_without_prerequisites_skips_the_gate_entirely() {
             workspace_request(&env, &ExecutionId::new("E-1").unwrap()),
             |_, _| executor,
             &evaluator,
+            None,
         )
         .expect("empty declaration is not a blocker");
     assert!(matches!(

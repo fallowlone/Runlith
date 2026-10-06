@@ -166,6 +166,7 @@ impl<C: Clock> OrchestrationService<C> {
         ids: OrchestrationIds,
         executor: &impl ExecutionPort,
         evaluator: &impl EvaluationPort,
+        current_policy: Option<&str>,
     ) -> Result<PlannedOrchestrationOutcome, PlannedOrchestrationError> {
         let planned = planning
             .decompose_for_task(planner, branch, decomposition, &policy, task_id)
@@ -177,8 +178,15 @@ impl<C: Clock> OrchestrationService<C> {
 
         // The revision is durable from here on: every failure is reported as
         // an outcome that carries the accepted plan, never as `Err`.
-        let step = match self.step_accepted_plan(planning, &plan, task_id, ids, executor, evaluator)
-        {
+        let step = match self.step_accepted_plan(
+            planning,
+            &plan,
+            task_id,
+            ids,
+            executor,
+            evaluator,
+            current_policy,
+        ) {
             Ok(step) => step,
             Err(error) => {
                 return Ok(PlannedOrchestrationOutcome::SchedulingFailed { plan, error });
@@ -242,6 +250,7 @@ impl<C: Clock> OrchestrationService<C> {
     /// `branch`, gates `task_id` on its Plan predecessors and delegates to the
     /// canonical scheduler. Never calls a planner and never creates a Plan
     /// revision. Nothing durable is written by the plan gate itself.
+    #[allow(clippy::too_many_arguments)]
     pub fn schedule_from_current_plan(
         &mut self,
         planning: &PlanningService<C>,
@@ -250,6 +259,7 @@ impl<C: Clock> OrchestrationService<C> {
         ids: OrchestrationIds,
         executor: &impl ExecutionPort,
         evaluator: &impl EvaluationPort,
+        current_policy: Option<&str>,
     ) -> Result<PlannedOrchestrationOutcome, PlannedOrchestrationError> {
         let Some(accepted) = planning
             .current_accepted_plan(branch)
@@ -259,7 +269,15 @@ impl<C: Clock> OrchestrationService<C> {
         };
         let plan = Box::new(accepted);
         Ok(
-            match self.step_accepted_plan(planning, &plan, task_id, ids, executor, evaluator)? {
+            match self.step_accepted_plan(
+                planning,
+                &plan,
+                task_id,
+                ids,
+                executor,
+                evaluator,
+                current_policy,
+            )? {
                 PlanStep::NotRepresented => {
                     PlannedOrchestrationOutcome::TaskNotInAcceptedPlan { plan }
                 }
@@ -416,6 +434,7 @@ impl<C: Clock> OrchestrationService<C> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn step_accepted_plan(
         &mut self,
         planning: &PlanningService<C>,
@@ -424,6 +443,7 @@ impl<C: Clock> OrchestrationService<C> {
         ids: OrchestrationIds,
         executor: &impl ExecutionPort,
         evaluator: &impl EvaluationPort,
+        current_policy: Option<&str>,
     ) -> Result<PlanStep, PlannedOrchestrationError> {
         // Every gate decision below is based on `plan`. If the canonical head
         // is no longer `plan`, applicability may differ: report it instead of
@@ -505,6 +525,7 @@ impl<C: Clock> OrchestrationService<C> {
             }),
             executor,
             evaluator,
+            current_policy,
         ) {
             Ok(execution) => Ok(PlanStep::Executed(execution)),
             Err(crate::ServiceError::Storage(storage_sqlite::StorageError::PlanStale {

@@ -18,6 +18,7 @@ mod approval_store;
 mod approved_proposal_codec;
 mod audit_store;
 mod candidate_assessment_store;
+mod claim_verification_store;
 mod entry_store;
 mod error;
 mod event;
@@ -40,6 +41,7 @@ pub use approval_store::{
     ApprovalCapabilityRecord, ApprovalRecord, ApprovalState, NewApprovalRecord,
 };
 pub use candidate_assessment_store::{CandidateEvidence, CandidateSelectionOutcome};
+pub use claim_verification_store::CompletionAdmissionRecord;
 pub use entry_store::{
     AdmittedExecutionEntry, ExecutionEntryAdmission, PlanHeadPrecondition,
     PlanningInputPrecondition, StrandedPreAttemptEntry,

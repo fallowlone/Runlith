@@ -108,7 +108,7 @@ fn full_lifecycle_commits_matching_ordered_history() {
     service.route_to_review(&task_id).unwrap();
     service.begin_verification(&task_id).unwrap();
     let completed = service
-        .verification_succeeded(&task_id, "VERIFIED: refs")
+        .verification_succeeded_under_policy(&task_id, "VERIFIED: refs", None)
         .unwrap();
     assert_eq!(completed.task.state(), TaskState::Completed);
 
@@ -228,7 +228,7 @@ fn invalid_transition_changes_nothing_and_appends_nothing() {
     let mut service = db.service();
     let task_id = seed_task(&mut service, "P-1", "T-1");
     let seeded_len = journal_len(&service);
-    match service.verification_succeeded(&task_id, "self-report") {
+    match service.verification_succeeded_under_policy(&task_id, "self-report", None) {
         Err(ServiceError::Domain(_)) => {}
         other => panic!("DRAFT → verification must fail domain validation, got {other:?}"),
     }

@@ -349,7 +349,7 @@ fn journal_evidence(seq: u64) -> PlanCommitJournalEvidence {
 fn fresh_database_reaches_schema_16() {
     let db = TestDb::new("schema");
     let store = db.open();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 22);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 23);
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
 }
 
@@ -1780,6 +1780,11 @@ fn schema_13_revision_history_without_lineage_fails_closed_after_upgrade() {
              DROP TABLE candidate_input_assessments;
              DROP TABLE candidate_input_operations;
              DROP TABLE observed_effects;
+             DROP TABLE agent_claims;
+             DROP TABLE claim_verifications;
+             DROP TABLE policy_exemptions;
+             DROP TABLE approval_discharges;
+             DROP TABLE completion_admissions;
              DROP TABLE planning_input_candidate_tasks;
              DROP TABLE human_decision_evidence;
              DROP TABLE human_decision_options;

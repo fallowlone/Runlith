@@ -10,6 +10,7 @@
 //! grants Task completion outside the trusted evaluation path.
 
 mod approval_service;
+mod candidate_verdict;
 mod clock;
 mod error;
 mod human_decision_service;
@@ -20,12 +21,14 @@ mod plan_graph;
 mod planned_orchestration;
 mod planning_service;
 mod preflight_service;
+mod requirement_binding;
 mod runtime_service;
 mod security_service;
 mod task_service;
 mod workspace_service;
 
 pub use approval_service::ApprovalService;
+pub use candidate_verdict::mint_candidate_verdicts;
 pub use clock::{format_rfc3339, Clock, FixedClock, SystemClock};
 pub use error::{ServiceError, ServiceResult};
 pub use human_decision_service::{HumanDecisionCreate, HumanDecisionService};
@@ -48,6 +51,10 @@ pub use planning_service::{
 };
 pub use preflight_service::{
     check_prerequisites, PreflightFinding, PreflightReport, PrerequisiteStatus,
+};
+pub use requirement_binding::{
+    bind_candidate_input_params, BindingProvenance, BoundEvidenceRequirement, FreshPresenceProof,
+    ProposedCandidateBinding, RequirementBindingError, BINDER_OPERATOR,
 };
 pub use runtime_service::{AppliedExecution, PlannedExecution, RuntimeService};
 pub use security_service::{

@@ -15,6 +15,7 @@
 //! `Unmeasured` so the trusted service charges conservatively.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -53,6 +54,13 @@ struct Malformed(String);
 
 type Parsed<T> = Result<T, Malformed>;
 
+/// Private trust-mode selection for [`ClaudePlanner::bind_with_model`].
+enum PlannerLaunch {
+    Unattached,
+    TrustedHost,
+    TrustedHostWithEnvironment(Vec<(OsString, OsString)>),
+}
+
 impl ClaudePlanner {
     /// Builds an unattached planner. Production must attach a verified Runner
     /// launch with [`Self::with_sandboxed_launch`] before any provider call.
@@ -61,7 +69,13 @@ impl ClaudePlanner {
         workdir: impl Into<PathBuf>,
         environment_base: impl Into<PathBuf>,
     ) -> Result<Self, String> {
-        Self::bind_with_model(config, workdir, environment_base, DEFAULT_MODEL_REF, false)
+        Self::bind_with_model(
+            config,
+            workdir,
+            environment_base,
+            DEFAULT_MODEL_REF,
+            PlannerLaunch::Unattached,
+        )
     }
 
     /// Explicit trusted-host constructor for deterministic adapter contract
@@ -71,36 +85,63 @@ impl ClaudePlanner {
         workdir: impl Into<PathBuf>,
         environment_base: impl Into<PathBuf>,
     ) -> Result<Self, String> {
-        Self::bind_with_model(config, workdir, environment_base, DEFAULT_MODEL_REF, true)
+        Self::bind_with_model(
+            config,
+            workdir,
+            environment_base,
+            DEFAULT_MODEL_REF,
+            PlannerLaunch::TrustedHost,
+        )
+    }
+
+    /// [`Self::bind_trusted_host`] with the provider's host variables taken
+    /// only from `host_environment`; see
+    /// [`ClaudeExecutor::bind_trusted_host_with_host_environment`].
+    pub fn bind_trusted_host_with_host_environment(
+        config: ClaudeConfig,
+        workdir: impl Into<PathBuf>,
+        environment_base: impl Into<PathBuf>,
+        host_environment: impl IntoIterator<Item = (OsString, OsString)>,
+    ) -> Result<Self, String> {
+        Self::bind_with_model(
+            config,
+            workdir,
+            environment_base,
+            DEFAULT_MODEL_REF,
+            PlannerLaunch::TrustedHostWithEnvironment(host_environment.into_iter().collect()),
+        )
     }
 
     /// Shared constructor for the explicit production and trusted-host entry
     /// points. Keeping the trust-mode switch private prevents composition code
-    /// from accidentally selecting it through a generic boolean option.
+    /// from accidentally selecting it through a generic option.
     fn bind_with_model(
         config: ClaudeConfig,
         workdir: impl Into<PathBuf>,
         environment_base: impl Into<PathBuf>,
         model_ref: impl Into<String>,
-        trusted_host: bool,
+        launch: PlannerLaunch,
     ) -> Result<Self, String> {
         let config = bound_planner_config(config)?;
         let workdir = workdir.into();
         let environment_base = environment_base.into();
-        let executor = if trusted_host {
-            ClaudeExecutor::bind_trusted_host(
-                config,
-                "Runlith proposal-only planner",
-                workdir,
-                environment_base,
-            )?
-        } else {
-            ClaudeExecutor::bind(
-                config,
-                "Runlith proposal-only planner",
-                workdir,
-                environment_base,
-            )?
+        let prompt = "Runlith proposal-only planner";
+        let executor = match launch {
+            PlannerLaunch::Unattached => {
+                ClaudeExecutor::bind(config, prompt, workdir, environment_base)?
+            }
+            PlannerLaunch::TrustedHost => {
+                ClaudeExecutor::bind_trusted_host(config, prompt, workdir, environment_base)?
+            }
+            PlannerLaunch::TrustedHostWithEnvironment(host_environment) => {
+                ClaudeExecutor::bind_trusted_host_with_host_environment(
+                    config,
+                    prompt,
+                    workdir,
+                    environment_base,
+                    host_environment,
+                )?
+            }
         };
         let identity = PlannerIdentity::new(
             PlannerAdapterId::new(CLAUDE_PLANNER_ADAPTER_ID).map_err(|error| error.to_string())?,

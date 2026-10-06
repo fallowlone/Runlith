@@ -9,9 +9,14 @@ use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
 mod engine;
+mod selector_catalog;
 mod test_mutation;
 
 pub use engine::{CompiledPolicy, PolicyEngine, PolicyLayer, PolicyRule, PolicyRuleEvidence};
+pub use selector_catalog::{
+    BoundCandidateParams, CandidateSelectorCatalog, CandidateSelectorCatalogRevision,
+    SelectorCatalogError, SELECTOR_FILE_CONTAINS_V1,
+};
 pub use test_mutation::{TestMutationPolicy, TestMutationPolicyError, TestMutationPolicyRevision};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -617,6 +622,7 @@ pub enum PolicyContractError {
     ApprovalNotRequired,
     HardDenied,
     InvalidTestMutationPolicy(String),
+    InvalidSelectorCatalog(String),
 }
 
 impl fmt::Display for PolicyContractError {
