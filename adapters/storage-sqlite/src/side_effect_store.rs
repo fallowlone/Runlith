@@ -21,6 +21,18 @@ fn domain(error: impl std::fmt::Display) -> StorageError {
     StorageError::DomainReconstruction(format!("side-effect store: {error}"))
 }
 
+/// One durable escalation with its optional resolution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SideEffectEscalation {
+    pub intent_id: String,
+    pub code: String,
+    pub evidence_refs: Vec<String>,
+    pub escalated_at_ms: i64,
+    pub resolved_at_ms: Option<i64>,
+    pub resolution: Option<String>,
+    pub successor_intent_id: Option<String>,
+}
+
 /// One durable transition audit row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SideEffectTransition {
@@ -47,6 +59,16 @@ type IntentRow = (
     String,
     i64,
     i64,
+);
+
+type EscalationRow = (
+    String,
+    String,
+    String,
+    i64,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
 );
 
 const INTENT_COLUMNS: &str = "intent_id, kind, target_ref, params_hash, idempotency_key,
@@ -376,6 +398,55 @@ impl crate::SqliteStore {
             });
         }
         Ok(transitions)
+    }
+
+    /// Reads one escalation by intent id, if recorded.
+    pub fn get_side_effect_escalation(
+        &self,
+        intent_id: &str,
+    ) -> StorageResult<Option<SideEffectEscalation>> {
+        let row: Option<EscalationRow> = self
+            .connection()
+            .query_row(
+                "SELECT intent_id, code, evidence_refs, escalated_at_ms,
+                        resolved_at_ms, resolution, successor_intent_id
+                 FROM side_effect_escalations WHERE intent_id = ?1",
+                params![intent_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(
+            |(
+                intent_id,
+                code,
+                evidence,
+                escalated_at_ms,
+                resolved_at_ms,
+                resolution,
+                successor_intent_id,
+            )| {
+                Ok(SideEffectEscalation {
+                    intent_id,
+                    code,
+                    evidence_refs: decode_list(&evidence)?,
+                    escalated_at_ms,
+                    resolved_at_ms,
+                    resolution,
+                    successor_intent_id,
+                })
+            },
+        )
+        .transpose()
     }
 
     /// Records one escalation for an ESCALATE intent (the trigger

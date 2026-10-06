@@ -68,6 +68,6 @@ pub use security_audit::{
     SecurityAuditId, SecurityAuditOutcome, SecurityAuditRecord, SecurityAuditSubject,
     SecurityAuditSubjectKind, SECURITY_AUDIT_RECORD_VERSION,
 };
-pub use side_effect_store::SideEffectTransition;
+pub use side_effect_store::{SideEffectEscalation, SideEffectTransition};
 pub use task_store::{BindingProofConsumption, SqliteStore};
 pub use test_mutation_store::EvaluatedPolicyBase;
