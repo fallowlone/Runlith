@@ -21,3 +21,7 @@ sha2 = "0.10"
 
 [dev-dependencies]
 policy = { path = "../../crates/policy" }
+# Raw-SQL probes for trigger/migration guarantees (TASK-0151): no public
+# API exposes DDL or row deletion, so SQL-level tests open the database
+# file directly. Test-only; same pinned rusqlite as the library.
+rusqlite = { version = "0.40.2", features = ["bundled"] }

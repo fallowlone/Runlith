@@ -21,7 +21,11 @@ mod plan_graph;
 mod planned_orchestration;
 mod planning_service;
 mod preflight_service;
+mod presence;
 mod requirement_binding;
+mod review_admission;
+mod review_scope;
+mod review_service;
 mod runtime_service;
 mod security_service;
 mod task_service;
@@ -54,9 +58,21 @@ pub use planning_service::{
 pub use preflight_service::{
     check_prerequisites, PreflightFinding, PreflightReport, PrerequisiteStatus,
 };
+pub use presence::{
+    DenyPresence, FreshPresenceProof, PresenceAuthority, PresenceError, TestPresenceAuthority,
+};
 pub use requirement_binding::{
-    bind_candidate_input_params, BindingProvenance, BoundEvidenceRequirement, FreshPresenceProof,
+    bind_candidate_input_params, BindingProvenance, BoundEvidenceRequirement,
     ProposedCandidateBinding, RequirementBindingError, BINDER_OPERATOR,
+};
+pub use review_admission::{
+    decide_review_admission, policy_review_path, review_path_name, ReviewAdmissionDecision,
+    ReviewAdmissionInput,
+};
+pub use review_scope::review_scope;
+pub use review_service::{
+    B1ReviewInput, ReviewAdmissionQuery, ReviewService, ReviewServiceError, ReviewServiceResult,
+    PRESENCE_FRESHNESS_MS,
 };
 pub use runtime_service::{AppliedExecution, PlannedExecution, RuntimeService};
 pub use security_service::{
