@@ -1,6 +1,6 @@
 # ADR-0041 — G8 Candidate-Only Verdict Minting Authority
 
-Status: **Proposed** (TASK-0125 phase c; implementation `509f810`, workspace verification green, owner ratification pending)
+Status: **Accepted** (TASK-0125; owner ratified 2026-10-06 after independent architecture/security review PASS of exact commits `509f810`/`768fa31`)
 Gate: G8
 
 > This decision states who is authorized to mint durable `AgentClaim` /
