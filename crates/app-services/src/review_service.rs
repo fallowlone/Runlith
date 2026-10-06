@@ -11,14 +11,12 @@ use sha2::{Digest, Sha256};
 use storage_sqlite::{SqliteStore, StorageError};
 
 use crate::clock::{Clock, SystemClock};
-use crate::presence::{FreshPresenceProof, PresenceAuthority, PresenceError};
+use crate::presence::{
+    FreshPresenceProof, PresenceAuthority, PresenceError, PRESENCE_FRESHNESS_MS,
+};
 use crate::review_admission::{
     decide_review_admission, ReviewAdmissionDecision, ReviewAdmissionInput,
 };
-
-/// How long a minted presence proof stays consumable (5 minutes).
-/// Proofs from the future always refuse.
-pub const PRESENCE_FRESHNESS_MS: u64 = 300_000;
 
 /// Caller-owned values for one B1 review. The service fills the
 /// current setting binding, the minted proof nonce, and the capture

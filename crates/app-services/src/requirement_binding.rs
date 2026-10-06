@@ -8,18 +8,20 @@
 //! and mints a new requirement revision (Option 3a) — never a mutation in
 //! place, never a re-binding of an already-bound requirement.
 //!
-//! Fail-closed by absence (conventional, not structural): `for_test` is
-//! currently uncalled in production, so operator binding is unreachable
-//! outside tests. IMPL-C must provide the sole production minter and
-//! audit/remove `for_test` call sites.
+//! Fail-closed by authority (TASK-0160 IMPL-C): the proof binds the
+//! exact operation plus the exact input digest, and anything else
+//! refuses — including `for_test` proofs, which bind no binding
+//! operation. Durable nonce single-use is enforced by the store at
+//! persistence time; this function owns the pure checks.
 
 use policy::{CandidateSelectorCatalogRevision, SelectorCatalogError};
+use sha2::{Digest, Sha256};
 use task_domain::{EvidenceRequirement, RequirementKind, RequirementParam, SubjectBinding};
+
+use crate::presence::{FreshPresenceProof, PRESENCE_FRESHNESS_MS};
 
 /// Provenance binder for ADR-0036 §1a operator-authored binding.
 pub const BINDER_OPERATOR: &str = "operator";
-
-use crate::presence::FreshPresenceProof;
 
 /// Operator-proposed binding values. Untrusted input: every field is
 /// validated against the catalog before anything is persisted.
@@ -67,6 +69,8 @@ pub enum RequirementBindingError {
     RequirementAlreadyBound,
     InvalidRequirementShape(String),
     InvalidPolicyFingerprint,
+    ProofBindingMismatch { field: &'static str },
+    StaleProof,
 }
 
 impl std::fmt::Display for RequirementBindingError {
@@ -82,16 +86,63 @@ impl std::fmt::Display for RequirementBindingError {
             Self::InvalidPolicyFingerprint => {
                 f.write_str("policy fingerprint must be sha256:<64 lowercase hex>")
             }
+            Self::ProofBindingMismatch { field } => {
+                write!(f, "presence proof does not bind this binding: {field}")
+            }
+            Self::StaleProof => f.write_str("presence proof is stale"),
         }
     }
 }
 
 impl std::error::Error for RequirementBindingError {}
 
+/// Exact operation string a binding proof binds: the criterion plus
+/// the catalogued selector and confined path (the binding address).
+/// Values are hashed because criterion ids may carry spaces, which
+/// can never appear in a valid operation token.
+pub fn binding_operation(criterion_id: &str, selector: &str, path: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"candidate-binding-op/v1\0");
+    hash.update(criterion_id.as_bytes());
+    hash.update(b"\0");
+    hash.update(selector.as_bytes());
+    hash.update(b"\0");
+    hash.update(path.as_bytes());
+    format!("candidate-binding:{:x}", hash.finalize())
+}
+
+/// Exact input digest a binding proof binds: every approved value,
+/// including the literal and policy fingerprint the operation
+/// address omits. A swapped literal or policy refuses here.
+pub fn binding_input_digest(
+    criterion_id: &str,
+    selector: &str,
+    path: &str,
+    literal: &str,
+    policy_fingerprint: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"candidate-binding-input/v1\0");
+    hash.update(criterion_id.as_bytes());
+    hash.update(b"\0");
+    hash.update(selector.as_bytes());
+    hash.update(b"\0");
+    hash.update(path.as_bytes());
+    hash.update(b"\0");
+    hash.update(literal.as_bytes());
+    hash.update(b"\0");
+    hash.update(policy_fingerprint.as_bytes());
+    format!("sha256:{:x}", hash.finalize())
+}
+
 /// Binds catalog-validated candidate-input params onto an unbound
 /// TestSuite requirement, minting a new revision.
 ///
-/// The input requirement is never mutated. The policy fingerprint must
+/// Authority first: the proof must bind this exact operation and
+/// input digest and be fresh relative to `bound_at_ms` (which doubles
+/// as the verification instant) — a missing, foreign, swapped, stale,
+/// or future proof refuses before any value is even validated. The
+/// input requirement is never mutated. The policy fingerprint must
 /// already be in the `sha256:` shape the TASK-0144 evaluator requires —
 /// anything else could never verify, so it fails here, not downstream.
 pub fn bind_candidate_input_params(
@@ -102,7 +153,29 @@ pub fn bind_candidate_input_params(
     policy_fingerprint: &str,
     bound_at_ms: u64,
 ) -> Result<BoundEvidenceRequirement, RequirementBindingError> {
-    let _ = proof;
+    let operation = binding_operation(
+        &requirement.criterion_id,
+        &proposed.selector,
+        &proposed.path,
+    );
+    if proof.operation() != operation {
+        return Err(RequirementBindingError::ProofBindingMismatch { field: "operation" });
+    }
+    let digest = binding_input_digest(
+        &requirement.criterion_id,
+        &proposed.selector,
+        &proposed.path,
+        &proposed.literal,
+        policy_fingerprint,
+    );
+    if proof.input_digest() != digest {
+        return Err(RequirementBindingError::ProofBindingMismatch { field: "input" });
+    }
+    if proof.proven_at_ms() > bound_at_ms
+        || bound_at_ms - proof.proven_at_ms() > PRESENCE_FRESHNESS_MS
+    {
+        return Err(RequirementBindingError::StaleProof);
+    }
     if !requirement.params.is_empty() {
         return Err(RequirementBindingError::RequirementAlreadyBound);
     }

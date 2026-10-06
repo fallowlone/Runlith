@@ -560,7 +560,7 @@ fn truncate_id(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use app_services::FixedClock;
+    use app_services::{FixedClock, PresenceAuthority};
     use storage_sqlite::EventType;
     use task_domain::TaskState;
 
@@ -585,6 +585,69 @@ mod tests {
                 },
             )),
         }
+    }
+
+    fn lifecycle_request(task_id: &str, op: TaskLifecycleOp, reason: &str) -> TaskCoreRequest {
+        TaskCoreRequest {
+            payload: Some(task_core_request::Payload::Lifecycle(
+                ipc_contracts::proto::LifecycleRequest {
+                    task_id: task_id.to_owned(),
+                    op: op as i32,
+                    reason: reason.to_owned(),
+                },
+            )),
+        }
+    }
+
+    #[test]
+    fn operator_ipc_cannot_bind_or_widen_requirement_params() {
+        // TASK-0160 (IMPL-C): lifecycle IPC carries no binding fields
+        // and no proof minter, so no sequence of operator requests —
+        // even with attacker-shaped reason text — binds params or
+        // widens an unbound requirement. Binding happens only through
+        // the presence-authorized control-surface service.
+        let mut service = service();
+        dispatch(&mut service, create_project_request("P-1", "P"), None);
+        let mut task = Task::draft(
+            TaskId::new("T-1").unwrap(),
+            ProjectId::new("P-1").unwrap(),
+            "objective",
+        )
+        .unwrap();
+        task.add_acceptance("criterion-1").unwrap();
+        task.define_evidence_requirements(vec![task_domain::EvidenceRequirement::new(
+            "criterion-1",
+            task_domain::RequirementKind::TestSuite,
+            task_domain::RequirementKind::TestSuite.default_subject_binding(),
+            Vec::new(),
+            Some("policy:test-seed".to_owned()),
+            true,
+        )
+        .unwrap()])
+            .unwrap();
+        service.create_task(&task).unwrap();
+        for (op, reason) in [
+            (TaskLifecycleOp::MarkReady, ""),
+            (TaskLifecycleOp::Claim, ""),
+            (TaskLifecycleOp::Start, ""),
+            (
+                TaskLifecycleOp::SubmitResult,
+                "selector=candidate.evil.v1 path=/etc/passwd literal=x",
+            ),
+            (
+                TaskLifecycleOp::RouteToReview,
+                "candidate-binding:00 proof=stolen",
+            ),
+        ] {
+            dispatch(&mut service, lifecycle_request("T-1", op, reason), None);
+        }
+        let task_id = TaskId::new("T-1").unwrap();
+        let stored = service.get_task(&task_id).unwrap().unwrap();
+        assert_eq!(stored.evidence_requirements().len(), 1);
+        assert!(
+            stored.evidence_requirements()[0].params.is_empty(),
+            "operator IPC must never bind requirement params"
+        );
     }
 
     #[test]
@@ -1044,12 +1107,29 @@ mod tests {
             path: "src/example.rs".to_owned(),
             literal: "fn accepted()".to_owned(),
         };
+        let policy_fingerprint = format!("sha256:{}", "7".repeat(64));
+        let proof = app_services::TestPresenceAuthority::new(1_700_000_000_000)
+            .prove(
+                &app_services::binding_operation(
+                    "criterion-candidate",
+                    &proposed.selector,
+                    &proposed.path,
+                ),
+                &app_services::binding_input_digest(
+                    "criterion-candidate",
+                    &proposed.selector,
+                    &proposed.path,
+                    &proposed.literal,
+                    &policy_fingerprint,
+                ),
+            )
+            .unwrap();
         app_services::bind_candidate_input_params(
             &catalog,
             &unbound,
             &proposed,
-            &app_services::FreshPresenceProof::for_test(),
-            &format!("sha256:{}", "7".repeat(64)),
+            &proof,
+            &policy_fingerprint,
             1_700_000_000_000,
         )
         .unwrap()
