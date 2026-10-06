@@ -5264,3 +5264,29 @@ items:
     references:
       - crates/app-services/src/verification_levels.rs
       - docs/architecture/adr/ADR-0013-policy-engine-os-isolation.md
+    outcome: >-
+      Implemented on branch task-0162-verify-executor:
+      crates/app-services/src/verification_execution.rs
+      (VerificationRunner service + validate_plan_commands). Every plan
+      command must exactly equal the derive_commands derivation for its
+      (ecosystem, level) or the plan refuses before any process exists;
+      execution is argv-only (never a shell) through
+      prepare_process_launch with per-command G6 authorization
+      (workspace read+write, exact executable, no network), injected
+      backend + requirements (strict on sandboxing backends, trusted-host
+      on native with env still cleared), canonicalized PATH-resolved
+      executables, timeout kill with orphan-safe pipe draining, and
+      bounded per-stream capture. Only digests+sizes persist as
+      ProcessExit observed effects — raw output never reaches the DB,
+      journal, or a typed error, so secret-shaped output cannot leak by
+      construction (asserted by a DB-bytes scan test). Fail-fast across
+      commands; executed commands (incl. nonzero/timeout signal exits)
+      always record their effect first. Tests: 2 allowlist unit + 11
+      integration (smuggled/V0/unresolved/strict-refusal/strict-ok/
+      happy+env-isolation/nonzero+no-leak/timeout/flood-truncation/
+      v3-order/fail-fast). No orchestrator-cycle call site by design:
+      automatic invocation needs product decisions (when/blocking/which
+      tasks) specified nowhere; the runner is available for that
+      follow-up. No TASK-0125 change, no schema change. Full workspace
+      verification green (128 suites, EXIT=0). Integration into main is
+      not claimed.
