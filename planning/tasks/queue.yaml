@@ -3743,9 +3743,32 @@ items:
     blocked_by: []
     references:
       - docs/architecture/adr/ADR-0018-independent-evaluation.md
+      - docs/architecture/adr/ADR-0041-g8-candidate-only-verdict-minting.md
       - crates/evaluation
       - crates/app-services/src/orchestration_service.rs
+      - crates/app-services/src/candidate_verdict.rs
       - docs/architecture/task-engine.md
+    outcome: >-
+      Resuscitated onto the TASK-0157..TASK-0159 stack on branch
+      task-0125-resuscitation. Phases (a)-(b) (commit 4e015f1):
+      migration renumbered to 0023_claim_verification.sql, CV-9 wiring
+      (ADR-0032 rules 4-5) with requirement_revision plus policy echo,
+      current policy fingerprint derived in agentd from
+      composition.planning_policy_fingerprint and plumbed through
+      orchestration/dispatch (D1 refuted: plan-revision fingerprint
+      bricks completion; the verification_succeeded alias removed).
+      Phase (c) (commit 509f810): candidate-only verdict minting via the
+      new trusted boundary mint_candidate_verdicts, called solely from
+      the shared orchestration concluding boundary after revalidation;
+      operator dispatch only attempts admission and never mints; missing
+      measurement mints nothing; HUMAN_APPROVAL discharges only via
+      CV-8; re-minting skips already-VERIFIED criteria. Minting
+      authority ratified as accepted ADR-0041 (commits 768fa31/6568680;
+      review pack 6eaffd4). completion_admission 16/16, orchestration
+      16/16; full workspace verification green (127 suites, EXIT=0).
+      Known limitation: admit_completion does not re-read inputs inside
+      the transaction; strict rule-5 is a separate follow-up task.
+      Integration into main is not claimed.
 
   - id: TASK-0126
     gate: G8
