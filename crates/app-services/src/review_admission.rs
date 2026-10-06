@@ -11,6 +11,7 @@
 pub struct ReviewAdmissionInput {
     pub policy: policy::TestMutationPolicyRevision,
     pub setting: policy::ReviewPathSetting,
+    pub profile: policy::ReviewerProfile,
     pub path: String,
     pub check: String,
     pub record: Option<evaluation::ReviewRecord>,
@@ -79,6 +80,8 @@ pub fn decide_review_admission(input: ReviewAdmissionInput) -> ReviewAdmissionDe
         affected_checks: input.affected_checks,
         policy_revision: input.policy.revision(),
         policy_fingerprint: input.policy.fingerprint().to_owned(),
+        profile_id: input.profile.profile_id().to_owned(),
+        profile_revision: input.profile.revision(),
         setting_revision: input.setting.revision(),
         setting_path: evaluation::ReviewPathName::B1,
     };
@@ -121,6 +124,10 @@ mod tests {
         format!("sha256:{}", (byte as char).to_string().repeat(64))
     }
 
+    fn profile() -> policy::ReviewerProfile {
+        policy::ReviewerProfile::new("owner-primary", 4, "key:platform-1").unwrap()
+    }
+
     fn record_with(
         verdict: evaluation::ReviewVerdictName,
         setting_revision: u64,
@@ -135,6 +142,8 @@ mod tests {
             affected_checks: vec!["cargo-test-unit".to_owned()],
             policy_revision: 7,
             policy_fingerprint: scoped_policy().fingerprint().to_owned(),
+            profile_id: "owner-primary".to_owned(),
+            profile_revision: 4,
             setting_revision,
             setting_path: evaluation::ReviewPathName::B1,
             reviewer_nonce: "nonce-1".to_owned(),
@@ -159,6 +168,7 @@ mod tests {
         ReviewAdmissionInput {
             policy,
             setting,
+            profile: profile(),
             path: "tests/unit.rs".to_owned(),
             check: "cargo-test-unit".to_owned(),
             record,

@@ -24,6 +24,16 @@ impl ReviewPathName {
             Self::B2 => "review-path/v1:b2",
         }
     }
+
+    pub fn deserialize(serialized: &str) -> Result<Self, ReviewError> {
+        match serialized {
+            "review-path/v1:b1" => Ok(Self::B1),
+            "review-path/v1:b2" => Ok(Self::B2),
+            _ => Err(ReviewError::MalformedRecord(
+                "unknown review path encoding".to_owned(),
+            )),
+        }
+    }
 }
 
 /// Explicit verdict name, mirroring `policy::ReviewVerdict`.
@@ -38,6 +48,16 @@ impl ReviewVerdictName {
         match self {
             Self::Approved => "approved",
             Self::Rejected => "rejected",
+        }
+    }
+
+    pub fn deserialize(serialized: &str) -> Result<Self, ReviewError> {
+        match serialized {
+            "approved" => Ok(Self::Approved),
+            "rejected" => Ok(Self::Rejected),
+            _ => Err(ReviewError::MalformedRecord(
+                "unknown review verdict encoding".to_owned(),
+            )),
         }
     }
 }
@@ -55,6 +75,8 @@ pub struct ReviewRecordFields {
     pub affected_checks: Vec<String>,
     pub policy_revision: u64,
     pub policy_fingerprint: String,
+    pub profile_id: String,
+    pub profile_revision: u64,
     pub setting_revision: u64,
     pub setting_path: ReviewPathName,
     pub reviewer_nonce: String,
@@ -81,6 +103,8 @@ pub struct ReviewExpectation {
     pub affected_checks: Vec<String>,
     pub policy_revision: u64,
     pub policy_fingerprint: String,
+    pub profile_id: String,
+    pub profile_revision: u64,
     pub setting_revision: u64,
     pub setting_path: ReviewPathName,
 }
@@ -123,6 +147,8 @@ pub struct ReviewRecord {
     affected_checks: Vec<String>,
     policy_revision: u64,
     policy_fingerprint: String,
+    profile_id: String,
+    profile_revision: u64,
     setting_revision: u64,
     setting_path: ReviewPathName,
     reviewer_nonce: String,
@@ -167,6 +193,9 @@ impl ReviewRecord {
         if fields.policy_revision == 0 || fields.setting_revision == 0 {
             return Err(malformed("policy/setting revision"));
         }
+        if !valid_token(&fields.profile_id) || fields.profile_revision == 0 {
+            return Err(malformed("reviewer profile binding"));
+        }
         for (value, name) in [
             (&fields.reviewer_nonce, "reviewer nonce"),
             (&fields.implementer_execution_id, "implementer execution"),
@@ -199,6 +228,8 @@ impl ReviewRecord {
             affected_checks,
             policy_revision: fields.policy_revision,
             policy_fingerprint: fields.policy_fingerprint,
+            profile_id: fields.profile_id,
+            profile_revision: fields.profile_revision,
             setting_revision: fields.setting_revision,
             setting_path: fields.setting_path,
             reviewer_nonce: fields.reviewer_nonce,
@@ -267,6 +298,12 @@ impl ReviewRecord {
         if self.policy_fingerprint != expected.policy_fingerprint {
             return Err(mismatch("policy_fingerprint"));
         }
+        if self.profile_id != expected.profile_id {
+            return Err(mismatch("profile_id"));
+        }
+        if self.profile_revision != expected.profile_revision {
+            return Err(mismatch("profile_revision"));
+        }
         if self.setting_revision != expected.setting_revision {
             return Err(mismatch("setting_revision"));
         }
@@ -286,6 +323,7 @@ impl ReviewRecord {
             self.base_manifest.as_str(),
             self.candidate_manifest.as_str(),
             self.policy_fingerprint.as_str(),
+            self.profile_id.as_str(),
             self.setting_path.serialize(),
             self.reviewer_nonce.as_str(),
             self.reviewer_input_digest.as_str(),
@@ -310,6 +348,7 @@ impl ReviewRecord {
             hash.update(b"\x01\0");
         }
         hash.update(self.policy_revision.to_be_bytes());
+        hash.update(self.profile_revision.to_be_bytes());
         hash.update(self.setting_revision.to_be_bytes());
         hash.update(self.captured_at_ms.to_be_bytes());
         if let Some(previous) = &self.supersedes {
@@ -345,6 +384,12 @@ impl ReviewRecord {
     }
     pub fn policy_fingerprint(&self) -> &str {
         &self.policy_fingerprint
+    }
+    pub fn profile_id(&self) -> &str {
+        &self.profile_id
+    }
+    pub fn profile_revision(&self) -> u64 {
+        self.profile_revision
     }
     pub fn setting_revision(&self) -> u64 {
         self.setting_revision
@@ -494,6 +539,8 @@ mod tests {
             policy_revision: 7,
             policy_fingerprint: sha(b'c'),
             setting_revision: 3,
+            profile_id: "owner-primary".to_owned(),
+            profile_revision: 4,
             setting_path: ReviewPathName::B1,
             reviewer_nonce: "nonce-1".to_owned(),
             reviewer_input_digest: sha(b'd'),
@@ -523,6 +570,8 @@ mod tests {
             policy_revision: 7,
             policy_fingerprint: sha(b'c'),
             setting_revision: 3,
+            profile_id: "owner-primary".to_owned(),
+            profile_revision: 4,
             setting_path: ReviewPathName::B1,
         }
     }
@@ -579,6 +628,20 @@ mod tests {
         fields.reviewer_input_digest = sha(b'd');
         fields.policy_revision = 0;
         assert!(ReviewRecord::new(fields).is_err());
+    }
+
+    #[test]
+    fn profile_binding_is_required_and_compared() {
+        let mut fields = sample_fields();
+        fields.profile_revision = 0;
+        assert!(ReviewRecord::new(fields).is_err());
+        let record = sample();
+        let mut rotated = expectation();
+        rotated.profile_revision = 9;
+        assert!(matches!(
+            record.validate_current(&rotated, 1_700_000_100_000, 86_400_000),
+            Err(ReviewError::BindingMismatch { .. })
+        ));
     }
 
     #[test]
