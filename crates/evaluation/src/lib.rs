@@ -19,6 +19,7 @@ mod error;
 mod observed_effect;
 mod port;
 mod request;
+mod review_record;
 mod verdict;
 
 pub use admission_snapshot::{
@@ -51,6 +52,10 @@ pub use observed_effect::{
 };
 pub use port::EvaluationPort;
 pub use request::EvaluationRequest;
+pub use review_record::{
+    ReviewError, ReviewExpectation, ReviewPathName, ReviewRecord, ReviewRecordFields,
+    ReviewVerdictName,
+};
 pub use verdict::EvaluationVerdict;
 
 // Identity re-exports so port implementors depend on this contract crate
