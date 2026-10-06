@@ -349,7 +349,7 @@ fn journal_evidence(seq: u64) -> PlanCommitJournalEvidence {
 fn fresh_database_reaches_schema_16() {
     let db = TestDb::new("schema");
     let store = db.open();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 24);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 25);
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
 }
 
@@ -1801,6 +1801,10 @@ fn schema_13_revision_history_without_lineage_fails_closed_after_upgrade() {
              DROP TABLE planning_input_snapshots;
              DROP TABLE plan_guardrail_events;
              DROP TABLE plan_revision_lineage;
+             DROP TABLE review_records;
+             DROP TABLE review_path_settings;
+             DROP TABLE reviewer_profiles;
+             DROP TABLE owner_presence_proofs;
              PRAGMA user_version = 13;",
         )
         .unwrap();
