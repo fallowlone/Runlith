@@ -4669,6 +4669,32 @@ items:
       - docs/architecture/adr/ADR-0024-g5-provider-execution-seam.md
       - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
       - docs/architecture/INVARIANTS.md
+    outcome: >-
+      Done on branch task-0145-review-authority. Delivered: policy
+      ReviewPath/ReviewPathSetting/HumanPrincipal/ImplementationPrincipal/
+      ReviewerProfile; evaluation ReviewRecord with exact bindings,
+      staleness, and fingerprint verification; presence primitives
+      (DenyPresence production fail-closed, TestPresenceAuthority);
+      pure decide_review_admission table; exact read-only review scope
+      mapping; migration 0025 (presence proofs, revisioned per-task
+      settings, profiles, records with proof-checked nonces, linear
+      supersession, sticky invalidation); review_authority_store with
+      validated restore; ReviewService (presence-gated setting changes
+      with 5-minute freshness, B1 reviews bound to current setting with
+      live-head auto-chain, setting switch invalidates the live head,
+      durable admission queries). 42 new tests: 6 policy + 6 record +
+      8 admission + 2 scope + 4 presence + 8 store (incl. trigger probes,
+      replay, reopen durability) + 8 service (incl. deny/stale presence,
+      dead parent, full admit flow). Full workspace run 129/129 suites
+      EXIT=0; fmt + clippy clean. Author security pass: races arbitrated
+      by schema (loser fails closed, orphan proofs unusable via op
+      binding); admission_ref bound opaquely (no durable
+      runner-admission registry exists to cross-verify — documented in
+      code); reviewer input digest must come from the trusted UI
+      (documented). Out of scope per task: TASK-0144 assessment-path
+      enforcement wiring (candidate path still requires Forbidden),
+      B2 prerequisite demonstration (selectable, always blocked, no
+      fallback), trusted control host (production denies).
   - id: TASK-0147
     gate: G9
     title: Dogfoodable repository information finder
