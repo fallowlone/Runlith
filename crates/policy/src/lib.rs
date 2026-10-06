@@ -666,6 +666,23 @@ fn checked_id(field: &'static str, value: String) -> Result<String, PolicyContra
 }
 
 fn normalize_relative_path(path: &Path) -> Result<PathBuf, PolicyContractError> {
+    // TASK-0151 finding 10: a `.` anywhere but alone is a non-canonical
+    // spelling and is refused instead of silently normalized away. The
+    // lone `.` stays legal as the conventional whole-workspace root.
+    // `components()` itself normalizes interior dots away, so detection
+    // is textual over separator-separated segments.
+    if path != Path::new(".")
+        && path
+            .as_os_str()
+            .as_encoded_bytes()
+            .split(|byte| *byte == b'/' || (cfg!(windows) && *byte == b'\\'))
+            .any(|segment| segment == b".")
+    {
+        return Err(PolicyContractError::MalformedScope {
+            field: "filesystem_root",
+            value: path.display().to_string(),
+        });
+    }
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
@@ -1010,6 +1027,24 @@ mod tests {
             FileScope::new("ws-1", "/tmp/outside"),
             Err(PolicyContractError::MalformedScope { .. })
         ));
+    }
+
+    // TASK-0151 finding 10: interior `.` components are non-canonical
+    // spellings and must be refused, not silently normalized away. The
+    // lone `.` stays legal: it is the conventional whole-workspace root.
+    #[test]
+    fn interior_dot_scope_is_refused() {
+        for spelling in ["a/./b", "./a", "a/.", "a/././b"] {
+            assert!(
+                matches!(
+                    FileScope::new("ws-1", spelling),
+                    Err(PolicyContractError::MalformedScope { .. })
+                ),
+                "{spelling:?} must be refused"
+            );
+        }
+        assert!(FileScope::new("ws-1", ".").is_ok());
+        assert!(FileScope::new("ws-1", "a/b").is_ok());
     }
 
     #[test]
