@@ -106,13 +106,16 @@ fn schema_12_database_upgrades_to_current_without_plan_cost_data() {
                  DROP TABLE reviewer_profiles;
                  DROP TABLE owner_presence_proofs;
                  DROP TABLE binding_proof_consumption;
+                 DROP TABLE side_effect_escalations;
+                 DROP TABLE side_effect_transitions;
+                 DROP TABLE side_effect_intents;
                  PRAGMA user_version = 12;",
             )
             .expect("simulate historical v12 schema");
     }
 
     let mut store = SqliteStore::open(&db.path).expect("migrate v12 to current");
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 26);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 27);
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
     let receipt_ref = PlanningCostReceiptRef::new("planning-receipt:after-upgrade").unwrap();
     let evidence = receipt(1);

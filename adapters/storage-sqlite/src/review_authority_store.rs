@@ -26,7 +26,7 @@ fn domain(error: impl std::fmt::Display) -> StorageError {
 /// as the empty string). No escaping rules to get wrong: lengths are
 /// unambiguous by construction, and decoding is strict (any deviation
 /// is corruption, never a guess).
-fn encode_list(values: &[String]) -> String {
+pub(crate) fn encode_list(values: &[String]) -> String {
     let mut encoded = String::new();
     for value in values {
         encoded.push_str(&format!("{}:{value}", value.len()));
@@ -34,7 +34,7 @@ fn encode_list(values: &[String]) -> String {
     encoded
 }
 
-fn decode_list(encoded: &str) -> StorageResult<Vec<String>> {
+pub(crate) fn decode_list(encoded: &str) -> StorageResult<Vec<String>> {
     let mut values = Vec::new();
     let mut rest = encoded;
     while !rest.is_empty() {

@@ -29,6 +29,7 @@ mod review_scope;
 mod review_service;
 mod runtime_service;
 mod security_service;
+mod side_effect_recovery;
 mod task_service;
 mod verification_execution;
 mod verification_levels;
