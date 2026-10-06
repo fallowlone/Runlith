@@ -4669,6 +4669,32 @@ items:
       - docs/architecture/adr/ADR-0024-g5-provider-execution-seam.md
       - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
       - docs/architecture/INVARIANTS.md
+    outcome: >-
+      Done on branch task-0145-review-authority. Delivered: policy
+      ReviewPath/ReviewPathSetting/HumanPrincipal/ImplementationPrincipal/
+      ReviewerProfile; evaluation ReviewRecord with exact bindings,
+      staleness, and fingerprint verification; presence primitives
+      (DenyPresence production fail-closed, TestPresenceAuthority);
+      pure decide_review_admission table; exact read-only review scope
+      mapping; migration 0025 (presence proofs, revisioned per-task
+      settings, profiles, records with proof-checked nonces, linear
+      supersession, sticky invalidation); review_authority_store with
+      validated restore; ReviewService (presence-gated setting changes
+      with 5-minute freshness, B1 reviews bound to current setting with
+      live-head auto-chain, setting switch invalidates the live head,
+      durable admission queries). 42 new tests: 6 policy + 6 record +
+      8 admission + 2 scope + 4 presence + 8 store (incl. trigger probes,
+      replay, reopen durability) + 8 service (incl. deny/stale presence,
+      dead parent, full admit flow). Full workspace run 129/129 suites
+      EXIT=0; fmt + clippy clean. Author security pass: races arbitrated
+      by schema (loser fails closed, orphan proofs unusable via op
+      binding); admission_ref bound opaquely (no durable
+      runner-admission registry exists to cross-verify — documented in
+      code); reviewer input digest must come from the trusted UI
+      (documented). Out of scope per task: TASK-0144 assessment-path
+      enforcement wiring (candidate path still requires Forbidden),
+      B2 prerequisite demonstration (selectable, always blocked, no
+      fallback), trusted control host (production denies).
   - id: TASK-0147
     gate: G9
     title: Dogfoodable repository information finder
@@ -4748,6 +4774,34 @@ items:
     blocked_by: []
     references:
       - docs/architecture/adr/ADR-0035-g8-immutable-git-candidate-proposal.md
+    outcome: >-
+      Implemented on branch task-0151-evidence-hardening. Storage batch
+      (migration 0024, schema 24): finding 1 BEFORE DELETE trigger on
+      candidate_input_operations; finding 2 invalidation check inside the
+      append transaction; findings 3+4 invalidated results unreadable
+      through get_observed_effect / get_candidate_evidence_for_completion
+      with atomic read+invalidation; finding 5 status_history 8192-byte
+      CHECK retained with a regression test; finding 6 assessment-requires-
+      selection trigger; finding 14 IF NOT EXISTS repair of the 0022-drifted
+      operations shape plus fail-closed recreate directive for pre-column
+      assessment shapes (no fabricated evidence). Producer batch: finding 7
+      CandidateSelector::from_requirement_under_policy reconciles the
+      requirement pin against the current policy (evaluator carries the
+      composition-derived fingerprint, None fails closed); finding 10
+      FileScope refuses non-lone interior "." spellings; finding 11 pinned
+      gitdir canonicalizes and re-checks the anchor (lexical path kept for
+      back-reference comparison); finding 13 operator IPC
+      VerificationSucceeded refuses candidate-routed tasks (completion only
+      through the revalidating production cycle); finding 12 mid-scan G6
+      fault-injection test proves abort-without-partial-snapshot at every
+      denial position. Findings 8 (repo-local config surface matrix) and 9
+      (per-descriptor audit volume, ~130K rows worst case) explicitly
+      re-deferred to TASK-0163/TASK-0164: both need G6-side design, not a
+      hardening-task pattern tweak. Every fix RED-first; production order
+      (selection before result) verified before enforcing the trigger;
+      completion_admission seeds updated to the producer order. Full
+      workspace verification green (127 suites, EXIT=0). Integration into
+      main is not claimed.
 
   # Cross-gate remediation: blocks running the Claude provider under
   # mandatory G6 confinement on macOS, needed before real-provider
@@ -4784,6 +4838,28 @@ items:
     references:
       - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
       - docs/development/G7_TASK_0112_PROVIDER_AUTH_DIAGNOSIS.md
+    outcome: >-
+      ADR-only, implemented on branch task-0152-provider-auth-adr by
+      adopting the owner's own draft branch
+      (origin/task-0152-confined-provider-auth-adr, head 3924bb7) via
+      merge (INDEX-only conflict, authorship preserved). ADR-0037 selects
+      Option B (trusted-host authenticated loopback credential gateway,
+      in-process in agentd, D1-D27); Option A (credential broker injecting
+      into child env) rejected on the measured Seatbelt *:443
+      host-confinement gap; Option C (in-sandbox Keychain grant) stays
+      rejected per TASK-0112. Evidence: owner-run real-credential
+      receipts for both classes plus agent-run invalid-credential and
+      round-6/7 hardening probes (docs/development/
+      G8_TASK_0152_PROVIDER_AUTH_PROBES.md + task0152-probes/); no secret
+      values in the adopted tree (scanned). Third independent
+      architecture/security review PASS recorded in docs/development/
+      ADR-0037_RATIFICATION_REVIEW_PACK.md (all code/doc/probe citations
+      re-verified current on the adoption base; one non-blocking line-drift
+      note); ratified to Accepted + INDEX link under the owner's standing
+      G8-closure directive. No production code changes; implementation
+      follow-ups proposed-not-created per the ADR (orchestrator registers
+      them); sibling WIP branch (PR #9 probe scripts) intentionally not
+      adopted (unreferenced). Integration into main is not claimed.
 
   # Cross-gate governance: repository licensing/product-monetization decision,
   # not scoped to any single implementation gate.
@@ -4947,6 +5023,24 @@ items:
       - SECURITY.md
       - .gitleaks.toml
       - docs/development/PUBLICATION_RUNBOOK.md
+    outcome: >-
+      Hygiene landed earlier via PR #11 (2779b70); this task verified
+      every exit clause against current main and recorded it here (no
+      tree changes needed). Verified: Support/openvidia/
+      proxy_config.json, data/sessions.db, .zcode/plans/*.md absent from
+      the tracked tree; .gitignore covers /Support/, data/sessions.db,
+      /.zcode/; git grep for /Users/[A-Za-z0-9_] returns nothing;
+      CONTRIBUTING.md states Apache-2.0 1.1 open source + no external PRs
+      (D7); SECURITY.md is private-reporting only; .gitleaks.toml carries
+      the nvidia-api-key rule; PUBLICATION_RUNBOOK.md is owner-executed
+      with no-history rationale, export steps, License Date bookkeeping
+      and trademark self-check. gitleaks dir: no leaks found.
+      gitleaks git over the file history: 8 nvidia-api-key hits = the 4
+      known findings at 6b9cacf (visible in tree at 56b8a68) plus the
+      same 4 lines on stale branch task-0057-branch-only-recovery
+      (b1f2493, same blob, no new exposure); history not rewritten per
+      scope. Key revocation remains an owner action. Integration into
+      main is not claimed.
 
   # Cross-gate test hygiene: app-services integration tests depended on the
   # runner's ambient temp directory and login session, so they failed on a
@@ -5290,3 +5384,61 @@ items:
       follow-up. No TASK-0125 change, no schema change. Full workspace
       verification green (128 suites, EXIT=0). Integration into main is
       not claimed.
+  # Re-deferred from TASK-0151 finding 8: the residual needs a
+  # pinned-command inventory crossed with the executable-config surface
+  # (review-grade matrix), not a one-line pattern tweak that would grant
+  # false confidence. Invocation env/config neutralization
+  # (adapters/git-cli/src/runner.rs) is already comprehensive; git
+  # lowercases section+key on parse (verified empirically), so the
+  # existing lowercase pattern has no case bypass.
+  - id: TASK-0163
+    gate: G6
+    title: Pinned-git repository-config executable-surface matrix
+    objective: >-
+      Enumerate the pinned read-only git command set and prove each
+      repository-local executable configuration surface (askpass, pager,
+      insteadOf rewrites, worktree/extension flags, and any further
+      config-or-env helper execution) either neutralized, fail-closed, or
+      unreachable from that set.
+    scope: >-
+      Review plus focused tests: command inventory, per-surface
+      disposition with evidence, pattern/env completions only where the
+      matrix proves a reachable hole. No new git commands, no behavior
+      change to accepted repositories.
+    exit_criteria_summary: >-
+      Matrix recorded (per command x surface, with disposition and
+      evidence); reachable holes closed with regression tests; unreachable
+      surfaces documented with the reason; full workspace verification
+      green.
+    depends_on:
+      - TASK-0151
+    blocked_by: []
+    references:
+      - adapters/git-cli/src/runner.rs
+  # Re-deferred from TASK-0151 finding 9: per-descriptor authorization
+  # appends >=2 audit rows per call (PolicyRequest/Requested + decision),
+  # so a worst-case scan (16,384 entries, 256 MiB) journals ~130K rows.
+  # Bounded by existing constants, but heavy; batching changes G6 audit
+  # trail semantics and needs G6-side design.
+  - id: TASK-0164
+    gate: G6
+    title: Bounded G6 audit volume for descriptor scans
+    objective: >-
+      Bound per-scan G6 audit volume without losing the fail-closed
+      per-descriptor authorization or audit-trail completeness required by
+      the G6 contracts.
+    scope: >-
+      G6-side design (batched authorization decisions, aggregated scan
+      receipts, or sized caps with fail-closed overflow): decision record
+      plus implementation. No silent authorization skipping; no audit gap
+      for denied operations.
+    exit_criteria_summary: >-
+      Worst-case per-scan audit rows bounded by an explicit constant with
+      a regression test; denials still individually journaled; full
+      workspace verification green.
+    depends_on:
+      - TASK-0151
+    blocked_by: []
+    references:
+      - crates/app-services/src/security_service.rs
+      - adapters/effect-capture-local/src/candidate_snapshot.rs
