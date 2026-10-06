@@ -4959,3 +4959,146 @@ items:
       is inherited through exact tree identity. Real-provider smokes remain
       ignored; full workspace was not run or required for this task scope.
       G8 remains IN_PROGRESS.
+
+  # ADR-0036 implementation follow-ups (IMPL-A..D), registered separately
+  # from TASK-0150 per the ADR; renumbered to TASK-0157..0160 because
+  # TASK-0156 is taken by the codex provider readiness worktree.
+  - id: TASK-0157
+    gate: G8
+    title: ADR-0036 IMPL-A - selector catalog and binding boundary
+    objective: >-
+      Provide the lawful production source for candidate-input selectors
+      on exact EvidenceRequirement revisions: a Policy-owned closed,
+      versioned, fingerprinted selector catalog plus the trusted
+      application-service binding boundary that validates and mints new
+      non-empty-params requirement revisions, gated on B1-grade fresh
+      presence authority.
+    scope: >-
+      crates/policy selector catalog (v1: only candidate.file-contains.v1)
+      mirroring TestMutationPolicy's closed/versioned/fingerprinted shape,
+      with ADR-0035-style hostile-path validation and bounded literals
+      including the SECRET-material screen; app-services binding boundary
+      that requires FreshPresenceProof, binds only unbound required
+      TestSuite/content+toolchain+config requirements, takes a
+      sha256:-shaped policy fingerprint, and mints new revisions with
+      binder/catalog/fingerprint provenance without mutating the input.
+      No production proof minting exists yet, so operator binding stays
+      unreachable outside tests (fail-closed by absence; IMPL-C must
+      provide the sole production minter). No V9
+      change (IMPL-B/TASK-0158), no materialization wiring (IMPL-C/
+      TASK-0160), no migration, no IPC/version change. Allowed paths:
+      crates/policy/src/, crates/policy/tests/,
+      crates/app-services/src/requirement_binding.rs,
+      crates/app-services/tests/requirement_binding.rs, lib.rs exports,
+      planning/tasks/queue.yaml, product/version.toml.
+    exit_criteria_summary: >-
+      Catalog membership, revision/fingerprint/restore, path, literal, and
+      secret-screen rules covered by focused tests; boundary tests prove
+      proof-gating, unbound-only binding, shape/fingerprint checks, sorted
+      literal/path/selector params, provenance, and catalog relay; no
+      behavior change in production paths; fmt, clippy -D warnings,
+      focused package suites, and independent security review green.
+    depends_on:
+      - TASK-0150
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0036-g8-evidence-requirement-parameter-binding-authority.md
+      - docs/architecture/adr/ADR-0034-g8-candidate-bound-test-execution.md
+      - docs/architecture/adr/ADR-0035-g8-immutable-git-candidate-proposal.md
+      - crates/policy/src/selector_catalog.rs
+      - crates/app-services/src/requirement_binding.rs
+    outcome: >-
+      Implemented ADR-0036 IMPL-A on branch task-0157-selector-catalog:
+      Policy-owned closed v1 catalog (only candidate.file-contains.v1,
+      revisioned/fingerprinted, ADR-0035-style path rules, bounded
+      literals with SECRET-form screen, no input echo in errors) plus the
+      app-services binding boundary (FreshPresenceProof-gated, unbound
+      required TestSuite/content+toolchain+config only, sha256: policy
+      fingerprint up front, new revision with sorted literal/path/selector
+      params and binder/catalog/fingerprint provenance, input never
+      mutated, re-binding refused). TDD: RED shown as E0432 on both new
+      test files, GREEN 15 catalog + 5 boundary tests; mutation proof
+      (neutered membership check fails uncatalogued_selector_is_rejected,
+      revert restores green). Independent security review returned
+      CHANGES-REQUIRED with 4 Low findings (F1 validated-vs-persisted
+      trim gap, F2 for_test overclaim, F3 JSON-quoted assignment
+      evasion, F4 selector echo); all fixed test-first and re-review
+      returned PASS. Verification: cargo fmt --all --check clean; cargo
+      clippy --workspace --all-targets -D warnings clean; policy, task-
+      domain, product-version, and full app-services suites green. No
+      production behavior change (no production proof minter or callers);
+      full workspace run not required for this scope. Operator binding
+      stays unreachable outside tests until TASK-0145/IMPL-C (TASK-0160).
+      G8 remains IN_PROGRESS.
+
+  - id: TASK-0158
+    gate: G8
+    title: ADR-0036 IMPL-B - V9 preservation-check update
+    objective: >-
+      Recognize an authorized, catalog-validated bound-params requirement
+      as non-escalating in V9 check_criteria_preservation (Option 2a),
+      within the D3 authorized bound.
+    scope: >-
+      Scoped change to the crates/plan/src/validation.rs V9 comparison
+      only: non-escalating solely for non-empty params produced by the
+      TASK-0157 binding boundary for a catalogued selector; any other
+      non-empty params source still escalates requirement_changed and
+      fails closed. No other validation, planning, or catalog change.
+    exit_criteria_summary: >-
+      V9 tests prove bound/catalogued vs foreign params handling; full
+      workspace verification and independent security review green.
+    depends_on:
+      - TASK-0157
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0036-g8-evidence-requirement-parameter-binding-authority.md
+      - crates/plan/src/validation.rs
+
+  - id: TASK-0159
+    gate: G8
+    title: ADR-0036 IMPL-D - TASK-0144 evaluator integration
+    objective: >-
+      Make the TASK-0144 candidate-input evaluator consume bound
+      requirements through the accepted
+      CandidateSelector::from_requirement contract, so evaluator
+      reachability no longer stops at the manual/pending path for bound
+      Tasks.
+    scope: >-
+      Integration only: consume TASK-0157-bound requirements; no evidence
+      scope widening beyond ADR-0035, no completion authority, no
+      producer-shape change.
+    exit_criteria_summary: >-
+      Governed candidate-input check end-to-end over a bound requirement
+      yields a durable structured result plus integrity assessment;
+      unbound stays fail-closed; full workspace verification and
+      independent security review green.
+    depends_on:
+      - TASK-0157
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0036-g8-evidence-requirement-parameter-binding-authority.md
+      - crates/evaluation/src/candidate.rs
+
+  - id: TASK-0160
+    gate: G8
+    title: ADR-0036 IMPL-C - operator binding control-surface path
+    objective: >-
+      Expose the TASK-0157 binding operation through the trusted Runlith
+      control surface with D1 fresh user-presence authority enforced at
+      the boundary, including plan-application timing (Option 2a).
+    scope: >-
+      Trusted control-surface binding path only, parallel to ADR-0033 B1
+      review; binding without fresh presence proof is impossible on every
+      path including IPC. May depend on TASK-0145 trusted
+      control-surface primitives.
+    exit_criteria_summary: >-
+      Presence-spoof, stale-proof, and IPC-impersonation tests fail
+      closed; full workspace verification and independent security
+      review green.
+    depends_on:
+      - TASK-0157
+      - TASK-0145
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0036-g8-evidence-requirement-parameter-binding-authority.md
+      - docs/architecture/adr/ADR-0033-g8-independent-test-mutation-review-authority.md
