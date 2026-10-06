@@ -584,6 +584,49 @@ mod tests {
         ));
     }
 
+    /// ADR-0040 addendum: pins this platform fact — `sandbox-exec`
+    /// accepts only `*` or `localhost` as the host in `(remote tcp …)`.
+    /// IP literals are rejected at profile-parse time (exit 65), which is
+    /// why per-IP destination pinning is not implemented. Fails loudly if
+    /// Apple ever relaxes the grammar, which is exactly when pinning
+    /// becomes worth revisiting.
+    #[test]
+    fn seatbelt_remote_tcp_accepts_only_star_or_localhost() {
+        use std::process::Command;
+
+        fn probe(remote: &str) -> std::process::Output {
+            let dir = std::env::temp_dir()
+                .join(format!("runlith-seatbelt-grammar-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let profile = dir.join("probe.sb");
+            std::fs::write(
+                &profile,
+                format!(
+                    "(version 1)\n(allow default)\n(allow network-outbound\n  (remote tcp \"{remote}\"))\n"
+                ),
+            )
+            .unwrap();
+            let output = Command::new("/usr/bin/sandbox-exec")
+                .arg("-f")
+                .arg(&profile)
+                .arg("/usr/bin/true")
+                .output()
+                .unwrap();
+            std::fs::remove_dir_all(&dir).ok();
+            output
+        }
+
+        let ip = probe("93.184.216.34:443");
+        assert!(!ip.status.success());
+        assert!(
+            String::from_utf8_lossy(&ip.stderr).contains("host must be * or localhost"),
+            "unexpected stderr: {:?}",
+            String::from_utf8_lossy(&ip.stderr)
+        );
+        assert!(probe("localhost:443").status.success());
+        assert!(probe("*:443").status.success());
+    }
+
     #[test]
     fn unsupported_network_scope_fails_before_spawn() {
         let case = Case::new("network-scope");

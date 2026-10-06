@@ -90,3 +90,28 @@ Measured facts since (2026-10-05, CLI as installed):
 - None for existing vaults, databases, or IPC peers. Sandbox rules get
   stricter; a launch that previously reached a non-pinned host now
   fails with the existing network-denial cause.
+
+## Addendum — IP pinning unimplementable on Seatbelt (2026-10-06)
+
+Measured against the system `/usr/bin/sandbox-exec` on macOS: a profile
+containing `(remote tcp "93.184.216.34:443")` is rejected at parse time
+with `sandbox-exec: host must be * or localhost in network address`
+(exit 65), while `localhost:443` and `*:443` parse and run (exit 0).
+Minimal three-case probe; see
+`seatbelt_remote_tcp_accepts_only_star_or_localhost` in
+`adapters/runner-macos-seatbelt/src/lib.rs`, which pins this platform
+fact and fails loudly if Apple ever relaxes it.
+
+Consequences for this ADR:
+
+- Per-IP destination pinning in the Seatbelt profile is not available on
+  the only supported platform. The pinning implementation was reverted;
+  no `tcp:443:<ip>` scope, resolver, or render code was kept.
+- The `localhost` form IS expressible, so a localhost-bound egress
+  filter remains theoretically possible — but only behind a local proxy
+  the CLI can be pointed at, which re-opens the Phase 2 proxy questions
+  (TLS interception or plaintext loopback the CLI does not advertise).
+  That is new work needing its own spike, not a continuation of this one.
+- Standing recommendation until such a spike lands: keep ADR-0039
+  Phase 1 (brokered release, adversarially measured) with the accepted
+  same-user residual; do not re-attempt IP pinning on Seatbelt.
