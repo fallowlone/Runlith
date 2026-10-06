@@ -19,25 +19,7 @@ use task_domain::{EvidenceRequirement, RequirementKind, RequirementParam, Subjec
 /// Provenance binder for ADR-0036 §1a operator-authored binding.
 pub const BINDER_OPERATOR: &str = "operator";
 
-/// B1-grade fresh interactive user-presence authority (ADR-0036 D1).
-///
-/// Opaque: only the trusted control surface may mint it in production.
-/// `for_test` exists so the boundary stays testable before the
-/// TASK-0145/IMPL-C control surface lands; no production caller may use it.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FreshPresenceProof {
-    _sealed: (),
-}
-
-impl FreshPresenceProof {
-    /// Test-only proof. Production minting requires the trusted
-    /// control surface (not yet implemented); until IMPL-C provides the
-    /// sole production minter, this constructor must stay uncalled
-    /// outside tests.
-    pub fn for_test() -> Self {
-        Self { _sealed: () }
-    }
-}
+use crate::presence::FreshPresenceProof;
 
 /// Operator-proposed binding values. Untrusted input: every field is
 /// validated against the catalog before anything is persisted.
