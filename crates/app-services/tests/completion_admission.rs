@@ -18,7 +18,7 @@ use evaluation::{
     CandidateDeletion, CandidateFreshnessCheckpoint, CandidateIntegrityAssessment,
     CandidateIntegrityOutcome, ClaimVerdict, ClaimedOutcome, ClaimedSubject, CriterionStatus,
     EffectKind, EffectPayload, EffectProvenance, EffectSubjectRef, EvidenceRefs, ObservedEffect,
-    Sha256Digest, SubjectFingerprint,
+    ResolvedEffect, Sha256Digest, SubjectFingerprint,
 };
 use plan_domain::RiskClass;
 use policy::{CandidateSelectorCatalog, CandidateSelectorCatalogRevision};
@@ -1248,5 +1248,145 @@ fn cv_candidate_mint_without_effects_mints_nothing_and_admission_refuses() {
     assert_refused(
         service.verification_succeeded_under_policy(&task_id, "harness verified", None),
         "UNVERIFIED",
+    );
+}
+
+// TASK-0161 (strict rule-5): the commit must re-check the exact report
+// inputs inside its transaction. Here handle A reads an admittable state,
+// handle B (a second connection, like the daemon's) moves the subject,
+// and handle A commits with its pre-move reading. That stale ADMIT must
+// refuse with Stale and write nothing.
+#[test]
+fn stale_subject_move_between_report_and_commit_must_refuse() {
+    let db = TestDb::new("rule5-stale-subject");
+    let mut service = db.service();
+    let task_id = seed_task(
+        &mut service,
+        "T-RULE5",
+        vec![EvidenceRequirement::authored_default("tests pass").unwrap()],
+    );
+    drive_to_verifying(&mut service, &task_id);
+    let (execution, attempt) = seed_execution(&mut service, &task_id);
+    let effect = append_basis_effect(&mut service, &execution, &attempt, "artifact:one", 'c');
+    let asserter = format!("candidate:{}:{}", execution.as_str(), attempt.as_str());
+    let minted = mint_candidate_verdicts(
+        service.store_mut(),
+        &task_id,
+        &execution,
+        &attempt,
+        &asserter,
+        FIXED_STAMP,
+    )
+    .unwrap();
+    assert_eq!(minted.len(), 1);
+
+    // Handle A: the report read — current subject binds the minted verdict.
+    let read_current = service
+        .store()
+        .latest_observed_subject_fingerprint_for_task(&task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(read_current, *effect.subject_fingerprint());
+    let report_task = service.store().get_task(&task_id).unwrap().unwrap();
+    let report_claims = service
+        .store()
+        .list_agent_claims_for_task(&task_id)
+        .unwrap();
+    let report_verdicts = service
+        .store()
+        .list_claim_verifications_for_task(&task_id)
+        .unwrap();
+    let report_exemptions = service
+        .store()
+        .list_policy_exemptions_for_task(&task_id)
+        .unwrap();
+    let report_discharges = service
+        .store()
+        .list_approval_discharges_for_task(&task_id)
+        .unwrap();
+    let report_resolved = vec![ResolvedEffect {
+        effect_id: effect.effect_id().as_str().to_owned(),
+        subject_fingerprint: effect.subject_fingerprint().clone(),
+    }];
+    let report_relied = vec![(&execution, &task_id)];
+    let snapshot = evaluation::AdmissionSnapshot::capture(
+        &report_task,
+        Some(&read_current),
+        &report_claims,
+        &report_verdicts,
+        &report_exemptions,
+        &report_discharges,
+        &report_resolved,
+        &report_relied,
+        &[],
+        None,
+        FIXED_STAMP,
+    );
+
+    // Handle B: a concurrent writer moves the subject after A's read.
+    let mut second =
+        TaskService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("second connection");
+    append_basis_effect(&mut second, &execution, &attempt, "artifact:one", 'd');
+    drop(second);
+
+    // Handle A commits with its pre-move reading.
+    let task = service.store().get_task(&task_id).unwrap().unwrap();
+    let mut next = task.clone();
+    next.verification_succeeded("harness verified").unwrap();
+    let event = NewJournalEvent {
+        event_type: EventType::VerificationSucceeded,
+        task_id: Some(task_id.clone()),
+        project_id: Some(task.project_id().clone()),
+        from_state: Some(TaskState::Verifying),
+        to_state: Some(TaskState::Completed),
+        reason: Some("harness verified".to_owned()),
+        correlation_id: "rule5-test".to_owned(),
+        causation_id: "rule5-test".to_owned(),
+        occurred_at: FIXED_STAMP.to_owned(),
+        provenance: "app-services/test".to_owned(),
+        execution_id: None,
+        attempt_id: None,
+        attempt_outcome: None,
+        workspace_id: None,
+        from_workspace_state: None,
+        to_workspace_state: None,
+        plan_revision: None,
+    };
+    let outcomes = vec![evaluation::CriterionOutcome {
+        criterion_id: "tests pass".to_owned(),
+        status: CriterionStatus::Verified,
+        evidence_ref: Some(minted[0].verification_id.as_str().to_owned()),
+        detail: "stale report read".to_owned(),
+    }];
+    let committed = service.store_mut().admit_completion(
+        &task_id,
+        TaskState::Verifying,
+        &next,
+        &event,
+        None,
+        &outcomes,
+        &[],
+        &snapshot,
+        FIXED_STAMP,
+    );
+    match committed {
+        Err(storage_sqlite::StorageError::Stale { found, .. }) => assert!(
+            found.contains("current_fingerprint"),
+            "the seal must name the drifted section, got {found:?}"
+        ),
+        other => panic!("a stale commit must refuse with Stale, got {other:?}"),
+    }
+    assert_eq!(
+        service.store().get_task(&task_id).unwrap().unwrap().state(),
+        TaskState::Verifying,
+        "a refused commit leaves the task VERIFYING"
+    );
+    assert!(
+        service
+            .store()
+            .list_completion_admissions_for_task(&task_id)
+            .unwrap()
+            .is_empty(),
+        "a refused commit writes no admission row"
     );
 }

@@ -115,7 +115,10 @@ impl crate::SqliteStore {
     }
 }
 
-fn load(connection: &rusqlite::Connection, id: &str) -> StorageResult<Option<ObservedEffect>> {
+pub(crate) fn load(
+    connection: &rusqlite::Connection,
+    id: &str,
+) -> StorageResult<Option<ObservedEffect>> {
     type Row = (
         String,
         String,
