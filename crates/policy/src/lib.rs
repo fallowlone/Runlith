@@ -9,10 +9,12 @@ use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
 mod engine;
+mod risk_signals;
 mod selector_catalog;
 mod test_mutation;
 
 pub use engine::{CompiledPolicy, PolicyEngine, PolicyLayer, PolicyRule, PolicyRuleEvidence};
+pub use risk_signals::{classify_risk_signals, RiskAdvisory, RiskSignal};
 pub use selector_catalog::{
     BoundCandidateParams, CandidateSelectorCatalog, CandidateSelectorCatalogRevision,
     SelectorCatalogError, SELECTOR_FILE_CONTAINS_V1,

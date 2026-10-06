@@ -4035,6 +4035,15 @@ items:
     depends_on: []
     blocked_by: []
     references:
+      - crates/policy/src/risk_signals.rs
+    outcome: >-
+      Implemented on branch task-0136-risk-baseline as pure std-only
+      policy::classify_risk_signals (no new dependencies, no callers in
+      any decision path): six signals in canonical order with keyword
+      evidence, 11 unit tests on synthetic samples RED->GREEN, module
+      docs stating advisory non-authority explicitly. fmt/clippy clean,
+      policy suite green (36+25+15). No behavior change to existing
+      paths; integration into main is not claimed.
 
 
   - id: TASK-0137
