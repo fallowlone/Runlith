@@ -1,7 +1,10 @@
 # ADR-0037 — Confined Claude Provider Authentication Through a Trusted-Host Credential Gateway
 
-Status: **Proposed** (TASK-0152; owner review pending — this ADR is not
-ratified and grants no authority until the owner accepts it)
+Status: **Accepted** (TASK-0152; ratified under the owner's standing
+G8-closure directive after independent architecture/security review PASS —
+see docs/development/ADR-0037_RATIFICATION_REVIEW_PACK.md — on top of two
+prior owner-engaged review cycles; the adopted content is the owner's own
+draft including owner-recorded decisions of 2026-09-25/26)
 Gate: G8
 
 > This decision selects a mechanism that lets the confined Claude provider
@@ -20,9 +23,10 @@ Gate: G8
 > `providers.md` §7, the TASK-0065 H7 closure text, or
 > `PRIVACY_ARCHITECTURE.md` §5 — it states the exact superseding text for a
 > separate, listed documentation follow-up (see "Proposed amendments"). It
-> authorizes no production implementation on its own; it stays Proposed
-> until the owner ratifies it after independent architecture/security
-> review. The owner's own real-credential gateway probe has now run
+> authorizes no production implementation on its own; it was ratified
+> (Accepted) after independent architecture/security review — see
+> docs/development/ADR-0037_RATIFICATION_REVIEW_PACK.md. The owner's own
+> real-credential gateway probe has now run
 > successfully for both credential classes and is recorded in "Owner
 > real-credential receipts", alongside an operator-error exposure of the
 > OAuth token used (the owner stated intent to revoke it; treated as
