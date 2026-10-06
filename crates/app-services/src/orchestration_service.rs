@@ -759,6 +759,32 @@ impl<C: Clock> OrchestrationService<C> {
                                     "completion freshness revalidation failed: {error}"
                                 )))
                             })?;
+                        // TASK-0125 phase (c): candidate-only verdict
+                        // minting. The independent Verified is durable
+                        // evidence only once minted against the attempt's
+                        // capture-pipeline effects; with no bound evidence
+                        // this mints nothing and admission below refuses
+                        // as before. The operator dispatch path never
+                        // reaches this mint — it only attempts admission.
+                        let asserter = format!(
+                            "candidate:{}:{}",
+                            execution_id.as_str(),
+                            attempt_id.as_str()
+                        );
+                        let now = self.tasks.now_stamp();
+                        crate::candidate_verdict::mint_candidate_verdicts(
+                            self.tasks.store_mut(),
+                            task_id,
+                            execution_id,
+                            attempt_id,
+                            &asserter,
+                            &now,
+                        )
+                        .map_err(|error| {
+                            ServiceError::Storage(StorageError::ConstraintViolation(format!(
+                                "candidate verdict minting failed: {error}"
+                            )))
+                        })?;
                         self.tasks.verification_succeeded_under_policy(
                             task_id,
                             "VERIFIED via independent evaluation",

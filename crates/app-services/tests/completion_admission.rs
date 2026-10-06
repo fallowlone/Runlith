@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_runtime::{AttemptId, Execution, ExecutionId, ProviderRef};
 use app_services::{
-    bind_candidate_input_params, FixedClock, FreshPresenceProof, ProposedCandidateBinding,
-    ServiceError, TaskService,
+    bind_candidate_input_params, mint_candidate_verdicts, FixedClock, FreshPresenceProof,
+    ProposedCandidateBinding, ServiceError, TaskService,
 };
 use evaluation::{
     candidate_sha256, requirement_revision, subject_fingerprint, CandidateCheckpointPhase,
@@ -1130,6 +1130,101 @@ fn cv8_discharge_bound_to_moved_subject_is_refused() {
 
     assert_refused(
         service.verification_succeeded_under_policy(&task_id, "owner approved", None),
+        "UNVERIFIED",
+    );
+}
+
+// TASK-0125 phase (c): candidate-only verdict minting. After the capture
+// pipeline records the attempt's observed effect (the trusted measurement
+// the mint never synthesizes), the candidate path mints one durable claim
+// plus one VERIFIED verdict bound to the current subject, and admission
+// then completes the task.
+#[test]
+fn cv_candidate_mint_binds_current_effects_and_admits_completion() {
+    let db = TestDb::new("cv-mint-admits");
+    let mut service = db.service();
+    let requirement = EvidenceRequirement::authored_default("tests pass").unwrap();
+    let expected_revision = requirement_revision(&requirement);
+    let task_id = seed_task(&mut service, "T-MINT", vec![requirement]);
+    drive_to_verifying(&mut service, &task_id);
+    let (execution, attempt) = seed_execution(&mut service, &task_id);
+    let effect = append_basis_effect(&mut service, &execution, &attempt, "artifact:one", 'c');
+    let asserter = format!("candidate:{}:{}", execution.as_str(), attempt.as_str());
+
+    let minted = mint_candidate_verdicts(
+        service.store_mut(),
+        &task_id,
+        &execution,
+        &attempt,
+        &asserter,
+        FIXED_STAMP,
+    )
+    .expect("minting over bound capture evidence must succeed");
+    assert_eq!(minted.len(), 1, "one verdict per required criterion");
+    let verdict = &minted[0];
+    assert_eq!(verdict.verdict, ClaimVerdict::Verified);
+    assert_eq!(verdict.verifier, evaluation::TRUSTED_VERIFIER_IDENTITY);
+    assert_eq!(verdict.requirement_revision, expected_revision);
+    assert_eq!(verdict.policy_fingerprint, None);
+    assert_eq!(
+        verdict.subject_fingerprint,
+        *effect.subject_fingerprint(),
+        "the verdict binds the current subject"
+    );
+    assert_eq!(
+        verdict.basis.effect_refs,
+        vec![effect.effect_id().as_str().to_owned()],
+        "the basis names exactly the bound capture effects"
+    );
+
+    service
+        .verification_succeeded_under_policy(&task_id, "harness verified", None)
+        .expect("minted verdict must admit completion");
+    assert_eq!(
+        service.store().get_task(&task_id).unwrap().unwrap().state(),
+        TaskState::Completed,
+    );
+}
+
+// Phase (c) fail-closed twin: with no capture evidence there is nothing to
+// bind, so minting succeeds vacuously with zero rows and admission still
+// refuses. Missing measurement is never an error here — the refusal is the
+// loud signal, owned by admission alone.
+#[test]
+fn cv_candidate_mint_without_effects_mints_nothing_and_admission_refuses() {
+    let db = TestDb::new("cv-mint-empty");
+    let mut service = db.service();
+    let task_id = seed_task(
+        &mut service,
+        "T-MINT-EMPTY",
+        vec![EvidenceRequirement::authored_default("tests pass").unwrap()],
+    );
+    drive_to_verifying(&mut service, &task_id);
+    let (execution, attempt) = seed_execution(&mut service, &task_id);
+    let asserter = format!("candidate:{}:{}", execution.as_str(), attempt.as_str());
+
+    let minted = mint_candidate_verdicts(
+        service.store_mut(),
+        &task_id,
+        &execution,
+        &attempt,
+        &asserter,
+        FIXED_STAMP,
+    )
+    .expect("nothing to bind is vacuous success, not an error");
+    assert!(minted.is_empty(), "no evidence means no minted rows");
+    assert!(service
+        .store()
+        .list_agent_claims_for_task(&task_id)
+        .unwrap()
+        .is_empty());
+    assert!(service
+        .store()
+        .list_claim_verifications_for_task(&task_id)
+        .unwrap()
+        .is_empty());
+    assert_refused(
+        service.verification_succeeded_under_policy(&task_id, "harness verified", None),
         "UNVERIFIED",
     );
 }
