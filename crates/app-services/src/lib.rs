@@ -10,6 +10,7 @@
 //! grants Task completion outside the trusted evaluation path.
 
 mod approval_service;
+mod binding_service;
 mod candidate_verdict;
 mod clock;
 mod error;
@@ -34,6 +35,9 @@ mod verification_levels;
 mod workspace_service;
 
 pub use approval_service::ApprovalService;
+pub use binding_service::{
+    BindingService, BindingServiceError, BindingServiceResult, OperatorBindingInput,
+};
 pub use candidate_verdict::mint_candidate_verdicts;
 pub use clock::{format_rfc3339, Clock, FixedClock, SystemClock};
 pub use error::{ServiceError, ServiceResult};
