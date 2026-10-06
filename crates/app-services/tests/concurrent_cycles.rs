@@ -138,6 +138,7 @@ impl Env {
                 request,
                 |_, _| StubExecutor,
                 &evaluator,
+                None,
             )
             .map(|_| ())
             .map_err(|error| format!("{error:?}"))

@@ -85,6 +85,33 @@ impl crate::SqliteStore {
     pub fn get_observed_effect(&self, id: &EffectId) -> StorageResult<Option<ObservedEffect>> {
         load(self.connection(), id.as_str())
     }
+
+    /// Lists every observed effect captured for one attempt in insertion
+    /// order. Read-only; used by candidate-only verdict minting to bind
+    /// verdicts to capture-pipeline measurement (never synthesized).
+    pub fn list_observed_effects_for_attempt(
+        &self,
+        execution_id: &agent_runtime::ExecutionId,
+        attempt_id: &agent_runtime::AttemptId,
+    ) -> StorageResult<Vec<ObservedEffect>> {
+        let mut statement = self.connection().prepare(
+            "SELECT effect_id FROM observed_effects
+             WHERE execution_id = ?1 AND attempt_id = ?2 ORDER BY rowid",
+        )?;
+        let ids = statement
+            .query_map(params![execution_id.as_str(), attempt_id.as_str()], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut effects = Vec::with_capacity(ids.len());
+        for id in &ids {
+            let effect = load(self.connection(), id)?.ok_or_else(|| {
+                StorageError::Corrupt(format!("observed effect {id} disappeared"))
+            })?;
+            effects.push(effect);
+        }
+        Ok(effects)
+    }
 }
 
 fn load(connection: &rusqlite::Connection, id: &str) -> StorageResult<Option<ObservedEffect>> {

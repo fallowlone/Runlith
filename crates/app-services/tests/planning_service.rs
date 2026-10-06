@@ -11,7 +11,11 @@ use app_services::{
     FixedClock, HumanDecisionCreate, HumanDecisionService, OrchestrationIds, OrchestrationService,
     PlanApplicabilityRefusal, PlannedExecutionEntryOutcome, PlannedOrchestrationOutcome,
     PlanningAssessmentOutcome, PlanningPolicyContext, PlanningProposalOutcome, PlanningService,
-    PlanningServiceError, RuntimeService, TaskService,
+    PlanningServiceError, RuntimeService, ServiceError, TaskService,
+};
+use evaluation::{
+    subject_fingerprint, ClaimVerdict, ClaimedOutcome, ClaimedSubject, EffectKind, EffectPayload,
+    EffectProvenance, EffectSubjectRef, EvidenceRefs, Sha256Digest,
 };
 use fake_evaluator::{EvaluatorMode, FakeEvaluator};
 use fake_planner::{FakePlanner, FakePlannerScenario};
@@ -31,7 +35,7 @@ use storage_sqlite::{
     EventType, ExecutionEntryAdmission, PlanHeadPrecondition, PlanningInputPrecondition,
     SecurityAuditEvent, SqliteStore, StorageError,
 };
-use task_domain::{Project, ProjectId, Task, TaskId, TaskState};
+use task_domain::{DomainError, Project, ProjectId, Task, TaskId, TaskState};
 
 const FIXED_MILLIS: u64 = 1_704_067_200_000;
 const MIGRATIONS_THROUGH_16: [&str; 16] = [
@@ -1446,6 +1450,7 @@ fn atomicity_assessment_shares_the_bounded_recorded_call_budget() {
 #[cfg(unix)]
 mod claude_fixture {
     use super::*;
+    use std::ffi::OsString;
     use std::io::Write;
     use std::time::Duration;
 
@@ -1462,6 +1467,17 @@ mod claude_fixture {
                 .map(|text| text.len())
                 .unwrap_or(0)
         }
+    }
+
+    /// Explicit provider host environment for the fixture executable, so the
+    /// tests do not depend on the runner's ambient login session: containers
+    /// commonly have no USER, which the provider requires (TASK-0155).
+    fn host_environment(db: &TestDb) -> Vec<(OsString, OsString)> {
+        vec![
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("HOME".into(), db.dir.clone().into_os_string()),
+            ("USER".into(), "runlith-fixture".into()),
+        ]
     }
 
     /// Real `ClaudePlanner` over a deterministic provider executable that
@@ -1489,8 +1505,13 @@ mod claude_fixture {
             .expect("fixture executable")
             .with_timeout(Duration::from_secs(10))
             .expect("timeout");
-        let planner = ClaudePlanner::bind_trusted_host(config, workdir, db.dir.join("env"))
-            .expect("claude planner");
+        let planner = ClaudePlanner::bind_trusted_host_with_host_environment(
+            config,
+            workdir,
+            db.dir.join("env"),
+            host_environment(db),
+        )
+        .expect("claude planner");
         Fixture { planner, spawns }
     }
 
@@ -1974,6 +1995,7 @@ fn task_not_in_candidate_plan_is_refused_before_commit() {
             ids("NOT-IN-PLAN"),
             &executor,
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .expect("applicability refusal is a typed outcome");
     assert!(matches!(
@@ -2011,6 +2033,7 @@ fn plan_predecessor_without_owned_canonical_task_is_refused_before_commit() {
             ids("PREDECESSOR"),
             &executor,
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .expect("applicability refusal is a typed outcome");
     assert!(matches!(
@@ -2132,6 +2155,7 @@ fn planning_path_errors_never_follow_a_plan_mutation() {
             ids("PROVIDER-ERROR"),
             &executor,
             &evaluator,
+            None,
         )
         .expect_err("provider failure is an error");
     assert!(matches!(
@@ -2151,6 +2175,7 @@ fn planning_path_errors_never_follow_a_plan_mutation() {
             ids("NO-EVIDENCE"),
             &executor,
             &evaluator,
+            None,
         )
         .expect_err("invalid context is an error");
     assert!(matches!(
@@ -2167,6 +2192,7 @@ fn planning_path_errors_never_follow_a_plan_mutation() {
             ids("DUPLICATE"),
             &executor,
             &evaluator,
+            None,
         )
         .expect("unrelated execution");
     assert!(matches!(
@@ -2184,6 +2210,7 @@ fn planning_path_errors_never_follow_a_plan_mutation() {
             ids("DUPLICATE"),
             &executor,
             &evaluator,
+            None,
         )
         .expect("post-commit failure is an outcome, never Err");
     match outcome {
@@ -2217,6 +2244,7 @@ fn current_plan_scheduling_reports_missing_plan_and_unrepresented_task_without_p
             ids("NO-PLAN"),
             &executor,
             &evaluator,
+            None,
         )
         .expect("no plan is an outcome");
     assert!(matches!(none, PlannedOrchestrationOutcome::NoAcceptedPlan));
@@ -2241,6 +2269,7 @@ fn current_plan_scheduling_reports_missing_plan_and_unrepresented_task_without_p
             ids("UNREPRESENTED"),
             &executor,
             &evaluator,
+            None,
         )
         .expect("unrepresented task is an outcome");
     assert!(matches!(
@@ -2832,6 +2861,107 @@ fn child_behind_running_predecessor_trips_l4_without_materializing() {
         .is_none());
 }
 
+/// TASK-0125 fixture: admits completion through the trusted gate with
+/// durable, subject-bound evidence — one captured observed effect for the
+/// concluded attempt, one claim plus a current VERIFIED verdict per
+/// criterion, then the admissible transition under the declaring policy
+/// fingerprint. Stands in for the capture/evaluation pipeline the product
+/// still has to wire (TASK-0125 follow-up).
+fn complete_with_captured_evidence(
+    tasks: &mut TaskService<FixedClock>,
+    task_id: &TaskId,
+    execution_id: &ExecutionId,
+    attempt_id: &AttemptId,
+    policy_fingerprint: &str,
+) {
+    let task = tasks
+        .store()
+        .get_task(task_id)
+        .expect("task")
+        .expect("task");
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let subject_ref =
+        EffectSubjectRef::new(format!("attempt:{}", attempt_id.as_str())).expect("ref");
+    let fingerprint = subject_fingerprint(
+        EffectKind::ArtifactHash,
+        subject_ref.as_str(),
+        &[("content", digest.as_str())],
+    )
+    .expect("fingerprint");
+    let effect = tasks
+        .store_mut()
+        .append_observed_effect(
+            subject_ref,
+            fingerprint.clone(),
+            EffectPayload::ArtifactHash {
+                bytes: 3,
+                sha256: Sha256Digest::new(digest).expect("digest"),
+            },
+            "2024-01-01T00:00:00Z",
+            EffectProvenance::new(
+                execution_id.clone(),
+                attempt_id.clone(),
+                "runlith.local-observer.v1",
+            )
+            .expect("provenance"),
+        )
+        .expect("captured effect");
+    for requirement in task.evidence_requirements().to_vec() {
+        let claim = tasks
+            .store_mut()
+            .append_agent_claim(
+                task_id,
+                &requirement.criterion_id,
+                ClaimedOutcome::Satisfied,
+                ClaimedSubject {
+                    subject_ref: format!("subject:{}", requirement.criterion_id),
+                    subject_fingerprint: fingerprint.clone(),
+                },
+                EvidenceRefs::default(),
+                "agent:fixture-builder",
+                "2024-01-01T00:00:00Z",
+            )
+            .expect("claim");
+        tasks
+            .store_mut()
+            .append_claim_verification(
+                &claim.claim_id,
+                requirement.requirement_kind,
+                fingerprint.clone(),
+                evaluation::requirement_revision(&requirement),
+                requirement.policy_fingerprint.clone(),
+                ClaimVerdict::Verified,
+                EvidenceRefs::new(vec![], vec![effect.effect_id().as_str().to_owned()], vec![])
+                    .expect("refs"),
+                None,
+                "2024-01-01T00:00:00Z",
+            )
+            .expect("verdict");
+    }
+    tasks
+        .verification_succeeded_under_policy(
+            task_id,
+            "verified with durable captured evidence",
+            Some(policy_fingerprint),
+        )
+        .expect("evidence-backed completion is admitted");
+}
+
+/// TASK-0125: a completion attempt refused by the admission gate — the
+/// task stays VERIFYING with typed per-criterion outcomes.
+fn assert_completion_admission_refusal(error: ServiceError) {
+    match error {
+        ServiceError::Domain(DomainError::InvalidTransition(reason)) => {
+            assert!(
+                reason.contains("completion admission refused"),
+                "expected a completion-admission refusal, got {reason:?}"
+            );
+            assert!(reason.contains("UNVERIFIED"), "got {reason:?}");
+        }
+        other => panic!("expected a completion-admission refusal, got {other:?}"),
+    }
+}
+
 #[test]
 fn child_behind_completed_predecessor_is_runnable_and_can_be_accepted() {
     let db = TestDb::new("child-l4-completed");
@@ -2839,9 +2969,36 @@ fn child_behind_completed_predecessor_is_runnable_and_can_be_accepted() {
     let node = TaskId::new("node-1").unwrap();
     let executor = CountingExecutor::new();
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
-    db.orchestration()
-        .schedule(&node, ids("complete-predecessor"), &executor, &evaluator)
-        .expect("predecessor completes through independent evaluation");
+    // TASK-0125: the independent-evaluation verdict alone is no longer
+    // completion authority. An evaluator/agent claim without durable,
+    // subject-bound evidence is refused and the Task stays VERIFYING.
+    let refused = db
+        .orchestration()
+        .schedule(
+            &node,
+            ids("complete-predecessor"),
+            &executor,
+            &evaluator,
+            None,
+        )
+        .expect_err("a claim without durable captured evidence must not complete");
+    assert_completion_admission_refusal(refused);
+    assert_eq!(
+        db.store().get_task(&node).unwrap().unwrap().state(),
+        TaskState::Verifying
+    );
+    // The trusted boundary admits completion once the plan-materialized
+    // criterion holds a current VERIFIED claim verification bound to a
+    // captured observed effect (the fixture stands in for capture).
+    let mut tasks = TaskService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("tasks");
+    complete_with_captured_evidence(
+        &mut tasks,
+        &node,
+        &ExecutionId::new("E-complete-predecessor").unwrap(),
+        &AttemptId::new("A-complete-predecessor").unwrap(),
+        "policy:test",
+    );
+    drop(tasks);
     assert_eq!(
         db.store().get_task(&node).unwrap().unwrap().state(),
         TaskState::Completed

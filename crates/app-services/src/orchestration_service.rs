@@ -180,8 +180,9 @@ impl<C: Clock> OrchestrationService<C> {
         ids: OrchestrationIds,
         executor: &impl ExecutionPort,
         evaluator: &impl EvaluationPort,
+        current_policy: Option<&str>,
     ) -> ServiceResult<OrchestrationOutcome> {
-        self.schedule_with_plan_head(task_id, ids, None, executor, evaluator)
+        self.schedule_with_plan_head(task_id, ids, None, executor, evaluator, current_policy)
     }
 
     /// Runs one bounded cycle authorized by an optional exact Plan head.
@@ -196,6 +197,7 @@ impl<C: Clock> OrchestrationService<C> {
         plan_head: Option<storage_sqlite::PlanHeadPrecondition>,
         executor: &impl ExecutionPort,
         evaluator: &impl EvaluationPort,
+        current_policy: Option<&str>,
     ) -> ServiceResult<OrchestrationOutcome> {
         let entered = match self.enter(task_id, ids, plan_head)? {
             Entered::NotRunnable(outcome) => return Ok(outcome),
@@ -210,7 +212,7 @@ impl<C: Clock> OrchestrationService<C> {
         // -- executor runs outside every SQLite transaction ------------------
         let behavior = executor.execute(&entered.work);
 
-        self.finish(entered.work, behavior, evaluator)
+        self.finish(entered.work, behavior, evaluator, current_policy)
     }
 
     /// Runs one bounded orchestration cycle with the attempt bound to an
@@ -229,6 +231,7 @@ impl<C: Clock> OrchestrationService<C> {
     /// with the pre-lease facts (`RUNNING` + execution, no attempt)
     /// committed — a legitimate recoverable intermediate, never a hidden
     /// rollback or retry.
+    #[allow(clippy::too_many_arguments)]
     pub fn schedule_in_workspace<G: GitPort, E: ExecutionPort>(
         &mut self,
         workspace: &mut WorkspaceService<G, C>,
@@ -237,6 +240,7 @@ impl<C: Clock> OrchestrationService<C> {
         workspace_request: WorkspaceRequest,
         make_executor: impl FnOnce(&Task, &WorkspaceLease) -> E,
         evaluator: &impl EvaluationPort,
+        current_policy: Option<&str>,
     ) -> ServiceResult<OrchestrationOutcome> {
         // Fail before any mutation: a workspace request for another
         // execution must not claim, start, or allocate anything.
@@ -257,6 +261,7 @@ impl<C: Clock> OrchestrationService<C> {
                 workspace_request,
                 make_executor,
                 evaluator,
+                current_policy,
             ),
         }
     }
@@ -273,6 +278,7 @@ impl<C: Clock> OrchestrationService<C> {
         work: WorkItem,
         executor: E,
         evaluator: &impl EvaluationPort,
+        current_policy: Option<&str>,
     ) -> ServiceResult<OrchestrationOutcome> {
         self.runtime.create_attempt(
             &work.execution_id,
@@ -283,7 +289,7 @@ impl<C: Clock> OrchestrationService<C> {
         // -- executor runs outside every SQLite transaction ------------------
         let behavior = executor.execute(&work);
 
-        self.finish(work, behavior, evaluator)
+        self.finish(work, behavior, evaluator, current_policy)
     }
 
     /// Commits the durable entry half of a cycle without running any
@@ -448,6 +454,7 @@ impl<C: Clock> OrchestrationService<C> {
         workspace_request: WorkspaceRequest,
         make_executor: impl FnOnce(&Task, &WorkspaceLease) -> E,
         evaluator: &impl EvaluationPort,
+        current_policy: Option<&str>,
     ) -> ServiceResult<OrchestrationOutcome> {
         if workspace_request.execution_id != work.execution_id {
             return Err(ServiceError::Storage(StorageError::ConstraintViolation(
@@ -503,7 +510,7 @@ impl<C: Clock> OrchestrationService<C> {
             }
         }
         let executor = make_executor(&task, &ensured.lease);
-        self.run_workspace_attempt(work, executor, evaluator)
+        self.run_workspace_attempt(work, executor, evaluator, current_policy)
     }
 
     /// Durable entry half of a cycle: readiness, then ONE atomic
@@ -683,6 +690,7 @@ impl<C: Clock> OrchestrationService<C> {
         work: WorkItem,
         behavior: Result<scheduler::WorkEvidence, scheduler::ExecutionProblem>,
         evaluator: &impl EvaluationPort,
+        current_policy: Option<&str>,
     ) -> ServiceResult<OrchestrationOutcome> {
         // -- conclude the Attempt exactly once -------------------------------
         let WorkItem {
@@ -751,9 +759,36 @@ impl<C: Clock> OrchestrationService<C> {
                                     "completion freshness revalidation failed: {error}"
                                 )))
                             })?;
-                        self.tasks.verification_succeeded(
+                        // TASK-0125 phase (c): candidate-only verdict
+                        // minting. The independent Verified is durable
+                        // evidence only once minted against the attempt's
+                        // capture-pipeline effects; with no bound evidence
+                        // this mints nothing and admission below refuses
+                        // as before. The operator dispatch path never
+                        // reaches this mint — it only attempts admission.
+                        let asserter = format!(
+                            "candidate:{}:{}",
+                            execution_id.as_str(),
+                            attempt_id.as_str()
+                        );
+                        let now = self.tasks.now_stamp();
+                        crate::candidate_verdict::mint_candidate_verdicts(
+                            self.tasks.store_mut(),
+                            task_id,
+                            execution_id,
+                            attempt_id,
+                            &asserter,
+                            &now,
+                        )
+                        .map_err(|error| {
+                            ServiceError::Storage(StorageError::ConstraintViolation(format!(
+                                "candidate verdict minting failed: {error}"
+                            )))
+                        })?;
+                        self.tasks.verification_succeeded_under_policy(
                             task_id,
                             "VERIFIED via independent evaluation",
+                            current_policy,
                         )?;
                         Ok(OrchestrationOutcome::ExecutionSucceededAndVerified {
                             task_id: task_id.clone(),

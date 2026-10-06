@@ -39,6 +39,19 @@ impl ProviderEnvironment {
     /// `runtime_base/<worktree-leaf>`. The base must be absolute and must not
     /// live inside the managed worktree. Missing/unsafe roots fail closed.
     pub fn prepare(workdir: &Path, runtime_base: &Path) -> Result<Self, String> {
+        Self::prepare_from(workdir, runtime_base, &|name| std::env::var_os(name))
+    }
+
+    /// [`Self::prepare`] with the host variables (PATH, HOME, USER, ...)
+    /// resolved through `host` instead of the ambient process environment.
+    /// The requirements are identical and absent names never fall back to
+    /// the ambient environment (TASK-0155).
+    pub(crate) fn prepare_from(
+        workdir: &Path,
+        runtime_base: &Path,
+        host: &dyn Fn(&str) -> Option<OsString>,
+    ) -> Result<Self, String> {
+        let host_var = |name: &str| host(name).filter(|value| !value.is_empty());
         if !workdir.is_absolute() {
             return Err("provider workdir must be absolute".to_owned());
         }
@@ -77,15 +90,15 @@ impl ProviderEnvironment {
             }
         }
 
-        let path = required_env("PATH")?;
-        let home = non_empty_env("HOME");
+        let path = host_var("PATH").ok_or("provider environment requires PATH")?;
+        let home = host_var("HOME");
         #[cfg(unix)]
         if home.is_none() {
             return Err(
                 "provider environment requires HOME for provider-owned authentication".to_owned(),
             );
         }
-        let user = non_empty_env("USER");
+        let user = host_var("USER");
         // Fail closed here rather than letting the child discover it: without
         // the login principal the provider cannot resolve its own stored
         // credentials, and it reports that as a bare exit 1 with no stderr,
@@ -109,11 +122,11 @@ impl ProviderEnvironment {
             home,
             user,
             #[cfg(windows)]
-            user_profile: non_empty_env("USERPROFILE"),
+            user_profile: host_var("USERPROFILE"),
             #[cfg(windows)]
-            system_root: non_empty_env("SystemRoot").or_else(|| non_empty_env("WINDIR")),
+            system_root: host_var("SystemRoot").or_else(|| host_var("WINDIR")),
             #[cfg(windows)]
-            path_ext: non_empty_env("PATHEXT"),
+            path_ext: host_var("PATHEXT"),
         })
     }
 
@@ -241,10 +254,6 @@ fn non_empty_env(name: &str) -> Option<OsString> {
     std::env::var_os(name).filter(|value| !value.is_empty())
 }
 
-fn required_env(name: &str) -> Result<OsString, String> {
-    non_empty_env(name).ok_or_else(|| format!("provider environment requires {name}"))
-}
-
 fn existing_optional_support_root(path: PathBuf) -> Result<Option<PathBuf>, String> {
     match fs::symlink_metadata(&path) {
         Ok(_) => Ok(Some(path)),
@@ -327,6 +336,79 @@ mod tests {
             std::env::var_os("USER").expect("host USER"),
             "USER must be the real login principal, not a synthesized value"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_host_environment_keeps_the_fail_closed_principal_requirement() {
+        // TASK-0155: an explicit host environment only replaces the lookup
+        // source; it must not relax the HOME/USER requirement, and it must
+        // not fall back to the ambient process environment.
+        let root = std::env::temp_dir().join(format!(
+            "runlith-provider-env-explicit-{}",
+            std::process::id()
+        ));
+        let workdir = root.join("work");
+        fs::create_dir_all(&workdir).unwrap();
+        let base = root.join("provider");
+        let lookup = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| OsString::from(value))
+            }
+        };
+
+        for (pairs, expected) in [
+            (
+                &[("HOME", "/nonexistent"), ("USER", "runlith-fixture")][..],
+                "provider environment requires PATH",
+            ),
+            (
+                &[("PATH", "/usr/bin:/bin"), ("USER", "runlith-fixture")][..],
+                "provider environment requires HOME for provider-owned authentication",
+            ),
+            (
+                &[("PATH", "/usr/bin:/bin"), ("HOME", "/nonexistent")][..],
+                "provider environment requires USER for provider-owned authentication",
+            ),
+            (
+                &[
+                    ("PATH", "/usr/bin:/bin"),
+                    ("HOME", "/nonexistent"),
+                    ("USER", ""),
+                ][..],
+                "provider environment requires USER for provider-owned authentication",
+            ),
+        ] {
+            let missing = ProviderEnvironment::prepare_from(&workdir, &base, &lookup(pairs));
+            assert_eq!(missing.unwrap_err(), expected);
+        }
+
+        let environment = ProviderEnvironment::prepare_from(
+            &workdir,
+            &base,
+            &lookup(&[
+                ("PATH", "/usr/bin:/bin"),
+                ("HOME", "/nonexistent"),
+                ("USER", "runlith-fixture"),
+                ("RUNLITH_UNALLOWLISTED_FIXTURE", "must-not-pass"),
+            ]),
+        )
+        .expect("explicit provider environment");
+        let pairs = environment.child_environment();
+        let value = |key: &str| {
+            pairs
+                .iter()
+                .find(|(name, _)| name == OsStr::new(key))
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(value("USER"), Some(OsString::from("runlith-fixture")));
+        assert_eq!(value("HOME"), Some(OsString::from("/nonexistent")));
+        assert_eq!(value("PATH"), Some(OsString::from("/usr/bin:/bin")));
+        assert_eq!(value("RUNLITH_UNALLOWLISTED_FIXTURE"), None);
         let _ = fs::remove_dir_all(root);
     }
 

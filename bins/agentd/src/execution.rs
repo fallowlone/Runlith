@@ -3653,6 +3653,13 @@ fn run_background_inner(
     } else {
         ProductionEvaluator::Pending(PendingEvaluator)
     };
+    // CV-7 current policy for the completing task, derived from the
+    // same composition the planner stamped with (D1'). Derived before
+    // `work` moves into the cycle. Derivation failure yields `None`,
+    // which fails closed for policy-derived requirements.
+    let current_policy = composition
+        .planning_policy_fingerprint(work.task_id.as_str())
+        .ok();
     let orchestration_result = orchestration
         .continue_workspace_cycle(
             &mut workspace,
@@ -3689,6 +3696,7 @@ fn run_background_inner(
                 )
             },
             &selected_evaluator,
+            current_policy.as_deref(),
         )
         .map_err(|error| format!("orchestration cycle: {error}"));
 
@@ -6217,20 +6225,40 @@ mod tests {
         path: &str,
         literal: &str,
     ) -> task_domain::EvidenceRequirement {
-        task_domain::EvidenceRequirement::new(
+        // TASK-0159 (ADR-0036 IMPL-D): well-formed candidate requirements
+        // are minted through the authorized binding boundary, so every
+        // consumer below exercises boundary-produced revisions end to end.
+        // Malformed-requirement tests keep seeding by hand through
+        // `seed_ready_with_requirement`.
+        let catalog = policy::CandidateSelectorCatalogRevision::new(
+            1,
+            policy::CandidateSelectorCatalog::v1(),
+        )
+        .unwrap();
+        let unbound = task_domain::EvidenceRequirement::new(
             criterion_id,
             task_domain::RequirementKind::TestSuite,
-            task_domain::SubjectBinding::ContentToolchainAndConfig,
-            vec![
-                task_domain::RequirementParam::new("selector", "candidate.file-contains.v1")
-                    .unwrap(),
-                task_domain::RequirementParam::new("path", path).unwrap(),
-                task_domain::RequirementParam::new("literal", literal).unwrap(),
-            ],
-            Some(format!("sha256:{}", "7".repeat(64))),
+            task_domain::RequirementKind::TestSuite.default_subject_binding(),
+            Vec::new(),
+            Some("policy:test-seed".to_owned()),
             true,
         )
+        .unwrap();
+        let proposed = app_services::ProposedCandidateBinding {
+            selector: "candidate.file-contains.v1".to_owned(),
+            path: path.to_owned(),
+            literal: literal.to_owned(),
+        };
+        app_services::bind_candidate_input_params(
+            &catalog,
+            &unbound,
+            &proposed,
+            &app_services::FreshPresenceProof::for_test(),
+            &format!("sha256:{}", "7".repeat(64)),
+            1_700_000_000_000,
+        )
         .unwrap()
+        .requirement
     }
 
     /// Seeds a project/Task reaching READY with exactly one acceptance
