@@ -3847,6 +3847,22 @@ items:
       - docs/development/G7_TASK_0120_FINAL_CLOSURE_REAUDIT.md
       - planning/roadmap.yaml
       - docs/architecture/INDEX.md
+    outcome: >-
+      Verdict G8_CLOSED on branch task-0127-g8-closure-audit, audited
+      main 8e290b7. All 28 G8 tasks merged (PRs #10-#23);
+      acceptance re-tested on a clean tree: full workspace 134/134
+      green EXIT=0, fmt + clippy clean, 22 fresh targeted re-runs
+      green; candidate-only minting proven single-caller; recovery
+      matrix, migration upgrades to 27, review/binding chains and
+      G5/G6/G7 envelopes re-pass. One minor hygiene finding (3
+      /Users paths in the 0152 probe doc, no secrets) rides the
+      recorded pre-publication follow-up; product identity repaired
+      to task0127 in the audit commit; CI billing, two key
+      revocations and live quota stay owner actions required by no
+      G8 exit criterion. Records:
+      docs/development/G8_TASK_0127_CLOSURE_AUDIT.md (verdict +
+      findings) and G8_TASK_0127_CLOSURE_GATE.md (GATE_PASS, 22/22
+      claims proven). No production behavior changed.
 
   - id: TASK-0128
     gate: G8
