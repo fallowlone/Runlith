@@ -22,6 +22,7 @@ mod planned_orchestration;
 mod planning_service;
 mod preflight_service;
 mod requirement_binding;
+mod review_admission;
 mod runtime_service;
 mod security_service;
 mod task_service;
@@ -55,6 +56,9 @@ pub use preflight_service::{
 pub use requirement_binding::{
     bind_candidate_input_params, BindingProvenance, BoundEvidenceRequirement, FreshPresenceProof,
     ProposedCandidateBinding, RequirementBindingError, BINDER_OPERATOR,
+};
+pub use review_admission::{
+    decide_review_admission, ReviewAdmissionDecision, ReviewAdmissionInput,
 };
 pub use runtime_service::{AppliedExecution, PlannedExecution, RuntimeService};
 pub use security_service::{
