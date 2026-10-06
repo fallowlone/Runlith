@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use agent_runtime::{AttemptId, Execution, ExecutionId, ProviderRef};
 use app_services::{
-    derive_commands, Ecosystem, ExecutableResolver, FixedClock, G6SecurityService, TaskService, VerificationCommand,
-    VerificationExecutionError, VerificationExecutionRequest, VerificationLevel, VerificationPlan,
-    VerificationRunner,
+    derive_commands, Ecosystem, ExecutableResolver, FixedClock, G6SecurityService, TaskService,
+    VerificationCommand, VerificationExecutionError, VerificationExecutionRequest,
+    VerificationLevel, VerificationPlan, VerificationRunner,
 };
 use evaluation::EffectPayload;
 use storage_sqlite::{EventType, NewJournalEvent, SqliteStore};
