@@ -29,6 +29,7 @@ mod review_service;
 mod runtime_service;
 mod security_service;
 mod task_service;
+mod verification_execution;
 mod verification_levels;
 mod workspace_service;
 
@@ -78,6 +79,11 @@ pub use security_service::{
     G6Authorization, G6SecurityError, G6SecurityService, PrivilegedOperation, ProcessSecuritySpec,
 };
 pub use task_service::{AppliedTransition, PlannedTransition, TaskService};
+pub use verification_execution::{
+    default_resolve_verification_program, validate_plan_commands, ExecutableResolver, PlanRefusal,
+    VerificationExecutionError, VerificationExecutionRequest, VerificationRunner, VerifiedCommand,
+    DEFAULT_STREAM_CAP_BYTES, DEFAULT_VERIFICATION_TIMEOUT_SECS, VERIFICATION_RUNNER_REF,
+};
 pub use verification_levels::{
     derive_commands, detect_ecosystem, plan_verification, required_kinds_for_level,
     select_verification_level, Ecosystem, RiskTier, VerificationCommand, VerificationLevel,
