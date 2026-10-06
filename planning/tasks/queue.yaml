@@ -5198,3 +5198,18 @@ items:
       - adapters/storage-sqlite/src/claim_verification_store.rs
       - crates/app-services/src/task_service.rs
       - crates/evaluation/src/claim_verification.rs
+    outcome: >-
+      Implemented on branch task-0161-strict-rule5 (commit 909bc80,
+      stacked on the TASK-0125 branch). New pure
+      evaluation::AdmissionSnapshot seals every report input through one
+      shared constructor; admit_completion re-reads the same rows inside
+      the committing transaction and refuses with typed Stale naming the
+      drifted section (vanished rows and fresh invalidations count as
+      drift). Connection-level reader extraction keeps one SQL shape per
+      list with zero behavior change to existing reads; admission_report
+      returns the snapshot alongside the report. Adversarial two-handle
+      RED test (stale subject move commits admission-1 pre-fix, refuses
+      with Stale post-fix); completion_admission 17/17, orchestration
+      16/16; full workspace verification green (127 suites, EXIT=0; one
+      earlier full run showed 2 load flakes, green in isolation and on
+      repeat). No schema change. Integration into main is not claimed.
