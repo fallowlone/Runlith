@@ -79,6 +79,11 @@ fn schema_12_database_upgrades_to_current_without_plan_cost_data() {
                  DROP TABLE candidate_input_assessments;
                  DROP TABLE candidate_input_operations;
                  DROP TABLE observed_effects;
+                 DROP TABLE agent_claims;
+                 DROP TABLE claim_verifications;
+                 DROP TABLE policy_exemptions;
+                 DROP TABLE approval_discharges;
+                 DROP TABLE completion_admissions;
                  DROP TABLE planning_input_candidate_tasks;
                  DROP TABLE human_decision_evidence;
                  DROP TABLE human_decision_options;
@@ -102,7 +107,7 @@ fn schema_12_database_upgrades_to_current_without_plan_cost_data() {
     }
 
     let mut store = SqliteStore::open(&db.path).expect("migrate v12 to current");
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 22);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 23);
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
     let receipt_ref = PlanningCostReceiptRef::new("planning-receipt:after-upgrade").unwrap();
     let evidence = receipt(1);

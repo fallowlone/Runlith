@@ -225,7 +225,7 @@ fn verified_end_to_end_flow_survives_db_reopen() {
     let executor = FakeExecutor::for_scenario(FakeScenario::Success);
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
     let outcome = service
-        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator)
+        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator, None)
         .expect("runnable task must schedule");
     assert_eq!(
         outcome,
@@ -307,6 +307,7 @@ fn production_orchestration_revalidates_before_verification_succeeded() {
             ids("E-COMPLETION", "A-COMPLETION"),
             &FakeExecutor::for_scenario(FakeScenario::Success),
             &evaluator,
+            None,
         )
         .expect("verified production flow");
     assert!(matches!(
@@ -331,7 +332,7 @@ fn rejected_evaluation_preserves_succeeded_attempt_history() {
     let executor = FakeExecutor::for_scenario(FakeScenario::Success);
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysRejected);
     let outcome = service
-        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator)
+        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator, None)
         .expect("runnable task must schedule");
     assert_eq!(
         outcome,
@@ -381,7 +382,7 @@ fn review_rejection_fixture_grants_no_authority_without_the_evaluator() {
         let executor = FakeExecutor::for_scenario(FakeScenario::ReviewRejection);
         let evaluator = FakeEvaluator::new(mode);
         let outcome = service
-            .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator)
+            .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator, None)
             .expect("runnable task must schedule");
         let task = service.tasks().get_task(&task_id).unwrap().unwrap();
         if expect_completed {
@@ -430,7 +431,7 @@ fn unfinished_dependency_blocks_without_runtime_facts() {
     let executor = FakeExecutor::for_scenario(FakeScenario::Success);
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
     let outcome = service
-        .schedule(&blocked, ids("E-1", "A-1"), &executor, &evaluator)
+        .schedule(&blocked, ids("E-1", "A-1"), &executor, &evaluator, None)
         .expect("schedule must report readiness, not fail");
     assert_eq!(
         outcome,
@@ -473,6 +474,7 @@ fn completed_dependency_is_runnable() {
             ids("E-B", "A-B"),
             &executor_b,
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -497,6 +499,7 @@ fn completed_dependency_is_runnable() {
             ids("E-1", "A-1"),
             &executor,
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .unwrap();
     assert!(
@@ -577,6 +580,7 @@ fn non_ready_lifecycle_states_are_not_runnable() {
             ids("E-RETRY", "A-RETRY"),
             &FakeExecutor::for_scenario(FakeScenario::Success),
             &FakeEvaluator::new(EvaluatorMode::AlwaysRejected),
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -591,6 +595,7 @@ fn non_ready_lifecycle_states_are_not_runnable() {
             ids("E-DONE", "A-DONE"),
             &FakeExecutor::for_scenario(FakeScenario::Success),
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .unwrap();
 
@@ -613,6 +618,7 @@ fn non_ready_lifecycle_states_are_not_runnable() {
                 ids(&format!("E-X{index}"), &format!("A-X{index}")),
                 &executor,
                 &evaluator,
+                None,
             )
             .expect("refusal must be a typed outcome, not an error");
         assert_eq!(
@@ -650,6 +656,7 @@ fn second_schedule_observes_state_and_duplicates_nothing() {
             ids("E-1", "A-1"),
             &FakeExecutor::for_scenario(FakeScenario::Success),
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .unwrap();
     assert!(matches!(
@@ -663,6 +670,7 @@ fn second_schedule_observes_state_and_duplicates_nothing() {
             ids("E-2", "A-2"),
             &FakeExecutor::for_scenario(FakeScenario::Success),
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -704,7 +712,7 @@ fn malformed_result_concludes_failed_and_never_reaches_verification() {
     let executor = FakeExecutor::for_scenario(FakeScenario::MalformedResult);
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
     let outcome = service
-        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator)
+        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator, None)
         .unwrap();
     assert_eq!(
         outcome,
@@ -747,7 +755,7 @@ fn partial_result_is_not_silent_success() {
     let executor = FakeExecutor::for_scenario(FakeScenario::PartialResult);
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
     let outcome = service
-        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator)
+        .schedule(&task_id, ids("E-1", "A-1"), &executor, &evaluator, None)
         .unwrap();
     assert!(
         matches!(
@@ -781,6 +789,7 @@ fn crash_and_timeout_map_to_canonical_outcomes_without_retry() {
                 ids("E-1", "A-1"),
                 &FakeExecutor::for_scenario(scenario),
                 &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+                None,
             )
             .unwrap();
         assert_eq!(
@@ -820,6 +829,7 @@ fn cancellation_records_cancelled_without_submission() {
             ids("E-1", "A-1"),
             &CancelStub,
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -933,7 +943,7 @@ fn completion_requires_each_step_and_only_the_verdict_completes() {
         .unwrap();
     assert_eq!(verdict, app_services::EvaluationVerdict::Verified);
     tasks
-        .verification_succeeded(&task_id, "VERIFIED via independent evaluation")
+        .verification_succeeded_under_policy(&task_id, "VERIFIED via independent evaluation", None)
         .unwrap();
     assert_eq!(
         tasks.get_task(&task_id).unwrap().unwrap().state(),
@@ -974,7 +984,7 @@ fn two_tasks_execute_through_separate_adapters_without_interference() {
         (&second, ids("E-2", "A-2"), &executor_b, &evaluator_b),
     ] {
         let outcome = service
-            .schedule(task_id, exec_ids, executor, evaluator)
+            .schedule(task_id, exec_ids, executor, evaluator, None)
             .unwrap();
         assert!(
             matches!(

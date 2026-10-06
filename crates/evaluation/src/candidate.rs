@@ -355,7 +355,7 @@ impl CandidateIntegrityAssessment {
     }
 }
 
-fn valid_sha256(value: &str) -> bool {
+pub(crate) fn valid_sha256(value: &str) -> bool {
     value.strip_prefix("sha256:").is_some_and(|hex| {
         hex.len() == 64
             && hex
@@ -411,29 +411,12 @@ impl CandidateSelector {
         if !valid_sha256(policy_fingerprint) {
             return Err(CandidateError::InvalidRequirement);
         }
-        let mut revision = Sha256::new();
-        revision.update(b"runlith:evidence-requirement:v1\0");
-        field(&mut revision, requirement.criterion_id.as_bytes());
-        field(
-            &mut revision,
-            requirement.requirement_kind.as_str().as_bytes(),
-        );
-        field(
-            &mut revision,
-            requirement.subject_binding.as_str().as_bytes(),
-        );
-        field(&mut revision, policy_fingerprint.as_bytes());
-        revision.update([u8::from(requirement.required)]);
-        for param in &requirement.params {
-            field(&mut revision, param.key().as_bytes());
-            field(&mut revision, param.value().as_bytes());
-        }
         Ok(Self {
             criterion_id: requirement.criterion_id.clone(),
             selector: requirement.params[2].value().to_owned(),
             path: path.to_owned(),
             literal: literal.to_owned(),
-            requirement_revision: format!("sha256:{:x}", revision.finalize()),
+            requirement_revision: requirement_revision(requirement),
         })
     }
 
@@ -1034,6 +1017,41 @@ fn manifest_digest(entries: &[CandidateManifestEntry]) -> String {
 fn field(hash: &mut Sha256, bytes: &[u8]) {
     hash.update((bytes.len() as u64).to_be_bytes());
     hash.update(bytes);
+}
+
+/// Canonical requirement revision (ADR-0032 rule 4): domain-separated
+/// `sha256:` hash over criterion id, kind, subject binding, policy
+/// fingerprint (empty when absent), required flag and sorted params.
+/// `CandidateSelector::from_requirement` uses this exact function, so the
+/// candidate revision equals the generic revision for candidate-shaped
+/// requirements; other shapes get a stable revision without a selector.
+#[must_use]
+pub fn requirement_revision(requirement: &task_domain::EvidenceRequirement) -> String {
+    let mut revision = Sha256::new();
+    revision.update(b"runlith:evidence-requirement:v1\0");
+    field(&mut revision, requirement.criterion_id.as_bytes());
+    field(
+        &mut revision,
+        requirement.requirement_kind.as_str().as_bytes(),
+    );
+    field(
+        &mut revision,
+        requirement.subject_binding.as_str().as_bytes(),
+    );
+    field(
+        &mut revision,
+        requirement
+            .policy_fingerprint
+            .as_deref()
+            .unwrap_or("")
+            .as_bytes(),
+    );
+    revision.update([u8::from(requirement.required)]);
+    for param in &requirement.params {
+        field(&mut revision, param.key().as_bytes());
+        field(&mut revision, param.value().as_bytes());
+    }
+    format!("sha256:{:x}", revision.finalize())
 }
 
 fn lowercase_hex(value: &str) -> bool {
