@@ -34,6 +34,7 @@ mod planning_control_store;
 mod review_authority_store;
 mod runtime_store;
 mod secret_store;
+mod side_effect_store;
 mod task_store;
 mod test_mutation_store;
 mod workspace_store;
@@ -67,5 +68,6 @@ pub use security_audit::{
     SecurityAuditId, SecurityAuditOutcome, SecurityAuditRecord, SecurityAuditSubject,
     SecurityAuditSubjectKind, SECURITY_AUDIT_RECORD_VERSION,
 };
+pub use side_effect_store::{SideEffectEscalation, SideEffectTransition};
 pub use task_store::{BindingProofConsumption, SqliteStore};
 pub use test_mutation_store::EvaluatedPolicyBase;

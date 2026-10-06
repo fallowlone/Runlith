@@ -16,6 +16,7 @@ mod ids;
 mod lease;
 mod liveness;
 mod port;
+mod side_effect;
 mod status;
 mod store;
 mod trusted;
@@ -30,6 +31,11 @@ pub use liveness::OwnerLiveness;
 pub use port::{
     DiffChangeKind, DiffEntry, DiffEvidence, GitPort, GitStateSnapshot, WorktreeDiff,
     MAX_DIFF_ENTRIES, MAX_DIFF_SUMMARY_CHARS,
+};
+pub use side_effect::{
+    classify_replay, cleanup_params_hash, materialize_params_hash, transition, ContinuationKind,
+    ReplayClass, ReplayIdentity, SideEffectError, SideEffectIntent, SideEffectIntentFields,
+    SideEffectKind, SideEffectState, TransitionEvent,
 };
 pub use status::WorktreeStatus;
 pub use store::{WorkspaceEventKind, WorkspaceJournalEvidence, WorkspaceStore};

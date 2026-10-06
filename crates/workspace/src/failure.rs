@@ -47,6 +47,9 @@ pub enum WorkspaceFailure {
     StorageFailure { detail: String },
     /// Idempotent cleanup hit: already absent and ownership-consistent.
     AlreadyAbsent,
+    /// An ambiguous side-effect intent blocks autonomous dispatch:
+    /// reconcile (or resolve the escalation) first (ADR-0031 SE-3/SE-8).
+    ReconciliationRequired { detail: String },
 }
 
 impl WorkspaceFailure {
@@ -70,6 +73,7 @@ impl WorkspaceFailure {
             Self::GitBackendFailure { .. } => "git_backend_failure",
             Self::StorageFailure { .. } => "storage_failure",
             Self::AlreadyAbsent => "already_absent",
+            Self::ReconciliationRequired { .. } => "reconciliation_required",
         }
     }
 }
@@ -92,7 +96,8 @@ impl fmt::Display for WorkspaceFailure {
             | Self::ActiveOwnerRejectsCleanup { detail }
             | Self::ActiveOwnerRejectsCheckout { detail }
             | Self::GitBackendFailure { detail }
-            | Self::StorageFailure { detail } => {
+            | Self::StorageFailure { detail }
+            | Self::ReconciliationRequired { detail } => {
                 write!(f, "{}: {detail}", self.kind())
             }
         }
