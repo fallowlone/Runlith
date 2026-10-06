@@ -7,6 +7,11 @@
 //! unsandboxed fallback). Freshness windows and nonce single-use are
 //! enforced by the store/service layers at consumption time.
 
+/// How long a minted presence proof stays consumable (5 minutes).
+/// Proofs from the future always refuse. Shared by every
+/// presence-gated boundary (review authority, binding authority).
+pub const PRESENCE_FRESHNESS_MS: u64 = 300_000;
+
 /// Minting failures. Production denial is terminal for the operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PresenceError {

@@ -60,10 +60,11 @@ pub use preflight_service::{
 };
 pub use presence::{
     DenyPresence, FreshPresenceProof, PresenceAuthority, PresenceError, TestPresenceAuthority,
+    PRESENCE_FRESHNESS_MS,
 };
 pub use requirement_binding::{
-    bind_candidate_input_params, BindingProvenance, BoundEvidenceRequirement,
-    ProposedCandidateBinding, RequirementBindingError, BINDER_OPERATOR,
+    bind_candidate_input_params, binding_input_digest, binding_operation, BindingProvenance,
+    BoundEvidenceRequirement, ProposedCandidateBinding, RequirementBindingError, BINDER_OPERATOR,
 };
 pub use review_admission::{
     decide_review_admission, policy_review_path, review_path_name, ReviewAdmissionDecision,
@@ -72,7 +73,6 @@ pub use review_admission::{
 pub use review_scope::review_scope;
 pub use review_service::{
     B1ReviewInput, ReviewAdmissionQuery, ReviewService, ReviewServiceError, ReviewServiceResult,
-    PRESENCE_FRESHNESS_MS,
 };
 pub use runtime_service::{AppliedExecution, PlannedExecution, RuntimeService};
 pub use security_service::{

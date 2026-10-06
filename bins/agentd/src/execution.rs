@@ -4899,6 +4899,7 @@ fn classify_reader_failure(infra: Option<String>, content: String) -> CheckError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use app_services::PresenceAuthority;
 
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -6295,11 +6296,23 @@ mod tests {
             path: path.to_owned(),
             literal: literal.to_owned(),
         };
+        let proof = app_services::TestPresenceAuthority::new(1_700_000_000_000)
+            .prove(
+                &app_services::binding_operation(criterion_id, &proposed.selector, &proposed.path),
+                &app_services::binding_input_digest(
+                    criterion_id,
+                    &proposed.selector,
+                    &proposed.path,
+                    &proposed.literal,
+                    policy_fingerprint,
+                ),
+            )
+            .unwrap();
         app_services::bind_candidate_input_params(
             &catalog,
             &unbound,
             &proposed,
-            &app_services::FreshPresenceProof::for_test(),
+            &proof,
             policy_fingerprint,
             1_700_000_000_000,
         )

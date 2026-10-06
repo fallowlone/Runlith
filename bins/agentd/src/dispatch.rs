@@ -560,7 +560,7 @@ fn truncate_id(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use app_services::FixedClock;
+    use app_services::{FixedClock, PresenceAuthority};
     use storage_sqlite::EventType;
     use task_domain::TaskState;
 
@@ -1044,12 +1044,29 @@ mod tests {
             path: "src/example.rs".to_owned(),
             literal: "fn accepted()".to_owned(),
         };
+        let policy_fingerprint = format!("sha256:{}", "7".repeat(64));
+        let proof = app_services::TestPresenceAuthority::new(1_700_000_000_000)
+            .prove(
+                &app_services::binding_operation(
+                    "criterion-candidate",
+                    &proposed.selector,
+                    &proposed.path,
+                ),
+                &app_services::binding_input_digest(
+                    "criterion-candidate",
+                    &proposed.selector,
+                    &proposed.path,
+                    &proposed.literal,
+                    &policy_fingerprint,
+                ),
+            )
+            .unwrap();
         app_services::bind_candidate_input_params(
             &catalog,
             &unbound,
             &proposed,
-            &app_services::FreshPresenceProof::for_test(),
-            &format!("sha256:{}", "7".repeat(64)),
+            &proof,
+            &policy_fingerprint,
             1_700_000_000_000,
         )
         .unwrap()
