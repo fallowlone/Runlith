@@ -35,6 +35,18 @@ pub struct SqliteStore {
     connection: Connection,
 }
 
+/// One recorded binding proof consumption (ADR-0036 IMPL-C): the
+/// presence nonce that authorized binding one criterion of one task.
+/// At most one row per (task, criterion) — the durable AlreadyBound.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BindingProofConsumption {
+    pub nonce: String,
+    pub task_id: String,
+    pub criterion_id: String,
+    pub operation: String,
+    pub bound_at_ms: i64,
+}
+
 impl SqliteStore {
     /// Opens (creating if absent) the database at `path`, enables and
     /// verifies foreign keys, and applies pending migrations.
@@ -261,46 +273,85 @@ impl SqliteStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let task_exists: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)",
-            params![snapshot.id.as_str()],
-            |row| row.get(0),
-        )?;
-        // Replace the full image so the stored task always mirrors the
-        // validated object (edges included); FK order: row first, then
-        // children. The UPSERT keeps the primary key and dependent policy
-        // revisions stable.
-        insert_task_row_replace(&transaction, &snapshot)?;
-        if !task_exists {
-            crate::test_mutation_store::insert_default_policy(&transaction, snapshot.id.as_str())?;
-        }
-        transaction.execute(
-            "DELETE FROM task_strings WHERE task_id = ?1",
-            params![snapshot.id.as_str()],
-        )?;
-        transaction.execute(
-            "DELETE FROM task_dependencies WHERE task_id = ?1",
-            params![snapshot.id.as_str()],
-        )?;
-        // Parameters reference requirements (FK), so they go first.
-        transaction.execute(
-            "DELETE FROM task_evidence_requirement_params WHERE task_id = ?1",
-            params![snapshot.id.as_str()],
-        )?;
-        transaction.execute(
-            "DELETE FROM task_evidence_requirements WHERE task_id = ?1",
-            params![snapshot.id.as_str()],
-        )?;
-        transaction.execute(
-            "DELETE FROM task_prerequisites WHERE task_id = ?1",
-            params![snapshot.id.as_str()],
-        )?;
-        insert_task_strings(&transaction, &snapshot)?;
-        insert_task_evidence_requirements(&transaction, &snapshot)?;
-        insert_task_prerequisites(&transaction, &snapshot)?;
-        insert_task_edges(&transaction, &snapshot)?;
+        save_task_rows(&transaction, &snapshot)?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Persists `task` together with one binding proof consumption in a
+    /// single transaction (ADR-0036 IMPL-C). The task save and the
+    /// consumption commit or roll back together: the loser of a
+    /// concurrent double-bind loses its task image too, so the stored
+    /// params always match the recorded consumption. The consumed proof
+    /// row must already exist (the service records it first); an
+    /// orphaned proof binds nothing by itself.
+    pub fn save_task_with_binding_proof(
+        &mut self,
+        task: &Task,
+        consumption: &BindingProofConsumption,
+    ) -> StorageResult<()> {
+        self.require_project(task.project_id())?;
+        self.require_dependency_targets(task)?;
+        let snapshot = task.snapshot();
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        save_task_rows(&transaction, &snapshot)?;
+        transaction
+            .execute(
+                "INSERT INTO binding_proof_consumption
+                 (nonce, task_id, criterion_id, operation, bound_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    consumption.nonce.as_str(),
+                    consumption.task_id.as_str(),
+                    consumption.criterion_id.as_str(),
+                    consumption.operation.as_str(),
+                    consumption.bound_at_ms,
+                ],
+            )
+            .map_err(|error| map_constraint(error, "consume binding proof"))?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Reads the recorded binding proof consumption for one
+    /// (task, criterion), if the criterion was bound through the
+    /// presence-authorized boundary.
+    pub fn get_binding_consumption(
+        &self,
+        task_id: &str,
+        criterion_id: &str,
+    ) -> StorageResult<Option<BindingProofConsumption>> {
+        let row: Option<(String, String, String, String, i64)> = self
+            .connection
+            .query_row(
+                "SELECT nonce, task_id, criterion_id, operation, bound_at_ms
+                 FROM binding_proof_consumption
+                 WHERE task_id = ?1 AND criterion_id = ?2",
+                params![task_id, criterion_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(
+            row.map(|(nonce, task_id, criterion_id, operation, bound_at_ms)| {
+                BindingProofConsumption {
+                    nonce,
+                    task_id,
+                    criterion_id,
+                    operation,
+                    bound_at_ms,
+                }
+            }),
+        )
     }
 
     // -- dependencies ---------------------------------------------------
@@ -979,6 +1030,53 @@ pub(crate) fn insert_task_row(
         )
         .map_err(|error| map_constraint(error, "insert task"))?;
     crate::test_mutation_store::insert_default_policy(connection, snapshot.id.as_str())?;
+    Ok(())
+}
+
+/// Writes the full task image inside an open transaction (shared by
+/// `save_task` and the atomic binding save).
+fn save_task_rows(
+    transaction: &rusqlite::Transaction<'_>,
+    snapshot: &TaskSnapshot,
+) -> StorageResult<()> {
+    let task_exists: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)",
+        params![snapshot.id.as_str()],
+        |row| row.get(0),
+    )?;
+    // Replace the full image so the stored task always mirrors the
+    // validated object (edges included); FK order: row first, then
+    // children. The UPSERT keeps the primary key and dependent policy
+    // revisions stable.
+    insert_task_row_replace(transaction, snapshot)?;
+    if !task_exists {
+        crate::test_mutation_store::insert_default_policy(transaction, snapshot.id.as_str())?;
+    }
+    transaction.execute(
+        "DELETE FROM task_strings WHERE task_id = ?1",
+        params![snapshot.id.as_str()],
+    )?;
+    transaction.execute(
+        "DELETE FROM task_dependencies WHERE task_id = ?1",
+        params![snapshot.id.as_str()],
+    )?;
+    // Parameters reference requirements (FK), so they go first.
+    transaction.execute(
+        "DELETE FROM task_evidence_requirement_params WHERE task_id = ?1",
+        params![snapshot.id.as_str()],
+    )?;
+    transaction.execute(
+        "DELETE FROM task_evidence_requirements WHERE task_id = ?1",
+        params![snapshot.id.as_str()],
+    )?;
+    transaction.execute(
+        "DELETE FROM task_prerequisites WHERE task_id = ?1",
+        params![snapshot.id.as_str()],
+    )?;
+    insert_task_strings(transaction, snapshot)?;
+    insert_task_evidence_requirements(transaction, snapshot)?;
+    insert_task_prerequisites(transaction, snapshot)?;
+    insert_task_edges(transaction, snapshot)?;
     Ok(())
 }
 
