@@ -1249,3 +1249,128 @@ fn plan_domain_depends_only_on_sha2() {
         .collect();
     assert_eq!(ids.len(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// TASK-0158 (ADR-0036 IMPL-B, D3): V9 recognizes an authorized bound-params
+// requirement as non-escalating; any other non-empty params source still
+// routes to the V9 risk gate.
+// ---------------------------------------------------------------------------
+
+fn bound_v1_requirement() -> EvidenceRequirement {
+    EvidenceRequirement::new(
+        "c1",
+        RequirementKind::TestSuite,
+        RequirementKind::TestSuite.default_subject_binding(),
+        vec![
+            RequirementParam::new("literal", "needle").unwrap(),
+            RequirementParam::new("path", "src/lib.rs").unwrap(),
+            RequirementParam::new("selector", "candidate.file-contains.v1").unwrap(),
+        ],
+        Some("policy:test".to_owned()),
+        true,
+    )
+    .unwrap()
+}
+
+#[test]
+fn v9_authorized_bound_candidate_params_do_not_escalate() {
+    let graph = base_graph();
+    let mut context = ctx();
+    context.affected_parent_criteria[0].requirement = Some(bound_v1_requirement());
+    assert!(matches!(
+        validate_proposal(&graph, &valid_changeset(), &context),
+        ValidationOutcome::Accepted {
+            risk_escalated: false
+        }
+    ));
+}
+
+#[test]
+fn v9_bound_shape_on_non_testsuite_kind_still_escalates() {
+    // F1: the boundary only binds onto required-TestSuite requirements;
+    // the same 3-key shape on any other kind is boundary-impossible and
+    // must escalate even when kind/binding otherwise match.
+    let graph = base_graph();
+    let mut changeset = valid_changeset();
+    changeset.node_additions[0].criteria = vec![plan_domain::CriterionDecl::new(
+        cid("c1a"),
+        VerificationMethod::IndependentReview,
+    )];
+    changeset.proposal_hash = compute_proposal_hash(&changeset);
+    let mut context = ctx();
+    context.affected_parent_criteria = vec![AffectedParentCriterion {
+        id: cid("c1"),
+        method: VerificationMethod::IndependentReview,
+        requirement: Some(
+            EvidenceRequirement::new(
+                "c1",
+                RequirementKind::IndependentReview,
+                RequirementKind::IndependentReview.default_subject_binding(),
+                vec![
+                    RequirementParam::new("literal", "needle").unwrap(),
+                    RequirementParam::new("path", "src/lib.rs").unwrap(),
+                    RequirementParam::new("selector", "candidate.file-contains.v1").unwrap(),
+                ],
+                Some("policy:test".to_owned()),
+                true,
+            )
+            .unwrap(),
+        ),
+    }];
+    assert_eq!(refusal_code(&graph, &changeset, &context), "RISK_GATE_OPEN");
+}
+
+#[test]
+fn v9_foreign_bound_params_still_escalate() {
+    // D3 authorized bound: only the exact boundary-produced shape for a
+    // catalogued selector is non-escalating. Everything else with
+    // non-empty params keeps routing to the risk gate.
+    let foreign: Vec<EvidenceRequirement> = [
+        // Uncatalogued selector id.
+        vec![
+            RequirementParam::new("literal", "needle").unwrap(),
+            RequirementParam::new("path", "src/lib.rs").unwrap(),
+            RequirementParam::new("selector", "candidate.evil.v1").unwrap(),
+        ],
+        // Missing path param.
+        vec![
+            RequirementParam::new("literal", "needle").unwrap(),
+            RequirementParam::new("selector", "candidate.file-contains.v1").unwrap(),
+        ],
+        // Extra param.
+        vec![
+            RequirementParam::new("literal", "needle").unwrap(),
+            RequirementParam::new("path", "src/lib.rs").unwrap(),
+            RequirementParam::new("selector", "candidate.file-contains.v1").unwrap(),
+            RequirementParam::new("scope", "broad").unwrap(),
+        ],
+        // Wrong key names.
+        vec![
+            RequirementParam::new("needle", "needle").unwrap(),
+            RequirementParam::new("file", "src/lib.rs").unwrap(),
+            RequirementParam::new("check", "candidate.file-contains.v1").unwrap(),
+        ],
+    ]
+    .into_iter()
+    .map(|params| {
+        EvidenceRequirement::new(
+            "c1",
+            RequirementKind::TestSuite,
+            RequirementKind::TestSuite.default_subject_binding(),
+            params,
+            Some("policy:test".to_owned()),
+            true,
+        )
+        .unwrap()
+    })
+    .collect();
+    for requirement in foreign {
+        let graph = base_graph();
+        let mut context = ctx();
+        context.affected_parent_criteria[0].requirement = Some(requirement);
+        assert_eq!(
+            refusal_code(&graph, &valid_changeset(), &context),
+            "RISK_GATE_OPEN"
+        );
+    }
+}

@@ -5053,6 +5053,26 @@ items:
     references:
       - docs/architecture/adr/ADR-0036-g8-evidence-requirement-parameter-binding-authority.md
       - crates/plan/src/validation.rs
+    outcome: >-
+      Implemented ADR-0036 IMPL-B on branch task-0158-v9-bound-params
+      (stacked on TASK-0157): V9 check_criteria_preservation treats a
+      parent requirement as non-escalating only for the exact
+      boundary-minted shape (TestSuite + content+toolchain+config, 3
+      params, keys literal/path/selector in order, catalogued
+      candidate.file-contains.v1 id); any other non-empty params still
+      routes to RISK_GATE_OPEN. Shape-only by design, no plan->policy
+      dependency (domain layering precedent); catalog growth fails closed
+      into escalation. TDD: behavioral RED via public validate_proposal,
+      GREEN 58 validation_rules tests; mutation proof (id-value check
+      removed fails the foreign guard, revert restores green).
+      Independent security review PASS with 2 optional notes; F1
+      (kind/binding pin) implemented test-first with delta re-review PASS,
+      F2 (sole-producer premise comment) applied. Verification: cargo
+      fmt --all --check clean; cargo clippy --workspace --all-targets -D
+      warnings clean; full plan-domain and app-services suites green. No
+      production behavior change (bound requirements unreachable until
+      TASK-0160 wiring); full workspace run not required for this scope.
+      G8 remains IN_PROGRESS.
 
   - id: TASK-0159
     gate: G8
