@@ -31,6 +31,7 @@ mod plan_cost_store;
 mod plan_guardrail_store;
 mod plan_store;
 mod planning_control_store;
+mod review_authority_store;
 mod runtime_store;
 mod secret_store;
 mod task_store;
@@ -60,6 +61,7 @@ pub use plan_store::{
     PlanRevisionLineage, PlanRevisionLineageRecord, CHILD_TASK_MATERIALIZATION_PROVENANCE,
 };
 pub use planning_control_store::{PlanningRunRecord, PlanningRunState};
+pub use review_authority_store::ReviewRecordState;
 pub use security_audit::{
     AuditCapability, NewSecurityAuditRecord, SecurityAuditAuthor, SecurityAuditEvent,
     SecurityAuditId, SecurityAuditOutcome, SecurityAuditRecord, SecurityAuditSubject,
