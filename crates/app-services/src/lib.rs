@@ -25,6 +25,7 @@ mod presence;
 mod requirement_binding;
 mod review_admission;
 mod review_scope;
+mod review_service;
 mod runtime_service;
 mod security_service;
 mod task_service;
@@ -68,6 +69,10 @@ pub use review_admission::{
     ReviewAdmissionInput,
 };
 pub use review_scope::review_scope;
+pub use review_service::{
+    B1ReviewInput, ReviewAdmissionQuery, ReviewService, ReviewServiceError, ReviewServiceResult,
+    PRESENCE_FRESHNESS_MS,
+};
 pub use runtime_service::{AppliedExecution, PlannedExecution, RuntimeService};
 pub use security_service::{
     G6Authorization, G6SecurityError, G6SecurityService, PrivilegedOperation, ProcessSecuritySpec,

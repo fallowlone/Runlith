@@ -397,6 +397,56 @@ impl crate::SqliteStore {
         Ok(records)
     }
 
+    /// Reads the live head for a task: the newest record that is
+    /// neither invalidated nor superseded. Linear history has at most
+    /// one; the service chains new reviews onto it.
+    pub fn live_review_record_head(&self, task_id: &str) -> StorageResult<Option<ReviewRecord>> {
+        let connection = self.connection();
+        let mut statement = connection.prepare(
+            "SELECT record_id, task_id, requirement_revision, base_manifest, candidate_manifest,
+                    changed_inputs, affected_checks, policy_revision, policy_fingerprint,
+                    profile_id, profile_revision, setting_revision, setting_path,
+                    reviewer_namespace, reviewer_nonce, reviewer_input_digest, reviewer_verdict,
+                    implementer_execution_id, implementer_attempt_id, implementer_admission_ref,
+                    rationale, evidence_refs, captured_at_ms, supersedes, fingerprint
+             FROM review_records
+             WHERE task_id = ?1 AND invalidated_at_ms IS NULL AND superseded_by IS NULL
+             ORDER BY rowid DESC LIMIT 1",
+        )?;
+        let row: Option<RecordRow> = statement
+            .query_row(params![task_id], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                    row.get(13)?,
+                    row.get(14)?,
+                    row.get(15)?,
+                    row.get(16)?,
+                    row.get(17)?,
+                    row.get(18)?,
+                    row.get(19)?,
+                    row.get(20)?,
+                    row.get(21)?,
+                    row.get(22)?,
+                    row.get(23)?,
+                    row.get(24)?,
+                ))
+            })
+            .optional()?;
+        row.map(record_from_row).transpose()
+    }
+
     /// Reads the mutable lifecycle state of one review record.
     pub fn review_record_state(&self, record_id: &str) -> StorageResult<Option<ReviewRecordState>> {
         let row: Option<(Option<i64>, Option<String>, Option<String>)> = self
