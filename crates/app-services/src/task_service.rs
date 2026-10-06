@@ -403,7 +403,7 @@ impl<C: Clock> TaskService<C> {
             },
         )?;
         let now = format_rfc3339(self.clock.now_millis());
-        let gate = self.admission_report(&task, policy_fp, &now)?;
+        let (gate, snapshot) = self.admission_report(&task, policy_fp, &now)?;
         if !gate.is_admit() {
             return Err(ServiceError::Domain(DomainError::InvalidTransition(
                 gate.refusal_summary(),
@@ -418,6 +418,7 @@ impl<C: Clock> TaskService<C> {
             policy_fp,
             &gate.outcomes,
             &consumed,
+            &snapshot,
             &now,
         )?;
         Ok(AppliedTransition {
@@ -430,16 +431,19 @@ impl<C: Clock> TaskService<C> {
     /// observed-effect fingerprint as the current subject reading, and the
     /// durable claim/verdict/exemption/discharge rows. No caller-supplied
     /// value participates — the in-memory shape of an evidence record can
-    /// never disagree with what admission actually read.
+    /// never disagree with what admission actually read. Returns the
+    /// sealed snapshot of the same reads alongside the report, so the
+    /// commit can re-verify the read set inside its transaction
+    /// (TASK-0161, strict rule-5).
     fn admission_report(
         &self,
         task: &Task,
         policy_fp: Option<&str>,
         now: &str,
-    ) -> ServiceResult<evaluation::AdmissionReport> {
+    ) -> ServiceResult<(evaluation::AdmissionReport, evaluation::AdmissionSnapshot)> {
         use evaluation::{
-            AdmissionContext, CandidateSelector, ClaimVerdict, CriterionEvidence, EffectId,
-            ResolvedEffect,
+            AdmissionContext, AdmissionSnapshot, CandidateSelector, ClaimVerdict,
+            CriterionEvidence, CriterionIntegrity, EffectId, ResolvedEffect,
         };
         let task_risk = task.snapshot().risk;
         let current = self
@@ -450,6 +454,14 @@ impl<C: Clock> TaskService<C> {
         let durable_exemptions = self.store.list_policy_exemptions_for_task(task.id())?;
         let durable_discharges = self.store.list_approval_discharges_for_task(task.id())?;
         let mut criteria = Vec::with_capacity(task.acceptance().len());
+        let mut snapshot_resolved: Vec<ResolvedEffect> = Vec::new();
+        let mut snapshot_executions: Vec<(ExecutionId, TaskId)> = Vec::new();
+        let mut snapshot_integrity: Vec<(
+            String,
+            ExecutionId,
+            AttemptId,
+            evaluation::IntegrityBasis,
+        )> = Vec::new();
         for criterion in task.acceptance() {
             let requirement = task
                 .evidence_requirements()
@@ -508,13 +520,15 @@ impl<C: Clock> TaskService<C> {
                     let Some(effect) = self.store.get_observed_effect(&effect_id)? else {
                         continue;
                     };
-                    let bound = self
+                    let owner = match self
                         .store
                         .get_execution(&effect.provenance().execution_id)?
-                        .is_some_and(|execution| execution.task_id() == task.id());
-                    if !bound {
-                        continue;
-                    }
+                    {
+                        Some(execution) if execution.task_id() == task.id() => {
+                            execution.task_id().clone()
+                        }
+                        _ => continue,
+                    };
                     if !relied_on.iter().any(|(execution_id, attempt_id)| {
                         *execution_id == effect.provenance().execution_id
                             && *attempt_id == effect.provenance().attempt_id
@@ -523,6 +537,12 @@ impl<C: Clock> TaskService<C> {
                             effect.provenance().execution_id.clone(),
                             effect.provenance().attempt_id.clone(),
                         ));
+                    }
+                    if !snapshot_executions
+                        .iter()
+                        .any(|(execution_id, _)| *execution_id == effect.provenance().execution_id)
+                    {
+                        snapshot_executions.push((effect.provenance().execution_id.clone(), owner));
                     }
                     if resolved_effects
                         .iter()
@@ -535,6 +555,14 @@ impl<C: Clock> TaskService<C> {
                     }
                 }
             }
+            for resolved in &resolved_effects {
+                if !snapshot_resolved
+                    .iter()
+                    .any(|known: &ResolvedEffect| known.effect_id == resolved.effect_id)
+                {
+                    snapshot_resolved.push(resolved.clone());
+                }
+            }
             // The gate mirrors the core's: empty params or non-candidate
             // selectors never consult integrity, so `None` here only
             // reaches the core where the core ignores it.
@@ -543,7 +571,18 @@ impl<C: Clock> TaskService<C> {
             {
                 None
             } else {
-                self.integrity_basis(&relied_on)?
+                match self.integrity_basis(&relied_on)? {
+                    Some((execution_id, attempt_id, basis)) => {
+                        snapshot_integrity.push((
+                            criterion.clone(),
+                            execution_id.clone(),
+                            attempt_id.clone(),
+                            basis.clone(),
+                        ));
+                        Some(basis)
+                    }
+                    None => None,
+                }
             };
             criteria.push(CriterionEvidence {
                 requirement: Some(requirement),
@@ -561,20 +600,48 @@ impl<C: Clock> TaskService<C> {
             current_policy_fingerprint: policy_fp,
             now,
         };
-        Ok(evaluation::evaluate_admission(&criteria, &context))
+        let report = evaluation::evaluate_admission(&criteria, &context);
+        let integrity_inputs: Vec<CriterionIntegrity> = snapshot_integrity
+            .iter()
+            .map(
+                |(criterion_id, execution_id, attempt_id, basis)| CriterionIntegrity {
+                    criterion_id: criterion_id.as_str(),
+                    execution_id,
+                    attempt_id,
+                    basis,
+                },
+            )
+            .collect();
+        let relied_refs: Vec<(&ExecutionId, &TaskId)> = snapshot_executions
+            .iter()
+            .map(|(execution_id, owner)| (execution_id, owner))
+            .collect();
+        let snapshot = AdmissionSnapshot::capture(
+            task,
+            current.as_ref(),
+            &durable_claims,
+            &durable_verdicts,
+            &durable_exemptions,
+            &durable_discharges,
+            &snapshot_resolved,
+            &relied_refs,
+            &integrity_inputs,
+            policy_fp,
+            now,
+        );
+        Ok((report, snapshot))
     }
     /// Current integrity basis for one candidate-shaped criterion (CV-9
     /// rule 4): the integrity assessment of the relied-on candidate
     /// execution, bound to its evaluated base. `candidates` arrive in
     /// basis order; the first execution with both an assessment and a
-    /// bound base wins. `None` (no assessment, no base) fails closed in
-    /// the core. Joins the same pre-commit read snapshot as verdicts and
-    /// effects — the commit guard is the atomic state write in
-    /// `admit_completion`.
+    /// bound base wins, and its keys travel with the basis so the commit
+    /// can re-read the same rows (TASK-0161, strict rule-5). `None` (no
+    /// assessment, no base) fails closed in the core.
     fn integrity_basis(
         &self,
         candidates: &[(ExecutionId, AttemptId)],
-    ) -> ServiceResult<Option<evaluation::IntegrityBasis>> {
+    ) -> ServiceResult<Option<(ExecutionId, AttemptId, evaluation::IntegrityBasis)>> {
         use evaluation::{CandidateIntegrityOutcome, IntegrityBasis};
         for (execution_id, attempt_id) in candidates {
             let assessment = self
@@ -584,12 +651,16 @@ impl<C: Clock> TaskService<C> {
                 .store
                 .get_evaluated_policy_base(execution_id.as_str())?;
             if let (Some(assessment), Some(base)) = (assessment, base) {
-                return Ok(Some(IntegrityBasis {
-                    clean: assessment.outcome == CandidateIntegrityOutcome::Intact,
-                    requirement_revision: assessment.requirement_revision.clone(),
-                    policy_fingerprint: assessment.policy_fingerprint.clone(),
-                    evaluated_base: base.policy.fingerprint().to_owned(),
-                }));
+                return Ok(Some((
+                    execution_id.clone(),
+                    attempt_id.clone(),
+                    IntegrityBasis {
+                        clean: assessment.outcome == CandidateIntegrityOutcome::Intact,
+                        requirement_revision: assessment.requirement_revision.clone(),
+                        policy_fingerprint: assessment.policy_fingerprint.clone(),
+                        evaluated_base: base.policy.fingerprint().to_owned(),
+                    },
+                )));
             }
         }
         Ok(None)
