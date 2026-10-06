@@ -172,7 +172,7 @@ impl crate::SqliteStore {
     ) -> StorageResult<()> {
         let changed = self.connection().execute(
             "UPDATE candidate_input_operations SET status = ?1, detail_code = ?2, updated_at_ms = ?3,
-                    status_history = status_history || char(10) || ?7
+                    status_history = substr(status_history || char(10) || ?7, -8191)
              WHERE execution_id = ?4 AND attempt_id = ?5 AND status = ?6 AND invalidated_at_ms IS NULL",
             params![status, detail_code, now_ms.min(i64::MAX as u64) as i64, execution_id, attempt_id, expected, format!("{status}:{detail_code:?}:{}", now_ms)],
         )?;
@@ -221,7 +221,7 @@ impl crate::SqliteStore {
                     status = CASE WHEN status IN ('RESULT_ADMITTED','COMPLETE') THEN status ELSE ?1 END,
                     detail_code = CASE WHEN status IN ('RESULT_ADMITTED','COMPLETE') THEN detail_code ELSE ?2 END,
                     updated_at_ms = ?3,
-                    status_history = status_history || char(10) || ?6
+                    status_history = substr(status_history || char(10) || ?6, -8191)
              WHERE execution_id = ?4 AND attempt_id = ?5",
             params![status, detail_code, now_ms, execution_id, attempt_id, format!("{status}:{detail_code}:{now_ms}")],
         )?;
@@ -262,7 +262,7 @@ impl crate::SqliteStore {
                     updated_at_ms = ?3,
                     invalidated_at_ms = COALESCE(invalidated_at_ms, ?3),
                     invalidation_code = COALESCE(invalidation_code, ?7),
-                    status_history = status_history || char(10) || ?6
+                    status_history = substr(status_history || char(10) || ?6, -8191)
              WHERE execution_id = ?4 AND attempt_id = ?5",
             params![status, detail_code, now_ms, execution_id, attempt_id, format!("{status}:{detail_code}:{now_ms}"), invalidation_code],
         )?;
@@ -315,9 +315,22 @@ impl crate::SqliteStore {
         };
         let effect_id =
             EffectId::new(effect_id).map_err(|error| StorageError::Corrupt(error.to_string()))?;
-        let effect = self
-            .get_observed_effect(&effect_id)?
-            .ok_or_else(|| StorageError::Corrupt("candidate result effect is missing".into()))?;
+        let effect = match self.get_observed_effect(&effect_id)? {
+            Some(effect) => effect,
+            None if self
+                .candidate_operation_invalidation(execution_id, attempt_id)?
+                .is_some() =>
+            {
+                return Err(StorageError::ConstraintViolation(
+                    "candidate result effect is quarantined by invalidation".into(),
+                ));
+            }
+            None => {
+                return Err(StorageError::Corrupt(
+                    "candidate result effect is missing".into(),
+                ));
+            }
+        };
         let integrity = self
             .get_candidate_integrity_assessment(execution_id, attempt_id)?
             .ok_or_else(|| {
@@ -451,6 +464,27 @@ impl crate::SqliteStore {
         }) {
             return Err(StorageError::Corrupt(
                 "candidate result task/execution/attempt lineage mismatch".to_owned(),
+            ));
+        }
+        // TASK-0151 finding 2: a result cannot land on an invalidated
+        // operation. Checked inside this transaction, atomically with the
+        // insert below — a concurrent invalidation either precedes this
+        // read (refused here) or blocks on the write lock until commit.
+        let invalidated: Option<String> = transaction
+            .query_row(
+                "SELECT invalidation_code FROM candidate_input_operations
+                 WHERE execution_id = ?1 AND attempt_id = ?2",
+                params![
+                    provenance.execution_id.as_str(),
+                    provenance.attempt_id.as_str()
+                ],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        if invalidated.is_some() {
+            return Err(StorageError::ConstraintViolation(
+                "candidate operation is invalidated; result refused".to_owned(),
             ));
         }
         let next: i64 = transaction.query_row(
