@@ -1,7 +1,7 @@
 //! Deterministic checked-in migrations with an explicit schema version.
 //!
 //! Versioning uses SQLite `PRAGMA user_version`: 0 means a fresh database,
-//! 22 is the supported version (`0001_task_core.sql`, then
+//! 24 is the supported version (`0001_task_core.sql`, then
 //! `0002_event_journal.sql`, then `0003_event_scope.sql`, then
 //! `0004_runtime_core.sql`, then `0005_workspace_leases.sql`, then
 //! `0006_attempt_reservations.sql`, then
@@ -14,17 +14,18 @@
 //! `0018_planning_input_evidence_requirements.sql`, then
 //! `0019_observed_effects.sql`, then `0020_task_prerequisites.sql`, then
 //! `0021_test_mutation_policy.sql`, then `0022_candidate_input_assessments.sql`,
-//! then `0023_claim_verification.sql`). Newer
+//! then `0023_claim_verification.sql`, then
+//! `0024_candidate_operations_hardening.sql`). Newer
 //! versions fail closed; re-opening the current version is a no-op (never
 //! destructively re-applied). Executing migrations inside one SQLite
 //! transaction is storage consistency only — not TASK-0024 event atomicity.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::error::{StorageError, StorageResult};
 
 /// Schema version this adapter understands.
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 23;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 24;
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_task_core.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_event_journal.sql");
@@ -50,6 +51,7 @@ const MIGRATION_0020: &str = include_str!("../migrations/0020_task_prerequisites
 const MIGRATION_0021: &str = include_str!("../migrations/0021_test_mutation_policy.sql");
 const MIGRATION_0022: &str = include_str!("../migrations/0022_candidate_input_assessments.sql");
 const MIGRATION_0023: &str = include_str!("../migrations/0023_claim_verification.sql");
+const MIGRATION_0024: &str = include_str!("../migrations/0024_candidate_operations_hardening.sql");
 
 /// Applies pending migrations to `connection`, which must already have
 /// `PRAGMA foreign_keys = ON`. Migrations run in order inside one SQLite
@@ -207,7 +209,43 @@ pub(crate) fn migrate(connection: &mut Connection) -> StorageResult<u32> {
             StorageError::Migration(format!("0023_claim_verification.sql failed: {error}"))
         })?;
     }
-    transaction.execute_batch("PRAGMA user_version = 23")?;
+    if current < 24 {
+        // TASK-0151 finding 14: 0022 was edited in place, gaining nine
+        // assessment columns after some databases recorded version 22.
+        // Backfilling evidence columns would fabricate audit data, so a
+        // database with the pre-column shape fails closed here with a
+        // recreate directive instead of migrating silently.
+        let table: Option<String> = transaction
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'table'
+                 AND name = 'candidate_input_assessments'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if table.is_some() {
+            let columns: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('candidate_input_assessments')
+                 WHERE name = 'deletions'",
+                [],
+                |row| row.get(0),
+            )?;
+            if columns == 0 {
+                return Err(StorageError::Migration(
+                    "candidate_input_assessments predates the in-place 0022 \
+                     column fix; this development database cannot be repaired \
+                     without fabricating evidence — recreate it"
+                        .to_owned(),
+                ));
+            }
+        }
+        transaction.execute_batch(MIGRATION_0024).map_err(|error| {
+            StorageError::Migration(format!(
+                "0024_candidate_operations_hardening.sql failed: {error}"
+            ))
+        })?;
+    }
+    transaction.execute_batch("PRAGMA user_version = 24")?;
     transaction.commit()?;
     Ok(SUPPORTED_SCHEMA_VERSION)
 }

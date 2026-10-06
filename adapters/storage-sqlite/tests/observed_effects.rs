@@ -752,7 +752,7 @@ fn cv_2_schema_18_migrates_to_19_with_closed_capture_authority() {
     }
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 23);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 24);
     let connection = rusqlite::Connection::open(&db.path).unwrap();
     let sql: String = connection
         .query_row(
@@ -1224,4 +1224,709 @@ fn now_millis() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64
+}
+
+// TASK-0151 storage hardening: compact candidate fixture reusing the
+// known-good values from candidate_result_and_typed_assessment test.
+struct CandidateSeed {
+    execution: ExecutionId,
+    attempt: AttemptId,
+    effect_id: EffectId,
+}
+
+fn seed_candidate(store: &mut SqliteStore) -> CandidateSeed {
+    let (execution, attempt) = seed_runtime(store);
+    store
+        .record_candidate_selection(
+            "T-EFFECT",
+            execution.as_str(),
+            attempt.as_str(),
+            "candidate-operation-1",
+            &"1".repeat(40),
+            &"3".repeat(40),
+            &format!("sha256:{}", "b".repeat(64)),
+            1,
+            &format!("sha256:{}", "c".repeat(64)),
+            "criterion-1",
+            "candidate.file-contains.v1",
+            "src/main.rs",
+            "accepted",
+            10,
+        )
+        .unwrap();
+    let subject = EffectSubjectRef::new(format!("attempt:{}", attempt.as_str())).unwrap();
+    let candidate_manifest = format!("sha256:{}", "d".repeat(64));
+    let mut assessment = CandidateIntegrityAssessment {
+        task_id: "T-EFFECT".to_owned(),
+        execution_id: execution.as_str().to_owned(),
+        attempt_id: attempt.as_str().to_owned(),
+        subject_ref: subject.as_str().to_owned(),
+        requirement_revision: format!("sha256:{}", "b".repeat(64)),
+        policy_revision: 1,
+        policy_fingerprint: format!("sha256:{}", "c".repeat(64)),
+        criterion_id: "criterion-1".to_owned(),
+        selector: "candidate.file-contains.v1".to_owned(),
+        selector_path: "src/main.rs".to_owned(),
+        selector_literal: "accepted".to_owned(),
+        invocation_id: "candidate-invocation-1".to_owned(),
+        evaluator_ref: "runlith.agentd.candidate-evaluator.v1".to_owned(),
+        runtime_ref: "agentd/1".to_owned(),
+        enforcement_ref: "runner-operation-1".to_owned(),
+        invocation_descriptor_version: 1,
+        invocation_descriptor_sha256: String::new(),
+        evaluator_executable: "/trusted/agentd".to_owned(),
+        toolchain_ref: "git-executable=/usr/bin/git;git version 2.54.0".to_owned(),
+        runner_backend: "native".to_owned(),
+        runner_plan_sha256: format!("sha256:{}", "6".repeat(64)),
+        runner_enforced_axes: 3,
+        runner_env_isolated: true,
+        base_commit_oid: "1".repeat(40),
+        base_tree_oid: "2".repeat(40),
+        base_manifest_sha256: format!("sha256:{}", "a".repeat(64)),
+        candidate_commit_oid: "3".repeat(40),
+        candidate_tree_oid: "4".repeat(40),
+        candidate_manifest_sha256: candidate_manifest.clone(),
+        deletions: vec![],
+        checkpoints: [
+            CandidateCheckpointPhase::Selection,
+            CandidateCheckpointPhase::BeforeEvaluation,
+            CandidateCheckpointPhase::AfterEvaluation,
+            CandidateCheckpointPhase::ResultAdmission,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, phase)| CandidateFreshnessCheckpoint {
+            phase,
+            observed_at_ms: 11 + index as u64,
+            git_metadata_fingerprint: format!("sha256:{}", "e".repeat(64)),
+            live_worktree_manifest_sha256: format!("sha256:{}", "f".repeat(64)),
+            matched: true,
+        })
+        .collect(),
+        outcome: CandidateIntegrityOutcome::Intact,
+        started_at_ms: 10,
+        completed_at_ms: 20,
+    };
+    assessment.refresh_invocation_descriptor_digest();
+    let config = candidate_sha256(
+        format!(
+            "{}\0{}\0{}\0{}\0{}\0{}",
+            assessment.requirement_revision,
+            assessment.policy_fingerprint,
+            assessment.selector,
+            assessment.selector_path,
+            assessment.selector_literal,
+            assessment.invocation_descriptor_sha256,
+        )
+        .as_bytes(),
+    );
+    let fingerprint = subject_fingerprint(
+        EffectKind::TestSuiteResult,
+        subject.as_str(),
+        &[
+            ("content", &candidate_manifest),
+            ("toolchain", &assessment.runtime_ref),
+            ("config", &config),
+        ],
+    )
+    .unwrap();
+    store
+        .append_security_audit(&NewSecurityAuditRecord {
+            event: SecurityAuditEvent::IsolationEnforcement,
+            author: SecurityAuditAuthor::Runner,
+            outcome: Some(SecurityAuditOutcome::Enforced),
+            occurred_at_ms: 20,
+            correlation_id: assessment.enforcement_ref.clone(),
+            causation_id: Some(assessment.invocation_id.clone()),
+            operation_id: Some(assessment.enforcement_ref.clone()),
+            task_id: Some(assessment.task_id.clone()),
+            execution_id: Some(assessment.execution_id.clone()),
+            attempt_id: Some(assessment.attempt_id.clone()),
+            subject: Some(SecurityAuditSubject {
+                kind: SecurityAuditSubjectKind::RunnerBackend,
+                id: assessment.runner_backend.clone(),
+            }),
+            policy_fingerprint: Some(assessment.policy_fingerprint.clone()),
+            rule_id: None,
+            reason_code: None,
+            approval_request_id: None,
+            capabilities: vec![],
+        })
+        .unwrap();
+    let effect = store
+        .append_candidate_result(
+            subject,
+            fingerprint,
+            EffectPayload::TestSuiteResult {
+                passed: 1,
+                failed: 0,
+                skipped: 0,
+                result_sha256: Sha256Digest::new(format!("sha256:{}", "9".repeat(64))).unwrap(),
+            },
+            "2026-09-23T12:00:00Z",
+            EffectProvenance::new(execution.clone(), attempt.clone(), "agentd/1")
+                .unwrap()
+                .with_lineage(
+                    Some("runlith.agentd.candidate-evaluator.v1".to_owned()),
+                    Some("candidate-invocation-1".to_owned()),
+                )
+                .unwrap(),
+            &assessment,
+        )
+        .unwrap();
+    CandidateSeed {
+        execution,
+        attempt,
+        effect_id: effect.effect_id().clone(),
+    }
+}
+
+/// Raw-SQL probe handle: trigger/migration guarantees have no public
+/// API by design, so these tests open the database file directly.
+fn raw(path: &std::path::Path) -> rusqlite::Connection {
+    rusqlite::Connection::open(path).unwrap()
+}
+
+// Finding 1: candidate operation rows must be delete-proof.
+#[test]
+fn candidate_operation_rows_cannot_be_deleted() {
+    let db = TestDb::new("candidate-no-delete");
+    let mut store = db.open();
+    let seed = seed_candidate(&mut store);
+    drop(store);
+    let conn = raw(&db.path);
+    let deleted = conn.execute(
+        "DELETE FROM candidate_input_operations WHERE execution_id = ?1",
+        [seed.execution.as_str()],
+    );
+    assert!(
+        deleted.is_err(),
+        "a BEFORE DELETE guard must refuse operation-row deletion"
+    );
+    let remaining: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM candidate_input_operations WHERE execution_id = ?1",
+            [seed.execution.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 1, "the operation row must survive");
+}
+
+// Finding 2: appending a result onto an invalidated operation refuses.
+#[test]
+fn append_candidate_result_refuses_invalidated_operation() {
+    let db = TestDb::new("candidate-append-invalidated");
+    let mut store = db.open();
+    let (execution, attempt) = seed_runtime(&mut store);
+    store
+        .record_candidate_selection(
+            "T-EFFECT",
+            execution.as_str(),
+            attempt.as_str(),
+            "candidate-operation-1",
+            &"1".repeat(40),
+            &"3".repeat(40),
+            &format!("sha256:{}", "b".repeat(64)),
+            1,
+            &format!("sha256:{}", "c".repeat(64)),
+            "criterion-1",
+            "candidate.file-contains.v1",
+            "src/main.rs",
+            "accepted",
+            10,
+        )
+        .unwrap();
+    // Drive to a terminal state, then invalidate (mirrors the sticky test).
+    for (from, to) in [
+        ("PENDING", "RESULT_ADMITTED"),
+        ("RESULT_ADMITTED", "COMPLETE"),
+    ] {
+        store
+            .update_candidate_operation_status(
+                execution.as_str(),
+                attempt.as_str(),
+                from,
+                to,
+                None,
+                11,
+            )
+            .unwrap();
+    }
+    store
+        .invalidate_candidate_operation(
+            execution.as_str(),
+            attempt.as_str(),
+            "TAMPERED",
+            "post-admission-tamper",
+            13,
+        )
+        .unwrap();
+    drop(store);
+    // A late result for the invalidated operation must be refused even
+    // though lineage and fingerprints check out.
+    let mut store = db.open();
+    let subject = EffectSubjectRef::new(format!("attempt:{}", attempt.as_str())).unwrap();
+    let candidate_manifest = format!("sha256:{}", "d".repeat(64));
+    let mut assessment = CandidateIntegrityAssessment {
+        task_id: "T-EFFECT".to_owned(),
+        execution_id: execution.as_str().to_owned(),
+        attempt_id: attempt.as_str().to_owned(),
+        subject_ref: subject.as_str().to_owned(),
+        requirement_revision: format!("sha256:{}", "b".repeat(64)),
+        policy_revision: 1,
+        policy_fingerprint: format!("sha256:{}", "c".repeat(64)),
+        criterion_id: "criterion-1".to_owned(),
+        selector: "candidate.file-contains.v1".to_owned(),
+        selector_path: "src/main.rs".to_owned(),
+        selector_literal: "accepted".to_owned(),
+        invocation_id: "candidate-invocation-1".to_owned(),
+        evaluator_ref: "runlith.agentd.candidate-evaluator.v1".to_owned(),
+        runtime_ref: "agentd/1".to_owned(),
+        enforcement_ref: "runner-operation-1".to_owned(),
+        invocation_descriptor_version: 1,
+        invocation_descriptor_sha256: String::new(),
+        evaluator_executable: "/trusted/agentd".to_owned(),
+        toolchain_ref: "git-executable=/usr/bin/git;git version 2.54.0".to_owned(),
+        runner_backend: "native".to_owned(),
+        runner_plan_sha256: format!("sha256:{}", "6".repeat(64)),
+        runner_enforced_axes: 3,
+        runner_env_isolated: true,
+        base_commit_oid: "1".repeat(40),
+        base_tree_oid: "2".repeat(40),
+        base_manifest_sha256: format!("sha256:{}", "a".repeat(64)),
+        candidate_commit_oid: "3".repeat(40),
+        candidate_tree_oid: "4".repeat(40),
+        candidate_manifest_sha256: candidate_manifest.clone(),
+        deletions: vec![],
+        checkpoints: [
+            CandidateCheckpointPhase::Selection,
+            CandidateCheckpointPhase::BeforeEvaluation,
+            CandidateCheckpointPhase::AfterEvaluation,
+            CandidateCheckpointPhase::ResultAdmission,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, phase)| CandidateFreshnessCheckpoint {
+            phase,
+            observed_at_ms: 11 + index as u64,
+            git_metadata_fingerprint: format!("sha256:{}", "e".repeat(64)),
+            live_worktree_manifest_sha256: format!("sha256:{}", "f".repeat(64)),
+            matched: true,
+        })
+        .collect(),
+        outcome: CandidateIntegrityOutcome::Intact,
+        started_at_ms: 10,
+        completed_at_ms: 20,
+    };
+    assessment.refresh_invocation_descriptor_digest();
+    let config = candidate_sha256(
+        format!(
+            "{}\0{}\0{}\0{}\0{}\0{}",
+            assessment.requirement_revision,
+            assessment.policy_fingerprint,
+            assessment.selector,
+            assessment.selector_path,
+            assessment.selector_literal,
+            assessment.invocation_descriptor_sha256,
+        )
+        .as_bytes(),
+    );
+    let fingerprint = subject_fingerprint(
+        EffectKind::TestSuiteResult,
+        subject.as_str(),
+        &[
+            ("content", &candidate_manifest),
+            ("toolchain", &assessment.runtime_ref),
+            ("config", &config),
+        ],
+    )
+    .unwrap();
+    let refused = store.append_candidate_result(
+        subject,
+        fingerprint,
+        EffectPayload::TestSuiteResult {
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            result_sha256: Sha256Digest::new(format!("sha256:{}", "9".repeat(64))).unwrap(),
+        },
+        "2026-09-23T12:00:00Z",
+        EffectProvenance::new(execution.clone(), attempt.clone(), "agentd/1")
+            .unwrap()
+            .with_lineage(
+                Some("runlith.agentd.candidate-evaluator.v1".to_owned()),
+                Some("candidate-invocation-1".to_owned()),
+            )
+            .unwrap(),
+        &assessment,
+    );
+    assert!(
+        refused.is_err(),
+        "appending onto an invalidated operation must refuse"
+    );
+}
+
+// Findings 3+4: invalidated results are unreadable as evidence, and the
+// read-plus-invalidation check is one atomic statement.
+#[test]
+fn get_observed_effect_quarantines_invalidated_results() {
+    let db = TestDb::new("candidate-read-invalidated");
+    let mut store = db.open();
+    let seed = seed_candidate(&mut store);
+    for (from, to) in [
+        ("PENDING", "RESULT_ADMITTED"),
+        ("RESULT_ADMITTED", "COMPLETE"),
+    ] {
+        store
+            .update_candidate_operation_status(
+                seed.execution.as_str(),
+                seed.attempt.as_str(),
+                from,
+                to,
+                None,
+                21,
+            )
+            .unwrap();
+    }
+    assert!(store
+        .get_observed_effect(&seed.effect_id)
+        .unwrap()
+        .is_some());
+    store
+        .invalidate_candidate_operation(
+            seed.execution.as_str(),
+            seed.attempt.as_str(),
+            "TAMPERED",
+            "post-admission-tamper",
+            22,
+        )
+        .unwrap();
+    assert!(
+        store
+            .get_observed_effect(&seed.effect_id)
+            .unwrap()
+            .is_none(),
+        "an invalidated result must not resolve as evidence"
+    );
+}
+
+// Findings 3+4, consumer side: the per-attempt effect list (the mint
+// basis) skips quarantined rows instead of erroring.
+#[test]
+fn attempt_effect_list_skips_invalidated_results() {
+    let db = TestDb::new("candidate-list-invalidated");
+    let mut store = db.open();
+    let seed = seed_candidate(&mut store);
+    for (from, to) in [
+        ("PENDING", "RESULT_ADMITTED"),
+        ("RESULT_ADMITTED", "COMPLETE"),
+    ] {
+        store
+            .update_candidate_operation_status(
+                seed.execution.as_str(),
+                seed.attempt.as_str(),
+                from,
+                to,
+                None,
+                21,
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        store
+            .list_observed_effects_for_attempt(&seed.execution, &seed.attempt)
+            .unwrap()
+            .len(),
+        1
+    );
+    store
+        .invalidate_candidate_operation(
+            seed.execution.as_str(),
+            seed.attempt.as_str(),
+            "TAMPERED",
+            "post-admission-tamper",
+            22,
+        )
+        .unwrap();
+    assert!(
+        store
+            .list_observed_effects_for_attempt(&seed.execution, &seed.attempt)
+            .unwrap()
+            .is_empty(),
+        "quarantined rows must vanish from the evidence list"
+    );
+}
+
+// Finding 5: repeated failures keep appending; history keeps its tail.
+#[test]
+fn status_history_keeps_tail_under_repeated_failures() {
+    let db = TestDb::new("candidate-status-tail");
+    let mut store = db.open();
+    let (execution, attempt) = seed_runtime(&mut store);
+    store
+        .record_candidate_selection(
+            "T-EFFECT",
+            execution.as_str(),
+            attempt.as_str(),
+            "candidate-operation-1",
+            &"1".repeat(40),
+            &"3".repeat(40),
+            &format!("sha256:{}", "b".repeat(64)),
+            1,
+            &format!("sha256:{}", "c".repeat(64)),
+            "criterion-1",
+            "candidate.file-contains.v1",
+            "src/main.rs",
+            "accepted",
+            10,
+        )
+        .unwrap();
+    for index in 0..300u64 {
+        store
+            .record_candidate_operation_failure(
+                execution.as_str(),
+                attempt.as_str(),
+                "MISMATCH",
+                &format!("freshness-mismatch-{index:04}-{}", "x".repeat(48)),
+                100 + index,
+            )
+            .unwrap_or_else(|_| panic!("failure {index} must still append"));
+    }
+    drop(store);
+    let conn = raw(&db.path);
+    let history: String = conn
+        .query_row(
+            "SELECT status_history FROM candidate_input_operations WHERE execution_id = ?1",
+            [execution.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        history.len() <= 8192,
+        "history stays within its bound, got {}",
+        history.len()
+    );
+    assert!(
+        history.contains("freshness-mismatch-0299"),
+        "the tail keeps the latest failure"
+    );
+}
+
+// Finding 6: an assessment cannot land without its selection row.
+#[test]
+fn candidate_result_requires_selection_row() {
+    let db = TestDb::new("candidate-no-selection");
+    let mut store = db.open();
+    let (execution, attempt) = seed_runtime(&mut store);
+    // No record_candidate_selection: lineage exists, selection does not.
+    let subject = EffectSubjectRef::new(format!("attempt:{}", attempt.as_str())).unwrap();
+    let candidate_manifest = format!("sha256:{}", "d".repeat(64));
+    let mut assessment = CandidateIntegrityAssessment {
+        task_id: "T-EFFECT".to_owned(),
+        execution_id: execution.as_str().to_owned(),
+        attempt_id: attempt.as_str().to_owned(),
+        subject_ref: subject.as_str().to_owned(),
+        requirement_revision: format!("sha256:{}", "b".repeat(64)),
+        policy_revision: 1,
+        policy_fingerprint: format!("sha256:{}", "c".repeat(64)),
+        criterion_id: "criterion-1".to_owned(),
+        selector: "candidate.file-contains.v1".to_owned(),
+        selector_path: "src/main.rs".to_owned(),
+        selector_literal: "accepted".to_owned(),
+        invocation_id: "candidate-invocation-1".to_owned(),
+        evaluator_ref: "runlith.agentd.candidate-evaluator.v1".to_owned(),
+        runtime_ref: "agentd/1".to_owned(),
+        enforcement_ref: "runner-operation-1".to_owned(),
+        invocation_descriptor_version: 1,
+        invocation_descriptor_sha256: String::new(),
+        evaluator_executable: "/trusted/agentd".to_owned(),
+        toolchain_ref: "git-executable=/usr/bin/git;git version 2.54.0".to_owned(),
+        runner_backend: "native".to_owned(),
+        runner_plan_sha256: format!("sha256:{}", "6".repeat(64)),
+        runner_enforced_axes: 3,
+        runner_env_isolated: true,
+        base_commit_oid: "1".repeat(40),
+        base_tree_oid: "2".repeat(40),
+        base_manifest_sha256: format!("sha256:{}", "a".repeat(64)),
+        candidate_commit_oid: "3".repeat(40),
+        candidate_tree_oid: "4".repeat(40),
+        candidate_manifest_sha256: candidate_manifest.clone(),
+        deletions: vec![],
+        checkpoints: [
+            CandidateCheckpointPhase::Selection,
+            CandidateCheckpointPhase::BeforeEvaluation,
+            CandidateCheckpointPhase::AfterEvaluation,
+            CandidateCheckpointPhase::ResultAdmission,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, phase)| CandidateFreshnessCheckpoint {
+            phase,
+            observed_at_ms: 11 + index as u64,
+            git_metadata_fingerprint: format!("sha256:{}", "e".repeat(64)),
+            live_worktree_manifest_sha256: format!("sha256:{}", "f".repeat(64)),
+            matched: true,
+        })
+        .collect(),
+        outcome: CandidateIntegrityOutcome::Intact,
+        started_at_ms: 10,
+        completed_at_ms: 20,
+    };
+    assessment.refresh_invocation_descriptor_digest();
+    let config = candidate_sha256(
+        format!(
+            "{}\0{}\0{}\0{}\0{}\0{}",
+            assessment.requirement_revision,
+            assessment.policy_fingerprint,
+            assessment.selector,
+            assessment.selector_path,
+            assessment.selector_literal,
+            assessment.invocation_descriptor_sha256,
+        )
+        .as_bytes(),
+    );
+    let fingerprint = subject_fingerprint(
+        EffectKind::TestSuiteResult,
+        subject.as_str(),
+        &[
+            ("content", &candidate_manifest),
+            ("toolchain", &assessment.runtime_ref),
+            ("config", &config),
+        ],
+    )
+    .unwrap();
+    let stored = store.append_candidate_result(
+        subject,
+        fingerprint,
+        EffectPayload::TestSuiteResult {
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            result_sha256: Sha256Digest::new(format!("sha256:{}", "9".repeat(64))).unwrap(),
+        },
+        "2026-09-23T12:00:00Z",
+        EffectProvenance::new(execution.clone(), attempt.clone(), "agentd/1")
+            .unwrap()
+            .with_lineage(
+                Some("runlith.agentd.candidate-evaluator.v1".to_owned()),
+                Some("candidate-invocation-1".to_owned()),
+            )
+            .unwrap(),
+        &assessment,
+    );
+    assert!(
+        stored.is_err(),
+        "an assessment without its selection row must refuse"
+    );
+}
+
+// Finding 14: databases shaped at a pre-fix 0022 head heal on open.
+#[test]
+fn migration_repairs_pretrigger_operations_shape() {
+    let db = TestDb::new("candidate-0022-repair");
+    {
+        let _store = db.open();
+    }
+    {
+        let conn = raw(&db.path);
+        conn.execute_batch(
+            "DROP TABLE candidate_input_operations;
+             DROP TABLE agent_claims;
+             DROP TABLE claim_verifications;
+             DROP TABLE policy_exemptions;
+             DROP TABLE approval_discharges;
+             DROP TABLE completion_admissions;
+             DROP TRIGGER IF EXISTS candidate_input_assessments_require_selection;
+             PRAGMA user_version = 22;",
+        )
+        .unwrap();
+    }
+    let store = db.open();
+    assert_eq!(store.schema_version().unwrap(), 24);
+    drop(store);
+    let conn = raw(&db.path);
+    let tables: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN
+             ('candidate_input_operations', 'agent_claims', 'claim_verifications')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 3, "repair recreates the missing tables");
+    let triggers: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN
+             ('candidate_input_operations_status_no_regression',
+              'candidate_input_operations_invalidation_sticky',
+              'candidate_input_operations_no_delete',
+              'candidate_input_assessments_require_selection')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(triggers, 4, "repair recreates all operations triggers");
+}
+
+// Finding 14, second half: a database with the pre-column assessments
+// shape cannot be repaired without fabricating evidence, so it fails
+// closed with a recreate directive instead of migrating silently.
+#[test]
+fn migration_refuses_precolumn_assessments_shape() {
+    let db = TestDb::new("candidate-0022-oldshape");
+    {
+        let _store = db.open();
+    }
+    {
+        let conn = raw(&db.path);
+        conn.execute_batch(
+            "DROP TABLE agent_claims;
+             DROP TABLE claim_verifications;
+             DROP TABLE policy_exemptions;
+             DROP TABLE approval_discharges;
+             DROP TABLE completion_admissions;
+             DROP TABLE candidate_input_assessments;
+             CREATE TABLE candidate_input_assessments (
+                 assessment_id TEXT PRIMARY KEY,
+                 effect_id TEXT NOT NULL UNIQUE,
+                 task_id TEXT NOT NULL,
+                 execution_id TEXT NOT NULL,
+                 attempt_id TEXT NOT NULL,
+                 subject_ref TEXT NOT NULL,
+                 requirement_revision TEXT NOT NULL,
+                 policy_revision INTEGER NOT NULL,
+                 policy_fingerprint TEXT NOT NULL,
+                 criterion_id TEXT NOT NULL,
+                 selector TEXT NOT NULL,
+                 selector_path TEXT NOT NULL,
+                 selector_literal TEXT NOT NULL,
+                 invocation_id TEXT NOT NULL,
+                 evaluator_ref TEXT NOT NULL,
+                 runtime_ref TEXT NOT NULL,
+                 enforcement_ref TEXT NOT NULL,
+                 base_commit_oid TEXT NOT NULL,
+                 base_tree_oid TEXT NOT NULL,
+                 base_manifest_sha256 TEXT NOT NULL,
+                 candidate_commit_oid TEXT NOT NULL,
+                 candidate_tree_oid TEXT NOT NULL,
+                 candidate_manifest_sha256 TEXT NOT NULL,
+                 checkpoints TEXT NOT NULL,
+                 integrity_outcome TEXT NOT NULL,
+                 started_at_ms INTEGER NOT NULL,
+                 completed_at_ms INTEGER NOT NULL
+             );
+             PRAGMA user_version = 22;",
+        )
+        .unwrap();
+    }
+    let reopened = SqliteStore::open(&db.path);
+    match reopened {
+        Err(StorageError::Migration(message)) => assert!(
+            message.contains("recreate"),
+            "the refusal must direct a recreate, got {message:?}"
+        ),
+        Ok(_) => panic!("pre-column shape must fail closed, but the open succeeded"),
+        Err(other) => panic!("pre-column shape must fail with Migration, got {other}"),
+    }
 }
