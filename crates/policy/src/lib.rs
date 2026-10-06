@@ -17,7 +17,7 @@ mod test_mutation;
 pub use engine::{CompiledPolicy, PolicyEngine, PolicyLayer, PolicyRule, PolicyRuleEvidence};
 pub use review_authority::{
     HumanPrincipal, ImplementationPrincipal, ReviewAuthorityError, ReviewPath, ReviewPathSetting,
-    ReviewVerdict,
+    ReviewVerdict, ReviewerProfile,
 };
 pub use risk_signals::{classify_risk_signals, RiskAdvisory, RiskSignal};
 pub use selector_catalog::{

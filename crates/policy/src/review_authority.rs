@@ -234,6 +234,88 @@ impl ImplementationPrincipal {
     }
 }
 
+/// Fixed product-managed reviewer profile: the minimal mapping the
+/// product (never callers/providers) resolves reviewers through. The
+/// profile revision is bound into review records alongside the setting
+/// and Policy revisions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewerProfile {
+    profile_id: String,
+    revision: u64,
+    key_ref: String,
+    fingerprint: String,
+}
+
+impl ReviewerProfile {
+    pub fn new(
+        profile_id: &str,
+        revision: u64,
+        key_ref: &str,
+    ) -> Result<Self, ReviewAuthorityError> {
+        if !valid_token(profile_id) || !valid_token(key_ref) {
+            return Err(ReviewAuthorityError(
+                "reviewer profile requires an id and key reference".into(),
+            ));
+        }
+        if revision == 0 {
+            return Err(ReviewAuthorityError(
+                "reviewer profile revision must be positive".into(),
+            ));
+        }
+        let mut hash = Sha256::new();
+        hash.update(b"reviewer-profile\0");
+        hash.update(profile_id.as_bytes());
+        hash.update(b"\0");
+        hash.update(revision.to_be_bytes());
+        hash.update(b"\0");
+        hash.update(key_ref.as_bytes());
+        Ok(Self {
+            profile_id: profile_id.to_owned(),
+            revision,
+            key_ref: key_ref.to_owned(),
+            fingerprint: format!("sha256:{:x}", hash.finalize()),
+        })
+    }
+
+    pub fn restore(
+        profile_id: &str,
+        revision: u64,
+        key_ref: &str,
+        fingerprint: &str,
+    ) -> Result<Self, ReviewAuthorityError> {
+        let value = Self::new(profile_id, revision, key_ref)?;
+        if value.fingerprint != fingerprint {
+            return Err(ReviewAuthorityError(
+                "stored reviewer profile fingerprint mismatch".into(),
+            ));
+        }
+        Ok(value)
+    }
+
+    pub fn profile_id(&self) -> &str {
+        &self.profile_id
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn key_ref(&self) -> &str {
+        &self.key_ref
+    }
+
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    pub fn serialize(&self) -> String {
+        format!(
+            "reviewer-profile/v1\nid:{}\nrev:{}\nkey:{}\n",
+            self.profile_id, self.revision, self.key_ref
+        )
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewAuthorityError(pub String);
 
@@ -312,6 +394,22 @@ mod tests {
         assert!(ImplementationPrincipal::new("", "A-1", "runner-admission-1").is_err());
         assert!(ImplementationPrincipal::new("E-1", "", "runner-admission-1").is_err());
         assert!(ImplementationPrincipal::new("E-1", "A-1", "").is_err());
+    }
+
+    #[test]
+    fn reviewer_profile_is_revisioned_and_fingerprinted() {
+        let profile = ReviewerProfile::new("owner-primary", 4, "key:platform-1").unwrap();
+        assert_eq!(profile.revision(), 4);
+        let restored =
+            ReviewerProfile::restore("owner-primary", 4, "key:platform-1", profile.fingerprint())
+                .unwrap();
+        assert_eq!(restored, profile);
+        assert!(ReviewerProfile::new("", 4, "key:platform-1").is_err());
+        assert!(ReviewerProfile::new("owner-primary", 0, "key:platform-1").is_err());
+        assert!(
+            ReviewerProfile::restore("owner-primary", 4, "key:other", profile.fingerprint())
+                .is_err()
+        );
     }
 
     #[test]

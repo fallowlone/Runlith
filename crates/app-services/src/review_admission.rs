@@ -35,6 +35,22 @@ pub enum ReviewAdmissionDecision {
     BlockedOnB2Prerequisite,
 }
 
+/// Converts the policy path into its evaluation mirror name.
+pub fn review_path_name(path: &policy::ReviewPath) -> evaluation::ReviewPathName {
+    match path {
+        policy::ReviewPath::B1 => evaluation::ReviewPathName::B1,
+        policy::ReviewPath::B2 => evaluation::ReviewPathName::B2,
+    }
+}
+
+/// Converts the evaluation mirror name back into the policy path.
+pub fn policy_review_path(name: evaluation::ReviewPathName) -> policy::ReviewPath {
+    match name {
+        evaluation::ReviewPathName::B1 => policy::ReviewPath::B1,
+        evaluation::ReviewPathName::B2 => policy::ReviewPath::B2,
+    }
+}
+
 /// Resolves policy + setting + optional record into one decision.
 ///
 /// Order: scope first (exact path/check), then path selection (B2 is
@@ -241,6 +257,28 @@ mod tests {
             decide_review_admission(args),
             ReviewAdmissionDecision::Deny { .. }
         ));
+    }
+
+    #[test]
+    fn review_path_mirror_agrees_across_evaluation_policy_boundary() {
+        // ADR-0018 keeps the two path types in separate crates; their
+        // wire encodings must stay identical or records stop matching
+        // settings.
+        for (policy_path, eval_name) in [
+            (policy::ReviewPath::B1, evaluation::ReviewPathName::B1),
+            (policy::ReviewPath::B2, evaluation::ReviewPathName::B2),
+        ] {
+            assert_eq!(
+                review_path_name(&policy_path).serialize(),
+                eval_name.serialize()
+            );
+            assert_eq!(review_path_name(&policy_path), eval_name);
+            assert_eq!(policy_review_path(eval_name), policy_path);
+        }
+        assert_eq!(
+            policy::ReviewPath::B1.serialize(),
+            evaluation::ReviewPathName::B1.serialize()
+        );
     }
 
     #[test]
