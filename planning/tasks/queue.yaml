@@ -10,7 +10,7 @@
 schema_version: 1
 completed_through: TASK-0150
 current_gate: G8
-gate_status: IN_PROGRESS  # G7 closed by TASK-0120; G8 bookkeeping through TASK-0150, independent gate closure remains pending
+gate_status: CLOSED  # TASK-0127 independent closure audit: G8_CLOSED (report docs/development/G8_TASK_0127_CLOSURE_AUDIT.md, gate docs/development/G8_TASK_0127_CLOSURE_GATE.md); current_gate held at G8 until the G9 breakdown is materialized
 
 items:
   - id: TASK-0012
