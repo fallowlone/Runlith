@@ -4732,6 +4732,34 @@ items:
     blocked_by: []
     references:
       - docs/architecture/adr/ADR-0035-g8-immutable-git-candidate-proposal.md
+    outcome: >-
+      Implemented on branch task-0151-evidence-hardening. Storage batch
+      (migration 0024, schema 24): finding 1 BEFORE DELETE trigger on
+      candidate_input_operations; finding 2 invalidation check inside the
+      append transaction; findings 3+4 invalidated results unreadable
+      through get_observed_effect / get_candidate_evidence_for_completion
+      with atomic read+invalidation; finding 5 status_history 8192-byte
+      CHECK retained with a regression test; finding 6 assessment-requires-
+      selection trigger; finding 14 IF NOT EXISTS repair of the 0022-drifted
+      operations shape plus fail-closed recreate directive for pre-column
+      assessment shapes (no fabricated evidence). Producer batch: finding 7
+      CandidateSelector::from_requirement_under_policy reconciles the
+      requirement pin against the current policy (evaluator carries the
+      composition-derived fingerprint, None fails closed); finding 10
+      FileScope refuses non-lone interior "." spellings; finding 11 pinned
+      gitdir canonicalizes and re-checks the anchor (lexical path kept for
+      back-reference comparison); finding 13 operator IPC
+      VerificationSucceeded refuses candidate-routed tasks (completion only
+      through the revalidating production cycle); finding 12 mid-scan G6
+      fault-injection test proves abort-without-partial-snapshot at every
+      denial position. Findings 8 (repo-local config surface matrix) and 9
+      (per-descriptor audit volume, ~130K rows worst case) explicitly
+      re-deferred to TASK-0163/TASK-0164: both need G6-side design, not a
+      hardening-task pattern tweak. Every fix RED-first; production order
+      (selection before result) verified before enforcing the trigger;
+      completion_admission seeds updated to the producer order. Full
+      workspace verification green (127 suites, EXIT=0). Integration into
+      main is not claimed.
 
   # Cross-gate remediation: blocks running the Claude provider under
   # mandatory G6 confinement on macOS, needed before real-provider
@@ -5222,3 +5250,61 @@ items:
       16/16; full workspace verification green (127 suites, EXIT=0; one
       earlier full run showed 2 load flakes, green in isolation and on
       repeat). No schema change. Integration into main is not claimed.
+  # Re-deferred from TASK-0151 finding 8: the residual needs a
+  # pinned-command inventory crossed with the executable-config surface
+  # (review-grade matrix), not a one-line pattern tweak that would grant
+  # false confidence. Invocation env/config neutralization
+  # (adapters/git-cli/src/runner.rs) is already comprehensive; git
+  # lowercases section+key on parse (verified empirically), so the
+  # existing lowercase pattern has no case bypass.
+  - id: TASK-0163
+    gate: G6
+    title: Pinned-git repository-config executable-surface matrix
+    objective: >-
+      Enumerate the pinned read-only git command set and prove each
+      repository-local executable configuration surface (askpass, pager,
+      insteadOf rewrites, worktree/extension flags, and any further
+      config-or-env helper execution) either neutralized, fail-closed, or
+      unreachable from that set.
+    scope: >-
+      Review plus focused tests: command inventory, per-surface
+      disposition with evidence, pattern/env completions only where the
+      matrix proves a reachable hole. No new git commands, no behavior
+      change to accepted repositories.
+    exit_criteria_summary: >-
+      Matrix recorded (per command x surface, with disposition and
+      evidence); reachable holes closed with regression tests; unreachable
+      surfaces documented with the reason; full workspace verification
+      green.
+    depends_on:
+      - TASK-0151
+    blocked_by: []
+    references:
+      - adapters/git-cli/src/runner.rs
+  # Re-deferred from TASK-0151 finding 9: per-descriptor authorization
+  # appends >=2 audit rows per call (PolicyRequest/Requested + decision),
+  # so a worst-case scan (16,384 entries, 256 MiB) journals ~130K rows.
+  # Bounded by existing constants, but heavy; batching changes G6 audit
+  # trail semantics and needs G6-side design.
+  - id: TASK-0164
+    gate: G6
+    title: Bounded G6 audit volume for descriptor scans
+    objective: >-
+      Bound per-scan G6 audit volume without losing the fail-closed
+      per-descriptor authorization or audit-trail completeness required by
+      the G6 contracts.
+    scope: >-
+      G6-side design (batched authorization decisions, aggregated scan
+      receipts, or sized caps with fail-closed overflow): decision record
+      plus implementation. No silent authorization skipping; no audit gap
+      for denied operations.
+    exit_criteria_summary: >-
+      Worst-case per-scan audit rows bounded by an explicit constant with
+      a regression test; denials still individually journaled; full
+      workspace verification green.
+    depends_on:
+      - TASK-0151
+    blocked_by: []
+    references:
+      - crates/app-services/src/security_service.rs
+      - adapters/effect-capture-local/src/candidate_snapshot.rs
