@@ -3989,6 +3989,22 @@ items:
     references:
       - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
       - ADR-0030
+      - crates/app-services/src/verification_levels.rs
+    outcome: >-
+      Implemented on branch task-0134-verify-levels as pure orchestrator-side
+      selection: V0..V3 from changed-path classes (lockfiles/manifests/
+      schema to V3, docs-only to V0, interface files to V1, else V2, max
+      wins), observed-effect subject fallback with empty-input no-op V0,
+      elevated-risk floor at V1, first-signal ecosystem detection, and
+      conventional per-ecosystem commands as data (never fabricated for
+      unknown ecosystems, never executed). Levels map to TASK-0123
+      RequirementKind obligations (V0 none, V1 ProcessExit, V2 TestSuite,
+      V3 TestSuite+SecurityCheck) as the repair-loop input seam; TASK-0125
+      contract untouched. 13 unit tests RED->GREEN incl. effect fixtures;
+      fmt/clippy clean, app-services lib 46/46. No executor built: no
+      TASK-0123 runner exists in-tree to execute through, and process
+      execution belongs to the G6 runner boundary; executor wiring is
+      tracked as TASK-0162. Integration into main is not claimed.
       - ADR-0031
 
   - id: TASK-0135
@@ -5165,3 +5181,29 @@ items:
     references:
       - docs/architecture/adr/ADR-0036-g8-evidence-requirement-parameter-binding-authority.md
       - docs/architecture/adr/ADR-0033-g8-independent-test-mutation-review-authority.md
+
+  # Follow-up carved out of TASK-0134: plan selection is done, but no
+  # in-tree runner executes the derived commands yet, and execution must
+  # go through the G6 runner boundary, not a bare orchestrator spawn.
+  - id: TASK-0162
+    gate: G8
+    title: Verification-plan executor wiring through the runner boundary
+    objective: >-
+      Execute TASK-0134 verification plans through the existing G6 runner
+      boundary and record results as observed effects, closing the
+      "verification runner executes selected level" exit clause.
+    scope: >-
+      Runner-adapter consumer of VerificationPlan only: sandboxed command
+      execution per the runner security levels, stdout/stderr capture as
+      bounded evidence, failures typed without leaking secrets. No new
+      selection logic, no TASK-0125 contract change.
+    exit_criteria_summary: >-
+      V1..V3 plans execute under confinement with captured evidence and
+      typed failures; adversarial command-injection and secret-leak tests
+      fail closed; full workspace verification green.
+    depends_on:
+      - TASK-0134
+    blocked_by: []
+    references:
+      - crates/app-services/src/verification_levels.rs
+      - docs/architecture/adr/ADR-0013-policy-engine-os-isolation.md
