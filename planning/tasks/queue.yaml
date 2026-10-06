@@ -5098,6 +5098,26 @@ items:
     references:
       - docs/architecture/adr/ADR-0036-g8-evidence-requirement-parameter-binding-authority.md
       - crates/evaluation/src/candidate.rs
+    outcome: >-
+      Implemented ADR-0036 IMPL-D on branch
+      task-0159-bound-evidence-integration (stacked on TASK-0158) as a
+      test-only integration proof: the TASK-0144 evaluator already
+      consumed bound requirements via CandidateSelector::from_requirement
+      in all three places (selection, evaluate, revalidate), so no
+      production change was needed. Added a focused interop test proving
+      TASK-0157 boundary output satisfies from_requirement, and rewired
+      the agentd candidate_requirement seed helper to mint through the
+      authorized boundary, so the full candidate e2e now exercises a
+      boundary-produced revision through the real production dispatch
+      path; malformed-requirement rejection seeds stay hand-built and
+      green. TDD note: RED was impossible (integration pre-existed), so
+      the interop test was proven by mutation (broken boundary key fails
+      it, revert restores green). Independent review PASS with no
+      findings. Verification: cargo fmt --all --check clean; cargo
+      clippy --workspace --all-targets -D warnings clean; app-services
+      requirement_binding 6/6, agentd lib 70 passed / 1 ignored (live
+      smoke), candidate subset 16/16. Full workspace run not required
+      (test-only change). G8 remains IN_PROGRESS.
 
   - id: TASK-0160
     gate: G8

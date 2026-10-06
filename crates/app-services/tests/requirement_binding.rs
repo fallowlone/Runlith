@@ -214,3 +214,26 @@ fn bind_relays_catalog_rejections() {
     )
     .expect_err("secret-shaped literal must fail closed at the boundary");
 }
+
+#[test]
+fn bound_requirement_is_consumable_by_the_task_0144_evaluator() {
+    // TASK-0159 (ADR-0036 IMPL-D): the boundary output shape is exactly
+    // what CandidateSelector::from_requirement accepts — same keys,
+    // order, selector id, and requirement kind/binding/fingerprint.
+    let bound = bind_candidate_input_params(
+        &catalog_rev(),
+        &unbound_requirement(),
+        &proposal(),
+        &FreshPresenceProof::for_test(),
+        POLICY_FINGERPRINT,
+        1_700_000_000_000,
+    )
+    .unwrap();
+    let selector = evaluation::CandidateSelector::from_requirement(&bound.requirement)
+        .expect("boundary-minted requirement must satisfy the evaluator");
+    assert_eq!(selector.criterion_id, "criterion-1");
+    assert_eq!(selector.selector, "candidate.file-contains.v1");
+    assert_eq!(selector.path, "src/lib.rs");
+    assert_eq!(selector.literal, "needle");
+    assert!(selector.requirement_revision.starts_with("sha256:"));
+}
