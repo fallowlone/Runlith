@@ -537,6 +537,28 @@ fn append_candidate_basis(
         ],
     )
     .unwrap();
+    // TASK-0151 finding 6: production records the selection (operation)
+    // row before the result, and the store now enforces that binding —
+    // seed the operation first, mirroring the producer order.
+    service
+        .store_mut()
+        .record_candidate_selection(
+            task_id.as_str(),
+            execution_id.as_str(),
+            attempt_id.as_str(),
+            &assessment.invocation_id,
+            "base-revision-test",
+            &assessment.candidate_commit_oid,
+            revision,
+            1,
+            base_fp,
+            criterion,
+            &assessment.selector,
+            &assessment.selector_path,
+            &assessment.selector_literal,
+            FIXED_MILLIS,
+        )
+        .unwrap();
     service
         .store_mut()
         .append_candidate_result(

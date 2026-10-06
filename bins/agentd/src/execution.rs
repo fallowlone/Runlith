@@ -989,6 +989,11 @@ struct CandidateInputEvaluator {
     /// harness binary, which has no such dispatch and cannot stand in for
     /// production here.
     evaluator_executable_override: Option<PathBuf>,
+    /// Currently effective Policy fingerprint the candidate requirement's
+    /// policy pin is reconciled against (TASK-0151 finding 7). `None`
+    /// fails closed: a policy-pinned requirement never resolves without
+    /// a known-current policy.
+    current_policy_fingerprint: Option<String>,
 }
 
 enum ProductionEvaluator {
@@ -1076,12 +1081,15 @@ impl EvaluationPort for CandidateInputEvaluator {
 }
 
 impl CandidateInputEvaluator {
-    fn supports_task(task: &task_domain::Task) -> bool {
+    fn supports_task(task: &task_domain::Task, current_policy: Option<&str>) -> bool {
         let requirements = task.evidence_requirements();
         if task.acceptance().len() != 1 || requirements.len() != 1 {
             return false;
         }
-        evaluation::CandidateSelector::from_requirement(&requirements[0])
+        let Some(current) = current_policy else {
+            return false;
+        };
+        evaluation::CandidateSelector::from_requirement_under_policy(&requirements[0], current)
             .is_ok_and(|selector| selector.criterion_id == task.acceptance()[0])
     }
 
@@ -1203,7 +1211,13 @@ impl CandidateInputEvaluator {
             .evidence_requirements()
             .iter()
             .filter(|requirement| requirement.required)
-            .map(evaluation::CandidateSelector::from_requirement)
+            .map(|requirement| {
+                let current = self
+                    .current_policy_fingerprint
+                    .as_deref()
+                    .ok_or(evaluation::CandidateError::InvalidRequirement)?;
+                evaluation::CandidateSelector::from_requirement_under_policy(requirement, current)
+            })
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("candidate requirement is unsupported or stale: {error}"))?;
         if requirements.len() != 1 || task.acceptance().len() != 1 {
@@ -1843,7 +1857,13 @@ impl CandidateInputEvaluator {
             .evidence_requirements()
             .iter()
             .filter(|requirement| requirement.required)
-            .map(evaluation::CandidateSelector::from_requirement)
+            .map(|requirement| {
+                let current = self
+                    .current_policy_fingerprint
+                    .as_deref()
+                    .ok_or(evaluation::CandidateError::InvalidRequirement)?;
+                evaluation::CandidateSelector::from_requirement_under_policy(requirement, current)
+            })
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| {
                 CandidateError::Other(format!(
@@ -2950,6 +2970,18 @@ fn authenticated_worktree_gitdir(
             "linked Git metadata directory is ambiguous".to_owned(),
         ));
     }
+    // TASK-0151 (#11): a symlinked parent under the anchor passes the lexical
+    // prefix check while resolving outside the pin. Canonicalize and re-check;
+    // the lexical path stays in use downstream so back-reference comparison
+    // keeps its existing lexical basis.
+    let canonical_gitdir = gitdir
+        .canonicalize()
+        .map_err(|_| CheckError::Content("linked Git metadata is unreadable".to_owned()))?;
+    if canonical_gitdir.strip_prefix(&worktrees_root).is_err() {
+        return Err(CheckError::Content(
+            "linked Git metadata escapes the trusted common directory".to_owned(),
+        ));
+    }
     let relative_bytes = relative
         .to_str()
         .ok_or_else(|| CheckError::Content("linked Git metadata path is not UTF-8".to_owned()))?
@@ -3606,12 +3638,23 @@ fn run_background_inner(
     // secure/canonicalize the snapshot directory) is real but comparatively
     // cheap OS work; it is still skipped entirely for the common
     // non-candidate case by gating it on the same check.
+    // CV-7 current policy for the completing task, derived from the
+    // same composition the planner stamped with (D1'). Derived before
+    // `work` moves into the cycle. Derivation failure yields `None`,
+    // which fails closed for policy-derived requirements — both at
+    // evaluator selection and inside the evaluator's selector
+    // reconciliation (TASK-0151 finding 7).
+    let current_policy = composition
+        .planning_policy_fingerprint(work.task_id.as_str())
+        .ok();
     let supports_candidate_input = orchestration
         .tasks()
         .get_task(&work.task_id)
         .ok()
         .flatten()
-        .is_some_and(|task| CandidateInputEvaluator::supports_task(&task));
+        .is_some_and(|task| {
+            CandidateInputEvaluator::supports_task(&task, current_policy.as_deref())
+        });
     let selected_evaluator = if supports_candidate_input {
         let snapshot_parent = db_path
             .parent()
@@ -3649,17 +3692,11 @@ fn run_background_inner(
             evaluator_executable_override: composition
                 .candidate_evaluator_executable_override
                 .clone(),
+            current_policy_fingerprint: current_policy.clone(),
         })
     } else {
         ProductionEvaluator::Pending(PendingEvaluator)
     };
-    // CV-7 current policy for the completing task, derived from the
-    // same composition the planner stamped with (D1'). Derived before
-    // `work` moves into the cycle. Derivation failure yields `None`,
-    // which fails closed for policy-derived requirements.
-    let current_policy = composition
-        .planning_policy_fingerprint(work.task_id.as_str())
-        .ok();
     let orchestration_result = orchestration
         .continue_workspace_cycle(
             &mut workspace,
@@ -6128,6 +6165,7 @@ mod tests {
             snapshot_parent: sandbox.dir.join("snapshots"),
             capture: effect_capture_local::LocalEffectCapture::default(),
             evaluator_executable_override: None,
+            current_policy_fingerprint: None,
         };
         let context = CandidateGitContext {
             request: &request,
@@ -6220,10 +6258,18 @@ mod tests {
     /// the real `task-domain` API (not the planner: TASK-0125 planner
     /// authorship of these params is a separate, unmerged, out-of-scope
     /// decision per the TASK-0144 envelope).
+    /// Policy fingerprint pinned by restart fixtures; the directly
+    /// driven test evaluators below reconcile against exactly this value
+    /// (TASK-0151 finding 7).
+    fn candidate_fixture_policy() -> String {
+        format!("sha256:{}", "7".repeat(64))
+    }
+
     fn candidate_requirement(
         criterion_id: &str,
         path: &str,
         literal: &str,
+        policy_fingerprint: &str,
     ) -> task_domain::EvidenceRequirement {
         // TASK-0159 (ADR-0036 IMPL-D): well-formed candidate requirements
         // are minted through the authorized binding boundary, so every
@@ -6254,7 +6300,7 @@ mod tests {
             &unbound,
             &proposed,
             &app_services::FreshPresenceProof::for_test(),
-            &format!("sha256:{}", "7".repeat(64)),
+            policy_fingerprint,
             1_700_000_000_000,
         )
         .unwrap()
@@ -6280,12 +6326,19 @@ mod tests {
     /// `SqliteStore::save_task`), never through the planner. The
     /// separately established accepted-plan binding is untouched: it is
     /// keyed by task id in its own table, not by requirement content.
-    fn seed_candidate_ready(db: &Path, project: &str, task: &str, path: &str, literal: &str) {
+    fn seed_candidate_ready(
+        db: &Path,
+        project: &str,
+        task: &str,
+        path: &str,
+        literal: &str,
+        policy_fingerprint: &str,
+    ) {
         seed_ready_with_requirement(
             db,
             project,
             task,
-            candidate_requirement("criterion-candidate", path, literal),
+            candidate_requirement("criterion-candidate", path, literal, policy_fingerprint),
         );
     }
 
@@ -6351,14 +6404,6 @@ mod tests {
         let expected_head = git_stdout(&sandbox.repo, &["rev-parse", "HEAD"]);
         let expected_tree = git_stdout(&sandbox.repo, &["rev-parse", "HEAD^{tree}"]);
 
-        seed_candidate_ready(
-            &sandbox.db,
-            "P-CANDIDATE-E2E",
-            "T-CANDIDATE-E2E",
-            "src/example.rs",
-            "fn accepted()",
-        );
-
         let fixture = fixture_script(
             &sandbox.dir,
             "success.sh",
@@ -6367,6 +6412,22 @@ mod tests {
         let composition = sandbox
             .composition(Some(fixture))
             .with_candidate_evaluator_executable_override(candidate_test_evaluator_executable());
+        // TASK-0151 finding 7: production reconciles the requirement's
+        // policy pin against the current policy, so the seeded requirement
+        // pins exactly the composition's current fingerprint (the same
+        // derivation production consults at evaluator selection).
+        let current_policy = composition
+            .planning_policy_fingerprint("T-CANDIDATE-E2E")
+            .expect("composition current policy resolves");
+        seed_candidate_ready(
+            &sandbox.db,
+            "P-CANDIDATE-E2E",
+            "T-CANDIDATE-E2E",
+            "src/example.rs",
+            "fn accepted()",
+            &current_policy,
+        );
+
         let (response, job) =
             run_via_dispatch(&composition, run_request("T-CANDIDATE-E2E", &sandbox.repo));
         let run = run_payload(&response);
@@ -6456,6 +6517,7 @@ mod tests {
             snapshot_parent: sandbox.dir.join("candidate-input-snapshots"),
             capture: effect_capture_local::LocalEffectCapture::default(),
             evaluator_executable_override: Some(candidate_test_evaluator_executable()),
+            current_policy_fingerprint: Some(current_policy.clone()),
         };
         std::fs::create_dir_all(&fresh_evaluator.snapshot_parent).unwrap();
         let format =
@@ -6708,6 +6770,7 @@ mod tests {
                 &criterion,
                 "src/example.rs",
                 "fn accepted()",
+                &candidate_fixture_policy(),
             )])
             .unwrap();
         tasks.create_task(&built).unwrap();
@@ -6783,6 +6846,7 @@ mod tests {
             snapshot_parent: fixture.sandbox.dir.join("candidate-input-snapshots"),
             capture: effect_capture_local::LocalEffectCapture::default(),
             evaluator_executable_override: Some(candidate_test_evaluator_executable()),
+            current_policy_fingerprint: Some(candidate_fixture_policy()),
         };
         std::fs::create_dir_all(&evaluator.snapshot_parent).unwrap();
         evaluator
@@ -7704,6 +7768,87 @@ mod tests {
         );
     }
 
+    // TASK-0151 finding 11: the pinned gitdir path is resolved lexically,
+    // so a symlinked parent under the anchor escapes the pin while
+    // passing the prefix check. The pin must canonicalize and re-check.
+    #[test]
+    fn pinned_gitdir_refuses_symlinked_parent() {
+        let sandbox = Sandbox::named("gitdir-symlink-parent");
+        let base = std::fs::canonicalize(&sandbox.dir).expect("canonical sandbox");
+        let anchor_dir = base.join("commondir");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(anchor_dir.join("worktrees")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("HEAD"), b"ref: refs/heads/evil\n").unwrap();
+        std::os::unix::fs::symlink(&outside, anchor_dir.join("worktrees").join("evil-link"))
+            .expect("symlinked parent fixture");
+        let anchor = workspace::TrustedCommonGit::from_canonical_commondir(anchor_dir.clone())
+            .expect("anchor");
+        let root = base.join("worktree-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let pointer = format!(
+            "gitdir: {}\n",
+            anchor_dir.join("worktrees").join("evil-link").display()
+        );
+        let _store = storage_sqlite::SqliteStore::open(&sandbox.db).expect("migrate sandbox db");
+        let request = EvaluationRequest {
+            task_id: task_domain::TaskId::new("T-GITDIR-SYMLINK").unwrap(),
+            execution_id: ExecutionId::new("E-GITDIR-SYMLINK").unwrap(),
+            attempt_id: agent_runtime::AttemptId::new("A-GITDIR-SYMLINK").unwrap(),
+            summary: "symlink parent probe".to_owned(),
+            evidence_ref: "symlink-probe".to_owned(),
+        };
+        let resolved = authenticated_worktree_gitdir(
+            &sandbox.db,
+            &request,
+            "invocation-symlink-probe",
+            &root,
+            pointer.as_bytes(),
+            &anchor,
+        );
+        match resolved {
+            Err(CheckError::Content(message)) => assert!(
+                message.contains("escapes"),
+                "refusal must name the escape, got {message:?}"
+            ),
+            other => panic!("symlinked parent must refuse, got {other:?}"),
+        }
+    }
+
+    // TASK-0151 finding 7: a well-formed requirement pinning a
+    // superseded policy must refuse evaluation and record nothing.
+    #[test]
+    fn stale_policy_pin_refuses_candidate_evaluation() {
+        let fixture = setup_candidate_restart_fixture(
+            "candidate-stale-policy",
+            "P-CANDIDATE-STALE-POLICY",
+            "T-CANDIDATE-STALE-POLICY",
+            "E-CANDIDATE-STALE-POLICY",
+            "A-CANDIDATE-STALE-POLICY",
+        );
+        let mut evaluator = candidate_restart_evaluator(&fixture);
+        evaluator.current_policy_fingerprint = Some(format!("sha256:{}", "e".repeat(64)));
+        let error = evaluator
+            .evaluate(&fixture.request)
+            .expect_err("superseded policy pin must refuse evaluation");
+        assert!(
+            error.detail().contains("stale"),
+            "refusal must name staleness, got {:?}",
+            error.detail()
+        );
+        let store = storage_sqlite::SqliteStore::open(&fixture.sandbox.db).expect("open store");
+        assert_eq!(
+            store
+                .candidate_operation_status(
+                    fixture.request.execution_id.as_str(),
+                    fixture.request.attempt_id.as_str()
+                )
+                .unwrap(),
+            None,
+            "refused evaluation must not record a candidate operation"
+        );
+    }
+
     #[test]
     fn check_error_defaults_to_content() {
         // CheckError::from(String) is Content (the default).
@@ -7766,6 +7911,7 @@ mod tests {
             snapshot_parent: fixture.sandbox.dir.join("candidate-input-snapshots"),
             capture: effect_capture_local::LocalEffectCapture::default(),
             evaluator_executable_override: Some(candidate_test_evaluator_executable()),
+            current_policy_fingerprint: Some(candidate_fixture_policy()),
         };
 
         // revalidate_before_completion must return Err.
