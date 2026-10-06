@@ -4997,6 +4997,24 @@ items:
       - SECURITY.md
       - .gitleaks.toml
       - docs/development/PUBLICATION_RUNBOOK.md
+    outcome: >-
+      Hygiene landed earlier via PR #11 (2779b70); this task verified
+      every exit clause against current main and recorded it here (no
+      tree changes needed). Verified: Support/openvidia/
+      proxy_config.json, data/sessions.db, .zcode/plans/*.md absent from
+      the tracked tree; .gitignore covers /Support/, data/sessions.db,
+      /.zcode/; git grep for /Users/[A-Za-z0-9_] returns nothing;
+      CONTRIBUTING.md states Apache-2.0 1.1 open source + no external PRs
+      (D7); SECURITY.md is private-reporting only; .gitleaks.toml carries
+      the nvidia-api-key rule; PUBLICATION_RUNBOOK.md is owner-executed
+      with no-history rationale, export steps, License Date bookkeeping
+      and trademark self-check. gitleaks dir: no leaks found.
+      gitleaks git over the file history: 8 nvidia-api-key hits = the 4
+      known findings at 6b9cacf (visible in tree at 56b8a68) plus the
+      same 4 lines on stale branch task-0057-branch-only-recovery
+      (b1f2493, same blob, no new exposure); history not rewritten per
+      scope. Key revocation remains an owner action. Integration into
+      main is not claimed.
 
   # Cross-gate test hygiene: app-services integration tests depended on the
   # runner's ambient temp directory and login session, so they failed on a
