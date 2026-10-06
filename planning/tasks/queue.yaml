@@ -3799,6 +3799,27 @@ items:
       - adapters/git-cli
       - crates/workspace
       - docs/architecture/INVARIANTS.md
+    outcome: >-
+      Done on branch task-0126-side-effect-dogfood. Delivered: (a)
+      side-effect intent domain + §2 machine in the workspace crate:
+      frozen v1 kinds (materialize/cleanup), the 12-edge transition
+      table, SE-1..SE-8 semantics verbatim (11 unit tests). (b)
+      Migration 0027: intent rows with the §2 edge table as a trigger,
+      append-only transition audit, sticky escalations, and a partial
+      unique active slot (one live intent per lease+kind); reads replay
+      the audit trail and refuse on any drift (6 store tests; fixtures
+      and pins follow to 27). (c) Recovery wiring: intent-gated
+      materialize_allocated, crash-A (pre-dispatch) / crash-B
+      (post-effect) / crash-C (partial state) reconcile via
+      ensure_workspace_ready, branch-only continuation with re-proved
+      provenance, typed escalation when the target state is unprovable,
+      and ReconciliationRequired as the refusal kind; 8 adversarial
+      restart tests prove no duplicate external mutation and no silent
+      retry. Full workspace run 134/134 suites green, EXIT=0; fmt +
+      clippy clean. Author security pass: any non-terminal intent
+      refuses blind re-dispatch until RECONCILE; dispatch errors map to
+      FAILED only on proven pre-dispatch refusal, otherwise AMBIGUOUS;
+      the cleanup kind is reserved (cleanup owned by TASK-0043).
 
   - id: TASK-0127
     gate: G8
