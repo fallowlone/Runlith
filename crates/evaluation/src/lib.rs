@@ -11,6 +11,7 @@
 //! authoritative lifecycle transition on that verdict. The evaluator never
 //! touches Task persistence, runtime persistence, or the journal.
 
+mod admission_snapshot;
 mod candidate;
 mod capture;
 mod claim_verification;
@@ -20,6 +21,10 @@ mod port;
 mod request;
 mod verdict;
 
+pub use admission_snapshot::{
+    AdmissionSnapshot, ClaimMarker, CriterionIntegrity, DischargeMarker, IntegrityMarker,
+    VerdictMarker,
+};
 pub use candidate::{
     candidate_sha256, requirement_revision, CandidateCheckpointPhase, CandidateDeletion,
     CandidateError, CandidateFile, CandidateFreshnessCheckpoint, CandidateIntegrityAssessment,

@@ -147,7 +147,7 @@ fn load_current_policy(
         .map_err(|error| StorageError::Corrupt(format!("task {task_id} policy: {error}")))
 }
 
-fn load_base(
+pub(crate) fn load_base(
     connection: &Connection,
     execution_id: &str,
 ) -> StorageResult<Option<EvaluatedPolicyBase>> {

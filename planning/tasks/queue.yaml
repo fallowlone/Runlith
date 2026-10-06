@@ -5165,3 +5165,51 @@ items:
     references:
       - docs/architecture/adr/ADR-0036-g8-evidence-requirement-parameter-binding-authority.md
       - docs/architecture/adr/ADR-0033-g8-independent-test-mutation-review-authority.md
+
+  - id: TASK-0161
+    gate: G8
+    title: Sealed admission snapshot in admit_completion (strict rule-5)
+    objective: >-
+      Close the TOCTOU window between completion-admission reads and the
+      atomic commit so a concurrent evidence writer cannot smuggle a stale
+      ADMIT through.
+    scope: >-
+      admit_completion re-reads the exact report inputs inside the
+      committing transaction and refuses with typed Stale on any drift
+      (requirements, current subject fingerprint, claims, verdicts,
+      exemptions, discharges, integrity basis). Snapshot shape lives in
+      the evaluation crate as a pure canonical struct; the store
+      enforces snapshot identity, never re-implements admission logic.
+      No schema change; admit_completion signature gains the snapshot.
+      Allowed paths: crates/evaluation/src/,
+      adapters/storage-sqlite/src/claim_verification_store.rs,
+      crates/app-services/src/task_service.rs, tests, queue entry.
+    exit_criteria_summary: >-
+      A concurrent subject move / verdict supersession / REFUTED insert
+      between report and commit refuses with Stale, leaves the task
+      VERIFYING and writes no completion_admissions row, proven by an
+      adversarial two-handle test; uncontended admission still
+      completes; full workspace verification green.
+    depends_on:
+      - TASK-0125
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0030-g8-observed-effect-claim-verification-contract.md
+      - adapters/storage-sqlite/src/claim_verification_store.rs
+      - crates/app-services/src/task_service.rs
+      - crates/evaluation/src/claim_verification.rs
+    outcome: >-
+      Implemented on branch task-0161-strict-rule5 (commit 909bc80,
+      stacked on the TASK-0125 branch). New pure
+      evaluation::AdmissionSnapshot seals every report input through one
+      shared constructor; admit_completion re-reads the same rows inside
+      the committing transaction and refuses with typed Stale naming the
+      drifted section (vanished rows and fresh invalidations count as
+      drift). Connection-level reader extraction keeps one SQL shape per
+      list with zero behavior change to existing reads; admission_report
+      returns the snapshot alongside the report. Adversarial two-handle
+      RED test (stale subject move commits admission-1 pre-fix, refuses
+      with Stale post-fix); completion_admission 17/17, orchestration
+      16/16; full workspace verification green (127 suites, EXIT=0; one
+      earlier full run showed 2 load flakes, green in isolation and on
+      repeat). No schema change. Integration into main is not claimed.
