@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use agent_runtime::{AttemptId, Execution, ExecutionId, ProviderRef};
 use app_services::{
-    bind_candidate_input_params, mint_candidate_verdicts, FixedClock, FreshPresenceProof,
-    ProposedCandidateBinding, ServiceError, TaskService,
+    bind_candidate_input_params, binding_input_digest, binding_operation, mint_candidate_verdicts,
+    FixedClock, PresenceAuthority, ProposedCandidateBinding, ServiceError, TaskService,
+    TestPresenceAuthority,
 };
 use evaluation::{
     candidate_sha256, requirement_revision, subject_fingerprint, CandidateCheckpointPhase,
@@ -411,16 +412,21 @@ fn bind_test_requirement(
         path: path.to_owned(),
         literal: literal.to_owned(),
     };
-    bind_candidate_input_params(
-        &catalog,
-        &unbound,
-        &proposed,
-        &FreshPresenceProof::for_test(),
-        policy,
-        FIXED_MILLIS,
-    )
-    .unwrap()
-    .requirement
+    let proof = TestPresenceAuthority::new(FIXED_MILLIS)
+        .prove(
+            &binding_operation(criterion, &proposed.selector, &proposed.path),
+            &binding_input_digest(
+                criterion,
+                &proposed.selector,
+                &proposed.path,
+                &proposed.literal,
+                policy,
+            ),
+        )
+        .unwrap();
+    bind_candidate_input_params(&catalog, &unbound, &proposed, &proof, policy, FIXED_MILLIS)
+        .unwrap()
+        .requirement
 }
 
 /// Seeds a READY workspace lease row directly: production reaches READY
