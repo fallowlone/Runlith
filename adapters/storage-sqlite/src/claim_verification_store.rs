@@ -8,10 +8,12 @@
 //! references). All records rebuild through the validated `evaluation`
 //! constructors, so stored content can never bypass validation.
 
+use agent_runtime::{AttemptId, ExecutionId};
 use evaluation::{
-    AdmissionReport, AgentClaim, ClaimId, ClaimVerdict, ClaimVerification, ClaimedOutcome,
-    ClaimedSubject, CriterionOutcome, EvidenceRefs, ExemptionId, PolicyExemption,
-    SubjectFingerprint, VerificationId,
+    AdmissionReport, AdmissionSnapshot, AgentClaim, CandidateIntegrityOutcome, ClaimId,
+    ClaimVerdict, ClaimVerification, ClaimedOutcome, ClaimedSubject, CriterionIntegrity,
+    CriterionOutcome, EffectId, EvidenceRefs, ExemptionId, IntegrityBasis, PolicyExemption,
+    ResolvedEffect, SubjectFingerprint, VerificationId,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use task_domain::{RequirementKind, TaskId};
@@ -95,6 +97,417 @@ fn claim_from_row(row: ClaimRow) -> Result<AgentClaim, evaluation::EffectError> 
     )
 }
 
+/// Connection-level readers shared by the public reads and the
+/// commit-time snapshot re-read (TASK-0161, strict rule-5): one SQL
+/// shape per list, so the sealed encoding can only differ on drift.
+pub(crate) fn list_agent_claims_on(
+    connection: &Connection,
+    task_id: &TaskId,
+) -> StorageResult<Vec<AgentClaim>> {
+    let mut statement = connection.prepare(
+        "SELECT claim_id, criterion_id, claimed_outcome, subject_ref,
+                subject_fingerprint, receipt_refs, effect_refs,
+                session_refs, asserted_by, asserted_at
+         FROM agent_claims WHERE task_id = ?1 ORDER BY rowid",
+    )?;
+    let rows = statement
+        .query_map(params![task_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|row| claim_from_row(row).map_err(|error| corrupt(&error.to_string())))
+        .collect()
+}
+
+pub(crate) fn list_claim_verifications_on(
+    connection: &Connection,
+    task_id: &TaskId,
+) -> StorageResult<Vec<ClaimVerification>> {
+    let mut statement = connection.prepare(
+        "SELECT v.verification_id, v.claim_id, v.verifier,
+                v.requirement_kind, v.subject_fingerprint,
+                v.requirement_revision, v.policy_fingerprint, v.verdict,
+                v.receipt_refs, v.effect_refs, v.session_refs,
+                v.superseded_by, v.decided_at
+         FROM claim_verifications v
+         JOIN agent_claims c ON c.claim_id = v.claim_id
+         WHERE c.task_id = ?1 ORDER BY v.rowid",
+    )?;
+    let rows = statement
+        .query_map(params![task_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, String>(12)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|row| {
+            let (
+                verification_id,
+                claim_id,
+                verifier,
+                kind,
+                fingerprint,
+                requirement_revision,
+                policy_fingerprint,
+                verdict,
+                receipts,
+                effects,
+                sessions,
+                superseded_by,
+                decided_at,
+            ) = row;
+            (|| {
+                let superseded_by = superseded_by
+                    .map(VerificationId::new)
+                    .transpose()
+                    .map_err(|error| corrupt(&error.to_string()))?;
+                ClaimVerification::new(
+                    VerificationId::new(verification_id)
+                        .map_err(|error| corrupt(&error.to_string()))?,
+                    ClaimId::new(claim_id).map_err(|error| corrupt(&error.to_string()))?,
+                    verifier,
+                    RequirementKind::parse(&kind).map_err(|error| corrupt(&error.to_string()))?,
+                    SubjectFingerprint::new(fingerprint)
+                        .map_err(|error| corrupt(&error.to_string()))?,
+                    requirement_revision,
+                    policy_fingerprint,
+                    ClaimVerdict::parse(&verdict).map_err(|error| corrupt(&error.to_string()))?,
+                    EvidenceRefs::decode(&receipts, &effects, &sessions)
+                        .map_err(|error| corrupt(&error.to_string()))?,
+                    superseded_by,
+                    decided_at,
+                )
+                .map_err(|error| corrupt(&error.to_string()))
+            })()
+        })
+        .collect()
+}
+
+pub(crate) fn list_policy_exemptions_on(
+    connection: &Connection,
+    task_id: &TaskId,
+) -> StorageResult<Vec<PolicyExemption>> {
+    let mut statement = connection.prepare(
+        "SELECT exemption_id, criterion_id, subject_fingerprint,
+                policy_fingerprint, created_at
+         FROM policy_exemptions WHERE task_id = ?1 ORDER BY rowid",
+    )?;
+    let rows = statement
+        .query_map(params![task_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|(id, criterion, fingerprint, policy, created_at)| {
+            (|| {
+                PolicyExemption::new(
+                    ExemptionId::new(id).map_err(|error| corrupt(&error.to_string()))?,
+                    criterion,
+                    SubjectFingerprint::new(fingerprint)
+                        .map_err(|error| corrupt(&error.to_string()))?,
+                    policy,
+                    created_at,
+                )
+                .map_err(|error| corrupt(&error.to_string()))
+            })()
+        })
+        .collect()
+}
+
+pub(crate) fn list_approval_discharges_on(
+    connection: &Connection,
+    task_id: &TaskId,
+) -> StorageResult<Vec<evaluation::ApprovalDischarge>> {
+    use evaluation::{AdmissionId, ApprovalDischarge, DischargeId};
+    let mut stmt = connection.prepare(
+        "SELECT discharge_id, criterion_id, subject_fingerprint, risk_class,
+                approval_ref, not_valid_before, not_valid_after,
+                consumed_by, created_at
+         FROM approval_discharges WHERE task_id = ?1 ORDER BY rowid",
+    )?;
+    let rows = stmt
+        .query_map(params![task_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|(id, crit, fp, risk, aref, nb, na, consumed, created)| {
+            (|| {
+                let consumed = consumed
+                    .map(AdmissionId::new)
+                    .transpose()
+                    .map_err(|e| corrupt(&e.to_string()))?;
+                ApprovalDischarge::new(
+                    DischargeId::new(id).map_err(|e| corrupt(&e.to_string()))?,
+                    crit,
+                    SubjectFingerprint::new(fp).map_err(|e| corrupt(&e.to_string()))?,
+                    risk,
+                    aref,
+                    nb,
+                    na,
+                    consumed,
+                    created,
+                )
+                .map_err(|e| corrupt(&e.to_string()))
+            })()
+        })
+        .collect()
+}
+
+pub(crate) fn latest_observed_subject_fingerprint_on(
+    connection: &Connection,
+    task_id: &TaskId,
+) -> StorageResult<Option<SubjectFingerprint>> {
+    let fp: Option<String> = connection
+        .query_row(
+            "SELECT o.subject_fingerprint FROM observed_effects o
+             JOIN executions e ON e.id = o.execution_id
+             WHERE e.task_id = ?1 ORDER BY o.rowid DESC LIMIT 1",
+            params![task_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    fp.map(SubjectFingerprint::new)
+        .transpose()
+        .map_err(|e| corrupt(&e.to_string()))
+}
+
+/// Re-reads the exact admission-report inputs on `connection` (the
+/// committing transaction at commit time), rebuilds the snapshot through
+/// the single [`AdmissionSnapshot::capture`] constructor, and refuses
+/// with [`StorageError::Stale`] naming the drifted section on any
+/// difference. Vanished rows and fresh invalidations are drift, never
+/// silent absence. This enforces strict rule-5: the report's read set is
+/// identical at commit time, or nothing commits.
+fn verify_admission_snapshot(
+    connection: &Connection,
+    task_id: &TaskId,
+    expected: &AdmissionSnapshot,
+    decided_at: &str,
+) -> StorageResult<()> {
+    use crate::candidate_assessment_store::{
+        candidate_operation_invalidation_on, get_candidate_integrity_assessment_on,
+    };
+    if decided_at != expected.now {
+        return Err(StorageError::Stale {
+            task: task_id.to_string(),
+            expected: "sealed admission snapshot".to_owned(),
+            found: "drift in now".to_owned(),
+        });
+    }
+    let task = crate::task_store::load_task(connection, task_id)?
+        .ok_or_else(|| StorageError::NotFound(format!("task {task_id} does not exist")))?;
+    let claims = list_agent_claims_on(connection, task_id)?;
+    let verdicts = list_claim_verifications_on(connection, task_id)?;
+    let exemptions = list_policy_exemptions_on(connection, task_id)?;
+    let discharges = list_approval_discharges_on(connection, task_id)?;
+    let current = latest_observed_subject_fingerprint_on(connection, task_id)?;
+    let mut resolved = Vec::with_capacity(expected.resolved_effects.len());
+    for (effect_id, _) in &expected.resolved_effects {
+        let id = EffectId::new(effect_id).map_err(|error| corrupt(&error.to_string()))?;
+        let effect =
+            crate::observed_effect_store::load(connection, id.as_str())?.ok_or_else(|| {
+                StorageError::Stale {
+                    task: task_id.to_string(),
+                    expected: "sealed admission snapshot".to_owned(),
+                    found: "drift in resolved_effects".to_owned(),
+                }
+            })?;
+        resolved.push(ResolvedEffect {
+            effect_id: effect.effect_id().as_str().to_owned(),
+            subject_fingerprint: effect.subject_fingerprint().clone(),
+        });
+    }
+    let mut relied: Vec<(ExecutionId, task_domain::TaskId)> =
+        Vec::with_capacity(expected.relied_executions.len());
+    for (execution_id, _) in &expected.relied_executions {
+        let row: Option<(String, String)> = connection
+            .query_row(
+                "SELECT id, task_id FROM executions WHERE id = ?1",
+                params![execution_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (execution_id, owner) = row.ok_or_else(|| StorageError::Stale {
+            task: task_id.to_string(),
+            expected: "sealed admission snapshot".to_owned(),
+            found: "drift in relied_executions".to_owned(),
+        })?;
+        relied.push((
+            ExecutionId::new(execution_id).map_err(|error| corrupt(&error.to_string()))?,
+            task_domain::TaskId::new(owner).map_err(|error| corrupt(&error.to_string()))?,
+        ));
+    }
+    let mut integrity_inputs = Vec::with_capacity(expected.integrity.len());
+    let mut integrity_ids: Vec<(ExecutionId, AttemptId)> =
+        Vec::with_capacity(expected.integrity.len());
+    let mut integrity_bases = Vec::with_capacity(expected.integrity.len());
+    for marker in &expected.integrity {
+        if candidate_operation_invalidation_on(
+            connection,
+            marker.execution_id.as_str(),
+            marker.attempt_id.as_str(),
+        )?
+        .is_some()
+        {
+            return Err(StorageError::Stale {
+                task: task_id.to_string(),
+                expected: "sealed admission snapshot".to_owned(),
+                found: "drift in integrity".to_owned(),
+            });
+        }
+        let assessment = get_candidate_integrity_assessment_on(
+            connection,
+            marker.execution_id.as_str(),
+            marker.attempt_id.as_str(),
+        )?
+        .ok_or_else(|| StorageError::Stale {
+            task: task_id.to_string(),
+            expected: "sealed admission snapshot".to_owned(),
+            found: "drift in integrity".to_owned(),
+        })?;
+        let base = crate::test_mutation_store::load_base(connection, marker.execution_id.as_str())?
+            .ok_or_else(|| StorageError::Stale {
+                task: task_id.to_string(),
+                expected: "sealed admission snapshot".to_owned(),
+                found: "drift in integrity".to_owned(),
+            })?;
+        integrity_ids.push((
+            ExecutionId::new(marker.execution_id.clone())
+                .map_err(|error| corrupt(&error.to_string()))?,
+            AttemptId::new(marker.attempt_id.clone())
+                .map_err(|error| corrupt(&error.to_string()))?,
+        ));
+        integrity_bases.push(IntegrityBasis {
+            clean: assessment.outcome == CandidateIntegrityOutcome::Intact,
+            requirement_revision: assessment.requirement_revision.clone(),
+            policy_fingerprint: assessment.policy_fingerprint.clone(),
+            evaluated_base: base.policy.fingerprint().to_owned(),
+        });
+    }
+    for ((marker, (execution_id, attempt_id)), basis) in expected
+        .integrity
+        .iter()
+        .zip(integrity_ids.iter())
+        .zip(integrity_bases.iter())
+    {
+        integrity_inputs.push(CriterionIntegrity {
+            criterion_id: marker.criterion_id.as_str(),
+            execution_id,
+            attempt_id,
+            basis,
+        });
+    }
+    let relied_refs: Vec<(&ExecutionId, &task_domain::TaskId)> = relied
+        .iter()
+        .map(|(execution_id, owner)| (execution_id, owner))
+        .collect();
+    let rebuilt = AdmissionSnapshot::capture(
+        &task,
+        current.as_ref(),
+        &claims,
+        &verdicts,
+        &exemptions,
+        &discharges,
+        &resolved,
+        &relied_refs,
+        &integrity_inputs,
+        expected.current_policy.as_deref(),
+        &expected.now,
+    );
+    if rebuilt != *expected {
+        return Err(StorageError::Stale {
+            task: task_id.to_string(),
+            expected: "sealed admission snapshot".to_owned(),
+            found: format!("drift in {}", first_diff_section(&rebuilt, expected)),
+        });
+    }
+    Ok(())
+}
+
+/// Names the first sealed section differing between the rebuilt and the
+/// expected snapshot, for the [`StorageError::Stale`] refusal detail.
+fn first_diff_section(rebuilt: &AdmissionSnapshot, expected: &AdmissionSnapshot) -> &'static str {
+    if rebuilt.task_id != expected.task_id || rebuilt.acceptance != expected.acceptance {
+        return "acceptance";
+    }
+    if rebuilt.requirements != expected.requirements {
+        return "requirements";
+    }
+    if rebuilt.task_risk != expected.task_risk {
+        return "task_risk";
+    }
+    if rebuilt.current_fingerprint != expected.current_fingerprint {
+        return "current_fingerprint";
+    }
+    if rebuilt.claims != expected.claims {
+        return "claims";
+    }
+    if rebuilt.verdicts != expected.verdicts {
+        return "verdicts";
+    }
+    if rebuilt.exemptions != expected.exemptions {
+        return "exemptions";
+    }
+    if rebuilt.discharges != expected.discharges {
+        return "discharges";
+    }
+    if rebuilt.resolved_effects != expected.resolved_effects {
+        return "resolved_effects";
+    }
+    if rebuilt.relied_executions != expected.relied_executions {
+        return "relied_executions";
+    }
+    if rebuilt.integrity != expected.integrity {
+        return "integrity";
+    }
+    if rebuilt.current_policy != expected.current_policy {
+        return "current_policy";
+    }
+    "now"
+}
+
 impl crate::SqliteStore {
     /// Persists one agent claim. Claims are audit data, never authority
     /// (CV-1, INV-146); identity allocation and insert share one IMMEDIATE
@@ -164,31 +577,7 @@ impl crate::SqliteStore {
 
     /// Lists a task's durable claims in insertion order.
     pub fn list_agent_claims_for_task(&self, task_id: &TaskId) -> StorageResult<Vec<AgentClaim>> {
-        let mut statement = self.connection().prepare(
-            "SELECT claim_id, criterion_id, claimed_outcome, subject_ref,
-                    subject_fingerprint, receipt_refs, effect_refs,
-                    session_refs, asserted_by, asserted_at
-             FROM agent_claims WHERE task_id = ?1 ORDER BY rowid",
-        )?;
-        let rows = statement
-            .query_map(params![task_id.as_str()], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(|row| claim_from_row(row).map_err(|error| corrupt(&error.to_string())))
-            .collect()
+        list_agent_claims_on(self.connection(), task_id)
     }
 
     /// Persists one trusted claim verdict. The verifier identity is the
@@ -298,79 +687,7 @@ impl crate::SqliteStore {
         &self,
         task_id: &TaskId,
     ) -> StorageResult<Vec<ClaimVerification>> {
-        let mut statement = self.connection().prepare(
-            "SELECT v.verification_id, v.claim_id, v.verifier,
-                    v.requirement_kind, v.subject_fingerprint,
-                    v.requirement_revision, v.policy_fingerprint, v.verdict,
-                    v.receipt_refs, v.effect_refs, v.session_refs,
-                    v.superseded_by, v.decided_at
-             FROM claim_verifications v
-             JOIN agent_claims c ON c.claim_id = v.claim_id
-             WHERE c.task_id = ?1 ORDER BY v.rowid",
-        )?;
-        let rows = statement
-            .query_map(params![task_id.as_str()], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, String>(10)?,
-                    row.get::<_, Option<String>>(11)?,
-                    row.get::<_, String>(12)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(|row| {
-                let (
-                    verification_id,
-                    claim_id,
-                    verifier,
-                    kind,
-                    fingerprint,
-                    requirement_revision,
-                    policy_fingerprint,
-                    verdict,
-                    receipts,
-                    effects,
-                    sessions,
-                    superseded_by,
-                    decided_at,
-                ) = row;
-                (|| {
-                    let superseded_by = superseded_by
-                        .map(VerificationId::new)
-                        .transpose()
-                        .map_err(|error| corrupt(&error.to_string()))?;
-                    ClaimVerification::new(
-                        VerificationId::new(verification_id)
-                            .map_err(|error| corrupt(&error.to_string()))?,
-                        ClaimId::new(claim_id).map_err(|error| corrupt(&error.to_string()))?,
-                        verifier,
-                        RequirementKind::parse(&kind)
-                            .map_err(|error| corrupt(&error.to_string()))?,
-                        SubjectFingerprint::new(fingerprint)
-                            .map_err(|error| corrupt(&error.to_string()))?,
-                        requirement_revision,
-                        policy_fingerprint,
-                        ClaimVerdict::parse(&verdict)
-                            .map_err(|error| corrupt(&error.to_string()))?,
-                        EvidenceRefs::decode(&receipts, &effects, &sessions)
-                            .map_err(|error| corrupt(&error.to_string()))?,
-                        superseded_by,
-                        decided_at,
-                    )
-                    .map_err(|error| corrupt(&error.to_string()))
-                })()
-            })
-            .collect()
+        list_claim_verifications_on(self.connection(), task_id)
     }
 
     /// Persists one policy exemption (CV-4). `risk` arrives already typed;
@@ -432,37 +749,7 @@ impl crate::SqliteStore {
         &self,
         task_id: &TaskId,
     ) -> StorageResult<Vec<PolicyExemption>> {
-        let mut statement = self.connection().prepare(
-            "SELECT exemption_id, criterion_id, subject_fingerprint,
-                    policy_fingerprint, created_at
-             FROM policy_exemptions WHERE task_id = ?1 ORDER BY rowid",
-        )?;
-        let rows = statement
-            .query_map(params![task_id.as_str()], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(|(id, criterion, fingerprint, policy, created_at)| {
-                (|| {
-                    PolicyExemption::new(
-                        ExemptionId::new(id).map_err(|error| corrupt(&error.to_string()))?,
-                        criterion,
-                        SubjectFingerprint::new(fingerprint)
-                            .map_err(|error| corrupt(&error.to_string()))?,
-                        policy,
-                        created_at,
-                    )
-                    .map_err(|error| corrupt(&error.to_string()))
-                })()
-            })
-            .collect()
+        list_policy_exemptions_on(self.connection(), task_id)
     }
 
     /// Persists one human-approval discharge (CV-8). Single-use is guarded
@@ -541,50 +828,7 @@ impl crate::SqliteStore {
         &self,
         task_id: &TaskId,
     ) -> StorageResult<Vec<evaluation::ApprovalDischarge>> {
-        use evaluation::{AdmissionId, ApprovalDischarge, DischargeId};
-        let mut stmt = self.connection().prepare(
-            "SELECT discharge_id, criterion_id, subject_fingerprint, risk_class,
-                    approval_ref, not_valid_before, not_valid_after,
-                    consumed_by, created_at
-             FROM approval_discharges WHERE task_id = ?1 ORDER BY rowid",
-        )?;
-        let rows = stmt
-            .query_map(params![task_id.as_str()], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, String>(8)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(|(id, crit, fp, risk, aref, nb, na, consumed, created)| {
-                (|| {
-                    let consumed = consumed
-                        .map(AdmissionId::new)
-                        .transpose()
-                        .map_err(|e| corrupt(&e.to_string()))?;
-                    ApprovalDischarge::new(
-                        DischargeId::new(id).map_err(|e| corrupt(&e.to_string()))?,
-                        crit,
-                        SubjectFingerprint::new(fp).map_err(|e| corrupt(&e.to_string()))?,
-                        risk,
-                        aref,
-                        nb,
-                        na,
-                        consumed,
-                        created,
-                    )
-                    .map_err(|e| corrupt(&e.to_string()))
-                })()
-            })
-            .collect()
+        list_approval_discharges_on(self.connection(), task_id)
     }
 
     /// Latest trusted subject fingerprint observed for a task, if any.
@@ -592,24 +836,14 @@ impl crate::SqliteStore {
         &self,
         task_id: &TaskId,
     ) -> StorageResult<Option<SubjectFingerprint>> {
-        let fp: Option<String> = self
-            .connection()
-            .query_row(
-                "SELECT o.subject_fingerprint FROM observed_effects o
-                 JOIN executions e ON e.id = o.execution_id
-                 WHERE e.task_id = ?1 ORDER BY o.rowid DESC LIMIT 1",
-                params![task_id.as_str()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        fp.map(SubjectFingerprint::new)
-            .transpose()
-            .map_err(|e| corrupt(&e.to_string()))
+        latest_observed_subject_fingerprint_on(self.connection(), task_id)
     }
     /// Atomically commits one admitted completion: guarded state write +
-    /// journal record + completion-admission row, consuming exactly the
-    /// discharges the report names, in one SQLite transaction. Refusals
-    /// never reach this boundary (nothing is written for them).
+    /// sealed snapshot re-verification + journal record +
+    /// completion-admission row, consuming exactly the discharges the
+    /// report names, in one SQLite transaction. Refusals never reach this
+    /// boundary (nothing is written for them); neither does a commit
+    /// whose report inputs drifted (strict rule-5: [`StorageError::Stale`]).
     #[allow(clippy::too_many_arguments)]
     pub fn admit_completion(
         &mut self,
@@ -620,6 +854,7 @@ impl crate::SqliteStore {
         policy_fp: Option<&str>,
         outcomes: &[CriterionOutcome],
         consumed: &[evaluation::DischargeId],
+        snapshot: &AdmissionSnapshot,
         decided_at: &str,
     ) -> StorageResult<(crate::JournalEvent, CompletionAdmissionRecord)> {
         use crate::journal_store::{insert_journal_event, require_envelope};
@@ -687,6 +922,7 @@ impl crate::SqliteStore {
                 },
             });
         }
+        verify_admission_snapshot(&tx, task_id, snapshot, decided_at)?;
         let committed = insert_journal_event(&tx, event)?;
         let aid = next_id(&tx, "completion_admissions", "admission_id", "admission")?;
         AdmissionId::new(&aid).map_err(|e| corrupt(&e.to_string()))?;
