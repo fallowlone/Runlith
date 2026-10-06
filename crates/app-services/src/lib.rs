@@ -58,7 +58,8 @@ pub use requirement_binding::{
     ProposedCandidateBinding, RequirementBindingError, BINDER_OPERATOR,
 };
 pub use review_admission::{
-    decide_review_admission, ReviewAdmissionDecision, ReviewAdmissionInput,
+    decide_review_admission, policy_review_path, review_path_name, ReviewAdmissionDecision,
+    ReviewAdmissionInput,
 };
 pub use runtime_service::{AppliedExecution, PlannedExecution, RuntimeService};
 pub use security_service::{
