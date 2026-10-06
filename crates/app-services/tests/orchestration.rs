@@ -26,7 +26,7 @@ use app_services::{
 use fake_agent::{ExecutionControl, ExecutionRequest, FakeAgent, FakeScenario};
 use fake_evaluator::{EvaluatorMode, FakeEvaluator};
 use storage_sqlite::EventType;
-use task_domain::{Project, ProjectId, Task, TaskId, TaskState};
+use task_domain::{EvidenceRequirement, Project, ProjectId, Task, TaskId, TaskState};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 const FIXED_MILLIS: u64 = 1_704_067_200_000;
@@ -1115,4 +1115,70 @@ fn enter_execution_refuses_duplicate_identities_before_any_mutation() {
             panic!("retry must be runnable, got {outcome:?}")
         }
     }
+}
+
+// TASK-0125 phase (c) guard: without capture-pipeline effects there is
+// nothing a verdict could bind, so the shared concluding boundary must
+// refuse completion and mint no claim/verdict rows — even when the
+// independent evaluation says Verified. Minting without bound evidence
+// would be authority without measurement.
+#[test]
+fn required_task_without_capture_effects_cannot_complete_and_mints_nothing() {
+    let db = TestDb::new("candidate-mints-verdict");
+    let mut service = db.orchestration();
+    let project = ProjectId::new("P-CV-MINT").unwrap();
+    service
+        .tasks_mut()
+        .create_project(&Project::new(project.clone(), "project P-CV-MINT").unwrap())
+        .unwrap();
+    let criterion = "tests pass";
+    let requirement = EvidenceRequirement::authored_default(criterion).unwrap();
+    let mut task = Task::draft(
+        TaskId::new("T-CV-MINT").unwrap(),
+        project,
+        "objective T-CV-MINT".to_owned(),
+    )
+    .unwrap();
+    task.define_planning_metadata(vec!["src/**".to_owned()], vec![criterion.to_owned()], "low")
+        .unwrap();
+    task.define_evidence_requirements(vec![requirement])
+        .unwrap();
+    service.tasks_mut().create_task(&task).unwrap();
+    let task_id = task.id().clone();
+    service.tasks_mut().mark_ready(&task_id).unwrap();
+
+    let outcome = service.schedule(
+        &task_id,
+        ids("E-CV-MINT", "A-CV-MINT"),
+        &FakeExecutor::for_scenario(FakeScenario::Success),
+        &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+        None,
+    );
+    assert!(
+        outcome.is_err(),
+        "admission must refuse without bound evidence, got {outcome:?}"
+    );
+    assert_eq!(
+        service.tasks().get_task(&task_id).unwrap().unwrap().state(),
+        TaskState::Verifying,
+        "a refused completion leaves the task VERIFYING"
+    );
+    assert!(
+        service
+            .tasks()
+            .store()
+            .list_claim_verifications_for_task(&task_id)
+            .unwrap()
+            .is_empty(),
+        "no evidence means no minted verdicts"
+    );
+    assert!(
+        service
+            .tasks()
+            .store()
+            .list_agent_claims_for_task(&task_id)
+            .unwrap()
+            .is_empty(),
+        "no evidence means no minted claims either"
+    );
 }

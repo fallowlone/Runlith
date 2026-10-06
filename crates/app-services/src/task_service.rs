@@ -78,6 +78,14 @@ impl<C: Clock> TaskService<C> {
         &self.store
     }
 
+    /// Current clock reading as RFC3339, for trusted minting boundaries
+    /// composed above this service (candidate verdicts stamp their
+    /// assertion time from the same clock as lifecycle transitions).
+    #[must_use]
+    pub fn now_stamp(&self) -> String {
+        format_rfc3339(self.clock.now_millis())
+    }
+
     /// Mutable access to the underlying store for multi-fact atomic
     /// boundaries owned elsewhere (the execution-entry admission commits
     /// through exactly one store handle so its transaction is truly one

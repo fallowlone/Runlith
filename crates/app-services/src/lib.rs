@@ -10,6 +10,7 @@
 //! grants Task completion outside the trusted evaluation path.
 
 mod approval_service;
+mod candidate_verdict;
 mod clock;
 mod error;
 mod human_decision_service;
@@ -27,6 +28,7 @@ mod task_service;
 mod workspace_service;
 
 pub use approval_service::ApprovalService;
+pub use candidate_verdict::mint_candidate_verdicts;
 pub use clock::{format_rfc3339, Clock, FixedClock, SystemClock};
 pub use error::{ServiceError, ServiceResult};
 pub use human_decision_service::{HumanDecisionCreate, HumanDecisionService};
