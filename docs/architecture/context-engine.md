@@ -291,3 +291,111 @@ implementation; Resource Engine implementation; Memory Engine
 implementation; Provider adapter implementation; Context JSON Schema;
 prompt template; TOON format; provider-specific compaction protocol;
 retention durations; Execution Envelope schema.
+
+## 12. Agent-router pattern consolidation (TASK-0137)
+
+Source: [`AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md`](../development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md)
+§5 (capability IDs below are audit IDs). Adoption rule, inherited from
+the audit: validated design semantics migrate onto Runlith's durable,
+policy-governed substrate; prototype code, dependencies, and prompt
+text never migrate verbatim, and every adopted pattern names its
+owning Runlith port and persistence story here. This section informs
+§10 open items; it closes none of them.
+
+### 12.1 Adopted patterns
+
+V10 planning artifact (brief/constraints/acceptance + handoff). Owned
+by the planning side and proposed through `PlannerPort` (plan crate);
+persisted as planner-owned durable state, never as Context truth. The
+Context Engine consumes the artifact as Execution Envelope input and
+as a retrieval source for selection. The artifact must not merge into
+the ContextPlan: the envelope states execution intent, the plan states
+evidence selection (§7).
+
+V11 review-context artifact (bounded evidence packet: diff head/tail,
+verification output, builder report). Produced by the Context Engine
+as a ContextPlan-shaped selection product for a review execution, and
+consumed by the review authority (current surface: `ReviewService`,
+app-services) through its explicit contract. Durable per execution as
+selection evidence (ADR-0010); raw evidence stays reopenable behind
+the packet. The V6 rejection carries over unchanged: reviewer signals
+are advisory only — no reviewer output becomes a verification
+authority, and the packet grants none.
+
+C2 compression pipeline (extractive/semantic/hybrid compressors +
+budget allocator). Owned by the Context Engine under its compaction
+responsibility (§2, §6); fresh implementation when built, not a port
+of prototype code. Hard constraints: pruning/compaction preserves
+provider-valid tool-call/tool-result correlation (INV-071), rendered
+context stays disposable (INV-016), provider-native compaction stays
+optimization only (INV-022), and rendered prompts are never persisted
+as a shortcut. Tokenizer choice follows the C1 rejection below. This
+pattern informs the §10 budget representation, soft/hard budget
+units, and compaction-mechanism items.
+
+C3 source-attributed, multi-turn context telemetry. Split by
+ownership: source attribution and the selection trace belong to
+Context observability (the §10 `RetrievalTrace` direction) and are
+durable per-execution evidence answering why any item entered
+context; token and cost measures belong to the future Usage rollup
+(TASK-0133, G14 — pending gate ratification) — the Context Engine
+never owns billing or economics.
+Telemetry inherits the trust/sensitivity separation (§4): relevance
+never equals trust, and SECRET never enters model context (INV-008).
+
+C4 observation handles / archived tool observations. The Context
+Engine owns selection and dereference of handles; observation bytes
+live in the future artifact capability (§6 direction: large results
+may later be artifact-backed — no `ArtifactStore` is built here).
+Archived observations remain reopenable evidence after the active
+window moves on (INV-021 spirit). This pattern informs the §10
+replay/reproducibility-mechanism item.
+
+C5 compaction receipts. Produced by the Context Engine as durable
+per-execution selection evidence recording what was compacted,
+dropped, or summarized, under which budget, and why. Continuity
+consumes receipts as history references for rollover and old-evidence
+lookup — it never becomes the selector, and a receipt is not a
+checkpoint (a checkpoint is continuity state sufficient to resume; a
+receipt is the record of a selection decision). Continuity §6 privacy
+rule applies: SECRET, PII, and raw tool payloads are not preserved
+merely because keeping them would make resumption easier.
+
+### 12.2 Rejected patterns (with reasons)
+
+C1 four-characters-per-token estimator. Rejected: Runlith's
+`tiktoken` feature is strictly better. The heuristic survives only
+as a tokenizer-unavailable fallback, never as the budgeting basis.
+
+Process-global in-memory registries as a system of record. Rejected:
+violates durability and single-writer invariants. Every adopted
+pattern above persists through its owning durable boundary
+(planner-owned state, per-execution selection evidence, future
+artifact/Usage stores) — see §12.1 per pattern.
+
+Reviewer prompt contract (`# PASS|# FAIL|# BLOCKED`) as verdict
+authority. Rejected: the agent cannot be its own verification
+authority (G8 verifier independence). Advisory reviewer signals only;
+carried into V11 above.
+
+Hardcoded role/quality/billing policy tables. Rejected: policy is
+typed, versioned Policy Engine data, never prototype constants. Any
+budget mode, privacy mode, or tier vocabulary touching C2/C3 arrives
+exclusively through Policy inputs.
+
+Out of scope for this section (neither adopted nor rejected here):
+V9 semantic-risk scoring (offline benchmark only, TASK-0140, privacy
+review pending) and the economics/verification capabilities owned by
+other migration tasks.
+
+### 12.3 Boundaries restated (not changed)
+
+Selection vs continuity stays split: §12.1 assigns production to the
+Context Engine and consumption to Continuity wherever the two meet
+(C5 receipts, archived observations as history). Envelope vs plan
+stays split: V10 feeds envelope inputs without merging the objects.
+No new vector database is introduced by this section, and no
+parallel retrieval subsystem is designed here (TASK-0147 constraint
+respected). Final Rust shapes, table layouts, and the §10 open items
+remain future decisions; this section only records which open items
+each adopted pattern informs.
