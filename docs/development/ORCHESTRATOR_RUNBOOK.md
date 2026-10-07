@@ -111,12 +111,14 @@ Cross-check:
 
 ```text
 version.task
-queue.completed_through
 queue outcomes
 roadmap.current_gate
 merged main history
 active worktrees
 ```
+
+(TASK-0166: `queue.completed_through` removed as legacy-stale; per-task
+outcomes plus merged main history are the completion record.)
 
 A mismatch does not automatically mean one value should overwrite another.
 Establish what actually completed and what each field is defined to represent.
