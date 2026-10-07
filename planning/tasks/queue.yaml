@@ -5745,12 +5745,13 @@ items:
     scope: >-
       Epoch and checkpoint persistence, the strict rollover algorithm,
       indexed old epochs, history search with exact-ref reads only,
-      working notes. Provider-native compaction stays an optimization
-      and never becomes the durability story.
+      working notes, and retention enforcement mechanics (durations
+      stay owned by privacy/storage policy). Provider-native compaction
+      stays an optimization and never becomes the durability story.
     exit_criteria_summary: >-
       Rollover without a persisted checkpoint refuses; history serves
-      bounded reads with provenance after restart; full workspace
-      verification green.
+      bounded reads with provenance after restart; retention enforcement
+      honors policy-owned durations; full workspace verification green.
     depends_on:
       - TASK-0168
     blocked_by: []

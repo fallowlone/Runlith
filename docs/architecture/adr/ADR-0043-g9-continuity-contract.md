@@ -22,11 +22,14 @@ Continuity answers how execution survives rollover and provider change.
 ### 1. Epoch identity and chain scope
 
 Epoch identity is `ctxepoch_<ulid26>` with a monotonic `epoch_seq`
-(`u64`) within its chain. A chain is scoped to (task, execution):
-concurrent executions never share an epoch chain (rule CR-9), and
-cross-chain reads happen only through history references. Exactly one
-epoch is ACTIVE per chain; older epochs are INDEXED and read-only. No
-provider-specific epoch types exist.
+(`u64`) within its chain. The ULID is the identity (globally
+unique); the sequence is per-chain ordering only. A chain is scoped
+to (task, execution): concurrent executions never share an epoch
+chain (rule CR-9), and cross-chain reads happen only through history
+references. Exactly one epoch is ACTIVE per chain; older epochs are
+INDEXED and read-only. No provider-specific epoch types exist.
+Selection-side epoch bindings stay opaque strings per ADR-0042
+section 3 until a future amendment needs a typed variant.
 
 ### 2. Checkpoint identity and schema
 
@@ -54,7 +57,10 @@ summary-of-summary chain must never become truth.
 
 Commit is atomic over (checkpoint row, epoch index entry, history
 references) and returns a `CheckpointReceipt` (`checkpoint_id`,
-`epoch_id`, `committed_at`, store revision). Writes land in staging
+`epoch_id`, `committed_at`, store revision). Exact Rust shapes for
+commit, `history.search` and `history.read` are TASK-0171's; this
+section pins atomicity, receipt fields and staging semantics only.
+Writes land in staging
 first; only the commit pointer swap makes a checkpoint readable —
 staging is never readable as committed (rule CR-2). Verification
 criteria: read-back equals written bytes, content hashes compare, the
@@ -69,7 +75,9 @@ a Continuity-owned observer over plan budgets plus provider usage
 signals (adapter-provided, untrusted hints). It may trigger checkpoint
 and rollover; it never selects content. Rollover checkpointing begins
 at the soft limit; past the hard limit, new execution cycles block
-until rollover completes (fail-closed), recorded in the trace.
+until rollover completes (fail-closed), recorded as a
+budget-snapshot/rejection entry per ADR-0042 section 7 and carrying
+no payload bytes.
 
 ### 5. Current working set
 
@@ -81,11 +89,14 @@ checkpoint plus the plan, never trusted from a crashed process image.
 ### 6. Working notes representation
 
 Timestamped entries: `note_id`, `created_at`, `author`
-(`Human` / `Agent` / `System`), body as inline text (at most 4 KiB)
-or reference for anything larger, and a sensitivity label. Notes are
-execution evidence. They are never automatically promoted to Memory,
-Decision, ADR or Task state — promotion needs the owning subsystem
-and its process.
+(`Human` / `Agent` / `System`), body as authored observation text
+inline (at most 4 KiB) or reference for anything larger, and a
+sensitivity label. The inline bound is authored text only: raw
+evidence — transcripts, tool payloads, files — always travels by
+reference (`reopen_ref`, `SourceRef`, artifact handle), never
+embedded. Notes are execution evidence. They are never automatically
+promoted to Memory, Decision, ADR or Task state — promotion needs
+the owning subsystem and its process.
 
 ### 7. History search and read contract
 
@@ -94,16 +105,17 @@ Two stages, no bulk dump by default (rule CR-4):
 (`history_ref`, `epoch_id`, disclosed rank signals, snippet method);
 `history.read(exact_ref)` returns bounded content for one ref.
 Reference format is `histref_<ulid26>`, opaque, epoch-bound inside.
-Ranking discloses its signals (recency plus FTS rank); exact weight
-tuning is TASK-0171's. Embeddings stay optional. Accepted filters:
-metadata, task, epoch, event type.
+Ranking discloses its signals (recency plus full-text rank where an
+FTS index exists); exact weight tuning is TASK-0171's. Embeddings
+stay optional. Accepted filters: metadata, task, epoch, event type.
 
 ### 8. Provider Session to Epoch linkage
 
 Provider sessions attach as append-only evidence: `SessionLink`
 (`session_ref` as an opaque provider string, `epoch_id`,
-`attempt_ref`, `provider_id`). Session references are never
-authoritative for continuation truth (INV-019, rule CR-6):
+`attempt_ref`, `provider_id`). Provider-native session state and
+compaction stay optimization only (INV-022). Session references are
+never authoritative for continuation truth (INV-019, rule CR-6):
 correctness-critical continuation must survive independently of raw
 chat transcript retention (INV-110).
 
@@ -121,8 +133,13 @@ Three windows, all fail-closed:
   Activation is idempotent — one checkpoint activates at most one
   successor epoch (rule CR-3) — so a repeated recovery cannot fork
   the chain.
-- Crash during activation: identical to the previous window; the
-  activation record decides whether there is anything left to do.
+- Crash during activation: recovery reads the activation record
+  (`checkpoint_id`, optional `successor_epoch_id`, `started_at`,
+  optional `completed_at`). If a successor epoch already completed
+  activation, recovery is a no-op (CR-3 forbids a second); otherwise
+  it completes the pending activation. Unlike the previous window,
+  where activation never began, this window disambiguates through
+  the record.
 
 ### 10. Concurrent execution and epoch semantics
 
@@ -153,11 +170,15 @@ open.
 
 ### 13. Privacy bounds
 
-SECRET, PII and raw tool payloads are never persisted in
-checkpoints, notes or history merely because keeping them would ease
-resumption (INV-008). Every checkpoint carries its sensitivity
-ceiling; resumption re-applies the ADR-0042 security filter before
-anything re-enters model context. Retention durations stay open.
+SECRET material is never persisted in checkpoints, notes or history:
+durable continuity state stores only opaque secret references and
+scoped bindings (INV-151, INV-008). PII and raw tool payloads travel
+by reference only and are never embedded (continuity.md section 6,
+Privacy Architecture). Every checkpoint carries its sensitivity
+ceiling as a label describing the highest level referenced — never
+as authority to carry SECRET values; resumption re-applies the
+ADR-0042 security filter before anything re-enters model context.
+Retention durations stay open.
 
 ### Executable rules
 
@@ -169,15 +190,17 @@ anything re-enters model context. Retention durations stay open.
   most one successor epoch.
 - **CR-4** `history.read` requires an exact ref; no bulk session
   dump by default.
-- **CR-5** Checkpoints embed no raw evidence beyond the section 6
-  note bound; summaries point to reopenable refs.
+- **CR-5** Checkpoints embed no raw evidence; the section 6 inline
+  bound is authored observation text only. Summaries point to
+  reopenable refs.
 - **CR-6** Provider session refs are never authoritative for
   continuation truth (INV-019).
 - **CR-7** Migration never replays side effects and never inherits
   authorization (INV-066).
-- **CR-8** Checkpoints, notes and history exclude SECRET/PII/raw
-  payloads beyond resumption necessity; the ceiling is enforced
-  (INV-008).
+- **CR-8** Checkpoints, notes and history carry no SECRET values
+  (opaque refs and scoped bindings only, INV-151, INV-008); PII and
+  raw payloads travel by reference only (continuity.md section 6,
+  Privacy Architecture); the ceiling is enforced as a label.
 - **CR-9** Concurrent executions never share an epoch chain.
 - **CR-10** Unknown checkpoint major versions refuse (fail-closed).
 
@@ -212,8 +235,10 @@ supersession, privacy bounds.
 Still open (explicitly not decided here): checkpoint persistence
 format (exact tables are TASK-0171's); history index/storage
 implementation; ranking weight tuning; retention and cleanup
-durations; Budget Monitor call mechanics (exact function shapes are
-TASK-0171's); Memory truth shapes (owning gate).
+durations (values owned by privacy/storage policy; enforcement
+mechanics are TASK-0171's); Budget Monitor, commit and
+history.search/history.read call mechanics (exact function shapes
+are TASK-0171's); Memory truth shapes (owning gate).
 
 ## Alternatives considered
 
@@ -233,15 +258,16 @@ TASK-0171's); Memory truth shapes (owning gate).
 ## Consequences
 
 - TASK-0171 transcribes this ADR for epochs, checkpoints, history
-  and migration; TASK-0172 additionally consumes the activation and
-  crash semantics for TAKEOVER's in-flight execution questions. Any
-  deviation needs an ADR amendment, not a queue-entry restatement
-  (the TASK-0097 lesson).
-- `continuity.md` sections 2, 4, 5 and 8 gain "Proposed by ADR-0043
-  (pending ratification)" annotations, flipped to "Decided by" on
-  acceptance together with a rewrite of the stale "remains open"
-  bodies; the section 8 list stays as the record with proposed items
-  marked.
+  and migration. The activation and crash semantics may inform the
+  TASK-0169 amendment consumed by TASK-0172; TAKEOVER authority stays
+  TASK-0169's, and no dependency change follows. Any deviation needs
+  an ADR amendment, not a queue-entry restatement (the TASK-0097
+  lesson).
+- `continuity.md` sections 2, 4, 5, 6 and 8 gain "Proposed by
+  ADR-0043 (pending ratification)" annotations, flipped to "Decided
+  by" on acceptance together with a rewrite of the stale
+  "remains open" bodies in sections 2 and 5; the section 8 list
+  stays as the record with proposed items marked.
 - No schema, IPC or dependency change in this task: this ADR is
   contract only. New tables are expected in TASK-0171.
 
@@ -272,7 +298,7 @@ checkpoints. No backfill: no durable continuity state exists yet.
   vocabulary, budgets, trace, security filter), ADR-0029
   (identity-only evidence refs)
 - `docs/architecture/INVARIANTS.md`: INV-008, INV-019, INV-020,
-  INV-021, INV-022, INV-023, INV-066, INV-110 (each cited invariant
-  is invoked in the body above)
+  INV-021, INV-022, INV-023, INV-066, INV-110, INV-151 (each cited
+  invariant is invoked in the body above)
 - `docs/security/DATA_CLASSIFICATION.md` (sensitivity levels)
 - `planning/roadmap.yaml` G9 (epochs, checkpoints, history search)
