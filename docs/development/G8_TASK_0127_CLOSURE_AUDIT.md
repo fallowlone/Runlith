@@ -199,6 +199,11 @@ gates, which repo policy accepts as Task evidence); revocation of the
 and of the `nvapi-` history keys (0154, history unrewritten per scope);
 live-provider quota (see §7).
 
+**Post-audit confirmation (2026-10-07):** the owner confirmed
+revocation of the 2026-09-25 exposed OAuth token (0152) and of the
+`nvapi-` history keys (0154). CI billing remains open (owner action,
+deferred).
+
 **Observations (no action required for closure):** O-01 queue
 `completed_through: TASK-0150` is legacy-stale (untouched by the whole
 G8 series; out-of-order completion voided its semantics — recommend

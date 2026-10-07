@@ -8,7 +8,6 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0150
 current_gate: G8
 gate_status: CLOSED  # TASK-0127 independent closure audit: G8_CLOSED (report docs/development/G8_TASK_0127_CLOSURE_AUDIT.md, gate docs/development/G8_TASK_0127_CLOSURE_GATE.md); current_gate held at G8 until the G9 breakdown is materialized
 
@@ -5503,3 +5502,75 @@ items:
     references:
       - crates/app-services/src/security_service.rs
       - adapters/effect-capture-local/src/candidate_snapshot.rs
+
+  # DRAFT (TASK-0127 follow-up): owner decision recorded 2026-10-07
+  # (mode B advisory, all submits, V1-V3 auto / V0 skips by
+  # construction); step 1 done, wiring not started.
+  - id: TASK-0165
+    gate: G9
+    title: Verification auto-invocation decision and orchestration wiring
+    objective: >-
+      Decide when the orchestrator automatically executes verification
+      plans through the TASK-0162 VerificationRunner, then wire that
+      decision into the orchestration cycle so selected levels produce
+      evidence without manual invocation.
+    scope: >-
+      Step 1 (blocking): owner product decision — which tasks trigger
+      automatic verification, whether results block completion or stay
+      advisory, which levels auto-run (V0 never runs), timeout/quota
+      behavior — recorded as a decision note referenced here. Step 2:
+      wire the decided call site only (orchestration cycle consumer of
+      VerificationPlan); no new selection logic, no TASK-0125 contract
+      change, runner semantics unchanged. G8 verification thread
+      continued under G9.
+    exit_criteria_summary: >-
+      Owner decision recorded and referenced; the decided trigger
+      executes V1..V3 plans with captured evidence and typed failures;
+      negative tests prove no auto-run outside the decision (V0,
+      excluded tasks, timeout); TASK-0125 admission behavior unchanged
+      except where the decision explicitly says otherwise; full
+      workspace verification green.
+    depends_on:
+      - TASK-0162
+      - TASK-0134
+    blocked_by: []
+    references:
+      - crates/app-services/src/verification_execution.rs
+      - crates/app-services/src/orchestration_service.rs
+      - docs/development/G8_TASK_0127_CLOSURE_AUDIT.md
+      - docs/development/G9_TASK_0165_AUTO_INVOCATION_DECISION.md
+
+  - id: TASK-0166
+    gate: G9
+    title: Deprecate queue completed_through
+    objective: >-
+      Remove the legacy-stale queue.completed_through header field and
+      its runbook reference; completion state lives in per-task
+      outcomes plus merged main history.
+    scope: >-
+      Delete the completed_through line from planning/tasks/queue.yaml;
+      drop queue.completed_through from ORCHESTRATOR_RUNBOOK.md Step C;
+      prove no code, test, CI, or script reads the field. Historical
+      docs mentioning it are frozen records and stay untouched. No
+      production behavior change.
+    exit_criteria_summary: >-
+      Field absent from the queue header; runbook Step C reconciles
+      version.task, queue outcomes, roadmap.current_gate, merged main
+      history, and active worktrees only; queue YAML parses; grep
+      over code/tests/CI/scripts finds no completed_through reader;
+      product-version suite green.
+    depends_on:
+      - TASK-0127
+    blocked_by: []
+    references:
+      - planning/tasks/queue.yaml
+      - docs/development/ORCHESTRATOR_RUNBOOK.md
+      - docs/development/G8_TASK_0127_CLOSURE_AUDIT.md
+    outcome: >-
+      Done on branch plan-g9-followup-drafts: completed_through
+      removed from the queue header; ORCHESTRATOR_RUNBOOK.md Step C
+      reconciles version.task, queue outcomes, roadmap.current_gate,
+      merged main history, and active worktrees; grep over
+      code/tests/CI/scripts finds no field reader (two task.rs hits
+      are an unrelated test name); historical docs untouched;
+      product-version 6/6; queue YAML parses (154 items).
