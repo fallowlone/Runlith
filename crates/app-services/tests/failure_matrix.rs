@@ -271,6 +271,7 @@ fn success_verified_end_to_end_is_exactly_once_and_survives_reopen() {
             task_id: task_id.clone(),
             execution_id: ExecutionId::new("E-1").unwrap(),
             attempt_id: AttemptId::new("A-1").unwrap(),
+            advisory: None,
         }
     );
     assert_eq!(executor.call_count(), 1);
@@ -343,6 +344,7 @@ fn review_rejection_keeps_succeeded_attempt_and_never_completes_on_fixture() {
             task_id: task_id.clone(),
             execution_id: ExecutionId::new("E-1").unwrap(),
             attempt_id: AttemptId::new("A-1").unwrap(),
+            advisory: None,
         }
     );
     assert_eq!(evaluator.call_count(), 1);
