@@ -79,25 +79,27 @@ persistence mechanism either.
 
 ## 4. ContextItem
 
-> Field names and type contracts proposed by
-> [`ADR-0042`](./adr/ADR-0042-g9-context-engine-contract.md) (TASK-0167,
-> pending ratification).
+> Field names and type contracts decided by
+> [`ADR-0042`](./adr/ADR-0042-g9-context-engine-contract.md) (TASK-0167).
 
 The accepted conceptual `ContextItem` carries these fields (SoT §26). This
-is an architecture contract, not a frozen type — no Rust shape and no JSON
-Schema are defined here:
+is an architecture contract, not a frozen type — field names and type
+contracts are frozen by ADR-0042 §1, Rust syntax stays the implementer's,
+and no JSON Schema is defined here:
 
-- id — item identity; exact format (UUID, ULID, integer, hash-only, …)
-  remains open.
-- kind — classifies the selected material; no closed enum unless accepted
-  architecture already provides one; future sources stay extensible.
+- id — item identity; format `ctxitem_` + 26-char Crockford Base32
+  (ULID shape, time-sortable) per ADR-0042 §1.
+- kind — classifies the selected material; closed ContextKind v1 enum
+  per ADR-0042 §2. New kinds arrive only through an ADR amendment;
+  unknown kinds fail closed at plan admission.
 - source_ref — identifies the source/evidence the item was derived from
-  and must support provenance; no universal URI/reference syntax is
-  invented.
-- content_hash — source/content integrity and reference identity; no
-  universal algorithm (SHA-256, BLAKE3, Git hash, …) is chosen here.
+  and must support provenance; typed SourceRef with revision binding
+  per ADR-0042 §3. Bare strings are rejected.
+- content_hash — source/content integrity and reference identity;
+  SHA-256 as `sha256:<64 lowercase hex>` per ADR-0042 §1.
 - priority — influences selection only; grants no instruction authority,
-  no security authority, no Policy bypass; no priority enum is invented.
+  no security authority, no Policy bypass; `u16` selection-only rank
+  per ADR-0042 §1.
 - freshness — independent from trust, authority, and sensitivity; those
   dimensions must never be collapsed into one value.
 - trust — highly relevant content may still be untrusted; trust metadata
@@ -113,17 +115,17 @@ Schema are defined here:
 - cache_class — cache planning is an optimization layer. Prompt caching
   may reduce cost, but it does not reduce attention load automatically,
   does not make context authoritative, and does not make stale content
-  correct. No cache classes are invented.
+  correct. CacheClass v1 (`StablePrefix` / `SessionEphemeral` /
+  `NoCache`) per ADR-0042 §1; optimization hint only.
 - provenance — enough to answer where the item came from, which
   source/revision produced it, why the representation is trusted or
-  untrusted, and whether raw evidence can be reopened. No final
-  provenance schema is defined.
+  untrusted, and whether raw evidence can be reopened.
+  ProvenanceEnvelope schema per ADR-0042 §4.
 
 ## 5. ContextPlan
 
-> Identity, versioning, budget shape and reason taxonomy proposed by
-> [`ADR-0042`](./adr/ADR-0042-g9-context-engine-contract.md) (TASK-0167,
-> pending ratification).
+> Identity, versioning, budget shape and reason taxonomy decided by
+> [`ADR-0042`](./adr/ADR-0042-g9-context-engine-contract.md) (TASK-0167).
 
 For every execution the accepted plan concepts are: Required, Selected,
 Deferred, Rejected, Budget, Cache boundaries, Renderer, Reasons, Source
@@ -143,8 +145,8 @@ rendered prompts must not be persisted merely as a shortcut.
 Observable and reproducible selection (INV-018) means the system must
 eventually explain: candidate sources considered; selected, deferred, and
 rejected items; reasons for selection/rejection; budget constraints;
-source hashes/revisions; renderer and cache decisions. No RetrievalTrace
-contract is implemented here.
+source hashes/revisions; renderer and cache decisions. RetrievalTrace
+contract per ADR-0042 §7.
 
 ## 6. Retrieval, disclosure, and rendering
 
@@ -167,8 +169,10 @@ document/resource; L3 section/symbol; L4 raw evidence.
 
 Token Cost is not Attention Load: a cached token may cost less while still
 consuming model attention, so optimization must reason about
-relevance/attention, not billing cost alone. No measurement formulas are
-defined. Prompt caching is optimization only — never a selection
+relevance/attention, not billing cost alone. Budgets are counted through
+the TokenCounter port with soft/hard tokens and a recorded counter
+method; attention load is item count plus total tokens (ADR-0042 §6).
+Prompt caching is optimization only — never a selection
 replacement, persistence, or durable continuity; stable-prefix ordering
 may be used where supported, with provider cache behavior remaining an
 adapter/renderer concern.
@@ -264,10 +268,9 @@ Full bounded-context registry: ARCHITECTURE.md §2 (not duplicated here).
 
 ## 10. Open Context Engine Design Items
 
-Unresolved by accepted architecture; listed, not decided. Items marked
-[ADR-0042] are proposed by
-[`ADR-0042`](./adr/ADR-0042-g9-context-engine-contract.md) (TASK-0167,
-pending ratification); the rest stay open:
+Mostly resolved by accepted architecture; the rest stay open. Items
+marked [ADR-0042] were decided by
+[`ADR-0042`](./adr/ADR-0042-g9-context-engine-contract.md) (TASK-0167):
 
 - final ContextItem Rust shape [ADR-0042 §1: field names fixed, Rust
   syntax is the implementer's]

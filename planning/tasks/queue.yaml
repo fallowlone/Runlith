@@ -8,8 +8,8 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-current_gate: G8
-gate_status: CLOSED  # TASK-0127 independent closure audit: G8_CLOSED (report docs/development/G8_TASK_0127_CLOSURE_AUDIT.md, gate docs/development/G8_TASK_0127_CLOSURE_GATE.md); current_gate held at G8 until the G9 breakdown is materialized
+current_gate: G9
+gate_status: IN_PROGRESS  # TASK-0167 activated G9 (ADR-0042 accepted); G8 closed by TASK-0127
 
 items:
   - id: TASK-0012
@@ -5642,6 +5642,24 @@ items:
       - docs/architecture/context-engine.md
       - docs/architecture/adr/ADR-0010-context-derived-state.md
       - planning/roadmap.yaml
+    outcome: >-
+      ACCEPTED 2026-10-07 by owner decision after three independent
+      review rounds. Round 1 returned CHANGES-REQUIRED with 15 findings
+      (envelope facets, V10/V11 grounding, tiktoken mandate, banners);
+      round 2 resolved 13 and found 3 new (trace counter method, 0173
+      scope, C1 framing); round 3 verified every resolution and returned
+      PASS with no new findings. Record:
+      docs/architecture/adr/ADR-0042-g9-context-engine-contract.md.
+      The ADR freezes ContextItem/ContextPlan vocabulary, the 9-field
+      Provenance Envelope, TokenCounter-port budgets, the RetrievalTrace
+      contract and rules CX-1..CX-10; status Accepted in the ADR and both
+      indexes. context-engine.md sections 4, 5, 6, 10 and 12.2 updated.
+      G9 activated in the same task: roadmap current_gate G9 with G9
+      in_progress, queue current_gate G9 with gate_status IN_PROGRESS,
+      product identity 0.1.0-dev.task0167. Contract only: no production
+      code, migration or IPC change. Verification observed on the branch:
+      queue YAML parses (163 items, IDs unique), product-version 6/6,
+      fmt clean, clippy -D warnings clean, diff-check clean.
 
   - id: TASK-0168
     gate: G9

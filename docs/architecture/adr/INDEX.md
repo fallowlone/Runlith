@@ -44,6 +44,6 @@
 | [ADR-0037](./ADR-0037-confined-provider-credential-gateway.md) | Confined Claude provider authentication through a trusted-host credential gateway | Accepted | provider authentication, G6 confinement, secrets broker, credential gateway, loopback proxy |
 | [ADR-0038](./ADR-0038-product-licensing.md) | Product licensing: Apache License, Version 2.0 with open-source License Grant | Accepted | licensing, monetization, open source, governance |
 | [ADR-0041](./ADR-0041-g8-candidate-only-verdict-minting.md) | G8 candidate-only verdict minting authority | Accepted | verification, claims, observed effects, completion authority, g8 sequencing |
-| [ADR-0042](./ADR-0042-g9-context-engine-contract.md) | G9 Context Engine contract (`ContextItem`/`ContextPlan`, Provenance Envelope, budgets, trace, CX-1..CX-10) | Proposed | context engine, selection, provenance, budgets, retrieval trace, g9 |
+| [ADR-0042](./ADR-0042-g9-context-engine-contract.md) | G9 Context Engine contract (`ContextItem`/`ContextPlan`, Provenance Envelope, budgets, trace, CX-1..CX-10) | Accepted | context engine, selection, provenance, budgets, retrieval trace, g9 |
 
 Coverage register (not an ADR): [COVERAGE.md](./COVERAGE.md).

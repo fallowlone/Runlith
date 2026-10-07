@@ -1,6 +1,8 @@
 # ADR-0042 — G9 Context Engine contract
 
-- Status: **Proposed** (TASK-0167; ratification pending)
+- Status: **Accepted** (TASK-0167; ratified 2026-10-07 by owner decision
+  after three independent review rounds: R1 15 findings, R2 3 new, R3
+  PASS; pre-acceptance commit 6d50845)
 - Date: 2026-10-07
 - Gate: G9
 

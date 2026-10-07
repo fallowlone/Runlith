@@ -8,7 +8,7 @@
 # Near-term work lives in planning/tasks/queue.yaml, not here.
 
 schema_version: 1
-current_gate: G8
+current_gate: G9
 task_queue: planning/tasks/queue.yaml
 
 gates:
@@ -105,7 +105,7 @@ gates:
 
   - id: G9
     name: Context Engine + Continuity
-    status: planned
+    status: in_progress
     objective: Retrieval, token budget, context plans, epochs, checkpoints,
       history search.
     planned_capabilities:
