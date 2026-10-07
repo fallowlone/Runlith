@@ -4119,6 +4119,13 @@ items:
     references:
       - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
       - docs/architecture/context-engine.md
+    outcome: >-
+      Done on branch task-0137-context-consolidation (PR #27, merged
+      as 9cf2485): context-engine.md section 12 maps V10/V11/C2/C3/C4/C5
+      to owning ports and persistence stories; C1, in-memory registries,
+      reviewer-as-authority, and hardcoded tables rejected with reasons;
+      boundaries restated unchanged; no section 10 items closed; design
+      note accepted by owner; docs-only, no code.
 
   - id: TASK-0138
     gate: G14
@@ -5539,6 +5546,17 @@ items:
       - crates/app-services/src/orchestration_service.rs
       - docs/development/G8_TASK_0127_CLOSURE_AUDIT.md
       - docs/development/G9_TASK_0165_AUTO_INVOCATION_DECISION.md
+    outcome: >-
+      Done on branch task-0165-advisory-auto-invocation (PR #26,
+      merged as 257120c): the workspace cycle auto-executes derived
+      V1..V3 plans through the TASK-0162 runner as advisory evidence
+      (mode B per the decision note); V0 and empty plans skip by
+      construction; the trigger fires on every submit including the
+      post-submit error path; the runner resolves lazily (Ready/Build)
+      so failure paths never pay construction; TASK-0125 admission
+      unchanged; 9 unit + 4 integration tests; full workspace green
+      (135 suites); two agentctl timing races hardened to quiescence
+      polls with purposes preserved.
 
   - id: TASK-0166
     gate: G9
