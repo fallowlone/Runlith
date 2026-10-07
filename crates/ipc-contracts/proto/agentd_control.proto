@@ -17,6 +17,7 @@ import "policy_core.proto";
 import "human_decision_core.proto";
 import "planning_core.proto";
 import "task_authoring_core.proto";
+import "finder_core.proto";
 
 // A single inbound control message from a local client to agentd.
 message ControlRequest {
@@ -38,6 +39,8 @@ message ControlRequest {
     PlanningCoreRequest planning_core = 8;
     // G7 Task planning-metadata authoring. Valid only on protocol-v6 sessions.
     TaskAuthoringCoreRequest task_authoring_core = 9;
+    // G9 repository finder. Valid only on protocol-v7 sessions.
+    FinderCoreRequest finder_core = 10;
   }
 }
 
@@ -58,6 +61,8 @@ message ControlResponse {
     PlanningCoreResponse planning_core = 8;
     // G7 Task planning-metadata authoring response. Protocol v6 only.
     TaskAuthoringCoreResponse task_authoring_core = 9;
+    // G9 repository finder response. Protocol v7 only.
+    FinderCoreResponse finder_core = 10;
   }
 }
 

@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package ai_engineering_os.ipc;
+
+// G9 finder IPC contract (protocol version 7 only).
+//
+// Imported by `agentd_control.proto`, which carries it as
+// `ControlRequest.finder_core = 10` / `ControlResponse.finder_core = 10`.
+// This file stays a bounded retrieval schema: one search page or one
+// reopened span per response, both bound to a source revision. It never
+// grows Task/Execution mutation, provider concepts, or trust verdicts —
+// the finder reads repository evidence; it decides nothing.
+//
+// Authority rules (TASK-0147, following ADR-0021):
+// - A finder request on a negotiated session below version 7 is
+//   rejected as unsupported for the negotiated protocol; it never
+//   executes.
+// - The client never mints retrieval authority: no revision, no
+//   content hash, no selection travels from client to server except
+//   the opaque handles the server itself minted (evidence ids,
+//   continuation tokens). The server owns binding and verification.
+// - Bounds chain: query text ≤ 1024 chars, limit ≤ 200 (0 means the
+//   server default), evidence ids ≤ 2048 bytes, excerpts ≤ 4096
+//   chars, failure detail ≤ 2048 chars, context ≤ 200 lines per
+//   side. A page carries at most `limit` hits; anything more
+//   arrives only through the explicit continuation token. There is
+//   no silent truncation on this wire: totals never understate,
+//   remainders always tokenize.
+
+// One bounded search page request.
+message FinderQueryRequest {
+  // Server-local absolute repository path (operational input, never
+  // persisted). Must resolve to a repository the daemon can read.
+  string repository_path = 1;
+  // Query text, non-blank, whitespace-separated literal terms.
+  string text = 2;
+  // Optional confined relative scope; blank means the whole root.
+  string scope = 3;
+  // Page size 1..200; 0 means the server default.
+  uint32 limit = 4;
+  // Service continuation token; blank means the first page.
+  string continuation = 5;
+}
+
+// One span reopen request behind a server-minted handle.
+message FinderShowRequest {
+  // Server-local absolute repository path (operational input, never
+  // persisted). Must match the root the handle was minted for.
+  string repository_path = 1;
+  // Opaque evidence id minted by a previous query page.
+  string evidence_id = 2;
+  // Adjacent context lines around the bound span; 0 means exactly
+  // the span. Beyond 200 per side is invalid_input.
+  uint32 context_before = 3;
+  uint32 context_after = 4;
+}
+
+message FinderCoreRequest {
+  oneof payload {
+    FinderQueryRequest query = 1;
+    FinderShowRequest show = 2;
+  }
+}
+
+// One selected hit: a reopenable handle plus its bounded excerpt.
+message FinderHit {
+  string evidence_id = 1;
+  string path = 2;
+  uint32 start_line = 3;
+  uint32 end_line = 4;
+  string excerpt = 5;
+  repeated string matched_terms = 6;
+  // "path" or "content".
+  string field = 7;
+  uint32 rank_score = 8;
+}
+
+// One source the selection did not cover, with its reason.
+message FinderSkipped {
+  string path = 1;
+  // "binary", "too_large", "inaccessible", or "denied".
+  string reason = 2;
+  // Reason detail: byte count, message, or rule name.
+  string detail = 3;
+}
+
+// One bound page: what revision the selection binds to, which
+// engine produced it, and the hits with their explicit remainder.
+message FinderPageResponse {
+  string query_text = 1;
+  string revision = 2;
+  bool dirty = 3;
+  string backend_name = 4;
+  string backend_version = 5;
+  repeated FinderHit hits = 6;
+  uint64 total_hits = 7;
+  repeated FinderSkipped skipped = 8;
+  // Blank when the page is complete.
+  string continuation = 9;
+}
+
+// One reopened span: exact lines plus the binding they were read
+// under. Lines are display bytes (post-filter) for the full window
+// [window_start_line, window_end_line]; content_hash binds the
+// pre-filter CORE bytes [start_line, end_line] the handle
+// addresses. Zero context means window equals core.
+message FinderSpanResponse {
+  string path = 1;
+  uint32 start_line = 2;
+  uint32 end_line = 3;
+  repeated string lines = 4;
+  string content_hash = 5;
+  string revision = 6;
+  bool dirty = 7;
+  uint32 window_start_line = 8;
+  uint32 window_end_line = 9;
+}
+
+// Typed finder failure. Codes: "stale", "unknown_evidence",
+// "invalid_query", "invalid_continuation", "not_a_repository",
+// "revision_unresolvable", "scope_escape", "backend_failure",
+// "invalid_input", "unavailable". Stale carries both revisions;
+// every other code carries bounded detail only.
+message FinderErrorResponse {
+  string code = 1;
+  string detail = 2;
+  string expected_rev = 3;
+  string actual_rev = 4;
+}
+
+message FinderCoreResponse {
+  oneof payload {
+    FinderPageResponse page = 1;
+    FinderSpanResponse span = 2;
+    FinderErrorResponse error = 3;
+  }
+}
