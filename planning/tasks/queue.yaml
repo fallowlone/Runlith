@@ -5607,3 +5607,228 @@ items:
       code/tests/CI/scripts finds no field reader (two task.rs hits
       are an unrelated test name); historical docs untouched;
       product-version 6/6; queue YAML parses (154 items).
+
+  # DRAFT (G9 activation breakdown, owner-approved 2026-10-07; execution
+  # starts with TASK-0167, which also flips roadmap G9 to in_progress
+  # and queue current_gate to G9).
+  - id: TASK-0167
+    gate: G9
+    title: G9 activation and Context Engine contract (ADR)
+    objective: >-
+      Freeze the G9 context vocabulary as an accepted contract ADR before
+      any implementation, in the TASK-0075 and TASK-0121 pattern, and
+      formally activate G9.
+    scope: >-
+      Contract only: one ADR plus context-engine.md amendments resolving
+      the section 10 open items needed for TASK-0170 through TASK-0175
+      (ContextItem and ContextPlan shapes, ContextKind taxonomy, SourceRef
+      and ID formats, Provenance Envelope schema with source, time, type,
+      sensitivity, permission scope, confidence and supersession, budget
+      representation with soft and hard units, selection and rejection
+      reason taxonomy, RetrievalTrace contract, security-filter API,
+      replay and reproducibility mechanism); every adopted section 12
+      pattern named against its contract surface; DOGFOOD_DETACHMENT
+      stated per capability; roadmap G9 to in_progress and queue
+      current_gate to G9. No production code, no migration, no IPC change.
+    exit_criteria_summary: >-
+      An accepted ADR an implementer can transcribe to tests without
+      guessing, referenced from docs/architecture/INDEX.md; roadmap and
+      queue flips recorded in the same task; queue YAML parses and ID
+      uniqueness holds.
+    depends_on:
+      - TASK-0127
+    blocked_by: []
+    references:
+      - docs/architecture/context-engine.md
+      - docs/architecture/adr/ADR-0010-context-derived-state.md
+      - planning/roadmap.yaml
+
+  - id: TASK-0168
+    gate: G9
+    title: Continuity contract - epochs, checkpoints, history (ADR)
+    objective: >-
+      Freeze the durable continuity contract as an accepted ADR before
+      implementation, so executions survive provider switches without
+      losing authoritative state.
+    scope: >-
+      Contract only: bounded Context Epochs, structured checkpoints, the
+      strict rollover algorithm with NO CHECKPOINT then NO ROLLOVER,
+      history search with history.read of exact refs only, working notes,
+      C5 compaction-receipt consumption as history references (a receipt
+      is never a checkpoint), and the privacy rule that SECRET, PII and
+      raw tool payloads are not preserved merely to ease resumption.
+      No production code.
+    exit_criteria_summary: >-
+      An accepted ADR naming durable fields, transitions, recovery
+      obligations and privacy bounds precisely enough for TASK-0171 to
+      implement without inventing semantics.
+    depends_on:
+      - TASK-0167
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0011-provider-independent-context-continuity.md
+      - docs/architecture/context-engine.md
+
+  - id: TASK-0169
+    gate: G9
+    title: TAKEOVER continuation and full HandoffPacket contract
+    objective: >-
+      Settle the TAKEOVER semantics deferred from G7 by the ADR-0027
+      TASK-0097 amendment, as an ADR-0027 amendment, before any
+      implementation.
+    scope: >-
+      Contract only, amending ADR-0027 (never restating the wide form in
+      a queue entry): what happens to the active planning run, the
+      claimed Task, the workspace lease and the in-flight execution when
+      a human assumes authority mid-flight, and how the Task returns to
+      machine execution afterwards; the resulting-revision reference;
+      rendering of the remaining packet fields (goal, state, actions,
+      blockers, uncertainty, question). No production code.
+    exit_criteria_summary: >-
+      An accepted ADR-0027 amendment with executable TAKEOVER and
+      rendering semantics that TASK-0172 can transcribe without guessing.
+    depends_on:
+      - TASK-0168
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - docs/architecture/adr/ADR-0011-provider-independent-context-continuity.md
+
+  - id: TASK-0170
+    gate: G9
+    title: Provenance Envelope and selection trace implementation
+    objective: >-
+      Implement durable per-execution selection evidence answering why
+      any item entered context, per the TASK-0167 contract.
+    scope: >-
+      Provenance Envelope domain types, persistence and read surface;
+      C3 source attribution and RetrievalTrace wiring as durable
+      selection evidence; trust and sensitivity separation with SECRET
+      never entering model context. Token and cost measures stay with
+      the future G14 usage rollup and are not built here.
+    exit_criteria_summary: >-
+      A bounded selection is durable, reopenable and explainable after
+      restart; inaccessible sources refuse explicitly; full workspace
+      verification green.
+    depends_on:
+      - TASK-0167
+    blocked_by: []
+    references:
+      - docs/architecture/context-engine.md
+      - docs/architecture/adr/ADR-0010-context-derived-state.md
+
+  - id: TASK-0171
+    gate: G9
+    title: Epochs, checkpoints and history implementation
+    objective: >-
+      Implement durable execution continuity per the TASK-0168 contract,
+      so a Task migrates between providers mid-flight with authoritative
+      state intact.
+    scope: >-
+      Epoch and checkpoint persistence, the strict rollover algorithm,
+      indexed old epochs, history search with exact-ref reads only,
+      working notes. Provider-native compaction stays an optimization
+      and never becomes the durability story.
+    exit_criteria_summary: >-
+      Rollover without a persisted checkpoint refuses; history serves
+      bounded reads with provenance after restart; full workspace
+      verification green.
+    depends_on:
+      - TASK-0168
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0011-provider-independent-context-continuity.md
+
+  - id: TASK-0172
+    gate: G9
+    title: TAKEOVER continuation implementation
+    objective: >-
+      Implement the TAKEOVER continuation and full HandoffPacket rendering
+      per the TASK-0169 amendment, through the shipped versioned control
+      plane.
+    scope: >-
+      HumanDecision continuation extension, trusted agentd IPC and agentctl
+      operations, durable resulting-revision reference, packet rendering,
+      and the failure matrix (TAKEOVER with an active run, consumed or
+      stale decision, stale lease, return to machine execution). No
+      weakening of existing G6 or G7 fences.
+    exit_criteria_summary: >-
+      A human can assume and return authority mid-flight with durable
+      evidence; stale or conflicting TAKEOVER attempts refuse typed;
+      full workspace verification green.
+    depends_on:
+      - TASK-0169
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+
+  - id: TASK-0173
+    gate: G9
+    title: Finder evidence-id shortening and symbol-aware ranking
+    objective: >-
+      Cut finder output-token and call-count cost without changing the
+      repo-finder seam, per the TASK-0147 benchmark follow-ups.
+    scope: >-
+      Evidence-id shortening (hash16 shape), symbol-aware ranking to cut
+      tight-page cutoffs and follow-up calls; benchmark rerun on the same
+      question set proving equal relevance and support at lower cost.
+      No seam change, no index (that is TASK-0174).
+    exit_criteria_summary: >-
+      Same-question-set rerun matches R4 and R5 scores with fewer output
+      tokens and fewer calls; determinism replay stays byte-identical.
+    depends_on:
+      - TASK-0147
+    blocked_by: []
+    references:
+      - docs/development/TASK_0147_FINDER_BENCHMARK.md
+
+  - id: TASK-0174
+    gate: G9
+    title: Finder index and INV-008 redaction filter
+    objective: >-
+      Remove the unindexed full-corpus scan from finder elapsed time and
+      replace the shipped PassthroughFilter with INV-008 redaction,
+      through the existing ContentFilter seam.
+    scope: >-
+      Phase-C index behind the repo-finder seam; a redacting ContentFilter
+      implementation per the TASK-0167 security-filter API; benchmark
+      rerun proving lower elapsed at equal scores. No seam-shape change.
+    exit_criteria_summary: >-
+      Elapsed no longer pays a full-corpus scan per query; secret-shaped
+      content cannot reach finder output by construction, pinned by a
+      regression test; full workspace verification green.
+    depends_on:
+      - TASK-0167
+      - TASK-0173
+    blocked_by: []
+    references:
+      - docs/development/TASK_0147_FINDER_BENCHMARK.md
+      - docs/architecture/INVARIANTS.md
+      - docs/architecture/context-engine.md
+
+  - id: TASK-0175
+    gate: G9
+    title: Planner evidence resolution boundary (ADR-0029 option B)
+    objective: >-
+      Make planner input real by resolving EvidenceRefs to bounded
+      classified content at a trusted boundary, with the privacy and
+      budget questions settled before implementation.
+    scope: >-
+      Privacy first: a classification and redaction policy under the
+      technical privacy contract plus an explicit DATA_FLOW_MAP entry,
+      then the resolution boundary where the trusted planning service
+      resolves refs to bounded content (the planner still never holds a
+      handle, query or store). Content growth against the planner token
+      budget is measured and bounded.
+    exit_criteria_summary: >-
+      Resolved content crosses the provider boundary only under the
+      accepted policy; unresolved or denied refs stay identity-only and
+      fail closed; planner budget impact measured; full workspace
+      verification green.
+    depends_on:
+      - TASK-0167
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0029-planner-evidence-resolution.md
+      - docs/privacy/TECHNICAL_PRIVACY_CONTRACT.md
+      - docs/privacy/DATA_FLOW_MAP.md
