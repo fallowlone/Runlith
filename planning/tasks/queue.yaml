@@ -4778,6 +4778,21 @@ items:
     references:
       - docs/architecture/context-engine.md
       - docs/architecture/adr/ADR-0010-context-derived-state.md
+      - docs/development/TASK_0147_FINDER_BENCHMARK.md
+    outcome: >-
+      Done on branch task-0147-repo-finder (PR #29, merged as 0097019):
+      dogfoodable agentctl find over the repo-finder seam (contract suite,
+      lexical finder-local engine, git-cli revision backend, rev-bound
+      FinderService with ContentFilter seam, protocol v7 IPC, agentd
+      dispatch); benchmark R1-R5 on the same question set and conditions:
+      finder 16/16 relevance+support equal to RTK-style, R5 byte-identical
+      replay proves determinism; cost axes honestly missed (output tokens
+      ~2.6x on the evidence-id tax, elapsed ~4-10x on unindexed scans)
+      with seam-stable follow-ups recorded (id shortening, phase-C index,
+      symbol-aware ranking); PassthroughFilter shipped, INV-008 redaction
+      stays the named follow-up; 145 workspace suites green (1 pre-existing
+      execution_recovery load flake triaged); version to task0147, gate
+      held G8.
 
   - id: TASK-0151
     gate: G8
