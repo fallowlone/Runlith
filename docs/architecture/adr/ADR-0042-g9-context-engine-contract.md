@@ -38,7 +38,7 @@ semantics:
 | `id` | opaque string, `ctxitem_` + 26-char Crockford Base32 (ULID shape, time-sortable). Sortability is required; the ULID crate is not mandated. |
 | `kind` | closed `ContextKind` v1 enum (see 2). Unknown kinds fail closed. |
 | `source_ref` | typed `SourceRef` (see 3). Bare strings are rejected. |
-| `content_hash` | `sha256:<64 lowercase hex>` over canonical source bytes (SHA-256 matches the plan-hash and audit-chain precedent). |
+| `content_hash` | `sha256:<64 lowercase hex>` over canonical source bytes (SHA-256 matches the plan-hash precedent in `crates/plan/src/hash.rs`). Namespaces are disjoint from the finder seam: `ctxitem_` ids never collide with finder `EvidenceId` (`rf1.` namespace, `crates/repo-finder/src/model.rs`), and finder hashes are bare 64-hex — the translation rule at the seam is to strip or add the `sha256:` prefix, never to reinterpret the bytes. |
 | `priority` | `u16` rank, selection-only. Grants no instruction, security or Policy authority. |
 | `freshness` | `Freshness` struct: `observed_at` (Unix millis UTC), `source_rev` binding, optional `stale_after`. Never merged with trust or sensitivity. |
 | `trust` | `Trust` struct: level `Verified` / `Unverified` / `Untrusted` plus a machine-readable reason. Relevance never equals trust. |
@@ -59,9 +59,11 @@ kind refuses plan admission (rule CX-1) instead of guessing.
 
 One of `TaskRef`, `RepoPath`, `PlanRef`, `AttemptRef`, `DecisionRef`,
 `EventSeq`, `MemoryRef`, `ObservationHandle`. Every variant carries the
-revision binding of its source (commit/tree, revision_seq, event seq,
-epoch id). A ref without a revision binding is malformed and refused
-(rule CX-2).
+revision binding of its source (commit/tree, revision_seq, event seq).
+Epoch and memory bindings stay opaque strings: no Epoch ID format is
+selected (`continuity.md` leaves it open for TASK-0168) and Memory
+truth shapes belong to their owning gate. A ref without a revision
+binding is malformed and refused (rule CX-2).
 
 ### 4. ProvenanceEnvelope
 
@@ -69,32 +71,43 @@ The roadmap's Context Provenance Envelope, normative fields: `source`
 (SourceRef), `source_rev`, `retrieved_at`, `selector` (which rule or
 query produced the item), `transform_chain` (ordered normalizations
 applied, possibly empty), `reopen_ref` (handle sufficient to reopen raw
-evidence, or explicit `NotReopenable` with reason). The envelope answers
-where the item came from, which revision produced it, why its
-representation is trusted or untrusted, and whether raw evidence can be
-reopened.
+evidence, or explicit `NotReopenable` with reason), `permission_scope`
+(the authorization scope the item was selected under, as an opaque
+string referencing the Policy decision), `confidence` (selector
+confidence as permille `0..=1000`; confidence never overrides trust or
+sensitivity), `supersession` (optional: which item id this envelope
+supersedes, with reason; a superseded item is Deferred with reason
+`Superseded`). The envelope answers where the item came from, which
+revision produced it, why its representation is trusted or untrusted,
+and whether raw evidence can be reopened.
 
 ### 5. ContextPlan
 
 Identity `ctxplan_<ulid26>`, `revision_seq` per execution, sections
 `Required` / `Selected` / `Deferred` / `Rejected`, `Budget`, cache
-boundaries, renderer id, reasons, source hashes. Every deferred or
-rejected item carries a closed `ReasonCode` v1: `BudgetExceeded`,
-`Superseded`, `SensitivityRefusal`, `StaleSource`, `DuplicateOf`,
-`TrustBelowFloor`, `RendererLimit`, `DeferredByPolicy`. Rendered prompts
-are never plan evidence (rule CX-4).
+boundaries, renderer id, reasons, source hashes. Cache boundaries are
+recorded as an ordered list of (`CacheClass`, item-id range) segments.
+The renderer id is an opaque string `renderer:<name>`; no renderer
+registry is built here. Every deferred or rejected item carries a
+closed `ReasonCode` v1: `BudgetExceeded`, `Superseded`,
+`SensitivityRefusal`, `StaleSource`, `DuplicateOf`, `TrustBelowFloor`,
+`RendererLimit`, `DeferredByPolicy`. Rendered prompts are never plan
+evidence (rule CX-4).
 
 ### 6. Budget representation
 
-Budgets are counted in tokens. The tokenizer is used when available
-(the `tiktoken` feature); the `chars/4` heuristic is a
-tokenizer-unavailable fallback only, never the budgeting basis (section
-12 C1 rejection carried over). A plan carries `soft_tokens` and
-`hard_tokens`: breaching soft triggers prune-or-compact, breaching hard
-refuses admission before render (rule CX-6). Attention Load is tracked
-separately as item count plus total tokens; no fancier formula is
-adopted. Token *cost* (money) is never computed here: counts are
-reported, economics belong to the G14 usage rollup (TASK-0133).
+Budgets are counted in tokens through a `TokenCounter` port with two
+shapes: an exact tokenizer when one exists in the deployment, and the
+`chars/4` estimator explicitly labeled as an estimate. No exact
+tokenizer ships in the repo today, so the heuristic is the only
+available counter — but it is never a silent basis: every budget
+records its counter method, and the trace carries it (section 7). A
+plan carries `soft_tokens` and `hard_tokens`: breaching soft triggers
+prune-or-compact, breaching hard refuses admission before render (rule
+CX-6). Attention Load is tracked separately as item count plus total
+tokens; no fancier formula is adopted. Token *cost* (money) is never
+computed here: counts are reported, economics belong to the G14 usage
+rollup (TASK-0133).
 
 ### 7. RetrievalTrace contract
 
@@ -111,18 +124,21 @@ selection.
 Two stages: Policy supplies data-flow constraints (the Context Engine
 never invents authorization); the filter enforces them over selected
 items before render. Filter functions are total: they never fail and
-never panic — filtering degrades to redaction or exclusion, never to
-errors (the `ContentFilter` totality precedent in
-`crates/app-services/src/finder_service.rs`). SECRET exclusion is
-fail-closed. Filtering applies to display bytes; integrity hashes bind
-pre-filter bytes (the `FinderSpan.content_hash` precedent).
+never panic — filtering degrades to redaction, never to errors (the
+`ContentFilter` totality precedent in
+`crates/app-services/src/finder_service.rs`, whose trait returns display
+bytes and has no exclusion signal). Exclusion is expressed by the
+selector, never by the filter: an excluded item moves to Rejected with
+its ReasonCode. SECRET exclusion is fail-closed. Filtering applies to
+display bytes; integrity hashes bind pre-filter bytes (the
+`FinderSpan.content_hash` precedent).
 
 ### 9. Replay and reproducibility
 
 Selection is deterministic given (plan inputs, source revisions, Policy
 fingerprint): the same `ContextPlan` against the same revisions
-reproduces the same selection modulo a freshness re-check, and the
-trace records everything needed to verify that (rule CX-5, INV-018).
+reproduces the recorded decision, and the freshness re-check is itself
+a traced step with its own inputs recorded (rule CX-5, INV-018).
 
 ### 10. Renderer contract
 
@@ -141,8 +157,9 @@ tool-call/tool-result correlation (INV-071).
   refusal is traced as `SensitivityRefusal` without content.
 - **CX-4** Rendered model context is never persisted as plan evidence.
   Only the plan, the trace and hashes persist.
-- **CX-5** Selection replays deterministically from (plan inputs, source
-  revisions, Policy fingerprint).
+- **CX-5** Selection replays the recorded decision from recorded
+  revisions; the freshness re-check is a traced step, not an untraced
+  hedge.
 - **CX-6** The hard budget is enforced before render; soft breach
   prunes or compacts, never silently overflows.
 - **CX-7** Trust, sensitivity and freshness stay separate fields with
@@ -160,8 +177,8 @@ Each adopted pattern names its contract surface (no new code here):
 
 | pattern | surface |
 |---|---|
-| V10 planning artifact | Execution Envelope input via `PlannerPort` (`crates/plan/src/model.rs`); never merged into `ContextPlan`. |
-| V11 review-context artifact | `ContextPlan`-shaped product consumed by `ReviewService` (`crates/app-services/src/review_service.rs`); advisory only, grants no verification authority. |
+| V10 planning artifact | Future contract: planner-owned artifact feeds Execution Envelope inputs; `PlannerPort` (`crates/plan/src/model.rs`) stays the proposal-only seam and carries no envelope field today. Never merged into `ContextPlan`. |
+| V11 review-context artifact | Future contract: `ContextPlan`-shaped product consumed through an extension of the `ReviewService` admission boundary (today `B1ReviewInput` / `ReviewAdmissionQuery` in `crates/app-services/src/review_service.rs`); advisory only, grants no verification authority. |
 | C2 compression pipeline | Compaction under section 6 budgets and rule CX-6; correlation preserved per INV-071. |
 | C3 telemetry | Source attribution and selection trace live in the section 7 trace; token/cost measures belong to TASK-0133 (G14). |
 | C4 observation handles | `ObservationHandle` source refs with `reopen_ref`; bytes live in a future artifact capability, not built here. |
@@ -203,8 +220,9 @@ mechanics; retention durations; Execution Envelope schema (a section
   coordination matters for traces and epochs, and the shape costs
   nothing.
 - BLAKE3 instead of SHA-256: rejected; speed is irrelevant at
-  selection cardinality, and SHA-256 matches the plan-hash
-  (`crates/plan`) and Security Audit hash-chain precedent.
+  selection cardinality, and SHA-256 matches the plan-hash precedent
+  (`crates/plan/src/hash.rs`: SHA-256 over deterministic canonical
+  bytes).
 - Open-string kinds with best-effort handling: rejected; fail-closed
   admission (CX-1) is the only behavior that keeps a stale selector
   from silently misreading new material.
@@ -214,9 +232,12 @@ mechanics; retention durations; Execution Envelope schema (a section
 
 ## Consequences
 
-- TASK-0170 through TASK-0175 transcribe this ADR instead of inventing
-  vocabulary; any deviation needs an ADR amendment, not a queue-entry
-  restatement (the TASK-0097 lesson).
+- TASK-0170, TASK-0173, TASK-0174 and TASK-0175 transcribe this ADR's
+  selection vocabulary and provenance envelope instead of inventing
+  their own; TASK-0171 and TASK-0172 additionally transcribe the
+  TASK-0168 continuity and TASK-0169 TAKEOVER contracts. Any deviation
+  needs an ADR amendment, not a queue-entry restatement (the TASK-0097
+  lesson).
 - `context-engine.md` sections 4, 5 and 10 gain "Decided by ADR-0042"
   annotations; the section 10 list stays as the record with resolved
   items marked.
@@ -252,9 +273,9 @@ backfill: no durable context-selection state exists yet.
   survival stay separate)
 - ADR-0010 (derived disposable state), ADR-0011 (continuity),
   ADR-0029 (identity-only evidence refs; option B is TASK-0175)
-- `docs/architecture/INVARIANTS.md`: INV-008, INV-016, INV-017,
-  INV-018, INV-022, INV-025, INV-030, INV-031, INV-038, INV-040,
-  INV-049, INV-071, INV-093, INV-098, INV-115
+- `docs/architecture/INVARIANTS.md`: INV-008, INV-016, INV-018,
+  INV-025, INV-038, INV-040, INV-071, INV-098, INV-115 (each cited
+  invariant is invoked in the body above)
 - `docs/security/DATA_CLASSIFICATION.md` (sensitivity levels)
 - `planning/roadmap.yaml` G9 (Provenance Envelope, finder, TAKEOVER,
   conditional entity graph)

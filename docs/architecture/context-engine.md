@@ -79,8 +79,9 @@ persistence mechanism either.
 
 ## 4. ContextItem
 
-> Field names and type contracts frozen by
-> [`ADR-0042`](./adr/ADR-0042-g9-context-engine-contract.md) (TASK-0167).
+> Field names and type contracts proposed by
+> [`ADR-0042`](./adr/ADR-0042-g9-context-engine-contract.md) (TASK-0167,
+> pending ratification).
 
 The accepted conceptual `ContextItem` carries these fields (SoT §26). This
 is an architecture contract, not a frozen type — no Rust shape and no JSON
@@ -120,8 +121,9 @@ Schema are defined here:
 
 ## 5. ContextPlan
 
-> Identity, versioning, budget shape and reason taxonomy frozen by
-> [`ADR-0042`](./adr/ADR-0042-g9-context-engine-contract.md) (TASK-0167).
+> Identity, versioning, budget shape and reason taxonomy proposed by
+> [`ADR-0042`](./adr/ADR-0042-g9-context-engine-contract.md) (TASK-0167,
+> pending ratification).
 
 For every execution the accepted plan concepts are: Required, Selected,
 Deferred, Rejected, Budget, Cache boundaries, Renderer, Reasons, Source
@@ -263,9 +265,9 @@ Full bounded-context registry: ARCHITECTURE.md §2 (not duplicated here).
 ## 10. Open Context Engine Design Items
 
 Unresolved by accepted architecture; listed, not decided. Items marked
-[ADR-0042] were decided by
-[`ADR-0042`](./adr/ADR-0042-g9-context-engine-contract.md) (TASK-0167);
-the rest stay open:
+[ADR-0042] are proposed by
+[`ADR-0042`](./adr/ADR-0042-g9-context-engine-contract.md) (TASK-0167,
+pending ratification); the rest stay open:
 
 - final ContextItem Rust shape [ADR-0042 §1: field names fixed, Rust
   syntax is the implementer's]
@@ -289,7 +291,8 @@ the rest stay open:
 - cache-boundary representation [ADR-0042 §5]
 - Context security-filter API [ADR-0042 §8]
 - tool-schema deferred-loading integration [open]
-- Token Cost measurement [ADR-0042 §6]
+- Token Cost measurement [ADR-0042 §6: counts + counter method;
+  money-cost stays G14]
 - Attention Load measurement [ADR-0042 §6]
 - exact embedding backend/model [open; embeddings stay optional
   behind a port]
