@@ -113,8 +113,9 @@ rollup (TASK-0133).
 
 Per-execution durable trace, persisted as execution evidence per
 ADR-0010: candidates considered; per-candidate decision (selected /
-deferred / rejected + ReasonCode + rule); budget snapshot; source
-revisions; renderer and cache decisions. The trace carries hashes and
+deferred / rejected + ReasonCode + rule); budget snapshot including
+the counter method; source revisions; renderer and cache decisions.
+The trace carries hashes and
 references only — never secret payloads, never rendered prompt bytes.
 It must answer "why did this file enter context?" without re-running
 selection.
@@ -232,15 +233,20 @@ mechanics; retention durations; Execution Envelope schema (a section
 
 ## Consequences
 
-- TASK-0170, TASK-0173, TASK-0174 and TASK-0175 transcribe this ADR's
-  selection vocabulary and provenance envelope instead of inventing
-  their own; TASK-0171 and TASK-0172 additionally transcribe the
-  TASK-0168 continuity and TASK-0169 TAKEOVER contracts. Any deviation
-  needs an ADR amendment, not a queue-entry restatement (the TASK-0097
-  lesson).
-- `context-engine.md` sections 4, 5 and 10 gain "Decided by ADR-0042"
-  annotations; the section 10 list stays as the record with resolved
-  items marked.
+- TASK-0170, TASK-0174 and TASK-0175 transcribe this ADR's selection
+  vocabulary and provenance envelope instead of inventing their own;
+  TASK-0171 and TASK-0172 additionally transcribe the TASK-0168
+  continuity and TASK-0169 TAKEOVER contracts. TASK-0173 transcribes
+  nothing here (it stays inside the finder seam on its TASK-0147
+  dependency) but is constrained by the section 1 namespace rule: the
+  hash16 direction applies to finder evidence ids, never to
+  `ctxitem_` ids. Any deviation needs an ADR amendment, not a
+  queue-entry restatement (the TASK-0097 lesson).
+- `context-engine.md` sections 4, 5 and 10 gain "Proposed by ADR-0042
+  (pending ratification)" annotations, flipped to "Decided by" on
+  acceptance together with a rewrite of the stale "remains open"
+  bodies; the section 10 list stays as the record with proposed items
+  marked.
 - The finder `ContentFilter` seam is unchanged; TASK-0174 replaces
   `PassthroughFilter` under section 8 totality and hash-binding rules.
 - No schema, IPC or dependency change in this task: this ADR is

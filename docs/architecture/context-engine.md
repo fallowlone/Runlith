@@ -378,9 +378,13 @@ merely because keeping them would make resumption easier.
 
 ### 12.2 Rejected patterns (with reasons)
 
-C1 four-characters-per-token estimator. Rejected: Runlith's
-`tiktoken` feature is strictly better. The heuristic survives only
-as a tokenizer-unavailable fallback, never as the budgeting basis.
+C1 four-characters-per-token estimator. Rejected as a silent basis:
+budgets are counted through the `TokenCounter` port (ADR-0042 §6),
+where an exact tokenizer is used when one ships in the deployment and
+the heuristic survives only as an explicitly labeled estimate with the
+counter method recorded. "Runlith's `tiktoken` feature" names a
+possible future counter, not a shipped one — no exact tokenizer ships
+in the repo today.
 
 Process-global in-memory registries as a system of record. Rejected:
 violates durability and single-writer invariants. Every adopted
