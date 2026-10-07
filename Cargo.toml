@@ -30,5 +30,8 @@ members = [
     "adapters/runner-macos-seatbelt",
     "crates/product-version",
     "crates/plan",
+    "crates/repo-finder",
+    "crates/repo-finder-contract",
+    "adapters/finder-local",
 ]
 resolver = "2"

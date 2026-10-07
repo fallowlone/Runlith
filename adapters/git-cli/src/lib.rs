@@ -34,6 +34,7 @@ mod cleanup;
 mod create;
 mod diff;
 mod observe;
+mod revision;
 mod runner;
 
 pub use runner::{BACKEND_REF, MAX_DETAIL_CHARS, MAX_GIT_OUTPUT_BYTES};
@@ -99,7 +100,7 @@ impl GitCli {
         self
     }
 
-    fn exe(&self) -> &OsStr {
+    pub(crate) fn exe(&self) -> &OsStr {
         &self.executable
     }
 }

@@ -20,6 +20,7 @@ plan-domain = { path = "../plan" }
 security-audit = { path = "../security-audit" }
 secrets = { path = "../secrets" }
 sha2 = "0.10"
+repo-finder = { path = "../repo-finder" }
 
 [dev-dependencies]
 fake-agent = { path = "../../adapters/fake-agent" }
