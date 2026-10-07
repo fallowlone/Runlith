@@ -36,8 +36,8 @@ use std::path::Path;
 
 use evaluation::{EvaluationPort, EvaluationRequest, EvaluationVerdict};
 use scheduler::{
-    derive_readiness, interpret, AttemptInterpretation, ExecutionPort, OrchestrationOutcome,
-    ScheduleReadiness, WorkItem,
+    derive_readiness, interpret, AdvisoryVerification, AttemptInterpretation, ExecutionPort,
+    OrchestrationOutcome, ScheduleReadiness, WorkItem,
 };
 use storage_sqlite::{SqliteStore, StorageError};
 use task_domain::{DomainError, Task, TaskId, TaskState};
@@ -45,6 +45,10 @@ use workspace::{GitPort, WorkspaceLease, WorkspaceStore};
 
 use crate::workspace_service::{WorkspaceRequest, WorkspaceService};
 
+use crate::advisory_verification::{
+    bound_advisory_reason, run_advisory_verification, AdvisoryRunner, AdvisoryStageInputs,
+    AdvisoryVerificationPolicy, AdvisoryVerificationRequest,
+};
 use crate::clock::{Clock, SystemClock};
 use crate::error::{ServiceError, ServiceResult};
 use crate::runtime_service::RuntimeService;
@@ -241,7 +245,11 @@ impl<C: Clock> OrchestrationService<C> {
         make_executor: impl FnOnce(&Task, &WorkspaceLease) -> E,
         evaluator: &impl EvaluationPort,
         current_policy: Option<&str>,
-    ) -> ServiceResult<OrchestrationOutcome> {
+        verification: Option<AdvisoryVerificationRequest<'_, C>>,
+    ) -> ServiceResult<OrchestrationOutcome>
+    where
+        C: Clone,
+    {
         // Fail before any mutation: a workspace request for another
         // execution must not claim, start, or allocate anything.
         if workspace_request.execution_id != ids.execution_id {
@@ -262,6 +270,7 @@ impl<C: Clock> OrchestrationService<C> {
                 make_executor,
                 evaluator,
                 current_policy,
+                verification,
             ),
         }
     }
@@ -447,6 +456,15 @@ impl<C: Clock> OrchestrationService<C> {
     /// conclude → submit → verify. Call exactly once per committed entry;
     /// a second call for the same execution fails on the durable
     /// attempt discipline instead of duplicating provider work silently.
+    ///
+    /// When `verification` is `Some`, every submitted attempt additionally
+    /// runs the advisory verification stage (TASK-0165): derived V1..V3
+    /// plans execute through the injected runner as evidence only. The
+    /// report attaches to the outcome and never blocks admission — not
+    /// even when the concluding boundary itself errors after the submit
+    /// committed (the stage still runs for its durable evidence while
+    /// the original error is preserved).
+    #[allow(clippy::too_many_arguments)]
     pub fn continue_workspace_cycle<G: GitPort, E: ExecutionPort>(
         &mut self,
         workspace: &mut WorkspaceService<G, C>,
@@ -455,7 +473,11 @@ impl<C: Clock> OrchestrationService<C> {
         make_executor: impl FnOnce(&Task, &WorkspaceLease) -> E,
         evaluator: &impl EvaluationPort,
         current_policy: Option<&str>,
-    ) -> ServiceResult<OrchestrationOutcome> {
+        verification: Option<AdvisoryVerificationRequest<'_, C>>,
+    ) -> ServiceResult<OrchestrationOutcome>
+    where
+        C: Clone,
+    {
         if workspace_request.execution_id != work.execution_id {
             return Err(ServiceError::Storage(StorageError::ConstraintViolation(
                 format!(
@@ -510,7 +532,141 @@ impl<C: Clock> OrchestrationService<C> {
             }
         }
         let executor = make_executor(&task, &ensured.lease);
-        self.run_workspace_attempt(work, executor, evaluator, current_policy)
+        // Durable identities for the error-path advisory check below;
+        // `run_workspace_attempt` takes `work` by value.
+        let error_path_work = work.clone();
+        match self.run_workspace_attempt(work, executor, evaluator, current_policy) {
+            Ok(outcome) => {
+                let Some(request) = verification else {
+                    return Ok(outcome);
+                };
+                let submit_work = match &outcome {
+                    OrchestrationOutcome::ExecutionSucceededAndVerified {
+                        task_id,
+                        execution_id,
+                        attempt_id,
+                        ..
+                    }
+                    | OrchestrationOutcome::ExecutionSucceededButRejected {
+                        task_id,
+                        execution_id,
+                        attempt_id,
+                        ..
+                    } => WorkItem {
+                        task_id: task_id.clone(),
+                        execution_id: execution_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                    },
+                    // No submit happened (failure, cancellation, …):
+                    // the advisory trigger never fired.
+                    _ => return Ok(outcome),
+                };
+                let AdvisoryVerificationRequest { runner, policy } = request;
+                let advisory =
+                    self.advisory_stage(workspace, &ensured.lease, runner, &policy, &submit_work);
+                Ok(attach_advisory(outcome, advisory))
+            }
+            Err(error) => {
+                // The concluding boundary may fail after the submit
+                // already committed (evaluator/verdict failure leaves the
+                // Task VERIFYING): the advisory trigger is the submit, not
+                // the outcome, so still run the stage for its durable
+                // evidence while preserving the original error.
+                let Some(request) = verification else {
+                    return Err(error);
+                };
+                let submitted = self
+                    .tasks
+                    .get_task(&error_path_work.task_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|task| {
+                        matches!(
+                            task.state(),
+                            TaskState::Submitted
+                                | TaskState::AwaitingReview
+                                | TaskState::Verifying
+                                | TaskState::RetryReady
+                                | TaskState::Completed
+                        )
+                    });
+                if submitted {
+                    let AdvisoryVerificationRequest { runner, policy } = request;
+                    let _advisory = self.advisory_stage(
+                        workspace,
+                        &ensured.lease,
+                        runner,
+                        &policy,
+                        &error_path_work,
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Advisory verification stage (TASK-0165, G9): derives the plan for
+    /// one submitted attempt from its worktree diff plus recorded attempt
+    /// effects and executes it through the injected runner. Total: every
+    /// failure — unreadable diff, unreadable effects, runner refusal or
+    /// timeout — becomes a `Failed` report. Never returns `Err` and never
+    /// mutates Task lifecycle state, so the caller cannot mistake it for
+    /// a blocking gate.
+    fn advisory_stage<G: GitPort>(
+        &mut self,
+        workspace: &WorkspaceService<G, C>,
+        lease: &WorkspaceLease,
+        runner: AdvisoryRunner<'_, C>,
+        policy: &AdvisoryVerificationPolicy,
+        work: &WorkItem,
+    ) -> AdvisoryVerification
+    where
+        C: Clone,
+    {
+        let evidence = match workspace.compute_diff(lease.id()) {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                return AdvisoryVerification::Failed {
+                    reason: bound_advisory_reason(error.to_string()),
+                };
+            }
+        };
+        let mut changed_paths =
+            Vec::with_capacity(evidence.diff.committed.len() + evidence.diff.working.len());
+        changed_paths.extend(
+            evidence
+                .diff
+                .committed
+                .iter()
+                .map(|entry| entry.path.clone()),
+        );
+        changed_paths.extend(evidence.diff.working.iter().map(|entry| entry.path.clone()));
+        let effects = match self
+            .tasks
+            .store()
+            .list_observed_effects_for_attempt(&work.execution_id, &work.attempt_id)
+        {
+            Ok(effects) => effects,
+            Err(error) => {
+                return AdvisoryVerification::Failed {
+                    reason: bound_advisory_reason(error.to_string()),
+                };
+            }
+        };
+        // A truncated diff still proceeds best-effort: advisory evidence
+        // from a partial path list is evidence, and under-selection only
+        // weakens an advisory signal. The blocking follow-up must treat
+        // truncation as inconclusive instead.
+        let captured_at = self.tasks.now_stamp();
+        let inputs = AdvisoryStageInputs {
+            policy,
+            work,
+            workspace: Path::new(lease.worktree_ref()),
+            changed_paths: &changed_paths,
+            attempt_effects: &effects,
+            captured_at: &captured_at,
+        };
+        run_advisory_verification(runner, &inputs)
     }
 
     /// Durable entry half of a cycle: readiness, then ONE atomic
@@ -794,6 +950,12 @@ impl<C: Clock> OrchestrationService<C> {
                             task_id: task_id.clone(),
                             execution_id: execution_id.clone(),
                             attempt_id: attempt_id.clone(),
+                            // The concluding boundary never runs the
+                            // advisory stage itself: `finish` is shared by
+                            // the workspace-less `schedule` path, which has
+                            // no workspace to execute against. The workspace
+                            // cycle attaches the report post-hoc.
+                            advisory: None,
                         })
                     }
                     EvaluationVerdict::Rejected => {
@@ -803,6 +965,9 @@ impl<C: Clock> OrchestrationService<C> {
                             task_id: task_id.clone(),
                             execution_id: execution_id.clone(),
                             attempt_id: attempt_id.clone(),
+                            // As above: no advisory stage inside `finish`;
+                            // the workspace cycle attaches the report.
+                            advisory: None,
                         })
                     }
                 }
@@ -846,6 +1011,40 @@ pub(crate) fn derive_task_readiness(
 /// maximum prerequisite count (each contributing value is itself capped
 /// by the `Prerequisite` vocabulary).
 const MAX_BLOCKER_REASON_LEN: usize = 2048;
+
+/// Attaches an advisory-stage report to a submit-path outcome. Total:
+/// non-submit variants pass through untouched (the stage never ran for
+/// them, and absence of the field value is the correct record).
+fn attach_advisory(
+    outcome: OrchestrationOutcome,
+    advisory: AdvisoryVerification,
+) -> OrchestrationOutcome {
+    match outcome {
+        OrchestrationOutcome::ExecutionSucceededAndVerified {
+            task_id,
+            execution_id,
+            attempt_id,
+            advisory: _,
+        } => OrchestrationOutcome::ExecutionSucceededAndVerified {
+            task_id,
+            execution_id,
+            attempt_id,
+            advisory: Some(advisory),
+        },
+        OrchestrationOutcome::ExecutionSucceededButRejected {
+            task_id,
+            execution_id,
+            attempt_id,
+            advisory: _,
+        } => OrchestrationOutcome::ExecutionSucceededButRejected {
+            task_id,
+            execution_id,
+            attempt_id,
+            advisory: Some(advisory),
+        },
+        other => other,
+    }
+}
 
 /// Composes the bounded, human-readable blocker report from positively
 /// failed preflight findings (TASK-0135). Declaration order is preserved;

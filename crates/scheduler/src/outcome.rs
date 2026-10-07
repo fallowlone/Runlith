@@ -8,6 +8,38 @@
 use agent_runtime::{AttemptId, AttemptOutcome, ExecutionId};
 use task_domain::{TaskId, TaskState};
 
+/// Why the advisory verification stage (TASK-0165) did not execute.
+/// No process ran and no effects were recorded in any of these cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvisorySkipReason {
+    /// The derived level was V0 — a docs-only or empty change. Skipped by
+    /// construction: the runner refuses V0 plans, so there is nothing to
+    /// execute.
+    LevelV0,
+    /// A V1..V3 level derived no commands (unknown ecosystem — commands
+    /// are never fabricated). Nothing to execute.
+    EmptyPlan,
+}
+
+/// Caller-visible report of the advisory verification stage (TASK-0165,
+/// G9): what the cycle's automatic verification-plan run concluded.
+/// Evidence for the caller, never Task lifecycle authority — the stage
+/// feeds the repair loop through recorded observed effects and never
+/// blocks admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdvisoryVerification {
+    /// The stage did not execute.
+    Skipped { reason: AdvisorySkipReason },
+    /// The derived V1..V3 plan executed to completion. Per-command
+    /// `ProcessExit` effects are readable from their canonical owner.
+    Completed { commands_executed: u32 },
+    /// The stage failed before or during execution (unresolvable
+    /// executable, refused launch, timeout, …). `reason` is bounded
+    /// opaque detail — never command output bytes. Commands that ran
+    /// still recorded their effects, including timeouts.
+    Failed { reason: String },
+}
+
 /// What one bounded `schedule` cycle concluded. At most one Execution and
 /// one Attempt are ever created per cycle; there is no retry loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +69,10 @@ pub enum OrchestrationOutcome {
         execution_id: ExecutionId,
         /// Durable attempt concluded `Succeeded` by this cycle.
         attempt_id: AttemptId,
+        /// Advisory verification-stage report (TASK-0165). `None` when the
+        /// cycle ran without a verification context (no workspace to
+        /// execute against) — the stage does not exist there.
+        advisory: Option<AdvisoryVerification>,
     },
     /// Executor evidence was valid and the Attempt stays `Succeeded`, but
     /// the independent evaluator rejected it: the trusted rejection
@@ -49,6 +85,10 @@ pub enum OrchestrationOutcome {
         execution_id: ExecutionId,
         /// Durable attempt (still `Succeeded`) created by this cycle.
         attempt_id: AttemptId,
+        /// Advisory verification-stage report (TASK-0165). `None` when the
+        /// cycle ran without a verification context (no workspace to
+        /// execute against) — the stage does not exist there.
+        advisory: Option<AdvisoryVerification>,
     },
     /// The executor behavior concluded the Attempt terminally without
     /// submission (failure, timeout, partial, …). Exactly one Attempt was

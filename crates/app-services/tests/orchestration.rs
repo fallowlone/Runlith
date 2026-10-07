@@ -233,6 +233,7 @@ fn verified_end_to_end_flow_survives_db_reopen() {
             task_id: task_id.clone(),
             execution_id: ExecutionId::new("E-1").unwrap(),
             attempt_id: AttemptId::new("A-1").unwrap(),
+            advisory: None,
         }
     );
     assert_eq!(executor.call_count(), 1);
@@ -340,6 +341,7 @@ fn rejected_evaluation_preserves_succeeded_attempt_history() {
             task_id: task_id.clone(),
             execution_id: ExecutionId::new("E-1").unwrap(),
             attempt_id: AttemptId::new("A-1").unwrap(),
+            advisory: None,
         }
     );
     drop(service);

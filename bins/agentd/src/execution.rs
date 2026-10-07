@@ -3553,6 +3553,10 @@ pub fn run_background(job: BackgroundJob) {
                 "agentd: execution {execution_id} concluded: {}",
                 outcome_tag(&outcome)
             );
+            eprintln!(
+                "agentd: execution {execution_id} advisory verification: {}",
+                advisory_tag(&outcome)
+            );
         }
         Err(detail) => {
             composition.cancels.release(&execution_id, owner);
@@ -3616,6 +3620,34 @@ fn run_background_inner(
     let mut workspace =
         WorkspaceService::open(&composition.db_path, git, root, app_services::SystemClock)
             .map_err(|error| format!("open workspace service: {error}"))?;
+    // TASK-0165 (G9): the advisory verification stage runs inside the
+    // workspace cycle below. The factory builds the runner on demand —
+    // and the stage resolves it only when a plan will actually execute,
+    // so lease failures, provider failures, and skipped plans never pay
+    // construction. Same confinement posture as provider launches (strict
+    // requirements, Provider purpose — verification needs no candidate
+    // ancestor grant): if the sandbox cannot run the toolchain, the
+    // runner fails closed and the cycle records advisory failure
+    // evidence instead of silently downgrading or blocking.
+    let verification_db = composition.db_path.clone();
+    let mut build_verification_runner =
+        move || -> Result<app_services::VerificationRunner<app_services::SystemClock>, String> {
+            let store = storage_sqlite::SqliteStore::open(&verification_db)
+                .map_err(|error| format!("open verification store: {error}"))?;
+            let security = G6SecurityService::open(&verification_db, app_services::SystemClock)
+                .map_err(|error| format!("open verification security: {error}"))?;
+            let backend =
+                production_runner_backend(Vec::new(), Vec::new(), RunnerLaunchPurpose::Provider)?;
+            let resolve: app_services::ExecutableResolver =
+                Arc::new(app_services::default_resolve_verification_program);
+            Ok(app_services::VerificationRunner::new(
+                store,
+                security,
+                backend,
+                IsolationRequirements::new(true, true, true),
+                resolve,
+            ))
+        };
     let tracker = composition.tracker.clone();
     let executable = composition.resolved_provider_executable()?;
     let db_path = composition.db_path.clone();
@@ -3734,6 +3766,13 @@ fn run_background_inner(
             },
             &selected_evaluator,
             current_policy.as_deref(),
+            Some(app_services::AdvisoryVerificationRequest {
+                runner: app_services::AdvisoryRunner::Build(&mut build_verification_runner),
+                policy: app_services::AdvisoryVerificationPolicy {
+                    timeout: Duration::from_secs(app_services::DEFAULT_VERIFICATION_TIMEOUT_SECS),
+                    per_stream_cap: app_services::DEFAULT_STREAM_CAP_BYTES,
+                },
+            }),
         )
         .map_err(|error| format!("orchestration cycle: {error}"));
 
@@ -3793,6 +3832,29 @@ fn outcome_tag(outcome: &OrchestrationOutcome) -> &'static str {
             "EXECUTION_SUCCEEDED_BUT_REJECTED"
         }
         OrchestrationOutcome::BlockedByPrerequisite { .. } => "BLOCKED_BY_PREREQUISITE",
+    }
+}
+
+/// Short advisory-stage tag for daemon logs: proves the TASK-0165 stage
+/// ran and what it concluded. Failure reasons are bounded opaque detail
+/// (never command output) via the shared truncation.
+fn advisory_tag(outcome: &OrchestrationOutcome) -> String {
+    let advisory = match outcome {
+        OrchestrationOutcome::ExecutionSucceededAndVerified { advisory, .. }
+        | OrchestrationOutcome::ExecutionSucceededButRejected { advisory, .. } => advisory,
+        _ => return "stage-absent".to_owned(),
+    };
+    match advisory {
+        None => "stage-absent".to_owned(),
+        Some(app_services::AdvisoryVerification::Skipped { reason }) => {
+            format!("skipped:{reason:?}")
+        }
+        Some(app_services::AdvisoryVerification::Completed { commands_executed }) => {
+            format!("completed:{commands_executed}")
+        }
+        Some(app_services::AdvisoryVerification::Failed { reason }) => {
+            format!("failed:{}", truncate_detail(reason))
+        }
     }
 }
 
