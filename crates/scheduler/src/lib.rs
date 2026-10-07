@@ -32,5 +32,5 @@ mod readiness;
 
 pub use execution_port::{ExecutionPort, ExecutionProblem, WorkEvidence, WorkItem};
 pub use interpret::{interpret, AttemptInterpretation};
-pub use outcome::OrchestrationOutcome;
+pub use outcome::{AdvisorySkipReason, AdvisoryVerification, OrchestrationOutcome};
 pub use readiness::{derive_readiness, ScheduleReadiness};
