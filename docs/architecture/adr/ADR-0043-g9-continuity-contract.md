@@ -165,8 +165,8 @@ Readers refuse an unknown checkpoint major version (fail-closed,
 rule CR-10); minor versions must stay backward compatible.
 Supersession runs through `parent_checkpoint`: superseded
 checkpoints stay readable — supersession never deletes. Retention
-and cleanup durations are separate privacy/storage work and stay
-open.
+and cleanup durations are owned by privacy/storage policy (values
+open); enforcement mechanics are TASK-0171's.
 
 ### 13. Privacy bounds
 
@@ -266,8 +266,8 @@ are TASK-0171's); Memory truth shapes (owning gate).
 - `continuity.md` sections 2, 4, 5, 6 and 8 gain "Proposed by
   ADR-0043 (pending ratification)" annotations, flipped to "Decided
   by" on acceptance together with a rewrite of the stale
-  "remains open" bodies in sections 2 and 5; the section 8 list
-  stays as the record with proposed items marked.
+  pre-ratification bodies in sections 2, 5 and 6; the section 8
+  list stays as the record with proposed items marked.
 - No schema, IPC or dependency change in this task: this ADR is
   contract only. New tables are expected in TASK-0171.
 

@@ -186,7 +186,9 @@ rewrites domain history, and no continuity event taxonomy is created.
 
 Context, history, and checkpoints remain subject to Data Classification
 and Privacy Architecture: SECRET, PII, and raw tool payloads must not be
-preserved merely because keeping them would make resumption easier.
+preserved merely because keeping them would make resumption easier
+(prior to ADR-0043 ratification; on acceptance SECRET is never
+persisted — opaque refs only — per ADR-0043 §13).
 Exact retention and cleanup policies are separate privacy/storage work.
 
 Rendered context packages are disposable; Context Plans, checkpoints, and
@@ -239,7 +241,8 @@ pending ratification); the rest stay open:
   trigger/gating semantics; call mechanics are TASK-0171's]
 - current-working-set definition [ADR-0043 §5]
 - working-notes representation [ADR-0043 §6]
-- history reference format [ADR-0043 §7]
+- history reference format [ADR-0043 §7; search/read Rust shapes
+  are TASK-0171's]
 - history index/storage implementation [open]
 - history result ranking [ADR-0043 §7 signal disclosure; weight
   tuning is TASK-0171's]
@@ -261,4 +264,5 @@ tables; checkpoint schema; history index implementation; Memory Engine
 implementation; Provider adapter implementation; Checkpoint JSON Schema;
 provider-specific compaction protocol; retention durations; migration
 resume protocol implementation. This list scopes this document only —
-decisions themselves may live in accepted ADRs (e.g. ADR-0043).
+decisions themselves may live in accepted ADRs (e.g. ADR-0043 once
+accepted).
