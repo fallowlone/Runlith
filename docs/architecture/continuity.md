@@ -48,6 +48,10 @@ without making any provider-native state authoritative.
 
 ## 2. Context Epoch
 
+> Epoch identity and chain scope proposed by
+> [`ADR-0043`](./adr/ADR-0043-g9-continuity-contract.md) (TASK-0168,
+> pending ratification).
+
 Work is organized as bounded active context windows:
 
 ```text
@@ -78,6 +82,10 @@ knowledge boundaries. Continuity may retrieve Memory; Continuity is not
 Memory itself.
 
 ## 4. Rollover algorithm
+
+> Transaction, verification, threshold and crash semantics proposed by
+> [`ADR-0043`](./adr/ADR-0043-g9-continuity-contract.md) (TASK-0168,
+> pending ratification).
 
 The accepted sequence (SoT §33):
 
@@ -122,6 +130,10 @@ lifecycle outcome for a failed checkpoint is invented — resulting
 execution behavior belongs to later implementation and recovery policy.
 
 ## 5. Checkpoints, history, and provider migration
+
+> Checkpoint schema, history contract and migration protocol proposed
+> by [`ADR-0043`](./adr/ADR-0043-g9-continuity-contract.md) (TASK-0168,
+> pending ratification).
 
 A checkpoint is structured continuity state sufficient to continue work
 without treating the full previous transcript as authoritative state. It
@@ -203,29 +215,36 @@ Full bounded-context registry: ARCHITECTURE.md §2 (not duplicated here).
 
 ## 8. Open Context Continuity Design Items
 
-Unresolved by accepted architecture; listed, not decided:
+Unresolved by accepted architecture; listed, not decided. Items marked
+[ADR-0043] are proposed by
+[`ADR-0043`](./adr/ADR-0043-g9-continuity-contract.md) (TASK-0168,
+pending ratification); the rest stay open:
 
-- Context Epoch ID format
-- checkpoint identity format
-- checkpoint schema
-- checkpoint persistence format
-- checkpoint transaction API
-- checkpoint verification criteria
-- soft/hard rollover thresholds
-- Budget Monitor ownership/API
-- current-working-set definition
-- working-notes representation
-- history reference format
-- history index/storage implementation
-- history result ranking
-- history retention/cleanup
-- provider Session ↔ Epoch linkage
-- crash during checkpoint semantics
-- crash between checkpoint commit and new-epoch activation
-- concurrent execution/epoch semantics
-- provider migration resume protocol
-- checkpoint version compatibility
-- checkpoint supersession semantics
+- Context Epoch ID format [ADR-0043 §1, with chain scope]
+- checkpoint identity format [ADR-0043 §2]
+- checkpoint schema [ADR-0043 §2]
+- checkpoint persistence format [open; exact tables are TASK-0171's]
+- checkpoint transaction API [ADR-0043 §3]
+- checkpoint verification criteria [ADR-0043 §3]
+- soft/hard rollover thresholds [ADR-0042 budgets as source, ADR-0043
+  §4 gating semantics]
+- Budget Monitor ownership/API [ADR-0043 §4 ownership and
+  trigger/gating semantics; call mechanics are TASK-0171's]
+- current-working-set definition [ADR-0043 §5]
+- working-notes representation [ADR-0043 §6]
+- history reference format [ADR-0043 §7]
+- history index/storage implementation [open]
+- history result ranking [ADR-0043 §7 signal disclosure; weight
+  tuning is TASK-0171's]
+- history retention/cleanup [open; separate privacy/storage work]
+- provider Session ↔ Epoch linkage [ADR-0043 §8]
+- crash during checkpoint semantics [ADR-0043 §9]
+- crash between checkpoint commit and new-epoch activation [ADR-0043
+  §9]
+- concurrent execution/epoch semantics [ADR-0043 §10]
+- provider migration resume protocol [ADR-0043 §11]
+- checkpoint version compatibility [ADR-0043 §12]
+- checkpoint supersession semantics [ADR-0043 §12]
 
 ## 9. Non-goals
 
