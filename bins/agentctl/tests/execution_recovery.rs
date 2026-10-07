@@ -496,6 +496,22 @@ fn daemon_restart_recovers_stranded_entry_through_resume() {
         "provider success verifies, never completes: {}",
         stdout(&task_get)
     );
+    // Quiescence: background work (evidence persistence, the TASK-0165
+    // advisory stage) legitimately outlives conclusion, so cancel must
+    // observe liveness release instead of racing it.
+    let release = Instant::now() + Duration::from_secs(90);
+    loop {
+        let status = sandbox.agentctl(&["execution", "status", &execution]);
+        assert!(status.status.success());
+        let out = stdout(&status);
+        if out.contains("live=false") {
+            break;
+        }
+        if Instant::now() >= release {
+            panic!("resumed execution never released liveness: {out:?}");
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
     let again = sandbox.agentctl(&["execution", "cancel", &execution]);
     assert!(stdout(&again).contains("ALREADY_CONCLUDED"));
     stop_daemon(daemon);

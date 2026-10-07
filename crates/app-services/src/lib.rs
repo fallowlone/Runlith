@@ -9,6 +9,7 @@
 //! capability (ADR-0022). Neither service decides scheduling, and neither
 //! grants Task completion outside the trusted evaluation path.
 
+mod advisory_verification;
 mod approval_service;
 mod binding_service;
 mod candidate_verdict;
@@ -35,6 +36,9 @@ mod verification_execution;
 mod verification_levels;
 mod workspace_service;
 
+pub use advisory_verification::{
+    AdvisoryRunner, AdvisoryVerificationPolicy, AdvisoryVerificationRequest,
+};
 pub use approval_service::ApprovalService;
 pub use binding_service::{
     BindingService, BindingServiceError, BindingServiceResult, OperatorBindingInput,
@@ -104,5 +108,6 @@ pub use workspace_service::{
 // bounded outcome). Scheduling mechanism itself stays in `scheduler`;
 pub use evaluation::{EvaluationPort, EvaluationRequest, EvaluationVerdict};
 pub use scheduler::{
-    ExecutionPort, ExecutionProblem, OrchestrationOutcome, WorkEvidence, WorkItem,
+    AdvisorySkipReason, AdvisoryVerification, ExecutionPort, ExecutionProblem,
+    OrchestrationOutcome, WorkEvidence, WorkItem,
 };
