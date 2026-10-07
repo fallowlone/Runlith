@@ -1,0 +1,11 @@
+[package]
+name = "repo-finder"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "repo_finder"
+path = "src/lib.rs"
+
+[dependencies]
+sha2 = "0.10"

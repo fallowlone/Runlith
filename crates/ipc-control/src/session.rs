@@ -26,8 +26,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::error::{ControlError, ControlResult};
 use crate::negotiation::{
     default_client_build_version, evaluate_handshake, rejection_for, validate_business_allowed,
-    validate_execution_allowed, validate_human_decision_allowed, validate_planning_allowed,
-    validate_policy_allowed, validate_task_authoring_allowed, ServerConfig,
+    validate_execution_allowed, validate_finder_allowed, validate_human_decision_allowed,
+    validate_planning_allowed, validate_policy_allowed, validate_task_authoring_allowed,
+    ServerConfig,
 };
 
 /// Deadline for a full client/server handshake exchange.
@@ -77,6 +78,8 @@ pub enum ReadyRequest {
     Planning(ipc_contracts::proto::PlanningCoreRequest),
     /// Decoded G7 Task planning-metadata authoring on a version-6 session.
     TaskAuthoring(ipc_contracts::proto::TaskAuthoringCoreRequest),
+    /// Decoded G9 repository finder request on a version-7 session.
+    Finder(ipc_contracts::proto::FinderCoreRequest),
 }
 
 /// Client-side handshake outcome.
@@ -207,6 +210,16 @@ impl ClientConfig {
             .push(ipc_contracts::IPC_PROTOCOL_VERSION_V6);
         config
     }
+
+    /// G9 finder client profile. Offers every version through v7 and
+    /// requires `finder_allowed` before use.
+    pub fn finder_default(client_kind: impl Into<String>) -> Self {
+        let mut config = Self::task_authoring_default(client_kind);
+        config
+            .supported_versions
+            .push(ipc_contracts::IPC_PROTOCOL_VERSION_V7);
+        config
+    }
 }
 
 /// Client side of the bootstrap control protocol.
@@ -294,6 +307,12 @@ where
     pub fn task_authoring_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_task_authoring_allowed)
+    }
+
+    #[must_use]
+    pub fn finder_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_finder_allowed)
     }
 
     /// Unwraps into the framed transport for lifecycle-owned exchanges
@@ -534,6 +553,28 @@ where
         }
     }
 
+    /// Protocol framing only: encodes the `FinderCoreResponse` inside
+    /// the `ControlResponse.finder_core` envelope and writes the frame.
+    /// Executes nothing — dispatch belongs to `agentd`. Valid only after
+    /// a successful handshake; the caller guarantees the session
+    /// negotiated version 7 (only v7 sessions can observe `Finder`).
+    pub async fn respond_finder(
+        &mut self,
+        response: ipc_contracts::proto::FinderCoreResponse,
+    ) -> ControlResult<()> {
+        self.require_ready()?;
+        let frame = bytes::Bytes::from(
+            ControlResponse {
+                payload: Some(control_response::Payload::FinderCore(response)),
+            }
+            .encode_to_vec(),
+        );
+        match self.transport.write_frame(frame).await {
+            Ok(()) => Ok(()),
+            Err(error) => self.fail(error.into()),
+        }
+    }
+
     /// Sends the existing `ShutdownResponse` acknowledgement for a
     /// previously observed [`ReadyRequest::Shutdown`].
     ///
@@ -603,6 +644,12 @@ where
     pub fn task_authoring_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_task_authoring_allowed)
+    }
+
+    #[must_use]
+    pub fn finder_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_finder_allowed)
     }
 
     /// Reads the first request (within [`HANDSHAKE_TIMEOUT`]), requires it
@@ -779,6 +826,15 @@ where
                     .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
                 match validate_task_authoring_allowed(negotiated) {
                     Ok(()) => Ok(ReadyRequest::TaskAuthoring(request)),
+                    Err(error) => self.fail(error),
+                }
+            }
+            Some(control_request::Payload::FinderCore(request)) => {
+                let negotiated = self
+                    .negotiated_version
+                    .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
+                match validate_finder_allowed(negotiated) {
+                    Ok(()) => Ok(ReadyRequest::Finder(request)),
                     Err(error) => self.fail(error),
                 }
             }
@@ -1511,11 +1567,12 @@ mod tests {
         )
     }
 
-    async fn g7_session_after_handshake(
+    async fn session_after_handshake(
         versions: Vec<u32>,
+        config: ServerConfig,
     ) -> (FramedTransport<Duplex>, ServerSession<Duplex>) {
         let (mut raw_client, raw_server) = raw_pair();
-        let mut server = ServerSession::new(raw_server, ServerConfig::g7_default());
+        let mut server = ServerSession::new(raw_server, config);
         raw_client
             .write_frame(handshake_request_frame(HandshakeRequest {
                 supported_protocol_versions: versions,
@@ -1527,6 +1584,36 @@ mod tests {
             .expect("write handshake");
         server.run_handshake().await.expect("ready");
         (raw_client, server)
+    }
+
+    async fn g7_session_after_handshake(
+        versions: Vec<u32>,
+    ) -> (FramedTransport<Duplex>, ServerSession<Duplex>) {
+        session_after_handshake(versions, ServerConfig::g7_default()).await
+    }
+
+    async fn g9_session_after_handshake(
+        versions: Vec<u32>,
+    ) -> (FramedTransport<Duplex>, ServerSession<Duplex>) {
+        session_after_handshake(versions, ServerConfig::g9_default()).await
+    }
+
+    fn finder_core_frame() -> Bytes {
+        use ipc_contracts::proto::{finder_core_request, FinderCoreRequest, FinderQueryRequest};
+        Bytes::from(
+            ControlRequest {
+                payload: Some(control_request::Payload::FinderCore(FinderCoreRequest {
+                    payload: Some(finder_core_request::Payload::Query(FinderQueryRequest {
+                        repository_path: "/repo".to_owned(),
+                        text: "needle".to_owned(),
+                        scope: String::new(),
+                        limit: 10,
+                        continuation: String::new(),
+                    })),
+                })),
+            }
+            .encode_to_vec(),
+        )
     }
 
     #[tokio::test]
@@ -1568,6 +1655,48 @@ mod tests {
         assert_eq!(config.supported_versions, vec![0, 1, 2, 3, 4, 5, 6]);
         let historical = ClientConfig::human_decision_default(CLIENT_KIND_AGENTCTL);
         assert_eq!(historical.supported_versions, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[tokio::test]
+    async fn v6_session_rejects_finder_and_v7_surfaces_it_without_executing() {
+        let (mut raw_client, mut server) =
+            g9_session_after_handshake(vec![0, 1, 2, 3, 4, 5, 6]).await;
+        assert_eq!(server.negotiated_version(), Some(6));
+        assert!(server.task_authoring_allowed());
+        assert!(!server.finder_allowed());
+        raw_client
+            .write_frame(finder_core_frame())
+            .await
+            .expect("write");
+        assert!(matches!(
+            server.next_request().await,
+            Err(ControlError::UnsupportedProtocol {
+                negotiated: 6,
+                required: 7
+            })
+        ));
+
+        let (mut raw_client, mut server) =
+            g9_session_after_handshake(vec![0, 1, 2, 3, 4, 5, 6, 7]).await;
+        assert_eq!(server.negotiated_version(), Some(7));
+        assert!(server.finder_allowed());
+        assert!(server.task_authoring_allowed());
+        raw_client
+            .write_frame(finder_core_frame())
+            .await
+            .expect("write");
+        assert!(matches!(
+            server.next_request().await,
+            Ok(ReadyRequest::Finder(_))
+        ));
+    }
+
+    #[test]
+    fn finder_client_profile_extends_the_g7_profile_with_v7() {
+        let config = ClientConfig::finder_default(CLIENT_KIND_AGENTCTL);
+        assert_eq!(config.supported_versions, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        let historical = ClientConfig::task_authoring_default(CLIENT_KIND_AGENTCTL);
+        assert_eq!(historical.supported_versions, vec![0, 1, 2, 3, 4, 5, 6]);
     }
 
     #[tokio::test]

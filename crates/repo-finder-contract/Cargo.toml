@@ -1,0 +1,11 @@
+[package]
+name = "repo-finder-contract"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "repo_finder_contract"
+path = "src/lib.rs"
+
+[dependencies]
+repo-finder = { path = "../repo-finder" }
