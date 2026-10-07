@@ -22,7 +22,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use app_services::{ApprovalService, HumanDecisionService, SystemClock, TaskService};
+use app_services::{
+    ApprovalService, FinderService, HumanDecisionService, SystemClock, TaskService,
+};
 use bytes::BytesMut;
 #[cfg(unix)]
 use ipc_control::{ClientConfig, ClientSession};
@@ -38,6 +40,7 @@ pub mod approval;
 pub mod data_dir;
 pub mod dispatch;
 pub mod execution;
+pub mod finder;
 pub mod human_decision;
 pub mod planning;
 
@@ -183,10 +186,11 @@ impl DaemonConfig {
     /// G5 daemon configuration (TASK-0047): protocols `[0, 1, 2]` with
     /// the durable database at `path`, enabling the execution surface
     /// (`run`/`status`/`cancel`) through the real-provider composition.
-    /// Production default from TASK-0047 on.
+    /// Production default from TASK-0047 on; G9 negotiates through v7
+    /// (repository finder) while preserving every older surface.
     pub fn with_execution(path: impl Into<PathBuf>) -> Self {
         Self {
-            server_config: ServerConfig::g7_default(),
+            server_config: ServerConfig::g9_default(),
             database_path: Some(path.into()),
             provider_executable: None,
         }
@@ -212,11 +216,17 @@ pub type BusinessHandle = Arc<tokio::sync::Mutex<TaskService>>;
 pub type ApprovalHandle = Arc<tokio::sync::Mutex<ApprovalService<SystemClock>>>;
 pub type HumanDecisionHandle = Arc<tokio::sync::Mutex<HumanDecisionService<SystemClock>>>;
 
+/// Shared trusted G9 finder service. Stateless and `Sync`: no mutex,
+/// no database — every handle and token is self-describing, so pages
+/// and reopens serve from any connection concurrently.
+pub type FinderHandle = Arc<FinderService>;
+
 struct ConnectionServices {
     business: Option<BusinessHandle>,
     execution: Option<execution::ExecutionHandle>,
     approval: Option<ApprovalHandle>,
     human_decision: Option<HumanDecisionHandle>,
+    finder: FinderHandle,
 }
 
 /// Terminal outcome of a daemon run.
@@ -290,6 +300,17 @@ fn open_approval_service(config: &DaemonConfig) -> Result<Option<ApprovalHandle>
             other => DaemonError::DataDir(format!("approval service startup failed: {other}")),
         })?,
     ))))
+}
+
+/// Opens the finder composition: lexical engine plus Git revision
+/// backend behind the trusted service. No database, no provider, no
+/// I/O — always present, including on control-only daemons.
+fn open_finder() -> FinderHandle {
+    let revision: Arc<dyn repo_finder::RepoRevisionPort> = Arc::new(git_cli::GitCli::new());
+    let engine = Arc::new(finder_local::LocalFinder::new(revision.clone()));
+    let search: Arc<dyn repo_finder::RepoSearchPort> = engine.clone();
+    let read: Arc<dyn repo_finder::RepoReadPort> = engine;
+    Arc::new(FinderService::new(search, read, revision))
 }
 
 fn open_human_decision_service(
@@ -460,6 +481,22 @@ where
                     return ConnectionOutcome::Ended;
                 }
             }
+            Ok(ReadyRequest::Finder(request)) => {
+                // Scans are seconds-long filesystem work: off the serve
+                // loop onto the blocking pool (safe on either runtime
+                // flavor), so other connections never stall behind one.
+                let service = services.finder.clone();
+                let response =
+                    match tokio::task::spawn_blocking(move || finder::dispatch(&service, request))
+                        .await
+                    {
+                        Ok(response) => response,
+                        Err(_) => finder::failed(),
+                    };
+                if session.respond_finder(response).await.is_err() {
+                    return ConnectionOutcome::Ended;
+                }
+            }
             Err(_) => return ConnectionOutcome::Ended,
         }
     }
@@ -484,6 +521,7 @@ async fn serve_streams<S>(
     execution: Option<execution::ExecutionHandle>,
     approval: Option<ApprovalHandle>,
     human_decision: Option<HumanDecisionHandle>,
+    finder: FinderHandle,
 ) -> RunOutcome
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -518,6 +556,7 @@ where
                 let execution = execution.clone();
                 let approval = approval.clone();
                 let human_decision = human_decision.clone();
+                let finder = finder.clone();
                 joins.spawn(async move {
                     let _permit = permit;
                     serve_connection(
@@ -528,6 +567,7 @@ where
                             execution,
                             approval,
                             human_decision,
+                            finder,
                         },
                         sender,
                         prefetched,
@@ -728,6 +768,7 @@ mod unix_daemon {
             open_execution(&config),
             approval,
             human_decision,
+            open_finder(),
         )
         .await;
         if let Some(snapshot) = owned.as_ref() {
@@ -828,6 +869,7 @@ mod windows_daemon {
             open_execution(&config),
             approval,
             human_decision,
+            super::open_finder(),
         )
         .await)
     }

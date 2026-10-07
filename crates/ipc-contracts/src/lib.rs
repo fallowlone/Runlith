@@ -42,14 +42,18 @@ pub const IPC_PROTOCOL_VERSION_V5: u32 = 5;
 /// planning metadata through the bounded `task_authoring_core` envelope.
 pub const IPC_PROTOCOL_VERSION_V6: u32 = 6;
 
+/// G9 repository finder (TASK-0147): bounded search pages and span
+/// reopens through the `finder_core` envelope.
+pub const IPC_PROTOCOL_VERSION_V7: u32 = 7;
+
 /// Current IPC protocol version: the highest version this build speaks.
-pub const IPC_PROTOCOL_VERSION: u32 = IPC_PROTOCOL_VERSION_V6;
+pub const IPC_PROTOCOL_VERSION: u32 = IPC_PROTOCOL_VERSION_V7;
 
 /// Alias making "current" explicit at call sites.
-pub const IPC_PROTOCOL_VERSION_CURRENT: u32 = IPC_PROTOCOL_VERSION_V6;
+pub const IPC_PROTOCOL_VERSION_CURRENT: u32 = IPC_PROTOCOL_VERSION_V7;
 
 /// Every protocol version this build negotiates, oldest first.
-pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 7] = [
+pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 8] = [
     IPC_PROTOCOL_VERSION_V0,
     IPC_PROTOCOL_VERSION_V1,
     IPC_PROTOCOL_VERSION_V2,
@@ -57,6 +61,7 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 7] = [
     IPC_PROTOCOL_VERSION_V4,
     IPC_PROTOCOL_VERSION_V5,
     IPC_PROTOCOL_VERSION_V6,
+    IPC_PROTOCOL_VERSION_V7,
 ];
 
 /// Maximum length of a client-supplied human/request `reason` (block
@@ -104,6 +109,7 @@ pub fn supports_business_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V4
             | IPC_PROTOCOL_VERSION_V5
             | IPC_PROTOCOL_VERSION_V6
+            | IPC_PROTOCOL_VERSION_V7
     )
 }
 
@@ -119,6 +125,7 @@ pub fn supports_execution_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V4
             | IPC_PROTOCOL_VERSION_V5
             | IPC_PROTOCOL_VERSION_V6
+            | IPC_PROTOCOL_VERSION_V7
     )
 }
 
@@ -132,6 +139,7 @@ pub fn supports_policy_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V4
             | IPC_PROTOCOL_VERSION_V5
             | IPC_PROTOCOL_VERSION_V6
+            | IPC_PROTOCOL_VERSION_V7
     )
 }
 
@@ -142,7 +150,10 @@ pub fn supports_policy_ipc(negotiated_version: u32) -> bool {
 pub fn supports_human_decision_ipc(negotiated_version: u32) -> bool {
     matches!(
         negotiated_version,
-        IPC_PROTOCOL_VERSION_V4 | IPC_PROTOCOL_VERSION_V5 | IPC_PROTOCOL_VERSION_V6
+        IPC_PROTOCOL_VERSION_V4
+            | IPC_PROTOCOL_VERSION_V5
+            | IPC_PROTOCOL_VERSION_V6
+            | IPC_PROTOCOL_VERSION_V7
     )
 }
 
@@ -152,15 +163,26 @@ pub fn supports_human_decision_ipc(negotiated_version: u32) -> bool {
 pub fn supports_planning_ipc(negotiated_version: u32) -> bool {
     matches!(
         negotiated_version,
-        IPC_PROTOCOL_VERSION_V5 | IPC_PROTOCOL_VERSION_V6
+        IPC_PROTOCOL_VERSION_V5 | IPC_PROTOCOL_VERSION_V6 | IPC_PROTOCOL_VERSION_V7
     )
 }
 
 /// Task planning-metadata authoring is new authority and is never enabled for
 /// v0-v5, whose `CreateTaskRequest` keeps its original objective-only shape.
+/// Version 7 preserves it.
 #[must_use]
 pub fn supports_task_authoring_ipc(negotiated_version: u32) -> bool {
-    negotiated_version == IPC_PROTOCOL_VERSION_V6
+    matches!(
+        negotiated_version,
+        IPC_PROTOCOL_VERSION_V6 | IPC_PROTOCOL_VERSION_V7
+    )
+}
+
+/// Repository finder pages and span reopens are new authority and are
+/// never enabled below v7.
+#[must_use]
+pub fn supports_finder_ipc(negotiated_version: u32) -> bool {
+    negotiated_version == IPC_PROTOCOL_VERSION_V7
 }
 
 #[cfg(test)]
@@ -184,16 +206,17 @@ mod tests {
     }
 
     #[test]
-    fn historical_versions_remain_supported_and_v6_is_current() {
+    fn historical_versions_remain_supported_and_v7_is_current() {
         assert_eq!(IPC_PROTOCOL_VERSION_V0, 0);
         assert_eq!(IPC_PROTOCOL_VERSION_V1, 1);
         assert_eq!(IPC_PROTOCOL_VERSION_V2, 2);
         assert_eq!(IPC_PROTOCOL_VERSION_V3, 3);
         assert_eq!(IPC_PROTOCOL_VERSION_V5, 5);
         assert_eq!(IPC_PROTOCOL_VERSION_V6, 6);
-        assert_eq!(IPC_PROTOCOL_VERSION, 6);
-        assert_eq!(IPC_PROTOCOL_VERSION_CURRENT, 6);
-        assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, [0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(IPC_PROTOCOL_VERSION_V7, 7);
+        assert_eq!(IPC_PROTOCOL_VERSION, 7);
+        assert_eq!(IPC_PROTOCOL_VERSION_CURRENT, 7);
+        assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, [0, 1, 2, 3, 4, 5, 6, 7]);
         assert!(is_supported_version(0));
         assert!(is_supported_version(1));
         assert!(is_supported_version(2));
@@ -201,7 +224,8 @@ mod tests {
         assert!(is_supported_version(4));
         assert!(is_supported_version(5));
         assert!(is_supported_version(6));
-        assert!(!is_supported_version(7));
+        assert!(is_supported_version(7));
+        assert!(!is_supported_version(8));
         assert!(is_compatible(0));
         assert!(is_compatible(1));
         assert!(is_compatible(2));
@@ -209,6 +233,7 @@ mod tests {
         assert!(is_compatible(4));
         assert!(is_compatible(5));
         assert!(is_compatible(6));
+        assert!(is_compatible(7));
     }
 
     #[test]
@@ -252,6 +277,24 @@ mod tests {
         assert!(supports_policy_ipc(IPC_PROTOCOL_VERSION_V6));
         assert!(supports_human_decision_ipc(IPC_PROTOCOL_VERSION_V6));
         assert!(supports_planning_ipc(IPC_PROTOCOL_VERSION_V6));
+    }
+
+    #[test]
+    fn v7_adds_finder_without_granting_it_to_historical_sessions() {
+        for historical in IPC_PROTOCOL_VERSION_V0..=IPC_PROTOCOL_VERSION_V6 {
+            assert!(
+                !supports_finder_ipc(historical),
+                "v{historical} never gains finder authority"
+            );
+        }
+        assert!(supports_finder_ipc(IPC_PROTOCOL_VERSION_V7));
+        assert!(!supports_finder_ipc(99));
+        assert!(supports_business_ipc(IPC_PROTOCOL_VERSION_V7));
+        assert!(supports_execution_ipc(IPC_PROTOCOL_VERSION_V7));
+        assert!(supports_policy_ipc(IPC_PROTOCOL_VERSION_V7));
+        assert!(supports_human_decision_ipc(IPC_PROTOCOL_VERSION_V7));
+        assert!(supports_planning_ipc(IPC_PROTOCOL_VERSION_V7));
+        assert!(supports_task_authoring_ipc(IPC_PROTOCOL_VERSION_V7));
     }
 
     #[test]
@@ -703,5 +746,58 @@ mod contract_tests {
             }
             other => panic!("expected create_project, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn finder_core_envelope_uses_field_ten_and_round_trips() {
+        use crate::proto::{
+            finder_core_request, finder_core_response, FinderCoreRequest, FinderCoreResponse,
+            FinderErrorResponse, FinderPageResponse, FinderQueryRequest,
+        };
+        let request = FinderCoreRequest {
+            payload: Some(finder_core_request::Payload::Query(FinderQueryRequest {
+                repository_path: "/repo".to_owned(),
+                text: "needle".to_owned(),
+                scope: "src".to_owned(),
+                limit: 10,
+                continuation: String::new(),
+            })),
+        };
+        let envelope = ControlRequest {
+            payload: Some(control_request::Payload::FinderCore(request)),
+        };
+        let bytes = envelope.encode_to_vec();
+        let decoded = ControlRequest::decode(bytes.as_slice()).expect("must decode");
+        match decoded.payload {
+            Some(control_request::Payload::FinderCore(inner)) => match inner.payload {
+                Some(finder_core_request::Payload::Query(query)) => {
+                    assert_eq!(query.repository_path, "/repo");
+                    assert_eq!(query.text, "needle");
+                    assert_eq!(query.scope, "src");
+                    assert_eq!(query.limit, 10);
+                }
+                other => panic!("expected finder query, got {other:?}"),
+            },
+            other => panic!("expected finder_core envelope, got {other:?}"),
+        }
+        let response = FinderCoreResponse {
+            payload: Some(finder_core_response::Payload::Error(FinderErrorResponse {
+                code: "stale".to_owned(),
+                detail: String::new(),
+                expected_rev: "r1".to_owned(),
+                actual_rev: "r2".to_owned(),
+            })),
+        };
+        let bytes = response.encode_to_vec();
+        let decoded = FinderCoreResponse::decode(bytes.as_slice()).expect("must decode");
+        match decoded.payload {
+            Some(finder_core_response::Payload::Error(error)) => {
+                assert_eq!(error.code, "stale");
+                assert_eq!(error.expected_rev, "r1");
+                assert_eq!(error.actual_rev, "r2");
+            }
+            other => panic!("expected finder error, got {other:?}"),
+        }
+        let _ = FinderPageResponse::default();
     }
 }

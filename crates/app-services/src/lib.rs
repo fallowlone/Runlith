@@ -15,6 +15,7 @@ mod binding_service;
 mod candidate_verdict;
 mod clock;
 mod error;
+mod finder_service;
 mod human_decision_service;
 mod managed_identity;
 mod observed_effect_service;
@@ -46,6 +47,7 @@ pub use binding_service::{
 pub use candidate_verdict::mint_candidate_verdicts;
 pub use clock::{format_rfc3339, Clock, FixedClock, SystemClock};
 pub use error::{ServiceError, ServiceResult};
+pub use finder_service::{ContentFilter, FinderPage, FinderService, FinderSpan, PassthroughFilter};
 pub use human_decision_service::{HumanDecisionCreate, HumanDecisionService};
 pub use managed_identity::{
     branch_for_execution, decode_readable_slug, is_ascii_casefold_stable, is_canonical_v2_slug,

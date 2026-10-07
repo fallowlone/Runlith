@@ -9,3 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 workspace = { path = "../../crates/workspace" }
+repo-finder = { path = "../../crates/repo-finder" }
+
+[dev-dependencies]
+repo-finder-contract = { path = "../../crates/repo-finder-contract" }

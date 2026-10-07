@@ -41,8 +41,9 @@ async fn main() -> ExitCode {
         Some("approval") => cmd_approval(args.collect()).await,
         Some("human-decision") => cmd_human_decision(args.collect()).await,
         Some("planning") => cmd_planning(args.collect()).await,
+        Some("find") => cmd_find(args.collect()).await,
         _ => {
-            eprintln!("usage: agentctl <start|ping|shutdown|project|task|execution|approval|human-decision|planning> ...");
+            eprintln!("usage: agentctl <start|ping|shutdown|project|task|execution|approval|human-decision|planning|find> ...");
             eprintln!("  agentctl project create <id> <name>");
             eprintln!("  agentctl project get <id>");
             eprintln!("  agentctl project list");
@@ -64,6 +65,8 @@ async fn main() -> ExitCode {
             eprintln!("  agentctl human-decision decide <request-id> <resume|replan|abort>");
             eprintln!("  agentctl planning trigger <task-id> <branch-id> <evidence-ref>");
             eprintln!("  agentctl planning apply <human-decision-id>");
+            eprintln!("  agentctl find query <repository-path> <text...> [--scope <dir>] [--limit <n>] [--continuation <token>] [--format text|json]");
+            eprintln!("  agentctl find show <repository-path> <evidence-id> [--context <n>] [--format text|json]");
             ExitCode::FAILURE
         }
     }
@@ -873,6 +876,40 @@ async fn cmd_planning(args: Vec<String>) -> ExitCode {
 #[cfg(windows)]
 async fn cmd_planning(_args: Vec<String>) -> ExitCode {
     eprintln!("agentctl: planning control is unavailable on this build");
+    ExitCode::FAILURE
+}
+
+#[cfg(unix)]
+async fn cmd_find(args: Vec<String>) -> ExitCode {
+    let endpoint = match resolve_production_endpoint() {
+        Ok(value) => value,
+        Err(error) => return fail(&error),
+    };
+    let (request, format) = match agentctl::parse_finder_args(&args) {
+        Ok(value) => value,
+        Err(usage) => {
+            eprintln!("{usage}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match agentctl::finder_request(&endpoint, spawn_sibling_daemon, request).await {
+        Ok(response) => match agentctl::format_finder_response(&response, format) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                ExitCode::FAILURE
+            }
+        },
+        Err(error) => fail(&error),
+    }
+}
+
+#[cfg(windows)]
+async fn cmd_find(_args: Vec<String>) -> ExitCode {
+    eprintln!("agentctl: finder control is unavailable on this build");
     ExitCode::FAILURE
 }
 
