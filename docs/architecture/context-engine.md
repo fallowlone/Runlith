@@ -79,6 +79,9 @@ persistence mechanism either.
 
 ## 4. ContextItem
 
+> Field names and type contracts frozen by
+> [`ADR-0042`](./adr/ADR-0042-g9-context-engine-contract.md) (TASK-0167).
+
 The accepted conceptual `ContextItem` carries these fields (SoT §26). This
 is an architecture contract, not a frozen type — no Rust shape and no JSON
 Schema are defined here:
@@ -116,6 +119,9 @@ Schema are defined here:
   provenance schema is defined.
 
 ## 5. ContextPlan
+
+> Identity, versioning, budget shape and reason taxonomy frozen by
+> [`ADR-0042`](./adr/ADR-0042-g9-context-engine-contract.md) (TASK-0167).
 
 For every execution the accepted plan concepts are: Required, Selected,
 Deferred, Rejected, Budget, Cache boundaries, Renderer, Reasons, Source
@@ -256,32 +262,38 @@ Full bounded-context registry: ARCHITECTURE.md §2 (not duplicated here).
 
 ## 10. Open Context Engine Design Items
 
-Unresolved by accepted architecture; listed, not decided:
+Unresolved by accepted architecture; listed, not decided. Items marked
+[ADR-0042] were decided by
+[`ADR-0042`](./adr/ADR-0042-g9-context-engine-contract.md) (TASK-0167);
+the rest stay open:
 
-- final ContextItem Rust shape
-- ContextItem ID format
-- ContextKind taxonomy
-- SourceRef format
-- content-hash algorithm
-- Priority representation
-- Freshness representation
-- TrustLevel representation
-- CacheClass taxonomy
-- ContextPlan identity/versioning
-- ContextPlan persistence format
-- Context budget representation
-- soft/hard budget units
-- candidate scoring/ranking model
-- selection/rejection reason taxonomy
-- RetrievalTrace contract
-- provider renderer contract
-- cache-boundary representation
-- Context security-filter API
-- tool-schema deferred-loading integration
-- Token Cost measurement
-- Attention Load measurement
-- exact embedding backend/model
-- context-plan replay/reproducibility mechanism
+- final ContextItem Rust shape [ADR-0042 §1: field names fixed, Rust
+  syntax is the implementer's]
+- ContextItem ID format [ADR-0042 §1]
+- ContextKind taxonomy [ADR-0042 §2]
+- SourceRef format [ADR-0042 §3]
+- content-hash algorithm [ADR-0042 §1]
+- Priority representation [ADR-0042 §1]
+- Freshness representation [ADR-0042 §1]
+- TrustLevel representation [ADR-0042 §1]
+- CacheClass taxonomy [ADR-0042 §1]
+- ContextPlan identity/versioning [ADR-0042 §5]
+- ContextPlan persistence format [open; exact tables are TASK-0170's]
+- Context budget representation [ADR-0042 §6]
+- soft/hard budget units [ADR-0042 §6]
+- candidate scoring/ranking model [open; `priority` is a rank input,
+  not a scoring model]
+- selection/rejection reason taxonomy [ADR-0042 §5]
+- RetrievalTrace contract [ADR-0042 §7]
+- provider renderer contract [ADR-0042 §10]
+- cache-boundary representation [ADR-0042 §5]
+- Context security-filter API [ADR-0042 §8]
+- tool-schema deferred-loading integration [open]
+- Token Cost measurement [ADR-0042 §6]
+- Attention Load measurement [ADR-0042 §6]
+- exact embedding backend/model [open; embeddings stay optional
+  behind a port]
+- context-plan replay/reproducibility mechanism [ADR-0042 §9]
 
 ## 11. Non-goals
 
