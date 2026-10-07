@@ -5686,6 +5686,29 @@ items:
     references:
       - docs/architecture/adr/ADR-0011-provider-independent-context-continuity.md
       - docs/architecture/context-engine.md
+    outcome: >-
+      ACCEPTED 2026-10-07 by owner decision after three independent
+      review rounds. Round 1 returned CHANGES-REQUIRED with 14 findings
+      (2 HIGH: qualified SECRET/PII wording against DATA_CLASSIFICATION
+      and INV-151, CR-5 against the never-embed rule); round 2 resolved
+      14 of 15 and found 3 new minor items; round 3 verified every
+      resolution and returned PASS with no new findings. Record:
+      docs/architecture/adr/ADR-0043-g9-continuity-contract.md.
+      The ADR freezes epoch identity and chain scope, the 11-field
+      checkpoint schema with atomic commit and activation idempotence,
+      Budget Monitor ownership with fail-closed hard gating, working
+      set and notes representation, the history search/read contract,
+      session linkage, three fail-closed crash windows, per-chain
+      concurrency, the migration resume protocol, version compat and
+      supersession, absolute SECRET/PII privacy bounds and rules
+      CR-1..CR-10; status Accepted in the ADR and both indexes.
+      continuity.md sections 2, 4, 5, 6, 8 and 9 updated. TASK-0171
+      scope gains retention enforcement mechanics (durations stay
+      policy-owned). Product identity 0.1.0-dev.task0168, gate G9.
+      Contract only: no production code, migration or IPC change.
+      Verification observed on the branch: queue YAML parses (163
+      items, IDs unique), product-version 6/6, fmt clean, clippy
+      -D warnings clean, diff-check clean.
 
   - id: TASK-0169
     gate: G9

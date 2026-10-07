@@ -1,6 +1,8 @@
 # ADR-0043 — G9 Continuity contract
 
-- Status: **Proposed** (TASK-0168; ratification pending)
+- Status: **Accepted** (TASK-0168; ratified 2026-10-07 by owner decision
+  after three independent review rounds: R1 14 findings, R2 3 new, R3
+  PASS; pre-acceptance commit b8e308b)
 - Date: 2026-10-07
 - Gate: G9
 
