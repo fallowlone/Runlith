@@ -94,6 +94,7 @@ version = "0.1.0"
 dependencies = [
  "agent-runtime",
  "context-engine",
+ "continuity",
  "evaluation",
  "fake-agent",
  "fake-evaluator",
@@ -408,6 +409,25 @@ name = "context-engine-contract"
 version = "0.1.0"
 dependencies = [
  "context-engine",
+]
+
+[[package]]
+name = "continuity"
+version = "0.1.0"
+dependencies = [
+ "agent-runtime",
+ "context-engine",
+ "task-domain",
+]
+
+[[package]]
+name = "continuity-contract"
+version = "0.1.0"
+dependencies = [
+ "agent-runtime",
+ "context-engine",
+ "continuity",
+ "task-domain",
 ]
 
 [[package]]
@@ -1725,6 +1745,8 @@ dependencies = [
  "agent-runtime",
  "context-engine",
  "context-engine-contract",
+ "continuity",
+ "continuity-contract",
  "evaluation",
  "plan-domain",
  "policy",

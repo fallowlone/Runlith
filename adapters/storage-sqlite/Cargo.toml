@@ -8,6 +8,7 @@ name = "storage_sqlite"
 path = "src/lib.rs"
 
 [dependencies]
+continuity = { path = "../../crates/continuity" }
 context-engine = { path = "../../crates/context-engine" }
 task-domain = { path = "../../crates/task" }
 agent-runtime = { path = "../../crates/agent-runtime" }
@@ -21,6 +22,7 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha2 = "0.10"
 
 [dev-dependencies]
+continuity-contract = { path = "../../crates/continuity-contract" }
 context-engine-contract = { path = "../../crates/context-engine-contract" }
 policy = { path = "../../crates/policy" }
 # Raw-SQL probes for trigger/migration guarantees (TASK-0151): no public

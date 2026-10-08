@@ -8,6 +8,7 @@ name = "app_services"
 path = "src/lib.rs"
 
 [dependencies]
+continuity = { path = "../continuity" }
 context-engine = { path = "../context-engine" }
 task-domain = { path = "../task" }
 agent-runtime = { path = "../agent-runtime" }

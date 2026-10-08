@@ -24,33 +24,36 @@ use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
 use crate::task_store::SqliteStore;
 
-fn u64_to_i64(field: &str, value: u64) -> Result<i64, ContextError> {
+pub(crate) fn u64_to_i64(field: &str, value: u64) -> Result<i64, ContextError> {
     i64::try_from(value)
         .map_err(|_| ContextError::InvalidInput(format!("{field} exceeds i64 range")))
 }
 
-fn i64_to_u64(field: &str, value: i64) -> Result<u64, ContextError> {
+pub(crate) fn i64_to_u64(field: &str, value: i64) -> Result<u64, ContextError> {
     u64::try_from(value).map_err(|_| ContextError::BackendFailure {
         detail: format!("stored {field} is negative"),
     })
 }
 
-fn sqlite(error: rusqlite::Error) -> ContextError {
+pub(crate) fn sqlite(error: rusqlite::Error) -> ContextError {
     ContextError::BackendFailure {
         detail: error.to_string(),
     }
 }
 
-fn reconstruct<T>(parsed: Result<T, ContextError>, what: &str) -> Result<T, ContextError> {
+pub(crate) fn reconstruct<T>(
+    parsed: Result<T, ContextError>,
+    what: &str,
+) -> Result<T, ContextError> {
     parsed.map_err(|error| ContextError::BackendFailure {
         detail: format!("stored {what} failed domain reconstruction: {error}"),
     })
 }
 
 /// Encoded source payload: (kind, p1, p2, n1, span_start, span_end).
-type EncodedSource = (String, String, String, i64, Option<i64>, Option<i64>);
+pub(crate) type EncodedSource = (String, String, String, i64, Option<i64>, Option<i64>);
 
-fn encode_source(source: &SourceRef) -> Result<EncodedSource, ContextError> {
+pub(crate) fn encode_source(source: &SourceRef) -> Result<EncodedSource, ContextError> {
     let encoded = match source {
         SourceRef::Task { task_id, event_seq } => (
             "TASK".to_owned(),
@@ -135,7 +138,7 @@ fn encode_source(source: &SourceRef) -> Result<EncodedSource, ContextError> {
     Ok(encoded)
 }
 
-fn decode_source(
+pub(crate) fn decode_source(
     kind: &str,
     p1: &str,
     p2: &str,

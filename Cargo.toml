@@ -35,5 +35,7 @@ members = [
     "adapters/finder-local",
     "crates/context-engine",
     "crates/context-engine-contract",
+    "crates/continuity",
+    "crates/continuity-contract",
 ]
 resolver = "2"

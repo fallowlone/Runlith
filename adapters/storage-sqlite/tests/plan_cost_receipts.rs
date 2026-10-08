@@ -118,13 +118,26 @@ fn schema_12_database_upgrades_to_current_without_plan_cost_data() {
                  DROP TABLE context_item_transforms;
                  DROP TABLE context_items;
                  DROP TABLE context_plans;
+                 DROP TABLE continuity_receipt_refs;
+                 DROP TABLE continuity_budget_events;
+                 DROP TABLE continuity_migration_links;
+                 DROP TABLE continuity_session_links;
+                 DROP TABLE continuity_history_refs;
+                 DROP TABLE continuity_activations;
+                 DROP TABLE continuity_checkpoint_notes;
+                 DROP TABLE continuity_checkpoint_evidence;
+                 DROP TABLE continuity_checkpoint_sources;
+                 DROP TABLE continuity_notes;
+                 DROP TABLE continuity_checkpoints;
+                 DROP TABLE continuity_epochs;
+                 DROP TABLE continuity_meta;
                  PRAGMA user_version = 12;",
             )
             .expect("simulate historical v12 schema");
     }
 
     let mut store = SqliteStore::open(&db.path).expect("migrate v12 to current");
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 28);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 29);
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
     let receipt_ref = PlanningCostReceiptRef::new("planning-receipt:after-upgrade").unwrap();
     let evidence = receipt(1);

@@ -5833,6 +5833,38 @@ items:
     blocked_by: []
     references:
       - docs/architecture/adr/ADR-0011-provider-independent-context-continuity.md
+    outcome: >-
+      ACCEPTED 2026-10-08 by owner decision after two independent
+      review rounds. Round 1 returned CHANGES-REQUIRED with 11
+      findings (1 HIGH: SECRET allowed Inline via staged notes,
+      violating CR-8; 2 MED: CR-10 version-on-read missing on
+      SQLite decode, purge ignored to_epoch FK side; 8 LOW:
+      notes purge-count gap, load_note staged visibility, port
+      search-doc staleness, budget-event taxonomy, activate
+      single-shot vs recover semantics, receipt sensitivity
+      exclusion, lineage-guard depth, ceiling coherence layering).
+      All 10 applicable fixes verified against bodies by round 2;
+      the budget taxonomy item was adjudicated a wrong premise
+      (plan_ref is a validated ContextPlanId, unreachable by
+      malformed shapes) and upheld as no-change. Round 2 returned
+      PASS with one non-blocking LOW doc residue (history.rs
+      comment wording), fixed before commit. Record:
+      crates/continuity (EpochId/CheckpointId/HistoryRef/NoteId
+      minting, model, strict rollover, history ranking,
+      ContinuityStorePort), crates/continuity-contract (store
+      contract suite), adapters/storage-sqlite migration 0029
+      plus continuity_store, crates/app-services
+      ContinuityService (open/commit/activate/recover/gate/
+      search/read/migrate/purge/rebuild). No IPC changes; one
+      pub(crate) test helper relaxation in context_store.
+      Product identity 0.1.0-dev.task0171, gate G9. Verification
+      observed on the branch: queue YAML parses, product-version
+      6/6, fmt clean, clippy -D warnings clean, diff-check
+      clean, domain 18/18, store contract green (search, read,
+      committed-only notes, purge counts, lineage guard,
+      version probe), service 7/7, full workspace green except
+      the known load-induced execution_recovery flake,
+      re-verified 14/14 green in isolation.
 
   - id: TASK-0172
     gate: G9
