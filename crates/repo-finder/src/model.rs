@@ -386,9 +386,12 @@ pub fn content_hash(lines: &[String]) -> String {
 }
 
 /// Self-describing reopenable handle:
-/// `rf1.<rev>.<start>.<end>.<hash>.<hexpath>`. Opaque to callers —
+/// `rf2.<rev>.<start>.<end>.<hash16>.<hexpath>`. Opaque to callers —
 /// only [`EvidenceId::parse`] reads it — and fail-closed: anything
 /// malformed is [`FinderError::InvalidInput`], never a guess.
+/// `rf2` stores the first 16 hex chars of the content hash (64-bit
+/// prefix); the legacy `rf1` shape with the full 64-hex hash stays
+/// parseable so older handles keep reopening.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvidenceId(String);
 
@@ -400,6 +403,7 @@ impl EvidenceId {
                 "content hash must be 64 hex chars".to_string(),
             ));
         }
+        let short = &hash[..16];
         let revision = parts.revision.as_str();
         if revision.is_empty()
             || !revision
@@ -415,7 +419,7 @@ impl EvidenceId {
             .to_str()
             .ok_or_else(|| FinderError::InvalidInput("evidence path must be UTF-8".to_string()))?;
         let id = format!(
-            "rf1.{revision}.{}.{}.{hash}.{}",
+            "rf2.{revision}.{}.{}.{short}.{}",
             parts.span.start_line,
             parts.span.end_line,
             hex_encode(path.as_bytes())
@@ -432,8 +436,10 @@ impl EvidenceId {
         fn malformed(what: &str) -> FinderError {
             FinderError::InvalidInput(format!("malformed evidence id: {what}"))
         }
-        let rest = text
-            .strip_prefix("rf1.")
+        let (version, rest) = text
+            .strip_prefix("rf2.")
+            .map(|rest| (2u8, rest))
+            .or_else(|| text.strip_prefix("rf1.").map(|rest| (1u8, rest)))
             .ok_or_else(|| malformed("prefix"))?;
         let segments: Vec<&str> = rest.split('.').collect();
         if segments.len() != 5 {
@@ -451,7 +457,8 @@ impl EvidenceId {
         let end: u32 = segments[2].parse().map_err(|_| malformed("span end"))?;
         let span = HitSpan::new(start, end).map_err(|_| malformed("span"))?;
         let hash = segments[3].to_ascii_lowercase();
-        if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let expected_len = if version == 2 { 16 } else { 64 };
+        if hash.len() != expected_len || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(malformed("hash"));
         }
         let path_bytes = hex_decode(segments[4]).ok_or_else(|| malformed("path"))?;
@@ -460,6 +467,75 @@ impl EvidenceId {
         validate_relative_confined(&path).map_err(|_| malformed("path"))?;
         let parts = EvidenceParts::new(revision, path, span).map_err(|_| malformed("parts"))?;
         Ok((parts, hash))
+    }
+
+    /// Rebuilds the owned handle from just-parsed parts plus the
+    /// stored hash in either accepted length (64 for `rf1`, 16 for
+    /// `rf2`). Callers that validated via [`EvidenceId::parse`] use
+    /// this instead of [`EvidenceId::mint`], which always takes the
+    /// full 64-hex content hash.
+    pub fn from_validated(parts: &EvidenceParts, stored_hash: &str) -> Result<Self, FinderError> {
+        let stored = stored_hash.to_ascii_lowercase();
+        let version = match stored.len() {
+            64 => 1u8,
+            16 => 2u8,
+            _ => {
+                return Err(FinderError::InvalidInput(
+                    "stored hash must be 16 or 64 hex chars".to_string(),
+                ));
+            }
+        };
+        if !stored.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(FinderError::InvalidInput(
+                "stored hash must be hex".to_string(),
+            ));
+        }
+        let revision = parts.revision.as_str();
+        if revision.is_empty()
+            || !revision
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err(FinderError::InvalidInput(
+                "revision is not evidence-safe".to_string(),
+            ));
+        }
+        let path = parts
+            .path
+            .to_str()
+            .ok_or_else(|| FinderError::InvalidInput("evidence path must be UTF-8".to_string()))?;
+        let id = format!(
+            "rf{version}.{revision}.{}.{}.{stored}.{}",
+            parts.span.start_line,
+            parts.span.end_line,
+            hex_encode(path.as_bytes())
+        );
+        if id.len() > MAX_EVIDENCE_ID_BYTES {
+            return Err(FinderError::InvalidInput(
+                "evidence id exceeds bound".to_string(),
+            ));
+        }
+        Ok(Self(id))
+    }
+
+    /// Compares a stored handle hash against a freshly computed
+    /// full-length hash. A 64-hex stored hash must match exactly; a
+    /// 16-hex stored hash (`rf2`) must prefix-match. Anything else
+    /// fails closed.
+    pub fn hash_matches(stored: &str, computed: &str) -> bool {
+        let stored = stored.to_ascii_lowercase();
+        let computed = computed.to_ascii_lowercase();
+        if !stored.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return false;
+        }
+        if computed.len() != 64 || !computed.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return false;
+        }
+        match stored.len() {
+            64 => stored == computed,
+            16 => computed.starts_with(&stored),
+            _ => false,
+        }
     }
 
     pub fn as_str(&self) -> &str {
@@ -865,7 +941,7 @@ mod tests {
         let id = EvidenceId::mint(&parts, &hash).unwrap();
         let (parsed, parsed_hash) = EvidenceId::parse(id.as_str()).unwrap();
         assert_eq!(parsed, parts);
-        assert_eq!(parsed_hash, hash);
+        assert_eq!(parsed_hash, &hash[..16]);
     }
 
     #[test]
@@ -950,6 +1026,98 @@ mod tests {
         let hit = sample_hit("src/a.rs", "needle here").unwrap();
         assert_eq!(hit.path, PathBuf::from("src/a.rs"));
         assert_eq!(hit.reason.rank_score, 7);
+    }
+
+    #[test]
+    fn evidence_id_mint_emits_hash16_handle() {
+        let parts = sample_parts();
+        let hash = content_hash(&["l3".to_string()]);
+        let id = EvidenceId::mint(&parts, &hash).unwrap();
+        let text = id.as_str();
+        assert!(text.starts_with("rf2."), "mint must emit rf2: {text}");
+        let (parsed, parsed_hash) = EvidenceId::parse(text).unwrap();
+        assert_eq!(parsed, parts);
+        assert_eq!(parsed_hash, &hash[..16]);
+        assert_eq!(parsed_hash.len(), 16);
+    }
+
+    #[test]
+    fn evidence_id_parse_accepts_legacy_rf1() {
+        let parts = sample_parts();
+        let hash = content_hash(&["l3".to_string()]);
+        let legacy = format!(
+            "rf1.{}.{}.{}.{}.{}",
+            parts.revision.as_str(),
+            parts.span.start_line,
+            parts.span.end_line,
+            hash,
+            hex_encode(parts.path.to_str().unwrap().as_bytes())
+        );
+        let (parsed, parsed_hash) = EvidenceId::parse(&legacy).unwrap();
+        assert_eq!(parsed, parts);
+        assert_eq!(parsed_hash, hash);
+    }
+
+    #[test]
+    fn evidence_id_from_validated_roundtrips_both_versions() {
+        let parts = sample_parts();
+        let hash = content_hash(&["l3".to_string()]);
+        let minted = EvidenceId::mint(&parts, &hash).unwrap();
+        let (parsed, stored) = EvidenceId::parse(minted.as_str()).unwrap();
+        let rebuilt = EvidenceId::from_validated(&parsed, &stored).unwrap();
+        assert_eq!(rebuilt.as_str(), minted.as_str());
+        let legacy = format!(
+            "rf1.{}.{}.{}.{}.{}",
+            parts.revision.as_str(),
+            parts.span.start_line,
+            parts.span.end_line,
+            hash,
+            hex_encode(parts.path.to_str().unwrap().as_bytes())
+        );
+        let (parsed, stored) = EvidenceId::parse(&legacy).unwrap();
+        let rebuilt = EvidenceId::from_validated(&parsed, &stored).unwrap();
+        assert_eq!(rebuilt.as_str(), legacy);
+        assert!(EvidenceId::from_validated(&parts, "zzz").is_err());
+    }
+
+    #[test]
+    fn evidence_id_parse_rejects_short_hash_under_rf1() {
+        let parts = sample_parts();
+        let hash = content_hash(&["l3".to_string()]);
+        let bad = format!(
+            "rf1.{}.{}.{}.{}.{}",
+            parts.revision.as_str(),
+            parts.span.start_line,
+            parts.span.end_line,
+            &hash[..16],
+            hex_encode(parts.path.to_str().unwrap().as_bytes())
+        );
+        assert!(EvidenceId::parse(&bad).is_err());
+    }
+
+    #[test]
+    fn hash_matches_accepts_full_and_prefix() {
+        let full = content_hash(&["l3".to_string()]);
+        assert!(EvidenceId::hash_matches(&full, &full));
+        assert!(EvidenceId::hash_matches(&full[..16], &full));
+        assert!(!EvidenceId::hash_matches(
+            &full[..16],
+            &content_hash(&["other".to_string()])
+        ));
+        assert!(!EvidenceId::hash_matches("zzz", &full));
+    }
+
+    #[test]
+    fn hash_matches_rejects_malformed_computed() {
+        let full = content_hash(&["l3".to_string()]);
+        let garbage_tail = format!(
+            "{}zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+            &full[..16]
+        );
+        assert_eq!(garbage_tail.len(), 64);
+        assert!(!EvidenceId::hash_matches(&full[..16], &garbage_tail));
+        assert!(!EvidenceId::hash_matches(&full, &full[..32]));
+        assert!(!EvidenceId::hash_matches(&full[..16], &full[..16]));
     }
 
     #[test]

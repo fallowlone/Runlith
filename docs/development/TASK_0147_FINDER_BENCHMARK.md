@@ -286,3 +286,114 @@ status for the TASK-0147 exit criteria: `PassthroughFilter`
 shipped, the `ContentFilter` seam reviewed (whole-window
 filtering pinned by tests); INV-008 redaction stays the named
 follow-up.
+
+## 8. Phase C round (TASK-0173): R6–R7
+
+Same question set (section 4), same corpus (`/tmp/task0147-corpus`,
+detached clean `40754ae` — still byte-clean, so R6 runs new
+binaries against the identical checkout state for a direct A/B),
+same exclusions (section 2). New binaries: fresh
+`target/debug/agentd` + `agentctl` from branch
+`task-0173-finder-cost` (hash16 `rf2` evidence ids, symbol-aware
+ranking: definition + whole-token score boosts, external-usage
+file tiebreak; no seam change). Methodology deviation, recorded:
+the daemon ran with `AI_ENGINEERING_OS_RUNTIME_DIR` and
+`AI_ENGINEERING_OS_DATA_DIR` overrides (fresh socket + fresh
+database) because the canonical local database (a v27
+dev-artifact missing `owner_presence_proofs`) fails the 0030
+migration — reproduced identically with the unmodified TASK-0172
+binary, so pre-existing and out of scope. Retrieval never touches
+the database; the overrides only isolate daemon startup.
+
+### Run R6 — finder run 2 (2026-10-08, arm64, Apple M2 Pro)
+
+18 calls (per-question: 1,2,4,2,2,2,1,4). Rig
+`/tmp/task0173-r6.sh`, raw log `/tmp/task0173-r6.log` (session
+artifacts, timed verbatim, 29,369 bytes, sha256
+`cc8aed1a…f63e7`). Contamination: zero hits in this
+file; `.git/`/`target/`/`.claude/` never surfaced. Every response
+bound to rev `40754ae…b2f51`, clean. All evidence ids `rf2.`
+(zero `rf1.`); every `show` reopened under the stored hash16.
+
+- Q1: `query … "run_advisory_verification
+  continue_workspace_cycle" --scope crates/app-services --limit 10`
+  → both definitions top-two (:91, :468) AND the post-step call
+  :669 fourth (external-usage tiebreak pages it past the
+  callee-file mentions). No continuation: def+call same-file
+  ordering on one page — the same inference R4 scored 2/2 on,
+  one call fewer. 2/2.
+- Q2: `query … "TASK-0165" --scope planning/tasks --limit 5` →
+  header `queue.yaml:5516` (1/1); `show … <id> --context 40` →
+  window 5476-5556 with the full `exit_criteria_summary` value
+  verbatim. 2/2.
+- Q3: `query … "struct TaskService" --limit 5` → def
+  `task_service.rs:52`; `query … "INV-043 TaskService" --limit 5`
+  → non-proof file (unchanged: hyphenated `INV-043` never forms
+  a symbol token, so no ranking signal); `query … "INV-043"
+  --scope docs/architecture --limit 5` → `INVARIANTS.md:19`
+  verbatim; `query … "trait PlannerPort" --limit 3` →
+  `plan/model.rs:638` first (`.md` lookalike `trait` lines lost the
+  Rust-only definition boost). Same evidence standard as R4. 2/2.
+- Q4: `query … "stays VERIFYING" --limit 3` → 3 non-proof lines
+  (643 total; the proof ties with other both-terms-as-tokens
+  lines and path order still buries it — measured, not
+  assumed); same `--scope crates/evaluation` → `error.rs:3` +
+  `port.rs:14`, exactly R4's citation. 2/2.
+- Q5: `query … "build_verification_runner
+  IsolationRequirements::new" --scope bins/agentd --limit 5` →
+  factory binding 3633 on page; `show … <id-3633> --context 16`
+  → factory window 3617-3649 with the lazy closure,
+  `RunnerLaunchPurpose::Provider` and strict
+  `new(true, true, true)` inside it. 2/2.
+- Q6: `query … "workspace-less schedule" --limit 3` → def
+  `:181` first, proof `:955` second (two-term line still
+  outranks every single-term competitor — the file preference
+  is a tiebreak, never a promotion); `show … <id> --context 1`
+  → 954-956 full rationale. 2/2.
+- Q7: `query … "validate_plan_commands refuses V0" --limit 5` →
+  def `:28` first, refusal doc `:27` verbatim second (adjacent
+  proof block; def-first is the intended new order). 2/2.
+- Q8: `query … "append_observed_effect" --limit 5` → store def
+  `:12` + runner call `:346`; `show … <id-346> --context 4` →
+  call args (no `ProcessExit` in range, as in R4); `query …
+  "ProcessExit" --scope crates/app-services/src --limit 6` →
+  payload built at `:317`; `query … "mint_candidate_verdicts"
+  --limit 3` → def `:37` + orchestration call `:931`. 2/2.
+
+Totals: relevance 16/16, support 16/16, 26,704 output bytes
+(~6,676 tokens), 1,976 input bytes (~494 tokens), 11.1s elapsed.
+
+### Run R7 — finder replay (2026-10-08, same hardware/corpus)
+
+Verbatim replay of the 18 R6 calls (`/tmp/task0173-r7.sh`,
+generated from the R6 log; same argv-equivalence caveat as R5).
+Log `/tmp/task0173-r7.log` (29,368 bytes, sha256
+`41b70414…f7f3bc2`).
+
+All 18 outputs byte-identical to R6 (26,722/26,722 body bytes;
+only the timing lines differ), all exit 0. Scores identical,
+16/16. R7 proves the ranking change keeps cross-process
+determinism: the new order is a pure function of query and
+corpus. On verifiability: every `show` re-verified under
+hash16, so nothing is lost against accidental drift — but the
+16-hex handle hash is a 64-bit prefix, not a
+collision-resistance boundary (birthday collisions need ~2^32
+crafted lines; the revision binding still covers committed
+tampering, and the window is in-revision drift only).
+
+### Phase C reading (TASK-0173)
+
+R6 matches R4/R5 at 16/16 with one fewer call (18 vs 19: Q1's
+continuation cut by the external-usage tiebreak) and ~1,000
+fewer output tokens (~6,676 vs ~7,678: ~745 from hash16 over 62
+hit lines plus the dropped continuation page). The token math
+reconciles exactly with the mechanism — no unexplained delta.
+Elapsed is unchanged (11.1s vs 10.8s): ranking and ids were
+never going to fix the unindexed scan; that stays TASK-0174's
+job, as scoped. Q4's rescope survives by measurement (ties no
+ranking signal breaks without file-identity knowledge), and Q3
+stays 4 calls for a vocabulary reason (hyphenated terms are not
+symbol tokens) — both documented above so TASK-0174's index
+work does not re-litigate them. No seam changed: `EvidenceId`
+stays opaque, `rf1` still parses, scores stay adapter-local,
+the contract suite is untouched.

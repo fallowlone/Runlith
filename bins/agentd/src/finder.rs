@@ -110,9 +110,9 @@ fn dispatch_show(service: &FinderService, show: FinderShowRequest) -> FinderCore
         }
     };
     // Rebuilds the owned handle from validated parts: infallible in
-    // practice (parse already enforced every mint rule), defensive
+    // practice (parse already enforced every rule), defensive
     // error instead of a panic if the rules ever drift apart.
-    let id = match EvidenceId::mint(&parts, &hash) {
+    let id = match EvidenceId::from_validated(&parts, &hash) {
         Ok(id) => id,
         Err(_) => {
             return error_response("invalid_input", "malformed evidence id", "", "");

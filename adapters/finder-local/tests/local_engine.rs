@@ -209,11 +209,15 @@ fn excerpt_marks_long_lines_and_handle_binds_full_line() {
         hit.excerpt.chars().count() <= 100 + 64,
         "marked excerpt must stay within content bound + marker"
     );
-    // The handle binds the FULL line: reopen compares equal.
+    // The handle binds the FULL line: reopen verifies under the
+    // stored (hash16) handle hash.
     let (parts, hash) = EvidenceId::parse(hit.evidence_id.as_str()).unwrap();
     let reopened = finder.read_span(scratch.root(), &parts).unwrap();
     assert_eq!(reopened.lines, vec![long_line]);
-    assert_eq!(reopened.content_hash, hash);
+    assert!(
+        EvidenceId::hash_matches(&hash, &reopened.content_hash),
+        "reopened bytes must verify against the handle hash"
+    );
 }
 
 #[test]
@@ -431,4 +435,201 @@ fn read_window_symlink_is_not_followed() {
         ),
         other => panic!("symlink window must fail closed, got {other:?}"),
     }
+}
+
+#[test]
+fn symbol_definition_outranks_reference() {
+    // Reference first in the file on purpose: ranking, not file
+    // order, must put the definition first.
+    let scratch =
+        ScratchRepo::with_files(&[("lib.rs", b"call(needle);\nfn needle() {}\n" as &[u8])]);
+    let query = FinderQuery::new("needle", 10).unwrap();
+    let outcome = engine().search(scratch.root(), &query).unwrap();
+    assert_eq!(outcome.hits.hits.len(), 2);
+    let first = &outcome.hits.hits[0];
+    let second = &outcome.hits.hits[1];
+    assert_eq!(
+        (first.span.start_line, second.span.start_line),
+        (2, 1),
+        "definition line must outrank the reference line"
+    );
+    assert!(
+        first.reason.rank_score > second.reason.rank_score,
+        "definition score must exceed reference score"
+    );
+}
+
+#[test]
+fn whole_token_outranks_substring() {
+    let scratch = ScratchRepo::with_files(&[("lib.rs", b"// xneedle\ncall(needle);\n" as &[u8])]);
+    let query = FinderQuery::new("needle", 10).unwrap();
+    let outcome = engine().search(scratch.root(), &query).unwrap();
+    assert_eq!(outcome.hits.hits.len(), 2);
+    assert_eq!(
+        (
+            outcome.hits.hits[0].span.start_line,
+            outcome.hits.hits[1].span.start_line
+        ),
+        (2, 1),
+        "whole-token hit must outrank the substring hit"
+    );
+}
+
+#[test]
+fn external_call_outranks_same_file_mention_at_equal_score() {
+    // Same score on both lines (one term, whole token); the usage
+    // outside the defining file must come first.
+    let scratch = ScratchRepo::with_files(&[
+        ("def.rs", b"fn needle() {}\nlet x = needle(0);\n" as &[u8]),
+        ("user.rs", b"call(needle);\n" as &[u8]),
+    ]);
+    let query = FinderQuery::new("needle", 10).unwrap();
+    let outcome = engine().search(scratch.root(), &query).unwrap();
+    let order: Vec<(String, u32)> = outcome
+        .hits
+        .hits
+        .iter()
+        .map(|hit| (hit.path.to_string_lossy().to_string(), hit.span.start_line))
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            ("def.rs".to_string(), 1),
+            ("user.rs".to_string(), 1),
+            ("def.rs".to_string(), 2),
+        ],
+        "definition first, then the external usage, then the same-file mention"
+    );
+}
+
+#[test]
+fn file_tiebreak_never_overrides_score() {
+    // A two-term same-file line must stay above a one-term external
+    // line: the file preference is a tiebreak, not a boost.
+    let scratch = ScratchRepo::with_files(&[
+        ("def.rs", b"fn needle() {}\nneedle alpha\n" as &[u8]),
+        ("user.rs", b"call(needle);\n" as &[u8]),
+    ]);
+    let query = FinderQuery::new("needle alpha", 10).unwrap();
+    let outcome = engine().search(scratch.root(), &query).unwrap();
+    let order: Vec<(String, u32)> = outcome
+        .hits
+        .hits
+        .iter()
+        .map(|hit| (hit.path.to_string_lossy().to_string(), hit.span.start_line))
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            ("def.rs".to_string(), 1),
+            ("def.rs".to_string(), 2),
+            ("user.rs".to_string(), 1),
+        ],
+        "higher score wins regardless of file"
+    );
+}
+
+#[test]
+fn qualified_definitions_earn_boost() {
+    let scratch = ScratchRepo::with_files(&[(
+        "lib.rs",
+        b"call(needle);\npub unsafe fn needle() {}\nasync fn needle() {}\nconst fn needle() {}\n"
+            as &[u8],
+    )]);
+    let query = FinderQuery::new("needle", 10).unwrap();
+    let outcome = engine().search(scratch.root(), &query).unwrap();
+    let lines: Vec<u32> = outcome
+        .hits
+        .hits
+        .iter()
+        .map(|hit| hit.span.start_line)
+        .collect();
+    assert_eq!(
+        lines,
+        vec![2, 3, 4, 1],
+        "qualified definitions must outrank the plain reference"
+    );
+}
+
+#[test]
+fn attribute_prefix_and_const_item_keep_definition_boost() {
+    let scratch = ScratchRepo::with_files(&[(
+        "lib.rs",
+        b"call(needle);\n#[inline] fn needle() {}\nconst needle: u32 = 1;\n" as &[u8],
+    )]);
+    let query = FinderQuery::new("needle", 10).unwrap();
+    let outcome = engine().search(scratch.root(), &query).unwrap();
+    let lines: Vec<u32> = outcome
+        .hits
+        .hits
+        .iter()
+        .map(|hit| hit.span.start_line)
+        .collect();
+    assert_eq!(
+        lines,
+        vec![2, 3, 1],
+        "attribute-prefixed fn and const item must both count as definitions"
+    );
+}
+
+#[test]
+fn definition_boost_ignores_non_rust_files() {
+    let scratch = ScratchRepo::with_files(&[
+        ("notes.md", b"let needle be free\n" as &[u8]),
+        ("lib.rs", b"call(needle);\n" as &[u8]),
+    ]);
+    let query = FinderQuery::new("needle", 10).unwrap();
+    let outcome = engine().search(scratch.root(), &query).unwrap();
+    let order: Vec<(String, u32)> = outcome
+        .hits
+        .hits
+        .iter()
+        .map(|hit| (hit.path.to_string_lossy().to_string(), hit.span.start_line))
+        .collect();
+    assert_eq!(
+        order,
+        vec![("lib.rs".to_string(), 1), ("notes.md".to_string(), 1),],
+        "prose lines must not earn the Rust definition boost"
+    );
+}
+
+#[test]
+fn path_ties_keep_path_order() {
+    // The file tiebreak is content-only: equal-score filename hits
+    // must not reorder on content-definition grounds.
+    let scratch = ScratchRepo::with_files(&[
+        ("aneedle.rs", b"fn needle() {}\n" as &[u8]),
+        ("zneedle.rs", b"x\n" as &[u8]),
+    ]);
+    let query = FinderQuery::new("needle", 10).unwrap();
+    let outcome = engine().search(scratch.root(), &query).unwrap();
+    let paths: Vec<String> = outcome
+        .hits
+        .hits
+        .iter()
+        .filter(|hit| hit.reason.field == MatchField::Path)
+        .map(|hit| hit.path.to_string_lossy().to_string())
+        .collect();
+    assert_eq!(
+        paths,
+        vec!["aneedle.rs".to_string(), "zneedle.rs".to_string()],
+        "path-hit ties must stay in path order"
+    );
+}
+
+#[test]
+fn let_binding_boosts_only_the_defined_name() {
+    let scratch =
+        ScratchRepo::with_files(&[("lib.rs", b"let other = needle;\nlet needle = 1;\n" as &[u8])]);
+    let query = FinderQuery::new("needle", 10).unwrap();
+    let outcome = engine().search(scratch.root(), &query).unwrap();
+    assert_eq!(outcome.hits.hits.len(), 2);
+    assert_eq!(
+        (
+            outcome.hits.hits[0].span.start_line,
+            outcome.hits.hits[1].span.start_line
+        ),
+        (2, 1),
+        "only the binding that defines the term earns the definition boost"
+    );
 }

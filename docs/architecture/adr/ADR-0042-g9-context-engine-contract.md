@@ -40,7 +40,7 @@ semantics:
 | `id` | opaque string, `ctxitem_` + 26-char Crockford Base32 (ULID shape, time-sortable). Sortability is required; the ULID crate is not mandated. |
 | `kind` | closed `ContextKind` v1 enum (see 2). Unknown kinds fail closed. |
 | `source_ref` | typed `SourceRef` (see 3). Bare strings are rejected. |
-| `content_hash` | `sha256:<64 lowercase hex>` over canonical source bytes (SHA-256 matches the plan-hash precedent in `crates/plan/src/hash.rs`). Namespaces are disjoint from the finder seam: `ctxitem_` ids never collide with finder `EvidenceId` (`rf1.` namespace, `crates/repo-finder/src/model.rs`), and finder hashes are bare 64-hex — the translation rule at the seam is to strip or add the `sha256:` prefix, never to reinterpret the bytes. |
+| `content_hash` | `sha256:<64 lowercase hex>` over canonical source bytes (SHA-256 matches the plan-hash precedent in `crates/plan/src/hash.rs`). Namespaces are disjoint from the finder seam: `ctxitem_` ids never collide with finder `EvidenceId` (`rf1.`/`rf2.` namespace, `crates/repo-finder/src/model.rs`), and finder hashes are bare hex — full 64-hex under `rf1`, the 16-hex prefix under `rf2` (TASK-0173) — the translation rule at the seam is to strip or add the `sha256:` prefix, never to reinterpret the bytes. |
 | `priority` | `u16` rank, selection-only. Grants no instruction, security or Policy authority. |
 | `freshness` | `Freshness` struct: `observed_at` (Unix millis UTC), `source_rev` binding, optional `stale_after`. Never merged with trust or sensitivity. |
 | `trust` | `Trust` struct: level `Verified` / `Unverified` / `Untrusted` plus a machine-readable reason. Relevance never equals trust. |

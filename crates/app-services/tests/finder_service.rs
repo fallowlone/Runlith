@@ -420,7 +420,13 @@ fn show_with_context_returns_window() {
     // The hash still binds the raw CORE bytes, never the window.
     let (_, hash) = EvidenceId::parse(id.as_str()).unwrap();
     assert_eq!(span.content_hash, hash);
-    assert_eq!(span.content_hash, content_hash(&["needle two".to_string()]));
+    assert!(
+        EvidenceId::hash_matches(
+            &span.content_hash,
+            &content_hash(&["needle two".to_string()])
+        ),
+        "stored handle hash must verify against the raw core bytes"
+    );
 }
 
 #[test]
@@ -549,8 +555,11 @@ fn filter_is_applied_without_breaking_binding() {
     // Binding still compares raw bytes: the handle hash matches.
     let (_, hash) = EvidenceId::parse(id.as_str()).unwrap();
     assert_eq!(span.content_hash, hash);
-    assert_eq!(
-        span.content_hash,
-        content_hash(&["secret needle".to_string()])
+    assert!(
+        EvidenceId::hash_matches(
+            &span.content_hash,
+            &content_hash(&["secret needle".to_string()])
+        ),
+        "stored handle hash must verify against the raw bytes"
     );
 }

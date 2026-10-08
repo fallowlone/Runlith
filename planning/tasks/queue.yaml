@@ -5937,6 +5937,24 @@ items:
     blocked_by: []
     references:
       - docs/development/TASK_0147_FINDER_BENCHMARK.md
+    outcome: >-
+      Done on branch task-0173-finder-cost: hash16 rf2 evidence ids
+      (mint short, parse rf1+rf2, prefix verify, legacy reopenable),
+      symbol-aware ranking (whole-token +2, Rust definition +4 with
+      attribute/qualifier handling, external-usage file tiebreak that
+      never overrides score), no seam change (contract suite untouched,
+      ids opaque on the wire). Benchmark rerun R6 on the same question
+      set and corpus (40754ae): 16/16 relevance+support at 18 calls
+      (Q1 continuation cut) and ~6,676 output tokens vs R4 19/~7,678;
+      R7 replay byte-identical (26,722/26,722). Elapsed unchanged
+      (~11s: the unindexed scan is TASK-0174's scope). Independent
+      review R1 CHANGES-REQUIRED (8 findings, 7 fixed + 1 optional
+      skipped) then R2 PASS. Full workspace verification green
+      (see task ledger); daemon-methodology note: R6 ran under
+      AI_ENGINEERING_OS_{RUNTIME,DATA}_DIR overrides because the
+      canonical v27 dev-database fails the 0030 migration — reproduced
+      identically on the unmodified TASK-0172 binary (pre-existing,
+      out of scope).
 
   - id: TASK-0174
     gate: G9

@@ -182,7 +182,7 @@ impl FinderService {
             });
         }
         let window = self.read.read_window(root, &parts, before, after)?;
-        if window.core.content_hash != hash {
+        if !repo_finder::EvidenceId::hash_matches(&hash, &window.core.content_hash) {
             return Err(FinderError::Stale {
                 expected_rev: parts.revision.as_str().to_string(),
                 actual_rev: provenance.revision.as_str().to_string(),

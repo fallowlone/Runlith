@@ -8,10 +8,12 @@
 //! (production: the `git-cli` backend); this crate never shells out
 //! to Git and never guesses a revision.
 //!
-//! Ranking (documented, deterministic, total order): filename hits
-//! first by path, then content hits by matched-term count desc, path
-//! asc, line asc. Scores are adapter-local; the matched terms are
-//! the explanation.
+//! Ranking (documented, deterministic, total order): score desc,
+//! then the external-usage file tiebreak, then path asc, then line
+//! asc. Filename hits score 1000+ (always above content); content
+//! hits score matched-term count plus symbol signals (+2 whole
+//! token, +4 Rust definition line). Scores are adapter-local; the
+//! matched terms are the explanation.
 //!
 //! Continuation tokens are plain offsets (`off:<n>`) into the total
 //! ordered match list. They are NOT bound to a query or revision at
@@ -130,12 +132,173 @@ struct Candidate {
 }
 
 impl Candidate {
+    /// Rust source files only: prose in other languages must not
+    /// earn Rust definition signals.
+    fn is_rust(&self) -> bool {
+        self.path.extension().is_some_and(|ext| ext == "rs")
+    }
+
     fn score(&self) -> u32 {
         match self.field {
             MatchField::Path => 1000 + self.terms.len() as u32,
-            MatchField::Content => self.terms.len() as u32,
+            MatchField::Content => {
+                let base = self.terms.len() as u32;
+                let tokens: Vec<&str> = split_symbol_tokens(&self.line).collect();
+                let whole = self
+                    .terms
+                    .iter()
+                    .any(|term| tokens.contains(&term.as_str()));
+                let defined = self.is_rust()
+                    && self
+                        .terms
+                        .iter()
+                        .any(|term| defines_symbol(&self.line, term));
+                base + u32::from(whole) * 2 + u32::from(defined) * 4
+            }
         }
     }
+}
+
+/// Strips a leading whole word (`unsafe` but never `unsafe_x`).
+/// Returns the remainder, or `None` when the word is absent.
+fn strip_word<'a>(text: &'a str, word: &str) -> Option<&'a str> {
+    let after = text.strip_prefix(word)?;
+    if after.is_empty() || after.starts_with(|c: char| !c.is_alphanumeric() && c != '_') {
+        Some(after)
+    } else {
+        None
+    }
+}
+
+/// Skips a balanced `[...]` group at the start of `text` (nested
+/// groups count). Returns the remainder after the closing bracket.
+fn skip_balanced(text: &str, open: char, close: char) -> Option<&str> {
+    let mut depth = 0u32;
+    for (index, c) in text.char_indices() {
+        if c == open {
+            depth += 1;
+        } else if c == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(&text[index + 1..]);
+            }
+        }
+    }
+    None
+}
+
+/// Symbol tokens: maximal runs of identifier characters. Splits
+/// `foo::bar`, `x.y`, and `f(x)` into comparable tokens.
+fn split_symbol_tokens(line: &str) -> impl Iterator<Item = &str> {
+    line.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|token| !token.is_empty())
+}
+
+/// True when the line defines `term`: a Rust item or binding keyword
+/// whose first symbol token is the term. Leading `pub`/`pub(...)`,
+/// same-line `#[...]` attributes, and `fn` qualifiers (`unsafe`,
+/// `async`, `const`, `extern "..."`) are skipped; `let other = term`
+/// does NOT count — only the bound name earns the boost. Callers
+/// gate on Rust source files; this stays a pure line predicate.
+fn defines_symbol(line: &str, term: &str) -> bool {
+    const KEYWORDS: [&str; 11] = [
+        "fn",
+        "struct",
+        "enum",
+        "trait",
+        "type",
+        "const",
+        "static",
+        "mod",
+        "let",
+        "macro_rules",
+        "macro",
+    ];
+    // One visibility qualifier at most (`pub`, `pub(...)`, `pub ` —
+    // never `public`); a second `pub` is not valid Rust.
+    let mut rest = line.trim_start();
+    if let Some(after) = rest.strip_prefix("pub") {
+        if after.starts_with('(') {
+            let mut depth = 0u32;
+            let mut end = None;
+            for (index, c) in after.char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(index + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            match end {
+                Some(end) => rest = after[end..].trim_start(),
+                None => return false,
+            }
+        } else if after.starts_with(char::is_whitespace) {
+            rest = after.trim_start();
+        } else if after.is_empty() {
+            return false;
+        }
+    }
+    // Same-line attributes (`#[inline] fn`) and `fn` qualifiers
+    // (`pub unsafe fn`, `async fn`, `const fn`, `extern "C" fn`):
+    // strip in a loop, since they compose. `const` strips only
+    // before `fn` — a bare `const NAME` is the keyword itself.
+    loop {
+        let before = rest;
+        if rest.starts_with("#[") {
+            match skip_balanced(rest, '[', ']') {
+                Some(after) => rest = after.trim_start(),
+                None => return false,
+            }
+        }
+        for qualifier in ["unsafe", "async", "extern"] {
+            if let Some(after) = strip_word(rest, qualifier) {
+                rest = after.trim_start();
+                // `extern "C"`: skip the ABI literal too.
+                if qualifier == "extern" && rest.starts_with('"') {
+                    if let Some(end) = rest[1..].find('"') {
+                        rest = rest[1 + end + 1..].trim_start();
+                    } else {
+                        return false;
+                    }
+                }
+            }
+        }
+        if let Some(after) = strip_word(rest, "const") {
+            if after.trim_start().starts_with("fn")
+                && after.trim_start()[2..].starts_with(|c: char| c.is_whitespace() || c == '(')
+            {
+                rest = after.trim_start();
+            }
+        }
+        if rest == before {
+            break;
+        }
+    }
+    for keyword in KEYWORDS {
+        let after = match rest.strip_prefix(keyword) {
+            Some(after)
+                if after.starts_with(char::is_whitespace)
+                    || after.starts_with('(')
+                    || after.starts_with('!') =>
+            {
+                after
+            }
+            _ => continue,
+        };
+        // `macro_rules! name` / `macro name`: skip the `!`.
+        let after = after.trim_start_matches('!').trim_start();
+        let mut tokens = split_symbol_tokens(after);
+        if tokens.next() == Some(term) {
+            return true;
+        }
+    }
+    false
 }
 
 impl RepoSearchPort for LocalFinder {
@@ -245,12 +408,58 @@ impl RepoSearchPort for LocalFinder {
                 }
             }
         }
-        candidates.sort_by(|a, b| {
-            b.score()
-                .cmp(&a.score())
-                .then_with(|| a.path.cmp(&b.path))
-                .then_with(|| a.line_no.cmp(&b.line_no))
+        // Defining files per matched term: the Rust files holding a
+        // definition line for the term. A content candidate outside
+        // every matched term's defining files outranks a same-file
+        // mention at EQUAL score only — the defining file is already
+        // represented by the definition itself, so its further
+        // mentions (imports, re-exports, recursion) yield to external
+        // usages. Content-only: filename hits keep pure path order
+        // among themselves. Deterministic per query and corpus.
+        let mut defining_files: std::collections::HashMap<String, Vec<PathBuf>> =
+            std::collections::HashMap::new();
+        for candidate in &candidates {
+            if candidate.field != MatchField::Content || !candidate.is_rust() {
+                continue;
+            }
+            for term in &candidate.terms {
+                if defines_symbol(&candidate.line, term) {
+                    defining_files
+                        .entry(term.clone())
+                        .or_default()
+                        .push(candidate.path.clone());
+                }
+            }
+        }
+        let is_external = |candidate: &Candidate| -> bool {
+            candidate.field == MatchField::Content
+                && candidate.terms.iter().all(|term| {
+                    defining_files
+                        .get(term.as_str())
+                        .is_none_or(|files| !files.contains(&candidate.path))
+                })
+        };
+        // Scores and file preference are precomputed once: the
+        // comparator below must stay a pure total order without
+        // re-tokenizing on every comparison.
+        let mut ranked: Vec<(u32, bool, Candidate)> = candidates
+            .into_iter()
+            .map(|candidate| {
+                let score = candidate.score();
+                let external = is_external(&candidate);
+                (score, external, candidate)
+            })
+            .collect();
+        ranked.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| b.1.cmp(&a.1))
+                .then_with(|| a.2.path.cmp(&b.2.path))
+                .then_with(|| a.2.line_no.cmp(&b.2.line_no))
         });
+        let candidates: Vec<Candidate> = ranked
+            .into_iter()
+            .map(|(_, _, candidate)| candidate)
+            .collect();
         let total_hits = candidates.len();
         let offset = parse_offset(query.continuation())?;
         let page: Vec<Candidate> = candidates
