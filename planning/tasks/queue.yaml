@@ -5734,6 +5734,27 @@ items:
     references:
       - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
       - docs/architecture/adr/ADR-0011-provider-independent-context-continuity.md
+    outcome: >-
+      ACCEPTED 2026-10-07 by owner decision after three independent
+      review rounds. Round 1 returned CHANGES-REQUIRED with 15 findings
+      (6 HIGH: skipped RESOLVED step, unconditional Blocked parking,
+      unrecoverable abandonment, record timing, untranscribable return,
+      Consumed supersession); round 2 verified all 15 and returned PASS
+      with 2 new minor notes; round 3 verified both notes and returned
+      PASS with no new findings. Record: the TASK-0169 amendment in
+      docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md,
+      superseding the TASK-0097 deferral. The amendment freezes TAKEOVER
+      as a fourth HumanContinuation through the shipped decide-consume
+      lifecycle, admission preconditions with fencing, atomic effects
+      with a TakeoverAdmission record, human-authored appends,
+      TriggerPlanning return, expiry abandonment, the
+      resulting-revision reference, six-field HandoffPacket rendering,
+      a failure matrix and the v8 wire assignment; status Accepted.
+      Product identity 0.1.0-dev.task0169, gate G9. Contract only: no
+      production code, migration or IPC change. Verification observed
+      on the branch: queue YAML parses (163 items, IDs unique),
+      product-version 6/6, fmt clean, clippy -D warnings clean,
+      diff-check clean.
 
   - id: TASK-0170
     gate: G9

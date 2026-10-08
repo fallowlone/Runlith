@@ -1106,9 +1106,11 @@ conflict entirely on ADR-0027's side.
 
 ## Amendment — TASK-0169 TAKEOVER continuation (2026-10-07)
 
-> Status: **Proposed** (TASK-0169; ratification pending). On acceptance
-> this amendment supersedes the TASK-0097 deferral of TAKEOVER, the
-> resulting-revision reference and the remaining HandoffPacket fields.
+> Status: **Accepted** (TASK-0169; ratified 2026-10-07 by owner decision
+> after three independent review rounds: R1 15 findings, R2 PASS + 2 new
+> notes, R3 PASS; pre-acceptance commit c0cc47b). This amendment
+> supersedes the TASK-0097 deferral of TAKEOVER, the resulting-revision
+> reference and the remaining HandoffPacket fields.
 
 ### Problem
 
