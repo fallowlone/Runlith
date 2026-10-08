@@ -563,3 +563,66 @@ fn filter_is_applied_without_breaking_binding() {
         "stored handle hash must verify against the raw bytes"
     );
 }
+
+#[test]
+fn redacting_filter_keeps_secrets_out_of_query_and_show() {
+    // INV-008 regression pin (TASK-0174): the fail-closed default
+    // filter (no explicit with_filter — this pins the default
+    // itself) keeps secret bytes out of excerpts and windows, while
+    // handle binding still verifies against raw bytes.
+    let search: Arc<dyn RepoSearchPort> = Arc::new(StubSearch {
+        matches: vec![
+            (
+                PathBuf::from("config.rs"),
+                1,
+                "password=hunter2".to_string(),
+            ),
+            (
+                PathBuf::from("config.rs"),
+                2,
+                "token ghp_abcdefgh1234567890".to_string(),
+            ),
+        ],
+    });
+    let mut files = HashMap::new();
+    files.insert(
+        PathBuf::from("config.rs"),
+        vec![
+            "password=hunter2".to_string(),
+            "token ghp_abcdefgh1234567890".to_string(),
+        ],
+    );
+    let read: Arc<dyn RepoReadPort> = Arc::new(StubRead {
+        files: Mutex::new(files),
+    });
+    let revision: Arc<dyn RepoRevisionPort> = Arc::new(StubRevision {
+        rev: Mutex::new("r1".to_string()),
+    });
+    let service = FinderService::new(search, read, revision);
+    let page = service
+        .query(&root(), &FinderQuery::new("password", 10).unwrap())
+        .unwrap();
+    assert_eq!(page.hits.len(), 2);
+    for hit in &page.hits {
+        assert!(
+            !hit.excerpt.contains("hunter2") && !hit.excerpt.contains("ghp_abcdefgh"),
+            "excerpt must carry no secret bytes, got {:?}",
+            hit.excerpt
+        );
+    }
+    assert_eq!(page.hits[0].excerpt, "password=[redacted]");
+    let id = page.hits[0].evidence_id.clone();
+    let span = service.show_with_context(&root(), &id, 0, 1).unwrap();
+    for line in &span.lines {
+        assert!(
+            !line.contains("hunter2") && !line.contains("ghp_abcdefgh"),
+            "window must carry no secret bytes, got {line:?}"
+        );
+    }
+    // Binding intact: the stored handle hash still verifies against
+    // the raw (pre-filter) core bytes.
+    assert!(EvidenceId::hash_matches(
+        &span.content_hash,
+        &content_hash(&["password=hunter2".to_string()])
+    ));
+}

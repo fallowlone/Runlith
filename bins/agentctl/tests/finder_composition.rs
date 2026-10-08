@@ -188,7 +188,7 @@ async fn query_returns_bounded_page_bound_to_head() {
     let page = page_of(&response);
     assert_eq!(page.revision, sandbox.head());
     assert!(!page.dirty);
-    assert_eq!(page.backend_name, "finder-local");
+    assert_eq!(page.backend_name, "finder-local-indexed");
     assert!(
         page.hits
             .iter()

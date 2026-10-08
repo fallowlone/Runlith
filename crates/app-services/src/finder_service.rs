@@ -7,9 +7,10 @@
 //! token is self-describing, so any daemon process can serve any
 //! page or reopen.
 //!
-//! [`ContentFilter`] is the INV-008 seam. Phase B ships
-//! [`PassthroughFilter`]; a redacting implementation plugs in
-//! without touching selection, paging, or staleness.
+//! [`ContentFilter`] is the INV-008 seam. [`RedactingFilter`] is the
+//! fail-closed default; [`PassthroughFilter`] stays for tests and
+//! callers that provably filter elsewhere. Swapping filters never
+//! touches selection, paging, or staleness.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -38,6 +39,25 @@ impl ContentFilter for PassthroughFilter {
 
     fn filter_lines(&self, _path: &Path, lines: Vec<String>) -> Vec<String> {
         lines
+    }
+}
+
+/// INV-008 redacting filter (TASK-0174): secret-shaped display bytes
+/// become `[redacted]` via the shared [`crate::secret_redaction`]
+/// screen. Total and display-only: staleness hashes still bind the
+/// pre-filter bytes, so filtering can neither forge nor break
+/// verification. Note: filtering runs after excerpt bounding, so a
+/// redacted excerpt may exceed the adapter bound by ~10 chars per
+/// swap; nothing downstream re-validates length (display-only).
+pub struct RedactingFilter;
+
+impl ContentFilter for RedactingFilter {
+    fn filter_excerpt(&self, _path: &Path, excerpt: String) -> String {
+        crate::secret_redaction::redact_line(&excerpt)
+    }
+
+    fn filter_lines(&self, _path: &Path, lines: Vec<String>) -> Vec<String> {
+        crate::secret_redaction::redact_lines(&lines)
     }
 }
 
@@ -80,6 +100,9 @@ pub struct FinderService {
 }
 
 impl FinderService {
+    /// Fail-closed default: display bytes pass through
+    /// [`RedactingFilter`]. Callers that provably filter elsewhere
+    /// opt out explicitly via [`FinderService::with_filter`].
     pub fn new(
         search: Arc<dyn RepoSearchPort>,
         read: Arc<dyn RepoReadPort>,
@@ -89,7 +112,7 @@ impl FinderService {
             search,
             read,
             revision,
-            filter: Arc::new(PassthroughFilter),
+            filter: Arc::new(RedactingFilter),
         }
     }
 

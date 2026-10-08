@@ -302,15 +302,19 @@ fn open_approval_service(config: &DaemonConfig) -> Result<Option<ApprovalHandle>
     ))))
 }
 
-/// Opens the finder composition: lexical engine plus Git revision
-/// backend behind the trusted service. No database, no provider, no
-/// I/O — always present, including on control-only daemons.
+/// Opens the finder composition: snapshot-indexed engine plus Git
+/// revision backend behind the trusted service, with INV-008
+/// redaction on all display bytes. No database, no provider — always
+/// present, including on control-only daemons.
 fn open_finder() -> FinderHandle {
     let revision: Arc<dyn repo_finder::RepoRevisionPort> = Arc::new(git_cli::GitCli::new());
-    let engine = Arc::new(finder_local::LocalFinder::new(revision.clone()));
+    let engine = Arc::new(finder_local::IndexedFinder::new(revision.clone()));
     let search: Arc<dyn repo_finder::RepoSearchPort> = engine.clone();
     let read: Arc<dyn repo_finder::RepoReadPort> = engine;
-    Arc::new(FinderService::new(search, read, revision))
+    Arc::new(
+        FinderService::new(search, read, revision)
+            .with_filter(Arc::new(app_services::RedactingFilter)),
+    )
 }
 
 fn open_human_decision_service(

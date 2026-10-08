@@ -19,6 +19,14 @@
 //! ordered match list. They are NOT bound to a query or revision at
 //! this layer: binding tokens to query+revision is the service's job
 //! (a token replayed against another query pages that query's list).
+//!
+//! [`IndexedFinder`](index::IndexedFinder) serves the same seam from
+//! a revision-bound in-memory snapshot: identical outcomes without
+//! the per-query filesystem walk.
+
+pub mod index;
+
+pub use index::IndexedFinder;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -120,6 +128,235 @@ impl LocalFinder {
         let dropped = line.chars().count() - truncated.chars().count();
         format!("{truncated}…[+{dropped} chars, reopen for the full line]")
     }
+
+    /// Reads and classifies one walked file. Shared by the scan path
+    /// and the snapshot builder so both see identical bytes, skips,
+    /// and failures. Scope filtering stays caller-side (query-time);
+    /// callers run [`reject_unrepresentable`] first so invalid paths
+    /// report skips without touching the filesystem.
+    fn ingest_file(&self, root_path: &Path, relative: &Path) -> Result<IngestedFile, FinderError> {
+        let full = root_path.join(relative);
+        if full.is_symlink() {
+            return Ok(IngestedFile::Skipped(SkippedSource {
+                path: relative.to_path_buf(),
+                reason: SkipReason::Denied {
+                    rule: "symlink".to_string(),
+                },
+            }));
+        }
+        let len = full
+            .symlink_metadata()
+            .map_err(|error| FinderError::BackendFailure {
+                detail: bound_detail(&error.to_string()),
+            })?
+            .len();
+        if len > self.max_file_bytes {
+            return Ok(IngestedFile::Skipped(SkippedSource {
+                path: relative.to_path_buf(),
+                reason: SkipReason::TooLarge { bytes: len },
+            }));
+        }
+        let bytes = std::fs::read(&full).map_err(|error| FinderError::BackendFailure {
+            detail: bound_detail(&error.to_string()),
+        })?;
+        if bytes.contains(&0) {
+            return Ok(IngestedFile::Skipped(SkippedSource {
+                path: relative.to_path_buf(),
+                reason: SkipReason::Binary,
+            }));
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        Ok(IngestedFile::Content {
+            lines: text.lines().map(str::to_string).collect(),
+            bytes: bytes.len() as u64,
+        })
+    }
+
+    /// Ranks candidates, pages them, and mints evidence handles.
+    /// Shared by the scan path and the indexed path so both emit
+    /// identical pages for identical candidate sets.
+    fn finish_search(
+        &self,
+        provenance: RepoProvenance,
+        candidates: Vec<Candidate>,
+        skipped: Vec<SkippedSource>,
+        query: &FinderQuery,
+    ) -> Result<SearchOutcome, FinderError> {
+        // Defining files per matched term: the Rust files holding a
+        // definition line for the term. A content candidate outside
+        // every matched term's defining files outranks a same-file
+        // mention at EQUAL score only — the defining file is already
+        // represented by the definition itself, so its further
+        // mentions (imports, re-exports, recursion) yield to external
+        // usages. Content-only: filename hits keep pure path order
+        // among themselves. Deterministic per query and corpus.
+        let mut defining_files: std::collections::HashMap<String, Vec<PathBuf>> =
+            std::collections::HashMap::new();
+        for candidate in &candidates {
+            if candidate.field != MatchField::Content || !candidate.is_rust() {
+                continue;
+            }
+            for term in &candidate.terms {
+                if defines_symbol(&candidate.line, term) {
+                    defining_files
+                        .entry(term.clone())
+                        .or_default()
+                        .push(candidate.path.clone());
+                }
+            }
+        }
+        let is_external = |candidate: &Candidate| -> bool {
+            candidate.field == MatchField::Content
+                && candidate.terms.iter().all(|term| {
+                    defining_files
+                        .get(term.as_str())
+                        .is_none_or(|files| !files.contains(&candidate.path))
+                })
+        };
+        // Scores and file preference are precomputed once: the
+        // comparator below must stay a pure total order without
+        // re-tokenizing on every comparison.
+        let mut ranked: Vec<(u32, bool, Candidate)> = candidates
+            .into_iter()
+            .map(|candidate| {
+                let score = candidate.score();
+                let external = is_external(&candidate);
+                (score, external, candidate)
+            })
+            .collect();
+        ranked.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| b.1.cmp(&a.1))
+                .then_with(|| a.2.path.cmp(&b.2.path))
+                .then_with(|| a.2.line_no.cmp(&b.2.line_no))
+        });
+        let candidates: Vec<Candidate> = ranked
+            .into_iter()
+            .map(|(_, _, candidate)| candidate)
+            .collect();
+        let total_hits = candidates.len();
+        let offset = parse_offset(query.continuation())?;
+        let page: Vec<Candidate> = candidates
+            .into_iter()
+            .skip(offset)
+            .take(query.limit())
+            .collect();
+        let continuation = if offset + page.len() < total_hits {
+            Some(
+                ContinuationToken::new(format!("off:{}", offset + page.len()))
+                    .expect("offset token must build: bounded digits under a short prefix"),
+            )
+        } else {
+            None
+        };
+        let mut hits = Vec::with_capacity(page.len());
+        for candidate in page {
+            let span = HitSpan::new(candidate.line_no, candidate.line_no)
+                .expect("candidate spans must build: one-based lines within a read file");
+            let parts =
+                EvidenceParts::new(provenance.revision.clone(), candidate.path.clone(), span)
+                    .expect("candidate parts must build: confined walk-relative paths");
+            // The handle binds the FULL line; the excerpt may carry a
+            // truncation marker. Reopen compares against full bytes.
+            let hash = content_hash(std::slice::from_ref(&candidate.line));
+            // The revision arrives from an injected port: an unsafe
+            // value is a backend failure, never a panic.
+            let id = EvidenceId::mint(&parts, &hash).map_err(|_| FinderError::BackendFailure {
+                detail: "revision is not evidence-safe".to_string(),
+            })?;
+            let score = candidate.score();
+            hits.push(
+                Hit::new(
+                    id,
+                    candidate.path,
+                    span,
+                    self.excerpt(&candidate.line),
+                    HitReason {
+                        matched_terms: candidate.terms,
+                        field: candidate.field,
+                        rank_score: score,
+                    },
+                )
+                .expect("candidate hit must build: bounded excerpt, confined path"),
+            );
+        }
+        Ok(SearchOutcome {
+            provenance,
+            backend: Self::backend_id(),
+            hits: BoundedHits {
+                total_hits,
+                hits,
+                skipped,
+                continuation,
+            },
+        })
+    }
+}
+
+/// One ingested file: searchable lines plus their byte weight, or an
+/// explicit skip recording why the file stays out.
+enum IngestedFile {
+    Content { lines: Vec<String>, bytes: u64 },
+    Skipped(SkippedSource),
+}
+
+/// Pure path-validity gate (no I/O): non-UTF-8 or overlong walked
+/// paths report an explicit skip instead of reaching the filesystem.
+fn reject_unrepresentable(relative: &Path) -> Option<SkippedSource> {
+    if relative.to_str().is_none() || relative.as_os_str().len() > repo_finder::MAX_PATH_BYTES {
+        Some(SkippedSource {
+            path: PathBuf::from("<unrepresentable-path>"),
+            reason: SkipReason::Denied {
+                rule: "non-utf8-or-overlong-path".to_string(),
+            },
+        })
+    } else {
+        None
+    }
+}
+
+/// Collects path-hit and content candidates for `terms` over one
+/// file's lines. Shared by scan and index so both rank identical
+/// candidate sets.
+fn collect_candidates(relative: &Path, lines: &[String], terms: &[&str]) -> Vec<Candidate> {
+    let mut candidates = Vec::new();
+    let file_name = relative
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let name_terms: Vec<String> = terms
+        .iter()
+        .filter(|term| file_name.contains(*term))
+        .map(|term| term.to_string())
+        .collect();
+    if !name_terms.is_empty() {
+        if let Some(first) = lines.first() {
+            candidates.push(Candidate {
+                path: relative.to_path_buf(),
+                line_no: 1,
+                line: first.clone(),
+                terms: name_terms,
+                field: MatchField::Path,
+            });
+        }
+    }
+    for (index, line) in lines.iter().enumerate() {
+        let matched: Vec<String> = terms
+            .iter()
+            .filter(|term| line.contains(*term))
+            .map(|term| term.to_string())
+            .collect();
+        if !matched.is_empty() {
+            candidates.push(Candidate {
+                path: relative.to_path_buf(),
+                line_no: index as u32 + 1,
+                line: line.clone(),
+                terms: matched,
+                field: MatchField::Content,
+            });
+        }
+    }
+    candidates
 }
 
 /// One ordered match before paging.
@@ -320,15 +557,8 @@ impl RepoSearchPort for LocalFinder {
         let mut candidates: Vec<Candidate> = Vec::new();
         let mut skipped: Vec<SkippedSource> = Vec::new();
         for relative in files {
-            if relative.to_str().is_none()
-                || relative.as_os_str().len() > repo_finder::MAX_PATH_BYTES
-            {
-                skipped.push(SkippedSource {
-                    path: PathBuf::from("<unrepresentable-path>"),
-                    reason: SkipReason::Denied {
-                        rule: "non-utf8-or-overlong-path".to_string(),
-                    },
-                });
+            if let Some(skip) = reject_unrepresentable(&relative) {
+                skipped.push(skip);
                 continue;
             }
             if let Some(scope) = query.scope() {
@@ -336,186 +566,14 @@ impl RepoSearchPort for LocalFinder {
                     continue;
                 }
             }
-            let full = root_path.join(&relative);
-            if full.is_symlink() {
-                skipped.push(SkippedSource {
-                    path: relative,
-                    reason: SkipReason::Denied {
-                        rule: "symlink".to_string(),
-                    },
-                });
-                continue;
-            }
-            let len = full
-                .symlink_metadata()
-                .map_err(|error| FinderError::BackendFailure {
-                    detail: bound_detail(&error.to_string()),
-                })?
-                .len();
-            if len > self.max_file_bytes {
-                skipped.push(SkippedSource {
-                    path: relative,
-                    reason: SkipReason::TooLarge { bytes: len },
-                });
-                continue;
-            }
-            let bytes = std::fs::read(&full).map_err(|error| FinderError::BackendFailure {
-                detail: bound_detail(&error.to_string()),
-            })?;
-            if bytes.contains(&0) {
-                skipped.push(SkippedSource {
-                    path: relative,
-                    reason: SkipReason::Binary,
-                });
-                continue;
-            }
-            let text = String::from_utf8_lossy(&bytes);
-            let lines: Vec<&str> = text.lines().collect();
-            let file_name = relative
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let name_terms: Vec<String> = terms
-                .iter()
-                .filter(|term| file_name.contains(*term))
-                .map(|term| term.to_string())
-                .collect();
-            if !name_terms.is_empty() {
-                if let Some(first) = lines.first() {
-                    candidates.push(Candidate {
-                        path: relative.clone(),
-                        line_no: 1,
-                        line: first.to_string(),
-                        terms: name_terms,
-                        field: MatchField::Path,
-                    });
-                }
-            }
-            for (index, line) in lines.iter().enumerate() {
-                let matched: Vec<String> = terms
-                    .iter()
-                    .filter(|term| line.contains(*term))
-                    .map(|term| term.to_string())
-                    .collect();
-                if !matched.is_empty() {
-                    candidates.push(Candidate {
-                        path: relative.clone(),
-                        line_no: index as u32 + 1,
-                        line: line.to_string(),
-                        terms: matched,
-                        field: MatchField::Content,
-                    });
+            match self.ingest_file(root_path, &relative)? {
+                IngestedFile::Skipped(skip) => skipped.push(skip),
+                IngestedFile::Content { lines, .. } => {
+                    candidates.extend(collect_candidates(&relative, &lines, &terms));
                 }
             }
         }
-        // Defining files per matched term: the Rust files holding a
-        // definition line for the term. A content candidate outside
-        // every matched term's defining files outranks a same-file
-        // mention at EQUAL score only — the defining file is already
-        // represented by the definition itself, so its further
-        // mentions (imports, re-exports, recursion) yield to external
-        // usages. Content-only: filename hits keep pure path order
-        // among themselves. Deterministic per query and corpus.
-        let mut defining_files: std::collections::HashMap<String, Vec<PathBuf>> =
-            std::collections::HashMap::new();
-        for candidate in &candidates {
-            if candidate.field != MatchField::Content || !candidate.is_rust() {
-                continue;
-            }
-            for term in &candidate.terms {
-                if defines_symbol(&candidate.line, term) {
-                    defining_files
-                        .entry(term.clone())
-                        .or_default()
-                        .push(candidate.path.clone());
-                }
-            }
-        }
-        let is_external = |candidate: &Candidate| -> bool {
-            candidate.field == MatchField::Content
-                && candidate.terms.iter().all(|term| {
-                    defining_files
-                        .get(term.as_str())
-                        .is_none_or(|files| !files.contains(&candidate.path))
-                })
-        };
-        // Scores and file preference are precomputed once: the
-        // comparator below must stay a pure total order without
-        // re-tokenizing on every comparison.
-        let mut ranked: Vec<(u32, bool, Candidate)> = candidates
-            .into_iter()
-            .map(|candidate| {
-                let score = candidate.score();
-                let external = is_external(&candidate);
-                (score, external, candidate)
-            })
-            .collect();
-        ranked.sort_by(|a, b| {
-            b.0.cmp(&a.0)
-                .then_with(|| b.1.cmp(&a.1))
-                .then_with(|| a.2.path.cmp(&b.2.path))
-                .then_with(|| a.2.line_no.cmp(&b.2.line_no))
-        });
-        let candidates: Vec<Candidate> = ranked
-            .into_iter()
-            .map(|(_, _, candidate)| candidate)
-            .collect();
-        let total_hits = candidates.len();
-        let offset = parse_offset(query.continuation())?;
-        let page: Vec<Candidate> = candidates
-            .into_iter()
-            .skip(offset)
-            .take(query.limit())
-            .collect();
-        let continuation = if offset + page.len() < total_hits {
-            Some(
-                ContinuationToken::new(format!("off:{}", offset + page.len()))
-                    .expect("offset token must build: bounded digits under a short prefix"),
-            )
-        } else {
-            None
-        };
-        let mut hits = Vec::with_capacity(page.len());
-        for candidate in page {
-            let span = HitSpan::new(candidate.line_no, candidate.line_no)
-                .expect("candidate spans must build: one-based lines within a read file");
-            let parts =
-                EvidenceParts::new(provenance.revision.clone(), candidate.path.clone(), span)
-                    .expect("candidate parts must build: confined walk-relative paths");
-            // The handle binds the FULL line; the excerpt may carry a
-            // truncation marker. Reopen compares against full bytes.
-            let hash = content_hash(std::slice::from_ref(&candidate.line));
-            // The revision arrives from an injected port: an unsafe
-            // value is a backend failure, never a panic.
-            let id = EvidenceId::mint(&parts, &hash).map_err(|_| FinderError::BackendFailure {
-                detail: "revision is not evidence-safe".to_string(),
-            })?;
-            let score = candidate.score();
-            hits.push(
-                Hit::new(
-                    id,
-                    candidate.path,
-                    span,
-                    self.excerpt(&candidate.line),
-                    HitReason {
-                        matched_terms: candidate.terms,
-                        field: candidate.field,
-                        rank_score: score,
-                    },
-                )
-                .expect("candidate hit must build: bounded excerpt, confined path"),
-            );
-        }
-        Ok(SearchOutcome {
-            provenance,
-            backend: Self::backend_id(),
-            hits: BoundedHits {
-                total_hits,
-                hits,
-                skipped,
-                continuation,
-            },
-        })
+        self.finish_search(provenance, candidates, skipped, query)
     }
 }
 

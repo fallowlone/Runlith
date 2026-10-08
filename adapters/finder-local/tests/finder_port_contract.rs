@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use finder_local::LocalFinder;
+use finder_local::{IndexedFinder, LocalFinder};
 use repo_finder::{FinderError, RepoProvenance, RepoRevisionPort, RepoRoot, Revision};
 use repo_finder_contract::run_finder_search_contract;
 
@@ -31,5 +31,11 @@ impl RepoRevisionPort for StubRevision {
 #[test]
 fn local_finder_satisfies_the_shared_search_contract() {
     let engine = LocalFinder::new(Arc::new(StubRevision));
+    run_finder_search_contract(&engine, &engine);
+}
+
+#[test]
+fn indexed_finder_satisfies_the_shared_search_contract() {
+    let engine = IndexedFinder::new(Arc::new(StubRevision));
     run_finder_search_contract(&engine, &engine);
 }

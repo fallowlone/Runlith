@@ -32,6 +32,7 @@ mod review_admission;
 mod review_scope;
 mod review_service;
 mod runtime_service;
+mod secret_redaction;
 mod security_service;
 mod side_effect_recovery;
 mod task_service;
@@ -51,7 +52,9 @@ pub use clock::{format_rfc3339, Clock, FixedClock, SystemClock};
 pub use context_service::{ContextService, SelectionRequest};
 pub use continuity_service::{CommitRequest, ContinuityService, NewNote};
 pub use error::{ServiceError, ServiceResult};
-pub use finder_service::{ContentFilter, FinderPage, FinderService, FinderSpan, PassthroughFilter};
+pub use finder_service::{
+    ContentFilter, FinderPage, FinderService, FinderSpan, PassthroughFilter, RedactingFilter,
+};
 pub use human_decision_service::{HumanDecisionCreate, HumanDecisionService, TakeoverAppends};
 pub use managed_identity::{
     branch_for_execution, decode_readable_slug, is_ascii_casefold_stable, is_canonical_v2_slug,
@@ -90,6 +93,7 @@ pub use review_service::{
     B1ReviewInput, ReviewAdmissionQuery, ReviewService, ReviewServiceError, ReviewServiceResult,
 };
 pub use runtime_service::{AppliedExecution, PlannedExecution, RuntimeService};
+pub use secret_redaction::{redact_line, redact_lines, REDACTED};
 pub use security_service::{
     G6Authorization, G6SecurityError, G6SecurityService, PrivilegedOperation, ProcessSecuritySpec,
 };

@@ -5979,6 +5979,22 @@ items:
       - docs/development/TASK_0147_FINDER_BENCHMARK.md
       - docs/architecture/INVARIANTS.md
       - docs/architecture/context-engine.md
+    outcome: >-
+      Done on branch task-0174-finder-index: IndexedFinder behind the
+      unchanged seam ports (rev-bound in-memory snapshot, per-file
+      trigram-Bloom prefilter + exact verify, dirty/cap delegation to
+      scan; distinct backend finder-local-indexed/0.1.0) and
+      RedactingFilter as the production ContentFilter (canonical
+      policy shapes + vendor prefixes, display-only, hashes bind
+      pre-filter bytes). Benchmark R8: 16/16 at 8.8s vs R6 11.5s
+      (warm median 380ms vs 528ms), bodies byte-identical to R6
+      except backend id; R9 replay byte-identical; zero redactions
+      (predicted + verified). Independent review R1
+      CHANGES-REQUIRED (12 findings: 11 fixed, 1 refuted with
+      clean-rebuild evidence), R2 CHANGES-REQUIRED (2 LOW
+      mechanical), R3 PASS. Full workspace verification green (163
+      ok, 0 failed); daemon overrides as in R6 (canonical-DB 0030
+      failure still pre-existing).
 
   - id: TASK-0175
     gate: G9

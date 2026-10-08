@@ -361,7 +361,8 @@ bound to rev `40754ae…b2f51`, clean. All evidence ids `rf2.`
   --limit 3` → def `:37` + orchestration call `:931`. 2/2.
 
 Totals: relevance 16/16, support 16/16, 26,704 output bytes
-(~6,676 tokens), 1,976 input bytes (~494 tokens), 11.1s elapsed.
+(~6,676 tokens), 1,976 input bytes (~494 tokens), 11.5s elapsed
+(rerun after review fixes; identical bytes).
 
 ### Run R7 — finder replay (2026-10-08, same hardware/corpus)
 
@@ -388,7 +389,7 @@ continuation cut by the external-usage tiebreak) and ~1,000
 fewer output tokens (~6,676 vs ~7,678: ~745 from hash16 over 62
 hit lines plus the dropped continuation page). The token math
 reconciles exactly with the mechanism — no unexplained delta.
-Elapsed is unchanged (11.1s vs 10.8s): ranking and ids were
+Elapsed is unchanged (11.5s vs 10.8s): ranking and ids were
 never going to fix the unindexed scan; that stays TASK-0174's
 job, as scoped. Q4's rescope survives by measurement (ties no
 ranking signal breaks without file-identity knowledge), and Q3
@@ -397,3 +398,76 @@ symbol tokens) — both documented above so TASK-0174's index
 work does not re-litigate them. No seam changed: `EvidenceId`
 stays opaque, `rf1` still parses, scores stay adapter-local,
 the contract suite is untouched.
+
+## 9. Phase C round 2 (TASK-0174): R8–R9
+
+Same question set (section 4), same corpus (detached clean
+`40754ae`), same exclusions (section 2). New binaries from branch
+`task-0174-finder-index`: snapshot index (`IndexedFinder` behind
+the unchanged seam ports, backend `finder-local-indexed/0.1.0`)
+and the production `RedactingFilter`. Same daemon overrides as
+R6 (fresh socket + database; the canonical-DB migration failure
+is unchanged and still out of scope).
+
+### Run R8 — indexed run (2026-10-08, arm64, Apple M2 Pro)
+
+The same 18 calls as R6 (queries verbatim; show ids are
+content-bound so the R6 ids replay verbatim). Rig
+`/tmp/task0174-r8.sh`, raw log `/tmp/task0174-r8.log` (session
+artifacts, timed verbatim, 29,481 bytes, sha256
+`35bd7658…0b8df`). Contamination: zero hits in this file;
+`.git/`/`target/`/`.claude/` never surfaced. Every response bound
+to rev `40754ae…b2f51`, clean. Redactions fired: zero — predicted
+(all R6 outputs screened against the rules pre-run) and verified.
+
+Per-question evidence is identical to R6 (same pages, same
+citations, same 1,2,4,2,2,2,1,4 call shape): relevance 16/16,
+support 16/16. Stronger: R8 response bodies are byte-identical
+to R6 except the 14 query header lines carrying the new backend
+id (+112 bytes total) — the index changes nothing but speed, as
+the scan-vs-indexed equivalence tests pin. (Byte-measure note:
+per-call rig sums exclude trailing newlines — R6 26,704, R8
+26,816 — while body-file comparisons include one newline per
+call — R6 26,722, R8/R9 26,834; both measures reconcile by
+exactly 18 newlines and the 112 header bytes.)
+
+Totals: 26,816 output bytes (~6,704 tokens), ~494 input tokens,
+8.8s elapsed (cold Q1 1,805ms incl. ~700ms snapshot build;
+warm median 380ms, range 364–552ms).
+
+### Run R9 — indexed replay (2026-10-08, same hardware/corpus)
+
+Verbatim replay of the 18 R8 calls (`/tmp/task0174-r9.sh`).
+Log `/tmp/task0174-r9.log` (29,480 bytes, sha256
+`dd14b336…bbba5`).
+
+All 18 outputs byte-identical to R8 (26,834/26,834 body-file
+bytes), all exit 0, 7.3s elapsed. R9's Q1 took 355ms against
+R8's 1,805ms with no shutdown issued between runs (same runtime
+dir, same daemon): the snapshot persists across runs — no
+rebuild, same bytes. Scores identical, 16/16.
+
+### Phase C reading (TASK-0174)
+
+R8 matches R6 at 16/16 with lower elapsed: 8.8s vs 11.5s
+total, warm-query median 380ms vs 528ms (R8's slowest warm
+query, 552ms, sits near R6's median; R6 spread to 961ms).
+Measured decomposition, two instruments: end-to-end medians
+above; in-process probes (session artifact, same corpus) show
+the filesystem scan at ~190ms/query, snapshot build ~700ms
+once, and warm indexed search ~90ms for the largest page. The
+end-to-end remainder per call (CLI, IPC, revision resolution,
+dispatch) is uninstrumented — no floor number is claimed; what
+the medians prove is that removing the walk lowers every warm
+query and tightens the spread ~3× (R6 428–961ms, R8 364–552ms).
+
+That corrects the phase-B attribution directionally: the
+"~0.5–0.9s per-query scan" bundled the ~190ms walk with
+several hundred ms of fixed per-call cost, so the index wins
+~150ms per warm query rather than the full spread. Further
+elapsed work belongs to revision resolution and dispatch, not
+retrieval — named here so no follow-up re-profiles it.
+Security posture: `PassthroughFilter` no longer ships;
+secret-shaped bytes cannot reach finder output except through
+shapes outside the canonical screen (documented in
+`secret_redaction.rs`), pinned by the service regression test.
