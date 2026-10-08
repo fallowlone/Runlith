@@ -1103,3 +1103,140 @@ No change to `AtomicityRequest`, `AtomicityAssessment`, the validation rules
 V1–V9, the guardrail bounds, `PlannerCallSpend`, `PlannerFault`, the
 publication fence itself, or ADR-0028 as written — this amendment resolves the
 conflict entirely on ADR-0027's side.
+
+## Amendment — TASK-0169 TAKEOVER continuation (2026-10-07)
+
+> Status: **Proposed** (TASK-0169; ratification pending). On acceptance
+> this amendment supersedes the TASK-0097 deferral of TAKEOVER, the
+> resulting-revision reference and the remaining HandoffPacket fields.
+
+### Problem
+
+The TASK-0097 amendment deferred TAKEOVER to G9 because G7 had not
+settled the semantics: what happens to the active planning run, the
+claimed Task, the workspace lease and the in-flight execution when a
+human assumes authority mid-flight, and how the Task returns to
+machine execution afterwards. This amendment settles them. Without it,
+TASK-0172 would ship a fourth enum variant the system accepts and
+cannot honour — the exact defect class the deferral was avoiding.
+
+### Decision
+
+TAKEOVER means a human assumes execution authority for the HDR's scope
+mid-flight. It is a fourth `HumanContinuation` variant alongside
+RESUME, REPLAN and ABORT — not a side channel. Authority transfers to
+the human and returns to the machine only through a subsequent machine
+planning cycle; nothing resumes automatically.
+
+**Admission preconditions** (all checked inside one transaction;
+any failure refuses typed with no state change):
+
+- The HDR is Pending and offers TAKEOVER in `options`; stale,
+  expired or already-consumed requests follow the existing
+  supersession path, never TAKEOVER admission.
+- No ACTIVE planning run exists on the branch
+  (`TAKEOVER_ACTIVE_RUN` refusal otherwise). The active run, if any,
+  must finish or be superseded first through existing paths.
+- No open attempt exists on the owning execution
+  (`TAKEOVER_OPEN_ATTEMPT` refusal otherwise). An open attempt is
+  concluded only through the existing trusted cancel path, never as
+  a side effect of TAKEOVER admission.
+- The admission is fenced like V9: planning input, plan head and run
+  generation are re-derived and must match the HDR binding, or the
+  request refuses as stale.
+- The human verdict arrives through the trusted human-verdict
+  channel with fresh presence bound to the exact HDR identity and
+  basis revision (the TASK-0062 exact-binding precedent): a TAKEOVER
+  grant authorizes only its bound request and is single-use.
+
+**Effects of admission** (atomic):
+
+- The HDR is Consumed with `selected` TAKEOVER (single-winner:
+  concurrent TAKEOVER consumers yield one admission and typed stale
+  refusals, the V9 RESUME precedent).
+- The Task moves to Blocked with the takeover reason recorded in the
+  journal. Machine execution for the scope is barred while Blocked
+  for this reason.
+- The workspace lease is untouched: it stays Ready under the same
+  ownership, and the human works in the same worktree. The trusted
+  anchor is re-validated at return; anchor mismatch refuses return.
+- A `TakeoverRecord` is appended carrying the basis plan revision
+  (mandatory), the resulting-revision reference (optional, set when
+  the human's work produces one), and the rendered packet fields
+  (below). This is the takeover-evidence record, not a second HDR:
+  the HDR stays the decision record.
+
+**Human authority during takeover.** The human acts through the
+trusted control plane only (the same versioned agentd/agentctl
+surface as any operator). Human-authored plan changes are validated
+trusted-side against V1–V9 exactly like planner proposals — the
+human is not a validation bypass. The human cannot conclude attempts,
+mint verdicts, widen scope, or weaken policy/approvals: completion
+authority stays with independent evaluation (ADR-0018/ADR-0030).
+
+**Return to machine execution.** TAKEOVER itself never resumes the
+machine. Return happens only through a subsequent planning cycle for
+the scope (a REPLAN continuation on a fresh HDR or an
+operator-triggered replan), which re-derives authority from current
+canonical state — including any human-authored resulting revision —
+and proceeds through the normal fences. Return with no human changes
+replans from the recorded basis revision.
+
+**Resulting-revision reference.** Optional reference to the
+PlanRevision accepted from human-authored changes during takeover.
+Null when the human changed no plan. The basis revision (plan head
+at admission) is always recorded; fencing at return compares
+against current canonical state, not against memory of the basis.
+
+**Full HandoffPacket rendering.** The human-facing rendering over the
+HDR plus the `TakeoverRecord`: `goal` (Task objective),
+`state` (task/plan/branch snapshot refs),
+`actions` (human-authored bounded text),
+`blockers` (derived open blockers),
+`uncertainty` (human-authored bounded text),
+`question` (human-authored bounded text). Derived fields are
+references, never copied truth; authored fields are bounded text
+with a sensitivity label and travel the ADR-0043 note rules (no
+SECRET values, PII/raw payloads by reference only).
+
+### Failure matrix
+
+- TAKEOVER with an open attempt or ACTIVE run: typed refusal, zero
+  state change.
+- TAKEOVER on a stale/expired/consumed HDR: existing supersession
+  path, never admission.
+- Concurrent TAKEOVER consumers: exactly one admission, typed stale
+  losers.
+- Human never acts: the HDR expires under existing expiry rules and
+  the scope recovers through supersession; Blocked-for-takeover is
+  never a permanent wedge.
+- Return with a broken workspace anchor: return refuses; the scope
+  stays Blocked pending reconciliation.
+- Human-authored plan change failing V1–V9: refused like any
+  proposal; the takeover itself is unaffected.
+
+### Wire and versioning notes (for TASK-0172, not this task)
+
+The `HumanContinuation` enum (Rust and
+`human_decision_core.proto`) gains a fourth variant. The additive
+wire value ships under the protocol-version rules (negotiated
+version gating per the ADR-0028 precedent); TASK-0172 assigns the
+version. No existing variant changes meaning.
+
+### Why this shape
+
+Refusal preconditions reuse the existing cancel, supersession and
+fencing paths instead of growing TAKEOVER its own shadow
+lifecycle. The Task parks in Blocked — the state that already means
+"machine progress barred" — instead of inventing a thirteenth Task
+state. The human validates like a planner, so no new trust axiom
+enters the system. And return runs the normal fences, so a takeover
+can never smuggle stale authority back into the machine.
+
+### Scope
+
+No change to RESUME/REPLAN/ABORT semantics, V1–V9, guardrail bounds,
+the publication fence, Task lifecycle transitions beyond the named
+Blocked parking, lease lifecycle, attempt append-only history, or
+completion authority. No production code in this task: the
+implementation is TASK-0172.
