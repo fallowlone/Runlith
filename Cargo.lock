@@ -93,6 +93,7 @@ name = "app-services"
 version = "0.1.0"
 dependencies = [
  "agent-runtime",
+ "context-engine",
  "evaluation",
  "fake-agent",
  "fake-evaluator",
@@ -397,6 +398,17 @@ name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
+name = "context-engine"
+version = "0.1.0"
+
+[[package]]
+name = "context-engine-contract"
+version = "0.1.0"
+dependencies = [
+ "context-engine",
+]
 
 [[package]]
 name = "core-foundation"
@@ -1711,6 +1723,8 @@ name = "storage-sqlite"
 version = "0.1.0"
 dependencies = [
  "agent-runtime",
+ "context-engine",
+ "context-engine-contract",
  "evaluation",
  "plan-domain",
  "policy",

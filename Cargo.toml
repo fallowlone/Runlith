@@ -33,5 +33,7 @@ members = [
     "crates/repo-finder",
     "crates/repo-finder-contract",
     "adapters/finder-local",
+    "crates/context-engine",
+    "crates/context-engine-contract",
 ]
 resolver = "2"

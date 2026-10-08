@@ -19,6 +19,7 @@ mod approved_proposal_codec;
 mod audit_store;
 mod candidate_assessment_store;
 mod claim_verification_store;
+mod context_store;
 mod entry_store;
 mod error;
 mod event;

@@ -78,8 +78,11 @@ evidence, or explicit `NotReopenable` with reason), `permission_scope`
 string referencing the Policy decision), `confidence` (selector
 confidence as permille `0..=1000`; confidence never overrides trust or
 sensitivity), `supersession` (optional: which item id this envelope
-supersedes, with reason; a superseded item is Deferred with reason
-`Superseded`). The envelope answers where the item came from, which
+supersedes, with reason; a superseded *optional* item is Deferred
+with reason `Superseded`, while a superseded *required* item stays
+selected — requirement wins — and carries the
+`required-over-superseded` rule). The envelope answers where the item
+came from, which
 revision produced it, why its representation is trusted or untrusted,
 and whether raw evidence can be reopened.
 

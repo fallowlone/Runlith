@@ -8,6 +8,7 @@ name = "storage_sqlite"
 path = "src/lib.rs"
 
 [dependencies]
+context-engine = { path = "../../crates/context-engine" }
 task-domain = { path = "../../crates/task" }
 agent-runtime = { path = "../../crates/agent-runtime" }
 workspace = { path = "../../crates/workspace" }
@@ -20,6 +21,7 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha2 = "0.10"
 
 [dev-dependencies]
+context-engine-contract = { path = "../../crates/context-engine-contract" }
 policy = { path = "../../crates/policy" }
 # Raw-SQL probes for trigger/migration guarantees (TASK-0151): no public
 # API exposes DDL or row deletion, so SQL-level tests open the database

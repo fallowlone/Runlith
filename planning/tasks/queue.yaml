@@ -5778,6 +5778,38 @@ items:
     references:
       - docs/architecture/context-engine.md
       - docs/architecture/adr/ADR-0010-context-derived-state.md
+    outcome: >-
+      ACCEPTED 2026-10-07 by owner decision after four independent
+      code-review rounds. Round 1 returned CHANGES-REQUIRED with 16
+      findings (save-coherence pre-checks, migration CHECK coverage,
+      fingerprint/replay binding, trust floor and staleness, scalar
+      validation); round 2 verified the resolutions and returned
+      CHANGES-REQUIRED with 8 findings (1 HIGH: envelope source
+      aliased on decode; 2 MED: trace budget/renderer unchecked,
+      one-sided section coverage; 5 LOW: contract-case masking,
+      orphan-assert gap, fingerprint taxonomy, trim-vs-raw bound,
+      dangling supersedes); round 3 verified all 8 and returned
+      CHANGES-REQUIRED with 3 new LOW findings (validate-on-save
+      taxonomy, exact boundary coverage, required-over-superseded
+      ADR wording); round 4 verified all 3 and returned PASS with no
+      new findings. Record: crates/context-engine (domain model,
+      mint, admit, verify_replay, ContextStorePort),
+      crates/context-engine-contract (store contract suite),
+      adapters/storage-sqlite migration 0028 plus context_store,
+      crates/app-services ContextService, and a one-sentence ADR-0042
+      section 4 correction (superseded optional items defer;
+      required items win with rule required-over-superseded).
+      Product identity 0.1.0-dev.task0170, gate G9. Verification
+      observed on the branch: queue YAML parses (163 items, IDs
+      unique), product-version 6/6, fmt clean, clippy -D warnings
+      clean, diff-check clean, domain 28/28, store contract green
+      (roundtrip, explain, missing, idempotency, reopen, SECRET,
+      14 coherence negatives, cross-plan, envelope-source,
+      supersession), service 4/4, full storage-sqlite and
+      app-services packages green, full workspace 148 suites green
+      with 2 load-induced timeouts re-verified green in isolation;
+      the live-ownership race flake fails on the unmodified base
+      too (pre-existing, out of scope).
 
   - id: TASK-0171
     gate: G9

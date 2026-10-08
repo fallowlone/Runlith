@@ -14,6 +14,7 @@ mod approval_service;
 mod binding_service;
 mod candidate_verdict;
 mod clock;
+mod context_service;
 mod error;
 mod finder_service;
 mod human_decision_service;
@@ -46,6 +47,7 @@ pub use binding_service::{
 };
 pub use candidate_verdict::mint_candidate_verdicts;
 pub use clock::{format_rfc3339, Clock, FixedClock, SystemClock};
+pub use context_service::{ContextService, SelectionRequest};
 pub use error::{ServiceError, ServiceResult};
 pub use finder_service::{ContentFilter, FinderPage, FinderService, FinderSpan, PassthroughFilter};
 pub use human_decision_service::{HumanDecisionCreate, HumanDecisionService};

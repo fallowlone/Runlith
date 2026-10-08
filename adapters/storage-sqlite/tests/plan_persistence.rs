@@ -349,7 +349,7 @@ fn journal_evidence(seq: u64) -> PlanCommitJournalEvidence {
 fn fresh_database_reaches_schema_16() {
     let db = TestDb::new("schema");
     let store = db.open();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 27);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 28);
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
 }
 
@@ -1809,6 +1809,15 @@ fn schema_13_revision_history_without_lineage_fails_closed_after_upgrade() {
              DROP TABLE side_effect_escalations;
              DROP TABLE side_effect_transitions;
              DROP TABLE side_effect_intents;
+             DROP TABLE context_trace_revs;
+             DROP TABLE context_trace_decisions;
+             DROP TABLE context_traces;
+             DROP TABLE context_cache_boundary_items;
+             DROP TABLE context_cache_boundaries;
+             DROP TABLE context_plan_hashes;
+             DROP TABLE context_item_transforms;
+             DROP TABLE context_items;
+             DROP TABLE context_plans;
              PRAGMA user_version = 13;",
         )
         .unwrap();
