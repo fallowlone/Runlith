@@ -1171,9 +1171,11 @@ two-step lifecycle):
 - Decide: `resolve_human_decision` moves the HDR PENDING→RESOLVED
   with `selected` TAKEOVER, recording `decided_by`/`decided_at`.
   Single-winner holds at the conditional
-  `UPDATE … WHERE status='PENDING'`: concurrent deciders yield one
-  RESOLVED and `HumanDecisionState` ("concurrent transition")
-  losers.
+  `UPDATE … WHERE status='PENDING'`. Losers arriving after the
+  winner commits observe the stored state through the pre-check
+  (`HumanDecisionState` carrying e.g. RESOLVED); "concurrent
+  transition" covers only the narrow race window where the check
+  passed but the UPDATE matched zero rows.
 - Consume: `consume_human_decision` moves RESOLVED→CONSUMED under
   the `status='RESOLVED' AND selected_continuation='TAKEOVER'`
   guard, atomically with the effects below. Anything else in that
@@ -1227,8 +1229,9 @@ moves the Task BLOCKED→RUNNING with the takeover record id as the
 resolution reference, and marks the record COMPLETED.
 
 **Abandonment.** Every admission carries a mandatory `expires_at`,
-chosen by the operator within a Policy-defined maximum (24h default
-when policy is silent). On expiry without return, the reconciler
+chosen by the operator within a Policy-defined maximum; when policy
+is silent this amendment sets the default maximum to 24h. On expiry
+without return, the reconciler
 unparks the Task BLOCKED→RUNNING with the record id plus the expiry
 event as the resolution reference, journaled, and marks the record
 EXPIRED. Blocked-for-takeover is therefore never a permanent wedge,
@@ -1262,8 +1265,9 @@ payloads by reference only).
 - TAKEOVER on a stale/expired Pending/Resolved HDR: existing
   supersession path, never admission. TAKEOVER on a Consumed HDR:
   typed `HumanDecisionState` refusal.
-- Concurrent TAKEOVER deciders: exactly one RESOLVED, the rest
-  `HumanDecisionState` ("concurrent transition") losers.
+- Concurrent TAKEOVER deciders: exactly one RESOLVED; late losers
+  observe the stored state, race-window losers observe "concurrent
+  transition" (both typed `HumanDecisionState`).
 - Human never acts: expiry fires the abandonment path above; the
   scope unparks with full evidence.
 - Return with a broken workspace anchor: `GitBackendFailure`; the
