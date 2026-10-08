@@ -1,0 +1,14 @@
+[package]
+name = "takeover"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "takeover"
+path = "src/lib.rs"
+
+[dependencies]
+task-domain = { path = "../task" }
+plan-domain = { path = "../plan" }
+context-engine = { path = "../context-engine" }
+continuity = { path = "../continuity" }

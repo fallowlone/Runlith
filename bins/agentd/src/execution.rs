@@ -4185,6 +4185,11 @@ fn start_run(
                     BusinessErrorCode::CorruptState,
                     "accepted planning state failed validation".to_owned(),
                 ),
+                PlanningServiceError::Workspace(_) => (
+                    BusinessErrorCode::StaleState,
+                    "takeover workspace anchor changed before execution admission; reconcile and retry"
+                        .to_owned(),
+                ),
             };
             (exec_error(code, message), None)
         }

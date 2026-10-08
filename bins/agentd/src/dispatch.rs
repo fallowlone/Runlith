@@ -504,6 +504,13 @@ pub(crate) fn map_error(error: &ServiceError) -> (BusinessErrorCode, String) {
                     truncate_id(request_id)
                 ),
             ),
+            StorageError::TakeoverAnchorMismatch { record_id, .. } => (
+                BusinessErrorCode::StaleState,
+                format!(
+                    "takeover {} workspace anchor changed concurrently; reconcile and retry",
+                    truncate_id(record_id)
+                ),
+            ),
             StorageError::Corrupt(_)
             | StorageError::DomainReconstruction(_)
             | StorageError::UnsupportedSchemaVersion { .. } => (

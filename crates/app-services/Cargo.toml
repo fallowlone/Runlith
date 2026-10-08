@@ -19,6 +19,7 @@ evaluation = { path = "../evaluation" }
 policy = { path = "../policy" }
 runner = { path = "../runner" }
 plan-domain = { path = "../plan" }
+takeover = { path = "../takeover" }
 security-audit = { path = "../security-audit" }
 secrets = { path = "../secrets" }
 sha2 = "0.10"

@@ -37,5 +37,6 @@ members = [
     "crates/context-engine-contract",
     "crates/continuity",
     "crates/continuity-contract",
+    "crates/takeover",
 ]
 resolver = "2"

@@ -25,7 +25,7 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::error::{StorageError, StorageResult};
 
 /// Schema version this adapter understands.
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 29;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 30;
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_task_core.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_event_journal.sql");
@@ -57,6 +57,7 @@ const MIGRATION_0026: &str = include_str!("../migrations/0026_binding_proof_cons
 const MIGRATION_0027: &str = include_str!("../migrations/0027_side_effect_intents.sql");
 const MIGRATION_0028: &str = include_str!("../migrations/0028_context_selection.sql");
 const MIGRATION_0029: &str = include_str!("../migrations/0029_continuity.sql");
+const MIGRATION_0030: &str = include_str!("../migrations/0030_takeover.sql");
 
 /// Applies pending migrations to `connection`, which must already have
 /// `PRAGMA foreign_keys = ON`. Migrations run in order inside one SQLite
@@ -277,7 +278,12 @@ pub(crate) fn migrate(connection: &mut Connection) -> StorageResult<u32> {
             StorageError::Migration(format!("0029_continuity.sql failed: {error}"))
         })?;
     }
-    transaction.execute_batch("PRAGMA user_version = 29")?;
+    if current < 30 {
+        transaction.execute_batch(MIGRATION_0030).map_err(|error| {
+            StorageError::Migration(format!("0030_takeover.sql failed: {error}"))
+        })?;
+    }
+    transaction.execute_batch("PRAGMA user_version = 30")?;
     transaction.commit()?;
     Ok(SUPPORTED_SCHEMA_VERSION)
 }

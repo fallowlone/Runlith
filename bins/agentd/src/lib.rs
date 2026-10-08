@@ -449,7 +449,11 @@ where
                 let response = match &services.human_decision {
                     Some(handle) => {
                         let mut service = handle.lock().await;
-                        human_decision::dispatch(&mut service, request)
+                        human_decision::dispatch(
+                            &mut service,
+                            request,
+                            session.negotiated_version().unwrap_or(0),
+                        )
                     }
                     None => human_decision::unavailable(),
                 };

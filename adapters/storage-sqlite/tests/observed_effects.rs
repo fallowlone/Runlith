@@ -752,7 +752,7 @@ fn cv_2_schema_18_migrates_to_19_with_closed_capture_authority() {
     }
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 29);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 30);
     let connection = rusqlite::Connection::open(&db.path).unwrap();
     let sql: String = connection
         .query_row(
@@ -1867,13 +1867,15 @@ fn migration_repairs_pretrigger_operations_shape() {
              DROP TABLE continuity_checkpoints;
              DROP TABLE continuity_epochs;
              DROP TABLE continuity_meta;
+             DROP TABLE takeover_admission_anchors;
+             DROP TABLE takeover_admissions;
              DROP TRIGGER IF EXISTS candidate_input_assessments_require_selection;
              PRAGMA user_version = 22;",
         )
         .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 29);
+    assert_eq!(store.schema_version().unwrap(), 30);
     drop(store);
     let conn = raw(&db.path);
     let tables: i64 = conn

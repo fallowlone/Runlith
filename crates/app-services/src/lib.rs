@@ -52,7 +52,7 @@ pub use context_service::{ContextService, SelectionRequest};
 pub use continuity_service::{CommitRequest, ContinuityService, NewNote};
 pub use error::{ServiceError, ServiceResult};
 pub use finder_service::{ContentFilter, FinderPage, FinderService, FinderSpan, PassthroughFilter};
-pub use human_decision_service::{HumanDecisionCreate, HumanDecisionService};
+pub use human_decision_service::{HumanDecisionCreate, HumanDecisionService, TakeoverAppends};
 pub use managed_identity::{
     branch_for_execution, decode_readable_slug, is_ascii_casefold_stable, is_canonical_v2_slug,
     is_windows_reserved_basename, managed_slug, MANAGED_DIGEST_PREFIX, MANAGED_READABLE_PREFIX,

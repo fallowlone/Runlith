@@ -5888,6 +5888,35 @@ items:
     blocked_by: []
     references:
       - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+    outcome: >-
+      ACCEPTED 2026-10-08 by owner decision after two independent
+      review rounds. Round 1 returned PASS with 2 LOW findings
+      (store append did not re-enforce the SECRET-reference rule
+      against struct-literal values; the handoff lease-id selection
+      rule was undocumented). Both fixed test-first and verified by
+      a focused round 2 (PASS). Record: crates/takeover (record,
+      status, authored fields, anchors, packet, expiry and anchor
+      comparison), TAKEOVER continuation in plan-domain and in
+      human_decision_core.proto with a v8+ session gate (no V8
+      version assigned, so the wire refuses by construction),
+      storage-sqlite migration 0030 (CHECK widening rebuild plus
+      takeover_admissions and takeover_admission_anchors) with
+      fenced admit/append/return/abandon transactions, Planning
+      Application Service operations (apply/append/render/
+      reconcile plus the TriggerPlanning return hook), trusted
+      agentd IPC (decide gate, error mapping) and agentctl
+      operations (takeover spelling, rendering). No production HDR
+      offers TAKEOVER and no daemon expiry tick: both are explicit
+      later rollout decisions recorded in the task ledger. Product
+      identity 0.1.0-dev.task0172, gate G9. Verification observed
+      on the branch: queue YAML parses, product-version 6/6, fmt
+      clean, clippy -D warnings clean, diff-check clean, domain
+      7/7, store 26/26, service 7/7, planning return 4/4, agentd
+      gate 3/3, agentctl mapping 2/2, wire 24/24, decide race
+      single-winner pinned, v4 binary refusal green with HDR left
+      PENDING, full workspace green except the known load-induced
+      execution_recovery flake (fails identically on the base
+      commit, passes solo).
 
   - id: TASK-0173
     gate: G9

@@ -1116,7 +1116,7 @@ fn stored_criterion_identity(
     format!("{}:{id}{}:{method}{requirement}", id.len(), method.len())
 }
 
-fn load_current_run(
+pub(crate) fn load_current_run(
     connection: &Connection,
     branch: &PlanBranchId,
 ) -> StorageResult<Option<PlanningRunRecord>> {

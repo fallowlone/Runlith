@@ -112,6 +112,7 @@ dependencies = [
  "security-audit",
  "sha2 0.10.9",
  "storage-sqlite",
+ "takeover",
  "task-domain",
  "workspace",
 ]
@@ -1754,6 +1755,7 @@ dependencies = [
  "secrets",
  "security-audit",
  "sha2 0.10.9",
+ "takeover",
  "task-domain",
  "workspace",
 ]
@@ -1778,6 +1780,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "takeover"
+version = "0.1.0"
+dependencies = [
+ "context-engine",
+ "continuity",
+ "plan-domain",
+ "task-domain",
 ]
 
 [[package]]

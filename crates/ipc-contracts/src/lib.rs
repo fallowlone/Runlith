@@ -185,6 +185,16 @@ pub fn supports_finder_ipc(negotiated_version: u32) -> bool {
     negotiated_version == IPC_PROTOCOL_VERSION_V7
 }
 
+/// Reports whether a negotiated session version accepts the TAKEOVER
+/// human continuation (TASK-0169 amendment): version 8 or higher only.
+/// No `IPC_PROTOCOL_VERSION_V8` exists yet — TASK-0172 implements the
+/// value and the refusal but assigns no version, so every negotiable
+/// session today refuses TAKEOVER by construction.
+#[must_use]
+pub fn supports_takeover_continuation(negotiated_version: u32) -> bool {
+    negotiated_version >= 8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +305,18 @@ mod tests {
         assert!(supports_human_decision_ipc(IPC_PROTOCOL_VERSION_V7));
         assert!(supports_planning_ipc(IPC_PROTOCOL_VERSION_V7));
         assert!(supports_task_authoring_ipc(IPC_PROTOCOL_VERSION_V7));
+    }
+
+    #[test]
+    fn takeover_continuation_requires_v8_or_higher() {
+        for historical in IPC_PROTOCOL_VERSION_V0..=IPC_PROTOCOL_VERSION_V7 {
+            assert!(
+                !supports_takeover_continuation(historical),
+                "v{historical} never accepts the TAKEOVER continuation"
+            );
+        }
+        assert!(supports_takeover_continuation(8));
+        assert!(supports_takeover_continuation(9));
     }
 
     #[test]
