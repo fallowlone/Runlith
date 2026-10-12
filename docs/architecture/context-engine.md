@@ -79,21 +79,27 @@ persistence mechanism either.
 
 ## 4. ContextItem
 
-The accepted conceptual `ContextItem` carries these fields (SoT §26). This
-is an architecture contract, not a frozen type — no Rust shape and no JSON
-Schema are defined here:
+> Field names and type contracts decided by
+> [`ADR-0042`](./adr/ADR-0042-g9-context-engine-contract.md) (TASK-0167).
 
-- id — item identity; exact format (UUID, ULID, integer, hash-only, …)
-  remains open.
-- kind — classifies the selected material; no closed enum unless accepted
-  architecture already provides one; future sources stay extensible.
+The accepted conceptual `ContextItem` carries these fields (SoT §26). This
+is an architecture contract, not a frozen type — field names and type
+contracts are frozen by ADR-0042 §1, Rust syntax stays the implementer's,
+and no JSON Schema is defined here:
+
+- id — item identity; format `ctxitem_` + 26-char Crockford Base32
+  (ULID shape, time-sortable) per ADR-0042 §1.
+- kind — classifies the selected material; closed ContextKind v1 enum
+  per ADR-0042 §2. New kinds arrive only through an ADR amendment;
+  unknown kinds fail closed at plan admission.
 - source_ref — identifies the source/evidence the item was derived from
-  and must support provenance; no universal URI/reference syntax is
-  invented.
-- content_hash — source/content integrity and reference identity; no
-  universal algorithm (SHA-256, BLAKE3, Git hash, …) is chosen here.
+  and must support provenance; typed SourceRef with revision binding
+  per ADR-0042 §3. Bare strings are rejected.
+- content_hash — source/content integrity and reference identity;
+  SHA-256 as `sha256:<64 lowercase hex>` per ADR-0042 §1.
 - priority — influences selection only; grants no instruction authority,
-  no security authority, no Policy bypass; no priority enum is invented.
+  no security authority, no Policy bypass; `u16` selection-only rank
+  per ADR-0042 §1.
 - freshness — independent from trust, authority, and sensitivity; those
   dimensions must never be collapsed into one value.
 - trust — highly relevant content may still be untrusted; trust metadata
@@ -109,13 +115,17 @@ Schema are defined here:
 - cache_class — cache planning is an optimization layer. Prompt caching
   may reduce cost, but it does not reduce attention load automatically,
   does not make context authoritative, and does not make stale content
-  correct. No cache classes are invented.
+  correct. CacheClass v1 (`StablePrefix` / `SessionEphemeral` /
+  `NoCache`) per ADR-0042 §1; optimization hint only.
 - provenance — enough to answer where the item came from, which
   source/revision produced it, why the representation is trusted or
-  untrusted, and whether raw evidence can be reopened. No final
-  provenance schema is defined.
+  untrusted, and whether raw evidence can be reopened.
+  ProvenanceEnvelope schema per ADR-0042 §4.
 
 ## 5. ContextPlan
+
+> Identity, versioning, budget shape and reason taxonomy decided by
+> [`ADR-0042`](./adr/ADR-0042-g9-context-engine-contract.md) (TASK-0167).
 
 For every execution the accepted plan concepts are: Required, Selected,
 Deferred, Rejected, Budget, Cache boundaries, Renderer, Reasons, Source
@@ -135,8 +145,8 @@ rendered prompts must not be persisted merely as a shortcut.
 Observable and reproducible selection (INV-018) means the system must
 eventually explain: candidate sources considered; selected, deferred, and
 rejected items; reasons for selection/rejection; budget constraints;
-source hashes/revisions; renderer and cache decisions. No RetrievalTrace
-contract is implemented here.
+source hashes/revisions; renderer and cache decisions. RetrievalTrace
+contract per ADR-0042 §7.
 
 ## 6. Retrieval, disclosure, and rendering
 
@@ -159,8 +169,10 @@ document/resource; L3 section/symbol; L4 raw evidence.
 
 Token Cost is not Attention Load: a cached token may cost less while still
 consuming model attention, so optimization must reason about
-relevance/attention, not billing cost alone. No measurement formulas are
-defined. Prompt caching is optimization only — never a selection
+relevance/attention, not billing cost alone. Budgets are counted through
+the TokenCounter port with soft/hard tokens and a recorded counter
+method; attention load is item count plus total tokens (ADR-0042 §6).
+Prompt caching is optimization only — never a selection
 replacement, persistence, or durable continuity; stable-prefix ordering
 may be used where supported, with provider cache behavior remaining an
 adapter/renderer concern.
@@ -256,32 +268,38 @@ Full bounded-context registry: ARCHITECTURE.md §2 (not duplicated here).
 
 ## 10. Open Context Engine Design Items
 
-Unresolved by accepted architecture; listed, not decided:
+Mostly resolved by accepted architecture; the rest stay open. Items
+marked [ADR-0042] were decided by
+[`ADR-0042`](./adr/ADR-0042-g9-context-engine-contract.md) (TASK-0167):
 
-- final ContextItem Rust shape
-- ContextItem ID format
-- ContextKind taxonomy
-- SourceRef format
-- content-hash algorithm
-- Priority representation
-- Freshness representation
-- TrustLevel representation
-- CacheClass taxonomy
-- ContextPlan identity/versioning
-- ContextPlan persistence format
-- Context budget representation
-- soft/hard budget units
-- candidate scoring/ranking model
-- selection/rejection reason taxonomy
-- RetrievalTrace contract
-- provider renderer contract
-- cache-boundary representation
-- Context security-filter API
-- tool-schema deferred-loading integration
-- Token Cost measurement
-- Attention Load measurement
-- exact embedding backend/model
-- context-plan replay/reproducibility mechanism
+- final ContextItem Rust shape [ADR-0042 §1: field names fixed, Rust
+  syntax is the implementer's]
+- ContextItem ID format [ADR-0042 §1]
+- ContextKind taxonomy [ADR-0042 §2]
+- SourceRef format [ADR-0042 §3]
+- content-hash algorithm [ADR-0042 §1]
+- Priority representation [ADR-0042 §1]
+- Freshness representation [ADR-0042 §1]
+- TrustLevel representation [ADR-0042 §1]
+- CacheClass taxonomy [ADR-0042 §1]
+- ContextPlan identity/versioning [ADR-0042 §5]
+- ContextPlan persistence format [open; exact tables are TASK-0170's]
+- Context budget representation [ADR-0042 §6]
+- soft/hard budget units [ADR-0042 §6]
+- candidate scoring/ranking model [open; `priority` is a rank input,
+  not a scoring model]
+- selection/rejection reason taxonomy [ADR-0042 §5]
+- RetrievalTrace contract [ADR-0042 §7]
+- provider renderer contract [ADR-0042 §10]
+- cache-boundary representation [ADR-0042 §5]
+- Context security-filter API [ADR-0042 §8]
+- tool-schema deferred-loading integration [open]
+- Token Cost measurement [ADR-0042 §6: counts + counter method;
+  money-cost stays G14]
+- Attention Load measurement [ADR-0042 §6]
+- exact embedding backend/model [open; embeddings stay optional
+  behind a port]
+- context-plan replay/reproducibility mechanism [ADR-0042 §9]
 
 ## 11. Non-goals
 
@@ -291,3 +309,115 @@ implementation; Resource Engine implementation; Memory Engine
 implementation; Provider adapter implementation; Context JSON Schema;
 prompt template; TOON format; provider-specific compaction protocol;
 retention durations; Execution Envelope schema.
+
+## 12. Agent-router pattern consolidation (TASK-0137)
+
+Source: [`AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md`](../development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md)
+§5 (capability IDs below are audit IDs). Adoption rule, inherited from
+the audit: validated design semantics migrate onto Runlith's durable,
+policy-governed substrate; prototype code, dependencies, and prompt
+text never migrate verbatim, and every adopted pattern names its
+owning Runlith port and persistence story here. This section informs
+§10 open items; it closes none of them.
+
+### 12.1 Adopted patterns
+
+V10 planning artifact (brief/constraints/acceptance + handoff). Owned
+by the planning side and proposed through `PlannerPort` (plan crate);
+persisted as planner-owned durable state, never as Context truth. The
+Context Engine consumes the artifact as Execution Envelope input and
+as a retrieval source for selection. The artifact must not merge into
+the ContextPlan: the envelope states execution intent, the plan states
+evidence selection (§7).
+
+V11 review-context artifact (bounded evidence packet: diff head/tail,
+verification output, builder report). Produced by the Context Engine
+as a ContextPlan-shaped selection product for a review execution, and
+consumed by the review authority (current surface: `ReviewService`,
+app-services) through its explicit contract. Durable per execution as
+selection evidence (ADR-0010); raw evidence stays reopenable behind
+the packet. The V6 rejection carries over unchanged: reviewer signals
+are advisory only — no reviewer output becomes a verification
+authority, and the packet grants none.
+
+C2 compression pipeline (extractive/semantic/hybrid compressors +
+budget allocator). Owned by the Context Engine under its compaction
+responsibility (§2, §6); fresh implementation when built, not a port
+of prototype code. Hard constraints: pruning/compaction preserves
+provider-valid tool-call/tool-result correlation (INV-071), rendered
+context stays disposable (INV-016), provider-native compaction stays
+optimization only (INV-022), and rendered prompts are never persisted
+as a shortcut. Tokenizer choice follows the C1 rejection below. This
+pattern informs the §10 budget representation, soft/hard budget
+units, and compaction-mechanism items.
+
+C3 source-attributed, multi-turn context telemetry. Split by
+ownership: source attribution and the selection trace belong to
+Context observability (the §10 `RetrievalTrace` direction) and are
+durable per-execution evidence answering why any item entered
+context; token and cost measures belong to the future Usage rollup
+(TASK-0133, G14 — pending gate ratification) — the Context Engine
+never owns billing or economics.
+Telemetry inherits the trust/sensitivity separation (§4): relevance
+never equals trust, and SECRET never enters model context (INV-008).
+
+C4 observation handles / archived tool observations. The Context
+Engine owns selection and dereference of handles; observation bytes
+live in the future artifact capability (§6 direction: large results
+may later be artifact-backed — no `ArtifactStore` is built here).
+Archived observations remain reopenable evidence after the active
+window moves on (INV-021 spirit). This pattern informs the §10
+replay/reproducibility-mechanism item.
+
+C5 compaction receipts. Produced by the Context Engine as durable
+per-execution selection evidence recording what was compacted,
+dropped, or summarized, under which budget, and why. Continuity
+consumes receipts as history references for rollover and old-evidence
+lookup — it never becomes the selector, and a receipt is not a
+checkpoint (a checkpoint is continuity state sufficient to resume; a
+receipt is the record of a selection decision). Continuity §6 privacy
+rule applies: SECRET, PII, and raw tool payloads are not preserved
+merely because keeping them would make resumption easier.
+
+### 12.2 Rejected patterns (with reasons)
+
+C1 four-characters-per-token estimator. Rejected as a silent basis:
+budgets are counted through the `TokenCounter` port (ADR-0042 §6),
+where an exact tokenizer is used when one ships in the deployment and
+the heuristic survives only as an explicitly labeled estimate with the
+counter method recorded. "Runlith's `tiktoken` feature" names a
+possible future counter, not a shipped one — no exact tokenizer ships
+in the repo today.
+
+Process-global in-memory registries as a system of record. Rejected:
+violates durability and single-writer invariants. Every adopted
+pattern above persists through its owning durable boundary
+(planner-owned state, per-execution selection evidence, future
+artifact/Usage stores) — see §12.1 per pattern.
+
+Reviewer prompt contract (`# PASS|# FAIL|# BLOCKED`) as verdict
+authority. Rejected: the agent cannot be its own verification
+authority (G8 verifier independence). Advisory reviewer signals only;
+carried into V11 above.
+
+Hardcoded role/quality/billing policy tables. Rejected: policy is
+typed, versioned Policy Engine data, never prototype constants. Any
+budget mode, privacy mode, or tier vocabulary touching C2/C3 arrives
+exclusively through Policy inputs.
+
+Out of scope for this section (neither adopted nor rejected here):
+V9 semantic-risk scoring (offline benchmark only, TASK-0140, privacy
+review pending) and the economics/verification capabilities owned by
+other migration tasks.
+
+### 12.3 Boundaries restated (not changed)
+
+Selection vs continuity stays split: §12.1 assigns production to the
+Context Engine and consumption to Continuity wherever the two meet
+(C5 receipts, archived observations as history). Envelope vs plan
+stays split: V10 feeds envelope inputs without merging the objects.
+No new vector database is introduced by this section, and no
+parallel retrieval subsystem is designed here (TASK-0147 constraint
+respected). Final Rust shapes, table layouts, and the §10 open items
+remain future decisions; this section only records which open items
+each adopted pattern informs.

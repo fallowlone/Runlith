@@ -1,0 +1,11 @@
+[package]
+name = "context-engine-contract"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "context_engine_contract"
+path = "src/lib.rs"
+
+[dependencies]
+context-engine = { path = "../context-engine" }

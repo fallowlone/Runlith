@@ -38,14 +38,17 @@ use plan_domain::{
     MAX_REVISIONS_PER_CYCLE_PER_BRANCH,
 };
 use storage_sqlite::{
-    ApprovedPlanProposal, ChildTaskMaterialization, EventType, NewHumanDecisionRequest,
-    NewJournalEvent, PlanCommitJournalEvidence, PlanRevisionLineage, PlanRevisionLineageRecord,
-    PlannerCallSettlement, PlanningRunRecord, PlanningRunState, SqliteStore, StorageError,
-    CHILD_TASK_MATERIALIZATION_PROVENANCE,
+    AbandonTakeover, ApprovedPlanProposal, ChildTaskMaterialization, CompleteTakeoverReturn,
+    EventType, NewHumanDecisionRequest, NewJournalEvent, PlanCommitJournalEvidence,
+    PlanRevisionLineage, PlanRevisionLineageRecord, PlannerCallSettlement, PlanningRunRecord,
+    PlanningRunState, SqliteStore, StorageError, CHILD_TASK_MATERIALIZATION_PROVENANCE,
 };
-use task_domain::{EvidenceRequirement, Task, TaskId, TaskState};
+use takeover::{compare_anchors, TakeoverRecordId, TakeoverStatus};
+use task_domain::{EvidenceRequirement, Task, TaskId, TaskState, TransitionCommand};
+use workspace::WorkspaceFailure;
 
 use crate::clock::{format_rfc3339, Clock, SystemClock};
+use crate::human_decision_service::takeover_unpark_event;
 use crate::plan_graph::{
     apply_validated_changeset, has_runnable_node, merged_depth, plan_predecessors, remaining_depth,
     target_applicability,
@@ -251,6 +254,7 @@ pub enum PlanningServiceError {
     Storage(StorageError),
     Domain(PlanDomainError),
     InvalidContext(String),
+    Workspace(WorkspaceFailure),
 }
 
 impl fmt::Display for PlanningServiceError {
@@ -260,6 +264,7 @@ impl fmt::Display for PlanningServiceError {
             Self::Storage(error) => write!(f, "plan persistence failed: {error}"),
             Self::Domain(error) => write!(f, "plan domain rejected trusted construction: {error}"),
             Self::InvalidContext(detail) => write!(f, "invalid planning context: {detail}"),
+            Self::Workspace(error) => write!(f, "planning workspace check failed: {error}"),
         }
     }
 }
@@ -635,6 +640,7 @@ impl<C: Clock> PlanningService<C> {
         if let Some(decision) = self.planning_human_gate(branch, policy, None)? {
             return Ok(PlanningProposalOutcome::WaitingForHuman(Box::new(decision)));
         }
+        let returning = self.takeover_return_prologue(branch, policy)?;
         let base = match self.prepare_proposal(
             branch,
             &request.evidence_refs,
@@ -676,7 +682,139 @@ impl<C: Clock> PlanningService<C> {
             || planner.propose_decomposition(request),
             proposal_receipt,
         )?;
-        self.conclude_proposal(branch, base, metered, policy, target)
+        let outcome = self.conclude_proposal(branch, base, metered, policy, target)?;
+        if let (Some(record_id), PlanningProposalOutcome::Accepted(_)) = (&returning, &outcome) {
+            self.complete_takeover_return(record_id, branch)?;
+        }
+        Ok(outcome)
+    }
+
+    /// Routes a TriggerPlanning call on a takeover scope into return
+    /// mode. Returns the ACTIVE record id when this call must complete
+    /// the return after an Accepted outcome, or `None` for ordinary
+    /// planning. An expired record abandons here and the call proceeds
+    /// as ordinary planning; anything else (Blocked without a record,
+    /// Running scope) behaves exactly as before.
+    fn takeover_return_prologue(
+        &mut self,
+        branch: &PlanBranchId,
+        policy: &PlanningPolicyContext,
+    ) -> Result<Option<TakeoverRecordId>, PlanningServiceError> {
+        let task_id = policy_task_id(policy)?;
+        let Some(record) = self.store.active_takeover_for_scope(&task_id, branch)? else {
+            return Ok(None);
+        };
+        let now = self.clock.now_millis();
+        if now > record.expires_at_ms {
+            self.abandon_expired_takeover(&record, now)?;
+            return Ok(None);
+        }
+        let task = self.store.get_task(&task_id)?.ok_or_else(|| {
+            PlanningServiceError::InvalidContext(format!(
+                "takeover {} references missing task {}",
+                record.id.as_str(),
+                task_id.as_str(),
+            ))
+        })?;
+        if task.state() != TaskState::Blocked {
+            return Err(StorageError::Corrupt(format!(
+                "takeover {} is ACTIVE but task {} is {}",
+                record.id.as_str(),
+                task_id.as_str(),
+                task.state().as_str(),
+            ))
+            .into());
+        }
+        let captured = self.store.takeover_anchors(&record.id)?;
+        let live = self.store.live_takeover_anchors(&task_id)?;
+        compare_anchors(&captured, &live).map_err(|error| {
+            PlanningServiceError::Workspace(WorkspaceFailure::GitBackendFailure {
+                detail: format!("takeover {}: {error}", record.id.as_str()),
+            })
+        })?;
+        Ok(Some(record.id))
+    }
+
+    /// Completes a takeover return after an Accepted planning outcome:
+    /// the anchor recheck, the BLOCKED→RUNNING unpark and the
+    /// COMPLETED mark, atomically. A record that expired mid-cycle
+    /// abandons instead; either way the Accepted outcome stands.
+    fn complete_takeover_return(
+        &mut self,
+        record_id: &TakeoverRecordId,
+        branch: &PlanBranchId,
+    ) -> Result<(), PlanningServiceError> {
+        let now = self.clock.now_millis();
+        let record = self.store.get_takeover(record_id)?.ok_or_else(|| {
+            StorageError::Corrupt(format!(
+                "takeover {} vanished before return completion",
+                record_id.as_str()
+            ))
+        })?;
+        if record.status != TakeoverStatus::Active {
+            return Err(StorageError::Corrupt(format!(
+                "takeover {} is {} at return completion",
+                record_id.as_str(),
+                record.status.as_str(),
+            ))
+            .into());
+        }
+        let task = self.store.get_task(&record.task_id)?.ok_or_else(|| {
+            StorageError::Corrupt(format!(
+                "takeover task {} is missing",
+                record.task_id.as_str()
+            ))
+        })?;
+        let mut next = task.clone();
+        next.apply(TransitionCommand::Start)
+            .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
+        let unpark = takeover_unpark_event(
+            now,
+            &task,
+            &next,
+            record_id,
+            &format!("planning-return:{}:{now}", branch.as_str(),),
+        );
+        self.store
+            .complete_takeover_return(CompleteTakeoverReturn {
+                record_id: record_id.clone(),
+                unpark_event: unpark,
+                now_ms: now,
+            })?;
+        Ok(())
+    }
+
+    /// Abandons one expired ACTIVE record during return routing, with
+    /// the record id plus the expiry marker as the resolution
+    /// reference. The TriggerPlanning call then proceeds as ordinary
+    /// planning on the unparked scope.
+    fn abandon_expired_takeover(
+        &mut self,
+        record: &takeover::TakeoverAdmission,
+        now: u64,
+    ) -> Result<(), PlanningServiceError> {
+        let task = self.store.get_task(&record.task_id)?.ok_or_else(|| {
+            StorageError::Corrupt(format!(
+                "takeover task {} is missing",
+                record.task_id.as_str()
+            ))
+        })?;
+        let mut next = task.clone();
+        next.apply(TransitionCommand::Start)
+            .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
+        let unpark = takeover_unpark_event(
+            now,
+            &task,
+            &next,
+            &record.id,
+            &format!("takeover-expiry:{}:{now}", record.id.as_str()),
+        );
+        self.store.abandon_takeover(AbandonTakeover {
+            record_id: record.id.clone(),
+            unpark_event: unpark,
+            now_ms: now,
+        })?;
+        Ok(())
     }
 
     pub fn propose_replan(

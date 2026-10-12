@@ -18,10 +18,10 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use ipc_contracts::proto::{
     control_request, control_response, ControlRequest, ControlResponse, ExecutionCoreRequest,
-    ExecutionCoreResponse, HumanDecisionCoreRequest, HumanDecisionCoreResponse,
-    PlanningCoreRequest, PlanningCoreResponse, PolicyCoreRequest, PolicyCoreResponse,
-    ShutdownRequest, TaskAuthoringCoreRequest, TaskAuthoringCoreResponse, TaskCoreRequest,
-    TaskCoreResponse, VaultCoreRequest, VaultCoreResponse,
+    ExecutionCoreResponse, FinderCoreRequest, FinderCoreResponse, HumanDecisionCoreRequest,
+    HumanDecisionCoreResponse, PlanningCoreRequest, PlanningCoreResponse, PolicyCoreRequest,
+    PolicyCoreResponse, ShutdownRequest, TaskAuthoringCoreRequest, TaskAuthoringCoreResponse,
+    TaskCoreRequest, TaskCoreResponse, VaultCoreRequest, VaultCoreResponse,
 };
 use ipc_control::{ClientConfig, ClientSession, ControlError, CLIENT_KIND_AGENTCTL};
 use ipc_transport::{FramedTransport, TransportError};
@@ -145,6 +145,11 @@ pub enum ClientError {
     /// reply is unconfirmed. A decision mutation is never replayed
     /// automatically; callers must re-probe the request by id.
     HumanDecisionAmbiguous(String),
+    /// A G9 finder exchange was sent (or may have been sent) but its
+    /// reply is unconfirmed. Finder reads are side-effect-free, so the
+    /// operator may re-issue explicitly; the client never retries
+    /// automatically because the revision may move between attempts.
+    FinderAmbiguous(String),
     /// OS/runtime I/O failure.
     Io(io::Error),
 }
@@ -173,6 +178,9 @@ impl fmt::Display for ClientError {
             }
             Self::PolicyAmbiguous(detail) => {
                 write!(f, "ambiguous approval result (not replayed): {detail}")
+            }
+            Self::FinderAmbiguous(detail) => {
+                write!(f, "ambiguous finder result (re-issue explicitly): {detail}")
             }
             Self::HumanDecisionAmbiguous(detail) => {
                 write!(
@@ -926,7 +934,7 @@ where
 
 /// Performs a protocol-v7 handshake for the ADR-0039 operator vault.
 #[cfg(unix)]
-async fn handshake_stream_v7<S>(stream: S) -> Result<ClientSession<S>, ClientError>
+async fn handshake_stream_vault<S>(stream: S) -> Result<ClientSession<S>, ClientError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -960,7 +968,7 @@ pub async fn vault_request(
         let stream = transport_connect(endpoint)
             .await
             .map_err(classify_transport)?;
-        handshake_stream_v7(stream).await
+        handshake_stream_vault(stream).await
     })
     .await?;
     let absence = absence_note(endpoint);
@@ -1074,6 +1082,84 @@ pub async fn task_authoring_request(
         Some(control_response::Payload::TaskAuthoringCore(response)) => Ok(response),
         other => Err(ClientError::BusinessAmbiguous(format!(
             "unexpected task authoring reply ({other:?}); endpoint {absence}; not replaying"
+        ))),
+    }
+}
+
+/// Performs a protocol-v7 handshake for repository finder reads.
+#[cfg(unix)]
+async fn handshake_stream_finder<S>(stream: S) -> Result<ClientSession<S>, ClientError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut session = ClientSession::new(
+        FramedTransport::new(stream),
+        ClientConfig::finder_default(CLIENT_KIND_AGENTCTL),
+    );
+    session
+        .perform_handshake()
+        .await
+        .map_err(classify_control)?;
+    if !session.finder_allowed() {
+        return Err(ClientError::Control(ControlError::UnsupportedProtocol {
+            negotiated: session.negotiated_version().unwrap_or(0),
+            required: ipc_contracts::IPC_PROTOCOL_VERSION_V7,
+        }));
+    }
+    Ok(session)
+}
+
+/// Sends one protocol-v7 finder read (query page or span reopen). A
+/// lost or ambiguous reply is [`ClientError::FinderAmbiguous`]; reads
+/// carry no side effects, so the operator may re-issue explicitly,
+/// but the client never retries automatically.
+#[cfg(unix)]
+pub async fn finder_request(
+    endpoint: &UnixEndpoint,
+    spawn: impl FnOnce() -> io::Result<Child>,
+    request: FinderCoreRequest,
+) -> Result<FinderCoreResponse, ClientError> {
+    let session = connect_or_start_with(spawn, || async {
+        let stream = transport_connect(endpoint)
+            .await
+            .map_err(classify_transport)?;
+        handshake_stream_finder(stream).await
+    })
+    .await?;
+    let absence = absence_note(endpoint);
+    let mut transport = session.into_inner();
+    let frame = Bytes::from(
+        ControlRequest {
+            payload: Some(control_request::Payload::FinderCore(request)),
+        }
+        .encode_to_vec(),
+    );
+    transport.write_frame(frame).await.map_err(|error| {
+        ClientError::FinderAmbiguous(format!(
+            "FinderCoreRequest send failed ({error}); endpoint {absence}; re-issue explicitly"
+        ))
+    })?;
+    let frame = tokio::time::timeout(BUSINESS_RESPONSE_TIMEOUT, transport.read_frame())
+        .await
+        .map_err(|_| {
+            ClientError::FinderAmbiguous(format!(
+                "finder response timeout; endpoint {absence}; re-issue explicitly"
+            ))
+        })?
+        .map_err(|error| {
+            ClientError::FinderAmbiguous(format!(
+                "finder response lost ({error}); endpoint {absence}; re-issue explicitly"
+            ))
+        })?;
+    let response = ControlResponse::decode(&frame[..]).map_err(|error| {
+        ClientError::FinderAmbiguous(format!(
+            "finder response undecodable ({error}); endpoint {absence}; re-issue explicitly"
+        ))
+    })?;
+    match response.payload {
+        Some(control_response::Payload::FinderCore(response)) => Ok(response),
+        other => Err(ClientError::FinderAmbiguous(format!(
+            "unexpected finder reply ({other:?}); endpoint {absence}; re-issue explicitly"
         ))),
     }
 }
@@ -1363,6 +1449,334 @@ pub fn resolve_production_endpoint() -> Result<UnixEndpoint, ClientError> {
 #[cfg(windows)]
 pub fn resolve_production_endpoint() -> Result<String, ClientError> {
     pipe_name().map_err(classify_transport)
+}
+
+/// Output shape for finder results. Identical bytes regardless of
+/// TTY: formatting follows only this explicit choice, never the
+/// output device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinderFormat {
+    Text,
+    Json,
+}
+
+/// Canonical `find` usage, shared by the parser and `main`.
+pub const FINDER_USAGE: &str = "usage: agentctl find query <repository-path> <text...> [--scope <dir>] [--limit <n>] [--continuation <token>] [--format text|json] | show <repository-path> <evidence-id> [--context <n>] [--format text|json]";
+
+/// Parses `find` argv (after the `find` word) into a wire request plus
+/// the output format. Strict: unknown flags, missing values, and
+/// stray positionals are usage errors, never guesses.
+pub fn parse_finder_args(args: &[String]) -> Result<(FinderCoreRequest, FinderFormat), String> {
+    use ipc_contracts::proto::{finder_core_request, FinderQueryRequest, FinderShowRequest};
+    let verb = args.first().map(String::as_str).ok_or(FINDER_USAGE)?;
+    match verb {
+        "query" => {
+            let repository_path = args.get(1).cloned().ok_or(FINDER_USAGE)?;
+            let mut text: Vec<String> = Vec::new();
+            let mut scope = String::new();
+            let mut limit: u32 = 0;
+            let mut continuation = String::new();
+            let mut format = FinderFormat::Text;
+            let mut rest = &args[2..];
+            while let Some((head, tail)) = rest.split_first() {
+                if let Some(flag) = head.strip_prefix("--") {
+                    let value = tail.first().cloned().ok_or(FINDER_USAGE)?;
+                    match flag {
+                        "scope" => scope = value,
+                        "limit" => {
+                            limit = value.parse::<u32>().map_err(|_| FINDER_USAGE)?;
+                        }
+                        "continuation" => continuation = value,
+                        "format" => {
+                            format = match value.as_str() {
+                                "text" => FinderFormat::Text,
+                                "json" => FinderFormat::Json,
+                                _ => return Err(FINDER_USAGE.to_owned()),
+                            };
+                        }
+                        _ => return Err(FINDER_USAGE.to_owned()),
+                    }
+                    rest = &tail[1..];
+                } else {
+                    text.push(head.clone());
+                    rest = tail;
+                }
+            }
+            if text.is_empty() {
+                return Err(FINDER_USAGE.to_owned());
+            }
+            Ok((
+                FinderCoreRequest {
+                    payload: Some(finder_core_request::Payload::Query(FinderQueryRequest {
+                        repository_path,
+                        text: text.join(" "),
+                        scope,
+                        limit,
+                        continuation,
+                    })),
+                },
+                format,
+            ))
+        }
+        "show" => {
+            let repository_path = args.get(1).cloned().ok_or(FINDER_USAGE)?;
+            let evidence_id = args.get(2).cloned().ok_or(FINDER_USAGE)?;
+            let mut format = FinderFormat::Text;
+            let mut context: u32 = 0;
+            let mut rest = &args[3..];
+            while let Some((head, tail)) = rest.split_first() {
+                if head == "--format" {
+                    let value = tail.first().cloned().ok_or(FINDER_USAGE)?;
+                    format = match value.as_str() {
+                        "text" => FinderFormat::Text,
+                        "json" => FinderFormat::Json,
+                        _ => return Err(FINDER_USAGE.to_owned()),
+                    };
+                    rest = &tail[1..];
+                } else if head == "--context" {
+                    let value = tail.first().cloned().ok_or(FINDER_USAGE)?;
+                    context = value.parse::<u32>().map_err(|_| FINDER_USAGE)?;
+                    rest = &tail[1..];
+                } else {
+                    return Err(FINDER_USAGE.to_owned());
+                }
+            }
+            Ok((
+                FinderCoreRequest {
+                    payload: Some(finder_core_request::Payload::Show(FinderShowRequest {
+                        repository_path,
+                        evidence_id,
+                        context_before: context,
+                        context_after: context,
+                    })),
+                },
+                format,
+            ))
+        }
+        _ => Err(FINDER_USAGE.to_owned()),
+    }
+}
+
+/// Renders a finder response for the CLI. `Ok` is stdout text (no
+/// trailing newline; the caller terminates the line); `Err` is the
+/// stderr message for a FAILURE exit. Errors — including empty
+/// payloads — never render as blank success.
+pub fn format_finder_response(
+    response: &FinderCoreResponse,
+    format: FinderFormat,
+) -> Result<String, String> {
+    use ipc_contracts::proto::finder_core_response;
+    match &response.payload {
+        Some(finder_core_response::Payload::Page(page)) => Ok(match format {
+            FinderFormat::Text => format_text_page(page),
+            FinderFormat::Json => format_json_page(page),
+        }),
+        Some(finder_core_response::Payload::Span(span)) => Ok(match format {
+            FinderFormat::Text => format_text_span(span),
+            FinderFormat::Json => format_json_span(span),
+        }),
+        Some(finder_core_response::Payload::Error(error)) => Err(match format {
+            FinderFormat::Text => format_text_error(error),
+            FinderFormat::Json => format_json_error(error),
+        }),
+        None => Err(match format {
+            FinderFormat::Text => "finder: empty response".to_owned(),
+            FinderFormat::Json => "{\"code\":\"empty_response\",\"detail\":\"empty response\",\
+                 \"expected_rev\":\"\",\"actual_rev\":\"\"}"
+                .to_owned(),
+        }),
+    }
+}
+
+fn dirty_marker(dirty: bool) -> &'static str {
+    if dirty {
+        "+dirty"
+    } else {
+        ""
+    }
+}
+
+fn format_text_page(page: &ipc_contracts::proto::FinderPageResponse) -> String {
+    let mut out = format!(
+        "# finder rev {}{} backend {}/{} total {} returned {}",
+        page.revision,
+        dirty_marker(page.dirty),
+        page.backend_name,
+        page.backend_version,
+        page.total_hits,
+        page.hits.len()
+    );
+    for hit in &page.hits {
+        out.push_str(&format!(
+            "\n{}:{}-{}\t{}\t{}",
+            hit.path, hit.start_line, hit.end_line, hit.evidence_id, hit.excerpt
+        ));
+    }
+    for skipped in &page.skipped {
+        out.push_str(&format!("\n# skip {} {}", skipped.path, skipped.reason));
+        if !skipped.detail.is_empty() {
+            out.push_str(&format!(" {}", skipped.detail));
+        }
+    }
+    if !page.continuation.is_empty() {
+        out.push_str(&format!("\n# next {}", page.continuation));
+    }
+    out
+}
+
+fn format_text_span(span: &ipc_contracts::proto::FinderSpanResponse) -> String {
+    // The window names the displayed lines, the core names the
+    // verified span inside it. An unset window (both zero, e.g. a
+    // historical peer) falls back to the core span; a window that
+    // equals the core keeps the exact-span header.
+    let (window_start, window_end) = if span.window_start_line == 0 && span.window_end_line == 0 {
+        (span.start_line, span.end_line)
+    } else {
+        (span.window_start_line, span.window_end_line)
+    };
+    let mut out = if window_start == span.start_line && window_end == span.end_line {
+        format!(
+            "# finder {}:{}-{} rev {}{} hash {}",
+            span.path,
+            span.start_line,
+            span.end_line,
+            span.revision,
+            dirty_marker(span.dirty),
+            span.content_hash
+        )
+    } else {
+        format!(
+            "# finder {}:{}-{} core {}-{} rev {}{} hash {}",
+            span.path,
+            window_start,
+            window_end,
+            span.start_line,
+            span.end_line,
+            span.revision,
+            dirty_marker(span.dirty),
+            span.content_hash
+        )
+    };
+    for line in &span.lines {
+        out.push('\n');
+        out.push_str(line);
+    }
+    out
+}
+
+fn format_text_error(error: &ipc_contracts::proto::FinderErrorResponse) -> String {
+    if error.expected_rev.is_empty() {
+        format!("finder {}: {}", error.code, error.detail)
+    } else {
+        format!(
+            "finder {}: {} (expected {}, now {})",
+            error.code, error.detail, error.expected_rev, error.actual_rev
+        )
+    }
+}
+
+fn format_json_page(page: &ipc_contracts::proto::FinderPageResponse) -> String {
+    let hits: Vec<String> = page
+        .hits
+        .iter()
+        .map(|hit| {
+            let terms: Vec<String> = hit
+                .matched_terms
+                .iter()
+                .map(|term| format!("\"{}\"", escape_json(term)))
+                .collect();
+            format!(
+                "{{\"evidence_id\":\"{}\",\"path\":\"{}\",\"start_line\":{},\"end_line\":{},\
+                 \"excerpt\":\"{}\",\"matched_terms\":[{}],\"field\":\"{}\",\"rank_score\":{}}}",
+                escape_json(&hit.evidence_id),
+                escape_json(&hit.path),
+                hit.start_line,
+                hit.end_line,
+                escape_json(&hit.excerpt),
+                terms.join(","),
+                escape_json(&hit.field),
+                hit.rank_score
+            )
+        })
+        .collect();
+    let skipped: Vec<String> = page
+        .skipped
+        .iter()
+        .map(|skip| {
+            format!(
+                "{{\"path\":\"{}\",\"reason\":\"{}\",\"detail\":\"{}\"}}",
+                escape_json(&skip.path),
+                escape_json(&skip.reason),
+                escape_json(&skip.detail)
+            )
+        })
+        .collect();
+    format!(
+        "{{\"query_text\":\"{}\",\"revision\":\"{}\",\"dirty\":{},\
+         \"backend\":{{\"name\":\"{}\",\"version\":\"{}\"}},\
+         \"hits\":[{}],\"total_hits\":{},\"skipped\":[{}],\"continuation\":\"{}\"}}",
+        escape_json(&page.query_text),
+        escape_json(&page.revision),
+        page.dirty,
+        escape_json(&page.backend_name),
+        escape_json(&page.backend_version),
+        hits.join(","),
+        page.total_hits,
+        skipped.join(","),
+        escape_json(&page.continuation)
+    )
+}
+
+fn format_json_span(span: &ipc_contracts::proto::FinderSpanResponse) -> String {
+    let lines: Vec<String> = span
+        .lines
+        .iter()
+        .map(|line| format!("\"{}\"", escape_json(line)))
+        .collect();
+    format!(
+        "{{\"path\":\"{}\",\"start_line\":{},\"end_line\":{},\
+         \"window_start_line\":{},\"window_end_line\":{},\"lines\":[{}],\
+         \"content_hash\":\"{}\",\"revision\":\"{}\",\"dirty\":{}}}",
+        escape_json(&span.path),
+        span.start_line,
+        span.end_line,
+        span.window_start_line,
+        span.window_end_line,
+        lines.join(","),
+        escape_json(&span.content_hash),
+        escape_json(&span.revision),
+        span.dirty
+    )
+}
+
+fn format_json_error(error: &ipc_contracts::proto::FinderErrorResponse) -> String {
+    format!(
+        "{{\"code\":\"{}\",\"detail\":\"{}\",\"expected_rev\":\"{}\",\"actual_rev\":\"{}\"}}",
+        escape_json(&error.code),
+        escape_json(&error.detail),
+        escape_json(&error.expected_rev),
+        escape_json(&error.actual_rev)
+    )
+}
+
+fn escape_json(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            ch if (ch as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", ch as u32));
+            }
+            ch => out.push(ch),
+        }
+    }
+    out
 }
 
 #[cfg(all(test, unix))]
@@ -1680,5 +2094,318 @@ mod tests {
         let (frames_seen, replayed) = server_task.await.expect("join");
         assert_eq!(frames_seen, 1, "exactly one ShutdownRequest may be sent");
         assert!(!replayed, "ShutdownRequest must not be replayed");
+    }
+
+    fn finder_args(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| word.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_query_with_joined_text() {
+        let (request, format) =
+            parse_finder_args(&finder_args(&["query", "/repo", "foo", "bar"])).unwrap();
+        match request.payload {
+            Some(ipc_contracts::proto::finder_core_request::Payload::Query(query)) => {
+                assert_eq!(query.repository_path, "/repo");
+                assert_eq!(query.text, "foo bar");
+                assert_eq!(query.limit, 0);
+                assert!(query.scope.is_empty());
+                assert!(query.continuation.is_empty());
+            }
+            other => panic!("expected query payload, got {other:?}"),
+        }
+        assert_eq!(format, FinderFormat::Text);
+    }
+
+    #[test]
+    fn parses_query_flags() {
+        let (request, format) = parse_finder_args(&finder_args(&[
+            "query",
+            "/repo",
+            "needle",
+            "--scope",
+            "src",
+            "--limit",
+            "5",
+            "--continuation",
+            "tok",
+            "--format",
+            "json",
+        ]))
+        .unwrap();
+        match request.payload {
+            Some(ipc_contracts::proto::finder_core_request::Payload::Query(query)) => {
+                assert_eq!(query.text, "needle");
+                assert_eq!(query.scope, "src");
+                assert_eq!(query.limit, 5);
+                assert_eq!(query.continuation, "tok");
+            }
+            other => panic!("expected query payload, got {other:?}"),
+        }
+        assert_eq!(format, FinderFormat::Json);
+    }
+
+    #[test]
+    fn rejects_bad_finder_argv() {
+        for argv in [
+            vec![],
+            vec!["query"],
+            vec!["query", "/repo"],
+            vec!["query", "/repo", "x", "--limit", "x"],
+            vec!["query", "/repo", "x", "--bogus", "y"],
+            vec!["query", "/repo", "x", "--format", "yaml"],
+            vec!["show"],
+            vec!["show", "/repo"],
+            vec!["show", "/repo", "id", "extra"],
+            vec!["show", "/repo", "id", "--context", "x"],
+            vec!["show", "/repo", "id", "--context"],
+            vec!["show", "/repo", "id", "--format"],
+            vec!["delete", "/repo"],
+        ] {
+            let words: Vec<String> = argv.iter().map(|word| word.to_string()).collect();
+            assert!(
+                parse_finder_args(&words).is_err(),
+                "argv {argv:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_show() {
+        let (request, format) =
+            parse_finder_args(&finder_args(&["show", "/repo", "rf1.id"])).unwrap();
+        match request.payload {
+            Some(ipc_contracts::proto::finder_core_request::Payload::Show(show)) => {
+                assert_eq!(show.repository_path, "/repo");
+                assert_eq!(show.evidence_id, "rf1.id");
+                assert_eq!(show.context_before, 0);
+                assert_eq!(show.context_after, 0);
+            }
+            other => panic!("expected show payload, got {other:?}"),
+        }
+        assert_eq!(format, FinderFormat::Text);
+    }
+
+    #[test]
+    fn parses_show_context() {
+        let (request, _) =
+            parse_finder_args(&finder_args(&["show", "/repo", "rf1.id", "--context", "3"]))
+                .unwrap();
+        match request.payload {
+            Some(ipc_contracts::proto::finder_core_request::Payload::Show(show)) => {
+                // Symmetric: one flag widens both sides equally.
+                assert_eq!(show.context_before, 3);
+                assert_eq!(show.context_after, 3);
+            }
+            other => panic!("expected show payload, got {other:?}"),
+        }
+    }
+
+    fn sample_page() -> FinderCoreResponse {
+        use ipc_contracts::proto::{
+            finder_core_response, FinderHit, FinderPageResponse, FinderSkipped,
+        };
+        FinderCoreResponse {
+            payload: Some(finder_core_response::Payload::Page(FinderPageResponse {
+                query_text: "needle".to_owned(),
+                revision: "abc123".to_owned(),
+                dirty: true,
+                backend_name: "finder-local".to_owned(),
+                backend_version: "0.1.0".to_owned(),
+                hits: vec![FinderHit {
+                    evidence_id: "rf1.ev".to_owned(),
+                    path: "src/a.rs".to_owned(),
+                    start_line: 3,
+                    end_line: 3,
+                    excerpt: "let needle = 1;".to_owned(),
+                    matched_terms: vec!["needle".to_owned()],
+                    field: "content".to_owned(),
+                    rank_score: 1,
+                }],
+                total_hits: 3,
+                skipped: vec![FinderSkipped {
+                    path: "bin/blob".to_owned(),
+                    reason: "binary".to_owned(),
+                    detail: String::new(),
+                }],
+                continuation: "rfc1.tok".to_owned(),
+            })),
+        }
+    }
+
+    #[test]
+    fn formats_text_page() {
+        let text = format_finder_response(&sample_page(), FinderFormat::Text).unwrap();
+        assert_eq!(
+            text,
+            "# finder rev abc123+dirty backend finder-local/0.1.0 total 3 returned 1\n\
+             src/a.rs:3-3\trf1.ev\tlet needle = 1;\n\
+             # skip bin/blob binary\n\
+             # next rfc1.tok"
+        );
+    }
+
+    #[test]
+    fn formats_text_span() {
+        use ipc_contracts::proto::{finder_core_response, FinderSpanResponse};
+        let response = FinderCoreResponse {
+            payload: Some(finder_core_response::Payload::Span(FinderSpanResponse {
+                path: "src/a.rs".to_owned(),
+                start_line: 3,
+                end_line: 4,
+                window_start_line: 3,
+                window_end_line: 4,
+                lines: vec!["let a = 1;".to_owned(), "let b = 2;".to_owned()],
+                content_hash: "0123abcd".to_owned(),
+                revision: "abc123".to_owned(),
+                dirty: false,
+            })),
+        };
+        let text = format_finder_response(&response, FinderFormat::Text).unwrap();
+        assert_eq!(
+            text,
+            "# finder src/a.rs:3-4 rev abc123 hash 0123abcd\nlet a = 1;\nlet b = 2;"
+        );
+    }
+
+    #[test]
+    fn formats_text_span_with_window() {
+        use ipc_contracts::proto::{finder_core_response, FinderSpanResponse};
+        let response = FinderCoreResponse {
+            payload: Some(finder_core_response::Payload::Span(FinderSpanResponse {
+                path: "src/a.rs".to_owned(),
+                start_line: 3,
+                end_line: 3,
+                window_start_line: 1,
+                window_end_line: 5,
+                lines: vec![
+                    "l1".to_owned(),
+                    "l2".to_owned(),
+                    "l3".to_owned(),
+                    "l4".to_owned(),
+                    "l5".to_owned(),
+                ],
+                content_hash: "0123abcd".to_owned(),
+                revision: "abc123".to_owned(),
+                dirty: false,
+            })),
+        };
+        let text = format_finder_response(&response, FinderFormat::Text).unwrap();
+        assert_eq!(
+            text,
+            "# finder src/a.rs:1-5 core 3-3 rev abc123 hash 0123abcd\nl1\nl2\nl3\nl4\nl5"
+        );
+    }
+
+    #[test]
+    fn formats_text_error_with_revs() {
+        use ipc_contracts::proto::{finder_core_response, FinderErrorResponse};
+        for (code, detail, expected, actual, message) in [
+            (
+                "stale",
+                "evidence revision moved",
+                "r1",
+                "r2",
+                "finder stale: evidence revision moved (expected r1, now r2)",
+            ),
+            (
+                "unknown_evidence",
+                "file cannot be read",
+                "",
+                "",
+                "finder unknown_evidence: file cannot be read",
+            ),
+        ] {
+            let response = FinderCoreResponse {
+                payload: Some(finder_core_response::Payload::Error(FinderErrorResponse {
+                    code: code.to_owned(),
+                    detail: detail.to_owned(),
+                    expected_rev: expected.to_owned(),
+                    actual_rev: actual.to_owned(),
+                })),
+            };
+            assert_eq!(
+                format_finder_response(&response, FinderFormat::Text).unwrap_err(),
+                message
+            );
+        }
+    }
+
+    #[test]
+    fn formats_json_page_with_escaping() {
+        use ipc_contracts::proto::{finder_core_response, FinderHit, FinderPageResponse};
+        let response = FinderCoreResponse {
+            payload: Some(finder_core_response::Payload::Page(FinderPageResponse {
+                query_text: "a\"b".to_owned(),
+                revision: "r".to_owned(),
+                dirty: false,
+                backend_name: "b".to_owned(),
+                backend_version: "v".to_owned(),
+                hits: vec![FinderHit {
+                    evidence_id: "e".to_owned(),
+                    path: "p".to_owned(),
+                    start_line: 1,
+                    end_line: 1,
+                    excerpt: "x\"y\nz\t\\u{1}é".to_owned(),
+                    matched_terms: vec!["m".to_owned()],
+                    field: "content".to_owned(),
+                    rank_score: 2,
+                }],
+                total_hits: 1,
+                skipped: Vec::new(),
+                continuation: String::new(),
+            })),
+        };
+        let json = format_finder_response(&response, FinderFormat::Json).unwrap();
+        assert_eq!(
+            json,
+            "{\"query_text\":\"a\\\"b\",\"revision\":\"r\",\"dirty\":false,\
+             \"backend\":{\"name\":\"b\",\"version\":\"v\"},\
+             \"hits\":[{\"evidence_id\":\"e\",\"path\":\"p\",\"start_line\":1,\"end_line\":1,\
+             \"excerpt\":\"x\\\"y\\nz\\t\\\\u{1}é\",\"matched_terms\":[\"m\"],\
+             \"field\":\"content\",\"rank_score\":2}],\
+             \"total_hits\":1,\"skipped\":[],\"continuation\":\"\"}"
+        );
+    }
+
+    #[test]
+    fn formats_json_span_and_error() {
+        use ipc_contracts::proto::{finder_core_response, FinderErrorResponse, FinderSpanResponse};
+        let span = FinderCoreResponse {
+            payload: Some(finder_core_response::Payload::Span(FinderSpanResponse {
+                path: "p".to_owned(),
+                start_line: 2,
+                end_line: 2,
+                window_start_line: 1,
+                window_end_line: 3,
+                lines: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+                content_hash: "h".to_owned(),
+                revision: "r".to_owned(),
+                dirty: true,
+            })),
+        };
+        assert_eq!(
+            format_finder_response(&span, FinderFormat::Json).unwrap(),
+            "{\"path\":\"p\",\"start_line\":2,\"end_line\":2,\
+             \"window_start_line\":1,\"window_end_line\":3,\"lines\":[\"a\",\"b\",\"c\"],\
+             \"content_hash\":\"h\",\"revision\":\"r\",\"dirty\":true}"
+        );
+        let error = FinderCoreResponse {
+            payload: Some(finder_core_response::Payload::Error(FinderErrorResponse {
+                code: "stale".to_owned(),
+                detail: "moved".to_owned(),
+                expected_rev: "r1".to_owned(),
+                actual_rev: "r2".to_owned(),
+            })),
+        };
+        assert_eq!(
+            format_finder_response(&error, FinderFormat::Json).unwrap_err(),
+            "{\"code\":\"stale\",\"detail\":\"moved\",\"expected_rev\":\"r1\",\"actual_rev\":\"r2\"}"
+        );
+        let empty = FinderCoreResponse { payload: None };
+        assert!(
+            format_finder_response(&empty, FinderFormat::Text).is_err(),
+            "empty payload must fail, never render blank success"
+        );
     }
 }

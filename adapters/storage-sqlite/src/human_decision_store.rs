@@ -464,6 +464,12 @@ impl SqliteStore {
         selected: HumanContinuation,
         consumed_at_ms: u64,
     ) -> StorageResult<HumanDecisionRequest> {
+        if selected == HumanContinuation::Takeover {
+            return Err(StorageError::HumanDecisionState {
+                request_id: id.as_str().to_owned(),
+                state: "TAKEOVER_REQUIRES_FENCED_ADMISSION".to_owned(),
+            });
+        }
         let tx = self
             .connection_mut()
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -838,17 +844,17 @@ pub(crate) fn consume_risk_decision_for_plan_commit(
     Ok(())
 }
 
-struct HumanDecisionAuditFact<'a> {
-    event: SecurityAuditEvent,
-    outcome: SecurityAuditOutcome,
-    id: &'a HumanDecisionRequestId,
-    task_id: &'a TaskId,
-    policy_fingerprint: &'a str,
-    reason_code: &'a str,
-    occurred_at_ms: u64,
+pub(crate) struct HumanDecisionAuditFact<'a> {
+    pub(crate) event: SecurityAuditEvent,
+    pub(crate) outcome: SecurityAuditOutcome,
+    pub(crate) id: &'a HumanDecisionRequestId,
+    pub(crate) task_id: &'a TaskId,
+    pub(crate) policy_fingerprint: &'a str,
+    pub(crate) reason_code: &'a str,
+    pub(crate) occurred_at_ms: u64,
 }
 
-fn append_human_decision_audit(
+pub(crate) fn append_human_decision_audit(
     tx: &Transaction<'_>,
     fact: HumanDecisionAuditFact<'_>,
 ) -> StorageResult<()> {
@@ -1167,13 +1173,17 @@ fn validate_current_connection(
     validate_record_current(connection, &record, now_ms)
 }
 
-fn validate_current_tx(tx: &Transaction<'_>, id: &str, now_ms: u64) -> StorageResult<()> {
+pub(crate) fn validate_current_tx(
+    tx: &Transaction<'_>,
+    id: &str,
+    now_ms: u64,
+) -> StorageResult<()> {
     let record = load_request(tx, id)?
         .ok_or_else(|| StorageError::NotFound(format!("human decision {id}")))?;
     validate_record_current(tx, &record, now_ms)
 }
 
-fn validate_record_current(
+pub(crate) fn validate_record_current(
     connection: &Connection,
     record: &HumanDecisionRequest,
     now_ms: u64,
@@ -1287,7 +1297,10 @@ fn current_snapshot_scope_risk(
     ))
 }
 
-fn load_request(connection: &Connection, id: &str) -> StorageResult<Option<HumanDecisionRequest>> {
+pub(crate) fn load_request(
+    connection: &Connection,
+    id: &str,
+) -> StorageResult<Option<HumanDecisionRequest>> {
     type Row = (
         i64,
         String,
@@ -1496,7 +1509,7 @@ fn canonical_sha256(value: &str) -> bool {
     })
 }
 
-fn to_i64(value: u64, field: &str) -> StorageResult<i64> {
+pub(crate) fn to_i64(value: u64, field: &str) -> StorageResult<i64> {
     i64::try_from(value)
         .map_err(|_| StorageError::ConstraintViolation(format!("{field} exceeds SQLite INTEGER")))
 }

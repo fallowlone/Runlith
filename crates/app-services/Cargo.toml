@@ -1,4 +1,5 @@
 [package]
+license = "Apache-2.0"
 name = "app-services"
 version = "0.1.0"
 edition = "2021"
@@ -8,6 +9,8 @@ name = "app_services"
 path = "src/lib.rs"
 
 [dependencies]
+continuity = { path = "../continuity" }
+context-engine = { path = "../context-engine" }
 task-domain = { path = "../task" }
 agent-runtime = { path = "../agent-runtime" }
 workspace = { path = "../workspace" }
@@ -17,9 +20,11 @@ evaluation = { path = "../evaluation" }
 policy = { path = "../policy" }
 runner = { path = "../runner" }
 plan-domain = { path = "../plan" }
+takeover = { path = "../takeover" }
 security-audit = { path = "../security-audit" }
 secrets = { path = "../secrets" }
 sha2 = "0.10"
+repo-finder = { path = "../repo-finder" }
 
 [dev-dependencies]
 fake-agent = { path = "../../adapters/fake-agent" }

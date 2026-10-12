@@ -484,6 +484,32 @@ fn check_referential_integrity(
     None
 }
 
+/// Catalogued v1 candidate-input selector (ADR-0036 §5). Duplicated from
+/// the Policy-owned catalog and the TASK-0144 evaluator by design: plan
+/// domain takes no policy dependency, and an unknown selector id fails
+/// closed into escalation until V9 is explicitly taught it (D3 narrowness).
+const BOUND_SELECTOR_FILE_CONTAINS_V1: &str = "candidate.file-contains.v1";
+
+/// D3 recognition: exactly the requirement shape the TASK-0157 binding
+/// boundary mints for a catalogued selector — TestSuite with
+/// content+toolchain+config binding (`required` is enforced by the
+/// surrounding unconditional disjunct), 3 params, keys literal/path/selector
+/// in sorted order, catalogued selector id. Shape-only on purpose: V9
+/// detects escalation, it does not authorize values; the evaluator
+/// re-validates path/literal/fingerprint before anything can verify.
+/// Premise: the boundary is the sole non-empty-params producer — a future
+/// second writer must revisit V9 (review F2).
+fn is_authorized_bound_candidate_params(requirement: &task_domain::EvidenceRequirement) -> bool {
+    let params = &requirement.params;
+    requirement.requirement_kind == task_domain::RequirementKind::TestSuite
+        && requirement.subject_binding == task_domain::SubjectBinding::ContentToolchainAndConfig
+        && params.len() == 3
+        && params[0].key() == "literal"
+        && params[1].key() == "path"
+        && params[2].key() == "selector"
+        && params[2].value() == BOUND_SELECTOR_FILE_CONTAINS_V1
+}
+
 /// Returns `Ok(requirement_changed)` where the flag routes to V9.
 fn check_criteria_preservation(
     changeset: &PlanChangeSet,
@@ -527,7 +553,8 @@ fn check_criteria_preservation(
                             let kind = crate::risk::requirement_kind_for_method(*method);
                             requirement.requirement_kind != kind
                                 || requirement.subject_binding != kind.default_subject_binding()
-                                || !requirement.params.is_empty()
+                                || (!requirement.params.is_empty()
+                                    && !is_authorized_bound_candidate_params(requirement))
                                 // An authored/migrated default has no policy fingerprint. Its
                                 // unchanged shape may be stamped by this trusted planning pass;
                                 // `None -> current` is not an obligation escalation.

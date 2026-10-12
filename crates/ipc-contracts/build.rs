@@ -33,6 +33,7 @@ fn main() {
     println!("cargo:rerun-if-changed=proto/planning_core.proto");
     println!("cargo:rerun-if-changed=proto/task_authoring_core.proto");
     println!("cargo:rerun-if-changed=proto/vault_core.proto");
+    println!("cargo:rerun-if-changed=proto/finder_core.proto");
     // Messages carrying vault secrets get a hand-written redacting `Debug`
     // in `src/lib.rs` instead of the generated one (ADR-0039).
     prost_build::Config::new()
@@ -51,6 +52,7 @@ fn main() {
                 "proto/planning_core.proto",
                 "proto/task_authoring_core.proto",
                 "proto/vault_core.proto",
+                "proto/finder_core.proto",
             ],
             &["proto/"],
         )

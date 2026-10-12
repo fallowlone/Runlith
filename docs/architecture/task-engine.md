@@ -447,3 +447,24 @@ escalation rather than claiming unconditional preservation. `policy_fingerprint`
 is the trusted policy namespace/freshness seam reserved for TASK-0125's
 ClaimVerification binding. TASK-0123 makes no G5/IPC protocol-version change
 and does not change completion authority.
+
+### G8 completion-admission binding (TASK-0125)
+
+`VERIFYING → COMPLETED` is admitted only through the trusted completion
+gate (ADR-0030 CV-1..CV-8): every acceptance criterion must hold a current
+VERIFIED `ClaimVerification` against its `EvidenceRequirement`, a CV-4
+typed-low-risk policy exemption (capture kinds only), or a CV-8 durable
+human-approval discharge bound to criterion, subject fingerprint, risk and
+validity window. The verdict string is journal context, never authority;
+agent claims and provider-local gather-act-verify loops produce claims and
+evidence, never transitions (INV-009, INV-113). Missing, stale (moved
+subject or policy fingerprint), superseded, self-verified or contradictory
+evidence refuses the transition and leaves the Task VERIFYING — UNVERIFIED,
+REFUTED and BLOCKED stay distinct and none of them is a pass (CV-6,
+INV-131/INV-136). An admitted completion commits the guarded state write,
+the journal record and a durable completion-admission record (per-criterion
+outcomes plus consumed approvals) in one SQLite transaction; refusals write
+nothing. A Task with zero acceptance criteria carries no obligations and
+completes through the pre-existing G2/G3 contract, still recording its
+admission.
+

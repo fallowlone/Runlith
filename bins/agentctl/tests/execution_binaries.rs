@@ -362,6 +362,22 @@ fn author_ready_planning_task(
 }
 
 fn seed_human_decision(sandbox: &Sandbox, task: &str) -> String {
+    seed_human_decision_with_options(
+        sandbox,
+        task,
+        vec![
+            plan_domain::HumanContinuation::Resume,
+            plan_domain::HumanContinuation::Replan,
+            plan_domain::HumanContinuation::Abort,
+        ],
+    )
+}
+
+fn seed_human_decision_with_options(
+    sandbox: &Sandbox,
+    task: &str,
+    options: Vec<plan_domain::HumanContinuation>,
+) -> String {
     let db = sandbox
         .root
         .join("data")
@@ -383,11 +399,7 @@ fn seed_human_decision(sandbox: &Sandbox, task: &str) -> String {
             reason: plan_domain::HumanDecisionReason::PlannerBlocked,
             risk: plan_domain::RiskClass::Low,
             affected_scope: plan_domain::ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
-            options: vec![
-                plan_domain::HumanContinuation::Resume,
-                plan_domain::HumanContinuation::Replan,
-                plan_domain::HumanContinuation::Abort,
-            ],
+            options,
             recommendation: None,
             evidence: vec![plan_domain::EvidenceRef::new(format!("hdq:{task}")).unwrap()],
             proposal_hash: None,
@@ -857,6 +869,32 @@ fn human_decision_cli_lists_gets_and_decides_over_protocol_v4() {
     let invalid = sandbox.agentctl(&["human-decision", "decide", &decision_id, "invalid-option"]);
     assert!(!invalid.status.success());
     assert!(stderr(&invalid).contains("usage: agentctl human-decision"));
+}
+
+#[test]
+fn human_decision_cli_refuses_takeover_below_v8() {
+    let sandbox = Sandbox::new("human-decision-takeover-v4", SUCCESS_BODY);
+    let _daemon = DaemonGuard::spawn(&sandbox);
+    seed_ready(&sandbox, "P-TO", "T-TO");
+    let decision_id = seed_human_decision_with_options(
+        &sandbox,
+        "T-TO",
+        vec![plan_domain::HumanContinuation::Takeover],
+    );
+
+    let get = sandbox.agentctl(&["human-decision", "get", &decision_id]);
+    assert!(get.status.success(), "get: {}", stderr(&get));
+    assert!(stdout(&get).contains("TAKEOVER"), "get {:?}", stdout(&get));
+
+    let decide = sandbox.agentctl(&["human-decision", "decide", &decision_id, "takeover"]);
+    assert!(!decide.status.success(), "takeover must refuse below v8");
+    assert!(
+        stderr(&decide).contains("UNSUPPORTED_PROTOCOL"),
+        "decide refusal: {}",
+        stderr(&decide)
+    );
+    let still_pending = sandbox.agentctl(&["human-decision", "get", &decision_id]);
+    assert!(stdout(&still_pending).contains("PENDING"));
 }
 
 #[test]

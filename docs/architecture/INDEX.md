@@ -84,6 +84,8 @@ Context / continuity work
 → continuity.md
 → adr/ADR-0010-context-derived-state.md
 → adr/ADR-0011-provider-independent-context-continuity.md
+→ adr/ADR-0042-g9-context-engine-contract.md
+→ adr/ADR-0043-g9-continuity-contract.md
 
 Memory work
 → adr/ADR-0012-structured-memory-provenance.md

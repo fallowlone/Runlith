@@ -44,8 +44,9 @@ async fn main() -> ExitCode {
         Some("human-decision") => cmd_human_decision(args.collect()).await,
         Some("planning") => cmd_planning(args.collect()).await,
         Some("vault") => vault::cmd(args.collect()).await,
+        Some("find") => cmd_find(args.collect()).await,
         _ => {
-            eprintln!("usage: agentctl <start|ping|shutdown|project|task|execution|approval|human-decision|planning|vault> ...");
+            eprintln!("usage: agentctl <start|ping|shutdown|project|task|execution|approval|human-decision|planning|vault|find> ...");
             eprintln!("  {}", vault::USAGE);
             eprintln!("  agentctl project create <id> <name>");
             eprintln!("  agentctl project get <id>");
@@ -65,9 +66,13 @@ async fn main() -> ExitCode {
             eprintln!("  agentctl approval decide <approval-request-id> <approve|deny>");
             eprintln!("  agentctl human-decision list");
             eprintln!("  agentctl human-decision get <request-id>");
-            eprintln!("  agentctl human-decision decide <request-id> <resume|replan|abort>");
+            eprintln!(
+                "  agentctl human-decision decide <request-id> <resume|replan|abort|takeover>"
+            );
             eprintln!("  agentctl planning trigger <task-id> <branch-id> <evidence-ref>");
             eprintln!("  agentctl planning apply <human-decision-id>");
+            eprintln!("  agentctl find query <repository-path> <text...> [--scope <dir>] [--limit <n>] [--continuation <token>] [--format text|json]");
+            eprintln!("  agentctl find show <repository-path> <evidence-id> [--context <n>] [--format text|json]");
             ExitCode::FAILURE
         }
     }
@@ -624,7 +629,7 @@ fn usage_human_decision() -> ExitCode {
     eprintln!("usage: agentctl human-decision <list|get|decide> ...");
     eprintln!("  agentctl human-decision list");
     eprintln!("  agentctl human-decision get <request-id>");
-    eprintln!("  agentctl human-decision decide <request-id> <resume|replan|abort>");
+    eprintln!("  agentctl human-decision decide <request-id> <resume|replan|abort|takeover>");
     ExitCode::FAILURE
 }
 
@@ -649,6 +654,7 @@ fn human_decision_request(args: &[String]) -> Result<HumanDecisionCoreRequest, (
                 "resume" => HumanContinuationDecision::Resume,
                 "replan" => HumanContinuationDecision::Replan,
                 "abort" => HumanContinuationDecision::Abort,
+                "takeover" => HumanContinuationDecision::Takeover,
                 _ => return Err(()),
             };
             Ok(HumanDecisionCoreRequest {
@@ -880,11 +886,46 @@ async fn cmd_planning(_args: Vec<String>) -> ExitCode {
     ExitCode::FAILURE
 }
 
+#[cfg(unix)]
+async fn cmd_find(args: Vec<String>) -> ExitCode {
+    let endpoint = match resolve_production_endpoint() {
+        Ok(value) => value,
+        Err(error) => return fail(&error),
+    };
+    let (request, format) = match agentctl::parse_finder_args(&args) {
+        Ok(value) => value,
+        Err(usage) => {
+            eprintln!("{usage}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match agentctl::finder_request(&endpoint, spawn_sibling_daemon, request).await {
+        Ok(response) => match agentctl::format_finder_response(&response, format) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                ExitCode::FAILURE
+            }
+        },
+        Err(error) => fail(&error),
+    }
+}
+
+#[cfg(windows)]
+async fn cmd_find(_args: Vec<String>) -> ExitCode {
+    eprintln!("agentctl: finder control is unavailable on this build");
+    ExitCode::FAILURE
+}
+
 fn human_continuation_name(value: i32) -> &'static str {
     match HumanContinuationDecision::try_from(value) {
         Ok(HumanContinuationDecision::Resume) => "RESUME",
         Ok(HumanContinuationDecision::Replan) => "REPLAN",
         Ok(HumanContinuationDecision::Abort) => "ABORT",
+        Ok(HumanContinuationDecision::Takeover) => "TAKEOVER",
         _ => "UNSPECIFIED",
     }
 }
@@ -1511,5 +1552,45 @@ fn print_execution_response(response: &ExecutionCoreResponse, direct: bool) -> E
         None => fail(&ClientError::ExecutionAmbiguous(
             "daemon sent an empty execution response".to_owned(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decide_continuation(spelling: &str) -> i32 {
+        let args = vec!["decide".to_owned(), "hdr-1".to_owned(), spelling.to_owned()];
+        match human_decision_request(&args).unwrap().payload {
+            Some(human_decision_core_request::Payload::Decide(request)) => request.continuation,
+            other => panic!("expected decide payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_maps_takeover_spelling() {
+        assert_eq!(
+            decide_continuation("takeover"),
+            HumanContinuationDecision::Takeover as i32
+        );
+        assert_eq!(
+            decide_continuation("abort"),
+            HumanContinuationDecision::Abort as i32
+        );
+        assert!(human_decision_request(&[
+            "decide".to_owned(),
+            "hdr-1".to_owned(),
+            "seize".to_owned()
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn continuation_name_renders_takeover() {
+        assert_eq!(
+            human_continuation_name(HumanContinuationDecision::Takeover as i32),
+            "TAKEOVER"
+        );
+        assert_eq!(human_continuation_name(99), "UNSPECIFIED");
     }
 }

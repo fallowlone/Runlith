@@ -8,12 +8,19 @@ use plan_domain::{
     ReplanRequest, RiskEscalationGrant, ScopeBound, MAX_DECOMPOSITION_DEPTH,
     MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH, MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
 };
-use storage_sqlite::{NewHumanDecisionRequest, SqliteStore, StorageError};
-use task_domain::TaskId;
+use storage_sqlite::{
+    AbandonTakeover, AdmitTakeover, AppendTakeover, NewHumanDecisionRequest, NewJournalEvent,
+    SqliteStore, StorageError,
+};
+use takeover::{
+    validate_takeover_expiry, AuthoredField, HandoffPacket, TakeoverAdmission, TakeoverRecordId,
+    TakeoverStateRefs,
+};
+use task_domain::{Task, TaskId, TaskState, TransitionCommand};
 
 use crate::{
-    Clock, PlanningPolicyContext, PlanningProposalOutcome, PlanningService, PlanningServiceError,
-    ServiceResult, SystemClock,
+    format_rfc3339, Clock, PlanningPolicyContext, PlanningProposalOutcome, PlanningService,
+    PlanningServiceError, ServiceResult, SystemClock, TaskService,
 };
 
 #[derive(Clone, Debug)]
@@ -32,6 +39,16 @@ pub struct HumanDecisionCreate {
     pub planning_input_fingerprint: String,
     pub policy_fingerprint: String,
     pub expires_at_ms: Option<u64>,
+}
+
+/// Human-authored appends to an ACTIVE takeover record. Each provided
+/// field overwrites its column; absent fields are untouched.
+#[derive(Clone, Debug)]
+pub struct TakeoverAppends {
+    pub actions: Option<AuthoredField>,
+    pub uncertainty: Option<AuthoredField>,
+    pub question: Option<AuthoredField>,
+    pub resulting_revision: Option<u64>,
 }
 
 pub struct HumanDecisionService<C: Clock = SystemClock> {
@@ -134,7 +151,166 @@ impl<C: Clock> HumanDecisionService<C> {
                 state: "RESOLVED_REPLAN_REQUIRES_PLANNING_BOUNDARY".to_owned(),
             }
             .into()),
+            HumanContinuation::Takeover => Err(StorageError::HumanDecisionState {
+                request_id: id.as_str().to_owned(),
+                state: "RESOLVED_TAKEOVER_REQUIRES_TAKEOVER_BOUNDARY".to_owned(),
+            }
+            .into()),
         }
+    }
+
+    /// Admits a Resolved TAKEOVER decision: the store checks every
+    /// precondition and applies the park plus the ACTIVE record
+    /// atomically. Refusals leave zero state change and never
+    /// supersede: the operator retries the same decision once the
+    /// blocking run or attempt clears.
+    pub fn apply_takeover(
+        &mut self,
+        id: &HumanDecisionRequestId,
+        expires_at_ms: u64,
+    ) -> ServiceResult<TakeoverAdmission> {
+        let now = self.clock.now_millis();
+        validate_takeover_expiry(now, expires_at_ms)
+            .map_err(|error| StorageError::ConstraintViolation(error.to_string()))?;
+        let record = self.store.validate_human_decision_current(id, now)?;
+        if record.status != HumanDecisionStatus::Resolved
+            || record.selected != Some(HumanContinuation::Takeover)
+        {
+            return Err(StorageError::HumanDecisionState {
+                request_id: id.as_str().to_owned(),
+                state: record.status.as_str().to_owned(),
+            }
+            .into());
+        }
+        let task = self
+            .store
+            .get_task(&record.task_id)?
+            .ok_or_else(|| missing_takeover_task(&record.task_id))?;
+        let mut next = task.clone();
+        next.apply(TransitionCommand::Block {
+            reason: format!("takeover for human decision {}", id.as_str()),
+        })?;
+        let park = takeover_park_event(now, &task, &next, id);
+        Ok(self.store.admit_takeover(AdmitTakeover {
+            hdr_id: id.clone(),
+            expires_at_ms,
+            park_event: park,
+            now_ms: now,
+        })?)
+    }
+
+    /// Appends human-authored fields to an ACTIVE takeover record.
+    pub fn append_takeover(
+        &mut self,
+        record_id: &TakeoverRecordId,
+        appends: TakeoverAppends,
+    ) -> ServiceResult<TakeoverAdmission> {
+        Ok(self.store.append_takeover(AppendTakeover {
+            record_id: record_id.clone(),
+            actions: appends.actions,
+            uncertainty: appends.uncertainty,
+            question: appends.question,
+            resulting_revision: appends.resulting_revision,
+            now_ms: self.clock.now_millis(),
+        })?)
+    }
+
+    /// Abandons every expired ACTIVE takeover record (optionally scoped
+    /// to one task), unparking each scope. An ACTIVE record on a
+    /// non-Blocked task is impossible through the shipped transitions
+    /// and fails closed instead of abandoning.
+    pub fn reconcile_takeover_expiry(
+        &mut self,
+        task_id: Option<&TaskId>,
+    ) -> ServiceResult<Vec<TakeoverAdmission>> {
+        let now = self.clock.now_millis();
+        let mut abandoned = Vec::new();
+        for record in self.store.expired_active_takeovers(task_id, now)? {
+            let task = self
+                .store
+                .get_task(&record.task_id)?
+                .ok_or_else(|| missing_takeover_task(&record.task_id))?;
+            if task.state() != TaskState::Blocked {
+                return Err(StorageError::Corrupt(format!(
+                    "takeover {} is ACTIVE but task {} is {}",
+                    record.id.as_str(),
+                    record.task_id.as_str(),
+                    task.state().as_str(),
+                ))
+                .into());
+            }
+            let mut next = task.clone();
+            next.apply(TransitionCommand::Start)?;
+            let unpark = takeover_unpark_event(
+                now,
+                &task,
+                &next,
+                &record.id,
+                &format!("takeover-expiry:{}:{now}", record.id.as_str()),
+            );
+            abandoned.push(self.store.abandon_takeover(AbandonTakeover {
+                record_id: record.id.clone(),
+                unpark_event: unpark,
+                now_ms: now,
+            })?);
+        }
+        Ok(abandoned)
+    }
+
+    /// Renders the human-facing handoff packet over the HDR plus the
+    /// takeover record: the task goal, canonical state refs, authored
+    /// fields and blockers (unresolved dependencies plus the HDR
+    /// reason). Read-only.
+    pub fn render_handoff_packet(
+        &self,
+        tasks: &TaskService<C>,
+        record_id: &TakeoverRecordId,
+    ) -> ServiceResult<HandoffPacket> {
+        let record = self
+            .store
+            .get_takeover(record_id)?
+            .ok_or_else(|| missing_takeover_record(record_id))?;
+        let hdr = self
+            .store
+            .get_human_decision(&record.hdr_id)?
+            .ok_or_else(|| {
+                StorageError::Corrupt(format!(
+                    "takeover {} references missing human decision {}",
+                    record.id.as_str(),
+                    record.hdr_id.as_str(),
+                ))
+            })?;
+        let task = tasks
+            .get_task(&record.task_id)?
+            .ok_or_else(|| missing_takeover_task(&record.task_id))?;
+        let mut blockers = Vec::new();
+        for dependency in tasks.list_dependencies(&record.task_id)? {
+            let target = tasks
+                .get_task(&dependency)?
+                .ok_or_else(|| missing_takeover_task(&dependency))?;
+            if !target.state().is_terminal() {
+                blockers.push(dependency.as_str().to_owned());
+            }
+        }
+        blockers.push(hdr.reason.as_str().to_owned());
+        let anchors = self.store.takeover_anchors(record_id)?;
+        Ok(HandoffPacket {
+            goal: task.objective().to_owned(),
+            state: TakeoverStateRefs {
+                task_id: record.task_id.as_str().to_owned(),
+                task_event_seq: self.store.latest_task_event_seq(&record.task_id)?,
+                plan_branch_id: record.plan_branch_id.as_str().to_owned(),
+                plan_head: self
+                    .store
+                    .get_plan_head(&record.plan_branch_id)?
+                    .unwrap_or(0),
+                lease_id: anchors.into_iter().next().map(|anchor| anchor.lease_id),
+            },
+            actions: record.actions.clone(),
+            blockers,
+            uncertainty: record.uncertainty.clone(),
+            question: record.question.clone(),
+        })
     }
 
     /// Returns a V9 validation grant only from a fresh durable human RESUME.
@@ -309,5 +485,74 @@ impl<C: Clock> HumanDecisionService<C> {
             .store
             .validate_human_decision_current(&record.id, self.clock.now_millis())?;
         Ok(Some(current))
+    }
+}
+
+fn missing_takeover_task(id: &TaskId) -> StorageError {
+    StorageError::NotFound(format!("takeover task {id} does not exist"))
+}
+
+fn missing_takeover_record(id: &TakeoverRecordId) -> StorageError {
+    StorageError::NotFound(format!("takeover {} does not exist", id.as_str()))
+}
+
+/// Mints the RUNNING→BLOCKED park journal evidence for admission.
+/// States derive from the domain-validated edge; the HDR identity is
+/// both the human-readable reason and the structured causation.
+pub(crate) fn takeover_park_event(
+    now_ms: u64,
+    from: &Task,
+    next: &Task,
+    hdr_id: &HumanDecisionRequestId,
+) -> NewJournalEvent {
+    NewJournalEvent {
+        event_type: storage_sqlite::EventType::Blocked,
+        task_id: Some(next.id().clone()),
+        project_id: Some(next.project_id().clone()),
+        from_state: Some(from.state()),
+        to_state: Some(next.state()),
+        reason: Some(format!("takeover for human decision {}", hdr_id.as_str())),
+        correlation_id: format!("takeover-admit:{}", hdr_id.as_str()),
+        causation_id: format!("human-decision:{}", hdr_id.as_str()),
+        occurred_at: format_rfc3339(now_ms),
+        provenance: "human-decision-service/apply-takeover".to_owned(),
+        execution_id: None,
+        attempt_id: None,
+        attempt_outcome: None,
+        workspace_id: None,
+        from_workspace_state: None,
+        to_workspace_state: None,
+        plan_revision: None,
+    }
+}
+
+/// Mints the BLOCKED→RUNNING unpark journal evidence for return and
+/// abandonment. The takeover record id is the correlation (the
+/// resolution reference); the caller names the trigger as causation.
+pub(crate) fn takeover_unpark_event(
+    now_ms: u64,
+    from: &Task,
+    next: &Task,
+    record_id: &TakeoverRecordId,
+    causation: &str,
+) -> NewJournalEvent {
+    NewJournalEvent {
+        event_type: storage_sqlite::EventType::Started,
+        task_id: Some(next.id().clone()),
+        project_id: Some(next.project_id().clone()),
+        from_state: Some(from.state()),
+        to_state: Some(next.state()),
+        reason: None,
+        correlation_id: record_id.as_str().to_owned(),
+        causation_id: causation.to_owned(),
+        occurred_at: format_rfc3339(now_ms),
+        provenance: "human-decision-service/takeover-unpark".to_owned(),
+        execution_id: None,
+        attempt_id: None,
+        attempt_outcome: None,
+        workspace_id: None,
+        from_workspace_state: None,
+        to_workspace_state: None,
+        plan_revision: None,
     }
 }

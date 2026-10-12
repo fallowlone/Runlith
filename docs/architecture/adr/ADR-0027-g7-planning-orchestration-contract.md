@@ -1103,3 +1103,205 @@ No change to `AtomicityRequest`, `AtomicityAssessment`, the validation rules
 V1–V9, the guardrail bounds, `PlannerCallSpend`, `PlannerFault`, the
 publication fence itself, or ADR-0028 as written — this amendment resolves the
 conflict entirely on ADR-0027's side.
+
+## Amendment — TASK-0169 TAKEOVER continuation (2026-10-07)
+
+> Status: **Accepted** (TASK-0169; ratified 2026-10-07 by owner decision
+> after three independent review rounds: R1 15 findings, R2 PASS + 2 new
+> notes, R3 PASS; pre-acceptance commit c0cc47b). This amendment
+> supersedes the TASK-0097 deferral of TAKEOVER, the resulting-revision
+> reference and the remaining HandoffPacket fields.
+
+### Problem
+
+The TASK-0097 amendment deferred TAKEOVER to G9 because G7 had not
+settled the semantics: what happens to the active planning run, the
+claimed Task, the workspace lease and the in-flight execution when a
+human assumes authority mid-flight, and how the Task returns to
+machine execution afterwards. This amendment settles them. Without it,
+TASK-0172 would ship a fourth enum variant the system accepts and
+cannot honour — the exact defect class the deferral was avoiding.
+
+### Decision
+
+TAKEOVER means a human assumes execution authority for the HDR's scope
+mid-flight. It is a fourth `HumanContinuation` variant alongside
+RESUME, REPLAN and ABORT — not a side channel. Authority transfers to
+the human and returns to the machine only through a subsequent machine
+planning cycle; nothing resumes automatically.
+
+**Admission preconditions** (all checked inside one transaction;
+any failure refuses typed with no state change):
+
+- The HDR is Pending and offers TAKEOVER in `options`. Stale or
+  expired Pending/Resolved requests follow the existing supersession
+  path; an already-Consumed HDR refuses with typed
+  `HumanDecisionState` (supersession rejects Consumed by
+  construction, so it can never route there).
+- The Task is Running and equals the HDR precondition's recorded
+  `task_state`: parking requires the accepted RUNNING→BLOCKED edge,
+  and no other source state is admitted.
+- No ACTIVE planning run exists on the branch
+  (`TAKEOVER_ACTIVE_RUN` refusal otherwise). The active run, if any,
+  must finish or be superseded first through existing paths.
+- No open attempt exists on any execution of the task
+  (`TAKEOVER_OPEN_ATTEMPT` refusal otherwise). The HDR carries
+  `task_id`, not an execution id, so admission resolves every
+  execution with that `task_id` and checks each for an open attempt
+  (at most one per execution by the append-only invariant). An open
+  attempt is concluded only through the existing trusted cancel
+  path, never as a side effect of TAKEOVER admission.
+- The admission is fenced: `task_state`, `task_event_seq`,
+  `plan_head`, `planning_input_snapshot_id`,
+  `planning_input_fingerprint` and `policy_fingerprint` are
+  re-derived from canonical state and must match the HDR
+  precondition, or the request refuses (`PlanningInputStale` for
+  moved inputs, `HumanDecisionStale` for expiry/fingerprint
+  mismatch).
+- The decide step rides the existing decide channel unchanged
+  (`DecideHumanDecisionRequest` with `request_id` + continuation):
+  no new presence primitive is introduced here, so TAKEOVER adds no
+  new decide transport beyond what RESUME/REPLAN/ABORT already
+  trust. Exact binding is enforced server-side instead: the grant
+  authorizes only its bound HDR identity, options membership and
+  re-derived basis, and is single-use through the resolve
+  conditional update below.
+
+**Effects of admission** (decide then consume, reusing the shipped
+two-step lifecycle):
+
+- Decide: `resolve_human_decision` moves the HDR PENDING→RESOLVED
+  with `selected` TAKEOVER, recording `decided_by`/`decided_at`.
+  Single-winner holds at the conditional
+  `UPDATE … WHERE status='PENDING'`. Losers arriving after the
+  winner commits observe the stored state through the pre-check
+  (`HumanDecisionState` carrying e.g. RESOLVED); "concurrent
+  transition" covers only the narrow race window where the check
+  passed but the UPDATE matched zero rows.
+- Consume: `consume_human_decision` moves RESOLVED→CONSUMED under
+  the `status='RESOLVED' AND selected_continuation='TAKEOVER'`
+  guard, atomically with the effects below. Anything else in that
+  slot refuses with the stored state.
+- The Task moves RUNNING→BLOCKED with the takeover reason recorded
+  in the journal. Machine execution for the scope is barred while
+  Blocked for this reason.
+- The workspace lease is untouched: it stays Ready under the same
+  ownership, and the human works in the same worktree.
+- A `TakeoverAdmission` record is appended carrying the basis plan
+  revision (mandatory), the HDR/execution/task refs, and a mandatory
+  `expires_at`. Owner is the Planning Application Service (the HDR
+  owner); storage is SQLite alongside HDR state; lifecycle facts
+  append to the Security Audit transactionally (the HDR precedent).
+  This is the takeover-evidence record, not a second HDR: the HDR
+  stays the decision record.
+
+**Human authority during takeover.** The human acts through the
+trusted control plane only (the same versioned agentd/agentctl
+surface as any operator). Human-authored plan changes are validated
+trusted-side against V1–V9 exactly like planner proposals — the
+human is not a validation bypass. The human cannot conclude attempts,
+mint evaluation/completion verdicts (ADR-0018/ADR-0030), widen scope,
+or weaken policy/approvals: completion authority stays with
+independent evaluation.
+
+**Human-authored appends.** After admission, the human may append
+`actions`, `uncertainty` and `question` (each authored bounded text,
+at most 4 KiB, with a DATA_CLASSIFICATION sensitivity label) plus
+the resulting-revision reference when their work produces one.
+Appends ride the same owner/storage/audit path as the admission
+record. The record carries status ACTIVE, COMPLETED or EXPIRED;
+the return gate matches on ACTIVE — that status, not journal text,
+is the durable marker distinguishing takeover-Blocked from other
+Blocked causes.
+
+**Return to machine execution.** TAKEOVER itself never resumes the
+machine. Return happens only through `TriggerPlanning` for the
+scope, which re-derives authority from current canonical state and
+proceeds through the normal fences. Fencing operands are the same
+six precondition fields re-derived fresh
+(`PlanningInputStale`/`HumanDecisionStale` on drift); the workspace
+anchor is re-validated by the Planning Application Service through
+the workspace port, and mismatch refuses with `GitBackendFailure`
+while the scope stays Blocked. If the plan head moved concurrently
+for non-human reasons, return replans from the current head — the
+recorded basis survives as provenance only, never as an override.
+A human-authored resulting revision enters return as an ordinary
+accepted revision, subject to the same fences. Successful return
+moves the Task BLOCKED→RUNNING with the takeover record id as the
+resolution reference, and marks the record COMPLETED.
+
+**Abandonment.** Every admission carries a mandatory `expires_at`,
+chosen by the operator within a Policy-defined maximum; when policy
+is silent this amendment sets the default maximum to 24h. On expiry
+without return, the reconciler
+unparks the Task BLOCKED→RUNNING with the record id plus the expiry
+event as the resolution reference, journaled, and marks the record
+EXPIRED. Blocked-for-takeover is therefore never a permanent wedge,
+and abandonment needs no HDR supersession (the HDR is Consumed by
+then, which supersession cannot touch by construction).
+
+**Resulting-revision reference.** Optional reference to the
+PlanRevision accepted from human-authored changes during takeover,
+set through the append path above. Null when the human changed no
+plan. The basis revision (plan head at admission) is always
+recorded; fencing at return compares against current canonical
+state, not against memory of the basis.
+
+**Full HandoffPacket rendering.** The human-facing rendering over the
+HDR plus the takeover record: `goal` (Task objective, task read),
+`state` (`task_id` at `task_event_seq`, `plan_branch_id` at plan
+head, lease id — refs, never copied truth),
+`actions` (human-authored, at most 4 KiB),
+`blockers` (derived: unresolved task dependencies via the Task
+dependency read, plus the HDR reason),
+`uncertainty` (human-authored, at most 4 KiB),
+`question` (human-authored, at most 4 KiB).
+Authored fields each carry a DATA_CLASSIFICATION sensitivity label
+and travel the ADR-0043 note rules (no SECRET values, PII/raw
+payloads by reference only).
+
+### Failure matrix
+
+- TAKEOVER with an open attempt or ACTIVE run: typed refusal, zero
+  state change.
+- TAKEOVER on a stale/expired Pending/Resolved HDR: existing
+  supersession path, never admission. TAKEOVER on a Consumed HDR:
+  typed `HumanDecisionState` refusal.
+- Concurrent TAKEOVER deciders: exactly one RESOLVED; late losers
+  observe the stored state, race-window losers observe "concurrent
+  transition" (both typed `HumanDecisionState`).
+- Human never acts: expiry fires the abandonment path above; the
+  scope unparks with full evidence.
+- Return with a broken workspace anchor: `GitBackendFailure`; the
+  scope stays Blocked pending reconciliation.
+- Human-authored plan change failing V1–V9: refused like any
+  proposal; the takeover itself is unaffected.
+
+### Wire and versioning
+
+The `HumanContinuation` enum (Rust and
+`human_decision_core.proto`) gains `TAKEOVER = 4`. The value is
+accepted only on negotiated protocol version 8 or higher (current
+maximum is 7, the G9 finder version): older sessions that decode an
+unknown continuation value refuse typed (fail-closed) and never
+misroute it. Highest-common negotiation is unchanged per ADR-0003,
+ADR-0021 and `ipc.md`. No existing variant changes meaning. TASK-0172
+implements the value and the refusal; it assigns no version.
+
+### Why this shape
+
+Refusal preconditions reuse the existing cancel, supersession and
+fencing paths instead of growing TAKEOVER its own shadow
+lifecycle. The Task parks in Blocked — the state that already means
+"machine progress barred" — instead of inventing a thirteenth Task
+state. The human validates like a planner, so no new trust axiom
+enters the system. And return runs the normal fences, so a takeover
+can never smuggle stale authority back into the machine.
+
+### Scope
+
+No change to RESUME/REPLAN/ABORT semantics, V1–V9, guardrail bounds,
+the publication fence, Task lifecycle transitions beyond the named
+Blocked parking, lease lifecycle, attempt append-only history, or
+completion authority. No production code in this task: the
+implementation is TASK-0172.

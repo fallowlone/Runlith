@@ -14,7 +14,9 @@
 //! and backtraces never cross this boundary (internal logs may retain
 //! safe diagnostics).
 
+use crate::execution::ExecutionComposition;
 use app_services::{ServiceError, TaskService};
+use evaluation::CandidateSelector;
 use ipc_contracts::proto::{
     task_authoring_core_request, task_authoring_core_response, task_core_request,
     task_core_response, AddDependencyResponse, BusinessError, BusinessErrorCode,
@@ -42,6 +44,7 @@ const MAX_REASON_LEN: usize = 4096;
 pub fn dispatch<C: app_services::Clock>(
     service: &mut TaskService<C>,
     request: TaskCoreRequest,
+    composition: Option<&ExecutionComposition>,
 ) -> TaskCoreResponse {
     match request.payload {
         Some(task_core_request::Payload::CreateProject(req)) => {
@@ -151,14 +154,30 @@ pub fn dispatch<C: app_services::Clock>(
                 Err(error) => error_response(error),
             }
         }
-        Some(task_core_request::Payload::Lifecycle(req)) => dispatch_lifecycle(service, req),
+        Some(task_core_request::Payload::Lifecycle(req)) => {
+            dispatch_lifecycle(service, req, composition)
+        }
         None => internal("empty business request"),
     }
+}
+
+/// Routing shape check: any required candidate-selector requirement routes
+/// the task through the candidate-input producer, whose evidence the
+/// operator path cannot revalidate (TASK-0151 finding 13). Shape-only on
+/// purpose — over-matching refuses more operator completions, which is
+/// the fail-closed direction; evaluation-time reconciliation stays in the
+/// producer (`CandidateSelector::from_requirement_under_policy`).
+fn task_is_candidate_routed(task: &Task) -> bool {
+    task.evidence_requirements()
+        .iter()
+        .filter(|requirement| requirement.required)
+        .any(|requirement| CandidateSelector::from_requirement(requirement).is_ok())
 }
 
 fn dispatch_lifecycle<C: app_services::Clock>(
     service: &mut TaskService<C>,
     req: ipc_contracts::proto::LifecycleRequest,
+    composition: Option<&ExecutionComposition>,
 ) -> TaskCoreResponse {
     use std::convert::TryFrom;
     let task_id = match TaskId::new(req.task_id) {
@@ -183,7 +202,33 @@ fn dispatch_lifecycle<C: app_services::Clock>(
         TaskLifecycleOp::BeginVerification => service.begin_verification(&task_id),
         TaskLifecycleOp::VerificationFailed => service.verification_failed(&task_id, req.reason),
         TaskLifecycleOp::VerificationSucceeded => {
-            service.verification_succeeded(&task_id, req.reason)
+            // TASK-0151 finding 13: the operator path never revalidates
+            // live candidate evidence, so candidate-input tasks complete
+            // exclusively through the production cycle (which revalidates
+            // before `verification_succeeded`). Refuse here, before the
+            // service call. A store failure reading the task fails closed
+            // through the service error mapping.
+            match service.get_task(&task_id) {
+                Err(error) => return error_response(error),
+                Ok(Some(task)) if task_is_candidate_routed(&task) => {
+                    return invalid_argument(
+                        "candidate-input tasks complete only through the production cycle",
+                    );
+                }
+                Ok(_) => {}
+            }
+            // CV-7 current policy, derived from the same composition the
+            // planner stamped with. Derivation failure (or a control-only
+            // daemon, where nothing stamps) yields `None`, which fails
+            // closed for policy-derived requirements and stays neutral
+            // for authored ones.
+            let current_policy =
+                composition.and_then(|c| c.planning_policy_fingerprint(task_id.as_str()).ok());
+            service.verification_succeeded_under_policy(
+                &task_id,
+                req.reason,
+                current_policy.as_deref(),
+            )
         }
     };
     match applied {
@@ -471,6 +516,13 @@ pub(crate) fn map_error(error: &ServiceError) -> (BusinessErrorCode, String) {
                     truncate_id(request_id)
                 ),
             ),
+            StorageError::TakeoverAnchorMismatch { record_id, .. } => (
+                BusinessErrorCode::StaleState,
+                format!(
+                    "takeover {} workspace anchor changed concurrently; reconcile and retry",
+                    truncate_id(record_id)
+                ),
+            ),
             StorageError::Corrupt(_)
             | StorageError::DomainReconstruction(_)
             | StorageError::UnsupportedSchemaVersion { .. } => (
@@ -527,7 +579,7 @@ fn truncate_id(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use app_services::FixedClock;
+    use app_services::{FixedClock, PresenceAuthority};
     use storage_sqlite::EventType;
     use task_domain::TaskState;
 
@@ -554,10 +606,73 @@ mod tests {
         }
     }
 
+    fn lifecycle_request(task_id: &str, op: TaskLifecycleOp, reason: &str) -> TaskCoreRequest {
+        TaskCoreRequest {
+            payload: Some(task_core_request::Payload::Lifecycle(
+                ipc_contracts::proto::LifecycleRequest {
+                    task_id: task_id.to_owned(),
+                    op: op as i32,
+                    reason: reason.to_owned(),
+                },
+            )),
+        }
+    }
+
+    #[test]
+    fn operator_ipc_cannot_bind_or_widen_requirement_params() {
+        // TASK-0160 (IMPL-C): lifecycle IPC carries no binding fields
+        // and no proof minter, so no sequence of operator requests —
+        // even with attacker-shaped reason text — binds params or
+        // widens an unbound requirement. Binding happens only through
+        // the presence-authorized control-surface service.
+        let mut service = service();
+        dispatch(&mut service, create_project_request("P-1", "P"), None);
+        let mut task = Task::draft(
+            TaskId::new("T-1").unwrap(),
+            ProjectId::new("P-1").unwrap(),
+            "objective",
+        )
+        .unwrap();
+        task.add_acceptance("criterion-1").unwrap();
+        task.define_evidence_requirements(vec![task_domain::EvidenceRequirement::new(
+            "criterion-1",
+            task_domain::RequirementKind::TestSuite,
+            task_domain::RequirementKind::TestSuite.default_subject_binding(),
+            Vec::new(),
+            Some("policy:test-seed".to_owned()),
+            true,
+        )
+        .unwrap()])
+            .unwrap();
+        service.create_task(&task).unwrap();
+        for (op, reason) in [
+            (TaskLifecycleOp::MarkReady, ""),
+            (TaskLifecycleOp::Claim, ""),
+            (TaskLifecycleOp::Start, ""),
+            (
+                TaskLifecycleOp::SubmitResult,
+                "selector=candidate.evil.v1 path=/etc/passwd literal=x",
+            ),
+            (
+                TaskLifecycleOp::RouteToReview,
+                "candidate-binding:00 proof=stolen",
+            ),
+        ] {
+            dispatch(&mut service, lifecycle_request("T-1", op, reason), None);
+        }
+        let task_id = TaskId::new("T-1").unwrap();
+        let stored = service.get_task(&task_id).unwrap().unwrap();
+        assert_eq!(stored.evidence_requirements().len(), 1);
+        assert!(
+            stored.evidence_requirements()[0].params.is_empty(),
+            "operator IPC must never bind requirement params"
+        );
+    }
+
     #[test]
     fn create_and_get_project_round_trip() {
         let mut service = service();
-        let created = dispatch(&mut service, create_project_request("P-1", "Runlith"));
+        let created = dispatch(&mut service, create_project_request("P-1", "Runlith"), None);
         match created.payload {
             Some(task_core_response::Payload::CreateProject(response)) => {
                 let project = response.project.expect("project dto");
@@ -575,6 +690,7 @@ mod tests {
                     },
                 )),
             },
+            None,
         );
         assert!(matches!(
             get.payload,
@@ -589,6 +705,7 @@ mod tests {
                     },
                 )),
             },
+            None,
         );
         match missing.payload {
             Some(task_core_response::Payload::Error(error)) => {
@@ -601,8 +718,8 @@ mod tests {
     #[test]
     fn duplicate_create_maps_to_already_exists() {
         let mut service = service();
-        dispatch(&mut service, create_project_request("P-1", "One"));
-        let again = dispatch(&mut service, create_project_request("P-1", "Two"));
+        dispatch(&mut service, create_project_request("P-1", "One"), None);
+        let again = dispatch(&mut service, create_project_request("P-1", "Two"), None);
         match again.payload {
             Some(task_core_response::Payload::Error(error)) => {
                 assert_eq!(error.code, BusinessErrorCode::AlreadyExists as i32);
@@ -615,7 +732,7 @@ mod tests {
     #[test]
     fn invalid_lifecycle_maps_to_invalid_transition_without_mutation() {
         let mut service = service();
-        dispatch(&mut service, create_project_request("P-1", "P"));
+        dispatch(&mut service, create_project_request("P-1", "P"), None);
         let task = Task::draft(
             TaskId::new("T-1").unwrap(),
             ProjectId::new("P-1").unwrap(),
@@ -634,6 +751,7 @@ mod tests {
                     },
                 )),
             },
+            None,
         );
         match bad.payload {
             Some(task_core_response::Payload::Error(error)) => {
@@ -665,12 +783,13 @@ mod tests {
                     },
                 )),
             },
+            None,
         );
         assert!(matches!(
             unknown.payload,
             Some(task_core_response::Payload::Error(_))
         ));
-        let empty = dispatch(&mut service, TaskCoreRequest { payload: None });
+        let empty = dispatch(&mut service, TaskCoreRequest { payload: None }, None);
         match empty.payload {
             Some(task_core_response::Payload::Error(error)) => {
                 assert_eq!(error.code, BusinessErrorCode::Internal as i32);
@@ -738,7 +857,7 @@ mod tests {
     #[test]
     fn lifecycle_success_returns_from_and_to_states() {
         let mut service = service();
-        dispatch(&mut service, create_project_request("P-1", "P"));
+        dispatch(&mut service, create_project_request("P-1", "P"), None);
         let task = Task::draft(
             TaskId::new("T-1").unwrap(),
             ProjectId::new("P-1").unwrap(),
@@ -757,6 +876,7 @@ mod tests {
                     },
                 )),
             },
+            None,
         );
         match response.payload {
             Some(task_core_response::Payload::Lifecycle(lifecycle)) => {
@@ -836,7 +956,7 @@ mod tests {
     #[test]
     fn v6_authoring_commits_canonical_planning_metadata_with_server_evidence() {
         let mut service = service();
-        dispatch(&mut service, create_project_request("P-1", "Runlith"));
+        dispatch(&mut service, create_project_request("P-1", "Runlith"), None);
         let response = dispatch_task_authoring(
             &mut service,
             planning_task_request(
@@ -876,7 +996,7 @@ mod tests {
     #[test]
     fn v6_authoring_refuses_invalid_metadata_without_persistence() {
         let mut service = service();
-        dispatch(&mut service, create_project_request("P-1", "Runlith"));
+        dispatch(&mut service, create_project_request("P-1", "Runlith"), None);
         for (id, paths, acceptance, risk) in [
             ("T-NO-SCOPE", &[][..], &["c"][..], "low"),
             ("T-NO-ACCEPTANCE", &["repo:src"][..], &[][..], "low"),
@@ -980,5 +1100,147 @@ mod tests {
         );
         assert!(long_detail.starts_with(&cut), "must keep a prefix");
         assert_eq!(truncate("short"), "short");
+    }
+
+    // TASK-0151 finding 13: the operator IPC path never revalidates live
+    // candidate evidence, so it must refuse candidate-input tasks outright;
+    // only the production cycle (which revalidates before completing) may
+    // complete them.
+    fn candidate_requirement_for_dispatch() -> task_domain::EvidenceRequirement {
+        let catalog = policy::CandidateSelectorCatalogRevision::new(
+            1,
+            policy::CandidateSelectorCatalog::v1(),
+        )
+        .unwrap();
+        let unbound = task_domain::EvidenceRequirement::new(
+            "criterion-candidate",
+            task_domain::RequirementKind::TestSuite,
+            task_domain::RequirementKind::TestSuite.default_subject_binding(),
+            Vec::new(),
+            Some("policy:test-seed".to_owned()),
+            true,
+        )
+        .unwrap();
+        let proposed = app_services::ProposedCandidateBinding {
+            selector: "candidate.file-contains.v1".to_owned(),
+            path: "src/example.rs".to_owned(),
+            literal: "fn accepted()".to_owned(),
+        };
+        let policy_fingerprint = format!("sha256:{}", "7".repeat(64));
+        let proof = app_services::TestPresenceAuthority::new(1_700_000_000_000)
+            .prove(
+                &app_services::binding_operation(
+                    "criterion-candidate",
+                    &proposed.selector,
+                    &proposed.path,
+                ),
+                &app_services::binding_input_digest(
+                    "criterion-candidate",
+                    &proposed.selector,
+                    &proposed.path,
+                    &proposed.literal,
+                    &policy_fingerprint,
+                ),
+            )
+            .unwrap();
+        app_services::bind_candidate_input_params(
+            &catalog,
+            &unbound,
+            &proposed,
+            &proof,
+            &policy_fingerprint,
+            1_700_000_000_000,
+        )
+        .unwrap()
+        .requirement
+    }
+
+    fn verify_succeed_request(task_id: &str) -> TaskCoreRequest {
+        TaskCoreRequest {
+            payload: Some(task_core_request::Payload::Lifecycle(
+                ipc_contracts::proto::LifecycleRequest {
+                    task_id: task_id.to_owned(),
+                    op: TaskLifecycleOp::VerificationSucceeded as i32,
+                    reason: "operator close".to_owned(),
+                },
+            )),
+        }
+    }
+
+    fn drive_to_verifying(service: &mut TaskService<FixedClock>, task_id: &TaskId) {
+        service.mark_ready(task_id).unwrap();
+        service.claim(task_id).unwrap();
+        service.start(task_id).unwrap();
+        service.submit_result(task_id, "summary").unwrap();
+        service.route_to_review(task_id).unwrap();
+        service.begin_verification(task_id).unwrap();
+        assert_eq!(
+            service.get_task(task_id).unwrap().unwrap().state(),
+            TaskState::Verifying
+        );
+    }
+
+    #[test]
+    fn operator_verification_succeeded_refuses_candidate_tasks() {
+        let mut service = service();
+        dispatch(&mut service, create_project_request("P-1", "P"), None);
+        let task_id = TaskId::new("T-CANDIDATE").unwrap();
+        let mut task = Task::draft(
+            task_id.clone(),
+            ProjectId::new("P-1").unwrap(),
+            "candidate objective",
+        )
+        .unwrap();
+        task.add_acceptance("criterion-candidate").unwrap();
+        task.define_evidence_requirements(vec![candidate_requirement_for_dispatch()])
+            .unwrap();
+        service.create_task(&task).unwrap();
+        drive_to_verifying(&mut service, &task_id);
+
+        let response = dispatch(&mut service, verify_succeed_request("T-CANDIDATE"), None);
+        match response.payload {
+            Some(task_core_response::Payload::Error(error)) => {
+                assert_eq!(error.code, BusinessErrorCode::InvalidArgument as i32);
+                assert!(
+                    error.message.contains("candidate-input"),
+                    "refusal must name the candidate-input path, got {:?}",
+                    error.message
+                );
+            }
+            other => panic!("expected candidate-input refusal, got {other:?}"),
+        }
+        assert_eq!(
+            service.get_task(&task_id).unwrap().unwrap().state(),
+            TaskState::Verifying,
+            "refused operator completion must not mutate the task"
+        );
+    }
+
+    #[test]
+    fn operator_verification_succeeded_still_routes_plain_tasks_to_service() {
+        let mut service = service();
+        dispatch(&mut service, create_project_request("P-1", "P"), None);
+        let task_id = TaskId::new("T-PLAIN").unwrap();
+        let mut task = Task::draft(
+            task_id.clone(),
+            ProjectId::new("P-1").unwrap(),
+            "plain objective",
+        )
+        .unwrap();
+        task.add_acceptance("criterion-plain").unwrap();
+        service.create_task(&task).unwrap();
+        drive_to_verifying(&mut service, &task_id);
+
+        let response = dispatch(&mut service, verify_succeed_request("T-PLAIN"), None);
+        match response.payload {
+            Some(task_core_response::Payload::Error(error)) => {
+                assert!(
+                    !error.message.contains("candidate-input"),
+                    "plain tasks must reach the service, got {:?}",
+                    error.message
+                );
+            }
+            other => panic!("expected the service verdict refusal, got {other:?}"),
+        }
     }
 }

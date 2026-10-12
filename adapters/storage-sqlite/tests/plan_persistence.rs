@@ -350,7 +350,7 @@ fn journal_evidence(seq: u64) -> PlanCommitJournalEvidence {
 fn fresh_database_reaches_schema_16() {
     let db = TestDb::new("schema");
     let store = db.open();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 25);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 33);
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
 }
 
@@ -1831,6 +1831,11 @@ fn schema_13_revision_history_without_lineage_fails_closed_after_upgrade() {
              DROP TABLE candidate_input_assessments;
              DROP TABLE candidate_input_operations;
              DROP TABLE observed_effects;
+             DROP TABLE agent_claims;
+             DROP TABLE claim_verifications;
+             DROP TABLE policy_exemptions;
+             DROP TABLE approval_discharges;
+             DROP TABLE completion_admissions;
              DROP TABLE planning_input_candidate_tasks;
              DROP TABLE human_decision_evidence;
              DROP TABLE human_decision_options;
@@ -1847,6 +1852,38 @@ fn schema_13_revision_history_without_lineage_fails_closed_after_upgrade() {
              DROP TABLE planning_input_snapshots;
              DROP TABLE plan_guardrail_events;
              DROP TABLE plan_revision_lineage;
+             DROP TABLE review_records;
+             DROP TABLE review_path_settings;
+             DROP TABLE reviewer_profiles;
+             DROP TABLE owner_presence_proofs;
+             DROP TABLE binding_proof_consumption;
+             DROP TABLE side_effect_escalations;
+             DROP TABLE side_effect_transitions;
+             DROP TABLE side_effect_intents;
+             DROP TABLE context_trace_revs;
+             DROP TABLE context_trace_decisions;
+             DROP TABLE context_traces;
+             DROP TABLE context_cache_boundary_items;
+             DROP TABLE context_cache_boundaries;
+             DROP TABLE context_plan_hashes;
+             DROP TABLE context_item_transforms;
+             DROP TABLE context_items;
+             DROP TABLE context_plans;
+             DROP TABLE continuity_receipt_refs;
+             DROP TABLE continuity_budget_events;
+             DROP TABLE continuity_migration_links;
+             DROP TABLE continuity_session_links;
+             DROP TABLE continuity_history_refs;
+             DROP TABLE continuity_activations;
+             DROP TABLE continuity_checkpoint_notes;
+             DROP TABLE continuity_checkpoint_evidence;
+             DROP TABLE continuity_checkpoint_sources;
+             DROP TABLE continuity_notes;
+             DROP TABLE continuity_checkpoints;
+             DROP TABLE continuity_epochs;
+             DROP TABLE continuity_meta;
+             DROP TABLE takeover_admission_anchors;
+             DROP TABLE takeover_admissions;
              PRAGMA user_version = 13;",
         )
         .unwrap();

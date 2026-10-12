@@ -37,12 +37,16 @@ use agent_runtime::ExecutionId;
 use storage_sqlite::{SqliteStore, StorageError};
 use task_domain::{ProjectId, TaskId};
 use workspace::{
-    DiffEvidence, GitPort, LeaseLifecycle, RepositoryRef, TrustedCommonGit, WorkspaceEventKind,
-    WorkspaceFailure, WorkspaceId, WorkspaceJournalEvidence, WorkspaceLease, WorkspaceStore,
-    WorktreeStatus,
+    DiffEvidence, GitPort, LeaseLifecycle, RepositoryRef, SideEffectIntent, SideEffectKind,
+    SideEffectState, TransitionEvent, TrustedCommonGit, WorkspaceEventKind, WorkspaceFailure,
+    WorkspaceId, WorkspaceJournalEvidence, WorkspaceLease, WorkspaceStore, WorktreeStatus,
 };
 
 use crate::clock::{format_rfc3339, Clock, SystemClock};
+use crate::side_effect_recovery::{
+    classify_dispatch_error, idempotency_key, materialize_pre_state, mint_intent_id,
+    DispatchOutcome, WORKSPACE_CONTRACT_FINGERPRINT,
+};
 
 /// Provenance marker for every workspace fact this service commits. Fixed
 /// string — never model narrative, never provider identity.
@@ -1108,7 +1112,7 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
     /// reconcilable. Stale lease handles (superseded objects) are refused
     /// before any mutation.
     pub fn materialize_allocated(
-        &self,
+        &mut self,
         lease: &WorkspaceLease,
         repository_path: &str,
     ) -> Result<(), WorkspaceFailure> {
@@ -1137,19 +1141,116 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
                 ),
             });
         }
+        let target_text = self.materialize_target_text(lease)?;
+        let anchor = self.load_anchor(lease.id())?;
+        // SE-1/SE-3 gate: a stranded non-terminal intent refuses blind
+        // re-dispatch — reconcile through `ensure_workspace_ready`
+        // first. Terminal intents (and legacy leases without one) open
+        // a fresh lineage below.
+        let intent = match self.active_materialize_intent(lease)? {
+            None => Some(self.record_materialize_intent(
+                lease,
+                repository_path,
+                &target_text,
+                &anchor,
+            )?),
+            Some(intent)
+                if matches!(
+                    intent.state(),
+                    SideEffectState::Confirmed | SideEffectState::Failed
+                ) =>
+            {
+                Some(self.record_materialize_intent(
+                    lease,
+                    repository_path,
+                    &target_text,
+                    &anchor,
+                )?)
+            }
+            Some(intent) if intent.state() == SideEffectState::IntentRecorded => Some(intent),
+            Some(intent) => {
+                return Err(WorkspaceFailure::ReconciliationRequired {
+                    detail: format!(
+                        "lease {} holds a {:?} materialize intent; reconcile via \
+                         ensure_workspace_ready before any retry",
+                        lease.id().as_str(),
+                        intent.state()
+                    ),
+                });
+            }
+        };
+        let intent = intent.ok_or_else(|| WorkspaceFailure::StorageFailure {
+            detail: format!(
+                "materialize intent for lease {} vanished",
+                lease.id().as_str()
+            ),
+        })?;
+        self.transition_intent(&intent, TransitionEvent::Dispatch, &[])?;
+        self.dispatch_materialize_effect(lease, repository_path, &target_text, &anchor, &intent)
+    }
+
+    /// Runs the fused Git dispatch for an EXECUTING materialize intent
+    /// and records the classified outcome (SE-2/SE-5). Shared by first
+    /// dispatch and crash-A re-dispatch; reconcile arms drive the
+    /// machine to EXECUTING before calling.
+    fn dispatch_materialize_effect(
+        &mut self,
+        lease: &WorkspaceLease,
+        repository_path: &str,
+        target_text: &str,
+        anchor: &TrustedCommonGit,
+        intent: &SideEffectIntent,
+    ) -> Result<(), WorkspaceFailure> {
+        match self
+            .git
+            .create_worktree(lease, repository_path, target_text, anchor)
+        {
+            Ok(()) => {
+                self.transition_intent(
+                    intent,
+                    TransitionEvent::Confirm,
+                    &["adapter-postconditions-verified".to_owned()],
+                )?;
+                Ok(())
+            }
+            Err(error) => {
+                match classify_dispatch_error(&error) {
+                    DispatchOutcome::Failed => {
+                        self.transition_intent(
+                            intent,
+                            TransitionEvent::Fail,
+                            &[format!("dispatch-refused:{}", error.kind())],
+                        )?;
+                    }
+                    DispatchOutcome::Ambiguous => {
+                        self.transition_intent(
+                            intent,
+                            TransitionEvent::MarkAmbiguous,
+                            &[format!("unknown-dispatch-outcome:{}", error.kind())],
+                        )?;
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Derives the Git target path for a lease under this root,
+    /// refusing when the persisted reference proves the root moved.
+    fn materialize_target_text(&self, lease: &WorkspaceLease) -> Result<String, WorkspaceFailure> {
         // Root-stability gate: the persisted worktree reference must still
         // resolve under this root. Current-v2 leases rederive exactly; pre-v2
         // leases (persisted byte-for-byte per §13) prove the lexical child
         // relationship instead of being rederived under the new scheme.
-        let target_text = match self.classify_lease_identity(lease)? {
+        match self.classify_lease_identity(lease)? {
             PersistedManagedIdentityFormat::CurrentV2 => self
                 .root
                 .join_workspace(lease.id())?
                 .to_str()
                 .ok_or_else(|| WorkspaceFailure::StorageFailure {
                     detail: "derived workspace target is not UTF-8".to_owned(),
-                })?
-                .to_owned(),
+                })
+                .map(str::to_owned),
             PersistedManagedIdentityFormat::Legacy => {
                 let persisted = PathBuf::from(lease.worktree_ref());
                 if persisted.parent() != Some(self.root.path()) {
@@ -1160,13 +1261,119 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
                         ),
                     });
                 }
-                lease.worktree_ref().to_owned()
+                Ok(lease.worktree_ref().to_owned())
             }
-        };
-        let anchor = self.load_anchor(lease.id())?;
-        self.git
-            .create_worktree(lease, repository_path, &target_text, &anchor)?;
-        Ok(())
+        }
+    }
+
+    /// Records the materialize intent for a lease (SE-1): durable
+    /// before any Git dispatch, with the observed pre-effect target
+    /// reading when observation succeeds.
+    fn record_materialize_intent(
+        &mut self,
+        lease: &WorkspaceLease,
+        repository_path: &str,
+        target_text: &str,
+        anchor: &TrustedCommonGit,
+    ) -> Result<SideEffectIntent, WorkspaceFailure> {
+        let execution = self
+            .store
+            .get_execution(lease.owner())
+            .map_err(store_failure)?
+            .ok_or_else(|| WorkspaceFailure::StorageFailure {
+                detail: format!(
+                    "execution {} does not exist for lease {}",
+                    lease.owner().as_str(),
+                    lease.id().as_str()
+                ),
+            })?;
+        let now = self.clock.now_millis();
+        let branch_absent = self
+            .git
+            .branch_exists(repository_path, lease.branch(), anchor)
+            .map(|exists| !exists)
+            .ok();
+        let path_absent = std::fs::symlink_metadata(target_text).is_err();
+        let intent = SideEffectIntent::new(workspace::SideEffectIntentFields {
+            intent_id: mint_intent_id(now),
+            kind: SideEffectKind::WorktreeMaterialize,
+            target_ref: lease.id().as_str().to_owned(),
+            params_hash: workspace::materialize_params_hash(
+                lease.branch().as_str(),
+                target_text,
+                lease.base_revision().as_str(),
+                lease.id().as_str(),
+                lease.owner().as_str(),
+            ),
+            idempotency_key: idempotency_key(
+                lease.id().as_str(),
+                SideEffectKind::WorktreeMaterialize,
+            ),
+            task_id: execution.task_id().as_str().to_owned(),
+            execution_id: lease.owner().as_str().to_owned(),
+            lease_id: lease.id().as_str().to_owned(),
+            pre_state_fingerprint: branch_absent
+                .map(|absent| materialize_pre_state(absent, path_absent)),
+            policy_fingerprint: WORKSPACE_CONTRACT_FINGERPRINT.to_owned(),
+        })
+        .map_err(|error| WorkspaceFailure::StorageFailure {
+            detail: format!("side-effect intent malformed: {error}"),
+        })?;
+        let at_ms = i64::try_from(now).unwrap_or(i64::MAX);
+        self.store
+            .record_side_effect_intent(&intent, at_ms)
+            .map_err(|error| match &error {
+                // Slot race: a concurrent creator holds the active
+                // intent — reconcile, never double-dispatch.
+                storage_sqlite::StorageError::ConstraintViolation(_) => {
+                    WorkspaceFailure::ReconciliationRequired {
+                        detail: format!(
+                            "lease {} already holds an active materialize intent; reconcile first",
+                            lease.id().as_str()
+                        ),
+                    }
+                }
+                _ => store_failure(error),
+            })
+    }
+
+    /// Reads the active materialize intent for a lease, if any.
+    fn active_materialize_intent(
+        &self,
+        lease: &WorkspaceLease,
+    ) -> Result<Option<SideEffectIntent>, WorkspaceFailure> {
+        self.store
+            .get_side_effect_intent_for_lease(
+                lease.id().as_str(),
+                SideEffectKind::WorktreeMaterialize,
+            )
+            .map_err(store_failure)
+    }
+
+    /// Whether the lease's materialize escalation (if any) is resolved.
+    fn materialize_escalation_resolved(
+        &self,
+        intent: &SideEffectIntent,
+    ) -> Result<bool, WorkspaceFailure> {
+        Ok(self
+            .store
+            .get_side_effect_escalation(intent.intent_id())
+            .map_err(store_failure)?
+            .is_some_and(|escalation| escalation.resolved_at_ms.is_some()))
+    }
+
+    /// Applies one intent transition with the service clock.
+    fn transition_intent(
+        &mut self,
+        intent: &SideEffectIntent,
+        event: TransitionEvent,
+        evidence: &[String],
+    ) -> Result<SideEffectIntent, WorkspaceFailure> {
+        let now = self.clock.now_millis();
+        let at_ms = i64::try_from(now).unwrap_or(i64::MAX);
+        self.store
+            .transition_side_effect_intent(intent.intent_id(), event, evidence, at_ms)
+            .map_err(store_failure)
     }
 
     /// Step 4 of the saga (crash-B seam): independently observe Git
@@ -1247,41 +1454,7 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         self.validate_request_against_lease(&lease, request)?;
         let anchor = self.load_anchor(lease.id())?;
         match lease.lifecycle() {
-            LeaseLifecycle::Allocated => {
-                if self
-                    .verify_git_consistent(&lease, &request.repository_path, &anchor)
-                    .is_ok()
-                {
-                    // Crash-B shape: Git did the work, finalization never
-                    // ran. Recognize — do not create anything new — and let
-                    // the guarded transition preserve exactly-once created.
-                    let ready = self.finalize_ready(lease.id(), &request.repository_path)?;
-                    Ok(EnsuredWorkspace {
-                        lease: ready,
-                        outcome: EnsureOutcome::RecognizedGitState,
-                    })
-                } else if let Some(recovered) = self.recover_branch_only(&lease, request)? {
-                    Ok(recovered)
-                } else if !self.side_effects_present(&lease, &request.repository_path) {
-                    // Crash-A shape: intent only, Git untouched. Resume.
-                    self.materialize_allocated(&lease, &request.repository_path)?;
-                    let ready = self.finalize_ready(lease.id(), &request.repository_path)?;
-                    Ok(EnsuredWorkspace {
-                        lease: ready,
-                        outcome: EnsureOutcome::ResumedAllocated,
-                    })
-                } else {
-                    // Crash-C shape: something happened, but not the exact
-                    // expected state. No replay, no cleanup, no guessing.
-                    Err(WorkspaceFailure::CheckoutFailed {
-                        detail: format!(
-                            "lease {} has ambiguous partial Git state; refusing blind replay; \
-                             inspect explicitly (cleanup owned by TASK-0043)",
-                            lease.id().as_str()
-                        ),
-                    })
-                }
-            }
+            LeaseLifecycle::Allocated => self.reconcile_allocated(lease, request, &anchor),
             LeaseLifecycle::Ready => {
                 // Defensive exactly-once: Ready implies its created fact
                 // committed atomically; a Ready lease without one is
@@ -1319,6 +1492,332 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
                 ),
             }),
         }
+    }
+
+    /// Allocated-lease reconcile (ADR-0031 SE-3/SE-6): observes the Git
+    /// target, drives the stranded intent (if any) through RECONCILE,
+    /// and continues exactly where the crash left off. Every outcome
+    /// matches the pre-0126 behavior; the intent trail is additive.
+    fn reconcile_allocated(
+        &mut self,
+        lease: WorkspaceLease,
+        request: &WorkspaceRequest,
+        anchor: &TrustedCommonGit,
+    ) -> Result<EnsuredWorkspace, WorkspaceFailure> {
+        let intent = self.active_materialize_intent(&lease)?;
+        // Terminal CONFIRMED needs no machine: the effect provably
+        // landed, so observe-and-finalize exactly as before (crash
+        // between CONFIRMED and finalize, or a legacy re-entry).
+        if intent
+            .as_ref()
+            .is_some_and(|intent| intent.state() == SideEffectState::Confirmed)
+        {
+            return self.reconcile_without_intent(lease, request, anchor);
+        }
+        // Unresolved ESCALATE suspends the autonomous sequence (SE-8).
+        if let Some(intent) = intent
+            .as_ref()
+            .filter(|intent| intent.state() == SideEffectState::Escalate)
+        {
+            if !self.materialize_escalation_resolved(intent)? {
+                return Err(WorkspaceFailure::ReconciliationRequired {
+                    detail: format!(
+                        "lease {} holds an unresolved materialize escalation; resolve it first",
+                        lease.id().as_str()
+                    ),
+                });
+            }
+        }
+        // Crash-B shape first (read-only observation): Git did the
+        // work, finalization never ran. Converge every stranded state
+        // to AMBIGUOUS, then confirm through RECONCILE.
+        if self
+            .verify_git_consistent(&lease, &request.repository_path, anchor)
+            .is_ok()
+        {
+            if let Some(intent) = intent {
+                let intent = match intent.state() {
+                    SideEffectState::IntentRecorded => {
+                        self.transition_intent(&intent, TransitionEvent::Dispatch, &[])?;
+                        self.refresh_materialize_intent(&lease)?
+                    }
+                    SideEffectState::SafeToRetry => {
+                        self.transition_intent(&intent, TransitionEvent::Redispatch, &[])?;
+                        self.refresh_materialize_intent(&lease)?
+                    }
+                    SideEffectState::SafeToContinue => {
+                        self.transition_intent(
+                            &intent,
+                            TransitionEvent::DispatchContinuation,
+                            &[],
+                        )?;
+                        self.refresh_materialize_intent(&lease)?
+                    }
+                    _ => intent,
+                };
+                if intent.state() == SideEffectState::Executing {
+                    self.transition_intent(
+                        &intent,
+                        TransitionEvent::MarkAmbiguous,
+                        &["stranded-executing-on-resume".to_owned()],
+                    )?;
+                }
+                let intent = self.refresh_materialize_intent(&lease)?;
+                if intent.state() == SideEffectState::Ambiguous {
+                    self.transition_intent(&intent, TransitionEvent::BeginReconcile, &[])?;
+                }
+                let intent = self.refresh_materialize_intent(&lease)?;
+                if intent.state() == SideEffectState::Reconcile {
+                    self.transition_intent(
+                        &intent,
+                        TransitionEvent::ReconciledToConfirmed,
+                        &["crash-b-postconditions-verified".to_owned()],
+                    )?;
+                }
+            }
+            let ready = self.finalize_ready(lease.id(), &request.repository_path)?;
+            return Ok(EnsuredWorkspace {
+                lease: ready,
+                outcome: EnsureOutcome::RecognizedGitState,
+            });
+        }
+        if let Some(intent) = intent {
+            return self.reconcile_stranded_materialize(lease, request, anchor, intent);
+        }
+        self.reconcile_without_intent(lease, request, anchor)
+    }
+
+    /// Legacy path: no live intent (pre-0126 lease, terminal lineage,
+    /// or resolved escalation). Observes the shape and proceeds
+    /// exactly as before, claiming an intent only when effects exist
+    /// to reconcile (never fabricating history for clean shapes).
+    fn reconcile_without_intent(
+        &mut self,
+        lease: WorkspaceLease,
+        request: &WorkspaceRequest,
+        anchor: &TrustedCommonGit,
+    ) -> Result<EnsuredWorkspace, WorkspaceFailure> {
+        if self
+            .verify_git_consistent(&lease, &request.repository_path, anchor)
+            .is_ok()
+        {
+            let ready = self.finalize_ready(lease.id(), &request.repository_path)?;
+            return Ok(EnsuredWorkspace {
+                lease: ready,
+                outcome: EnsureOutcome::RecognizedGitState,
+            });
+        }
+        if self.prove_branch_only_recovery(&lease, request)? {
+            return self.claim_and_reconcile(lease, request, anchor);
+        }
+        if !self.side_effects_present(&lease, &request.repository_path) {
+            // Crash-A shape: intent only, Git untouched. Resume.
+            self.materialize_allocated(&lease, &request.repository_path)?;
+            let ready = self.finalize_ready(lease.id(), &request.repository_path)?;
+            return Ok(EnsuredWorkspace {
+                lease: ready,
+                outcome: EnsureOutcome::ResumedAllocated,
+            });
+        }
+        // Crash-C shape: claim the intent, then reconcile (SE-8).
+        self.claim_and_reconcile(lease, request, anchor)
+    }
+
+    /// Claims an intent over observed out-of-band effects, then runs
+    /// the stranded reconcile: Dispatch → AMBIGUOUS ("another party
+    /// may have effected this target") → RECONCILE → shape.
+    fn claim_and_reconcile(
+        &mut self,
+        lease: WorkspaceLease,
+        request: &WorkspaceRequest,
+        anchor: &TrustedCommonGit,
+    ) -> Result<EnsuredWorkspace, WorkspaceFailure> {
+        let target_text = self.materialize_target_text(&lease)?;
+        let intent =
+            self.record_materialize_intent(&lease, &request.repository_path, &target_text, anchor)?;
+        self.transition_intent(&intent, TransitionEvent::Dispatch, &[])?;
+        let intent = self.refresh_materialize_intent(&lease)?;
+        self.transition_intent(
+            &intent,
+            TransitionEvent::MarkAmbiguous,
+            &["out-of-band-effects-observed".to_owned()],
+        )?;
+        let intent = self.refresh_materialize_intent(&lease)?;
+        self.reconcile_stranded_materialize(lease, request, anchor, intent)
+    }
+
+    /// Reconciles a stranded non-terminal intent: EXECUTING (or a
+    /// claimed dispatch) becomes AMBIGUOUS, RECONCILE observes the
+    /// shape, and exactly one typed outcome follows (SE-3/SE-6).
+    fn reconcile_stranded_materialize(
+        &mut self,
+        lease: WorkspaceLease,
+        request: &WorkspaceRequest,
+        anchor: &TrustedCommonGit,
+        intent: SideEffectIntent,
+    ) -> Result<EnsuredWorkspace, WorkspaceFailure> {
+        // Drive to AMBIGUOUS from wherever the crash stranded the
+        // lineage (EXECUTING normally; INTENT_RECORDED claims its
+        // first dispatch here since effects may exist out-of-band).
+        let intent = match intent.state() {
+            SideEffectState::IntentRecorded => {
+                self.transition_intent(&intent, TransitionEvent::Dispatch, &[])?;
+                let intent = self.refresh_materialize_intent(&lease)?;
+                self.transition_intent(
+                    &intent,
+                    TransitionEvent::MarkAmbiguous,
+                    &["out-of-band-effects-observed".to_owned()],
+                )?;
+                self.refresh_materialize_intent(&lease)?
+            }
+            SideEffectState::Executing => {
+                self.transition_intent(
+                    &intent,
+                    TransitionEvent::MarkAmbiguous,
+                    &["stranded-executing-on-resume".to_owned()],
+                )?;
+                self.refresh_materialize_intent(&lease)?
+            }
+            SideEffectState::Ambiguous => intent,
+            SideEffectState::Reconcile => intent,
+            SideEffectState::SafeToRetry => {
+                return self.redispatch_after_retry(lease, request, anchor, intent);
+            }
+            SideEffectState::SafeToContinue => {
+                return self.continue_branch_only(lease, request, anchor, intent);
+            }
+            // Terminals and CONFIRMED never reach here (handled by the
+            // caller); ESCALATE is gated on resolution there too.
+            _ => {
+                return self.reconcile_without_intent(lease, request, anchor);
+            }
+        };
+        if intent.state() == SideEffectState::Ambiguous {
+            self.transition_intent(&intent, TransitionEvent::BeginReconcile, &[])?;
+        }
+        let intent = self.refresh_materialize_intent(&lease)?;
+        if self.prove_branch_only_recovery(&lease, request)? {
+            self.transition_intent(
+                &intent,
+                TransitionEvent::ReconciledToContinue,
+                &["branch-only-provenance-verified".to_owned()],
+            )?;
+            let intent = self.refresh_materialize_intent(&lease)?;
+            return self.continue_branch_only(lease, request, anchor, intent);
+        }
+        if !self.side_effects_present(&lease, &request.repository_path) {
+            self.transition_intent(
+                &intent,
+                TransitionEvent::ReconciledToRetry,
+                &["crash-a-target-absent".to_owned()],
+            )?;
+            let intent = self.refresh_materialize_intent(&lease)?;
+            return self.redispatch_after_retry(lease, request, anchor, intent);
+        }
+        self.transition_intent(
+            &intent,
+            TransitionEvent::Escalate,
+            &["crash-c-shape-unrecognized".to_owned()],
+        )?;
+        let intent = self.refresh_materialize_intent(&lease)?;
+        self.escalate_materialize(lease, intent, "ambiguous-target-unrecognized")
+    }
+
+    /// Crash-A continuation: the target provably matches the pre-effect
+    /// state, so re-dispatch the original operation (SE-4 same key).
+    fn redispatch_after_retry(
+        &mut self,
+        lease: WorkspaceLease,
+        request: &WorkspaceRequest,
+        anchor: &TrustedCommonGit,
+        intent: SideEffectIntent,
+    ) -> Result<EnsuredWorkspace, WorkspaceFailure> {
+        // Re-prove absence at dispatch time: the world may have moved
+        // since RECONCILE ran (crash between SafeToRetry and here).
+        if self.side_effects_present(&lease, &request.repository_path) {
+            self.transition_intent(&intent, TransitionEvent::Redispatch, &[])?;
+            let intent = self.refresh_materialize_intent(&lease)?;
+            self.transition_intent(
+                &intent,
+                TransitionEvent::MarkAmbiguous,
+                &["target-moved-since-reconcile".to_owned()],
+            )?;
+            let intent = self.refresh_materialize_intent(&lease)?;
+            return self.reconcile_stranded_materialize(lease, request, anchor, intent);
+        }
+        self.transition_intent(&intent, TransitionEvent::Redispatch, &[])?;
+        let intent = self.refresh_materialize_intent(&lease)?;
+        let target_text = self.materialize_target_text(&lease)?;
+        self.dispatch_materialize_effect(
+            &lease,
+            &request.repository_path,
+            &target_text,
+            anchor,
+            &intent,
+        )?;
+        let ready = self.finalize_ready(lease.id(), &request.repository_path)?;
+        Ok(EnsuredWorkspace {
+            lease: ready,
+            outcome: EnsureOutcome::ResumedAllocated,
+        })
+    }
+
+    /// Branch-only continuation (AttachWorktree): the named
+    /// continuation re-proves provenance, then attaches.
+    fn continue_branch_only(
+        &mut self,
+        lease: WorkspaceLease,
+        request: &WorkspaceRequest,
+        anchor: &TrustedCommonGit,
+        intent: SideEffectIntent,
+    ) -> Result<EnsuredWorkspace, WorkspaceFailure> {
+        if intent.state() == SideEffectState::SafeToContinue {
+            self.transition_intent(&intent, TransitionEvent::DispatchContinuation, &[])?;
+        }
+        let intent = self.refresh_materialize_intent(&lease)?;
+        self.recover_branch_only_with_intent(&lease, request, anchor, &intent)
+    }
+
+    /// Crash-C: record the typed escalation and return the same
+    /// refusal as before (SE-8; externally unchanged).
+    fn escalate_materialize(
+        &mut self,
+        lease: WorkspaceLease,
+        intent: SideEffectIntent,
+        code: &str,
+    ) -> Result<EnsuredWorkspace, WorkspaceFailure> {
+        let now = self.clock.now_millis();
+        let at_ms = i64::try_from(now).unwrap_or(i64::MAX);
+        self.store
+            .record_side_effect_escalation(
+                intent.intent_id(),
+                code,
+                &["crash-c-ambiguous-partial-state".to_owned()],
+                at_ms,
+            )
+            .map_err(store_failure)?;
+        Err(WorkspaceFailure::CheckoutFailed {
+            detail: format!(
+                "lease {} has ambiguous partial Git state; refusing blind replay; \
+                 inspect explicitly (cleanup owned by TASK-0043)",
+                lease.id().as_str()
+            ),
+        })
+    }
+
+    /// Reloads the lease's materialize intent (transitions move the
+    /// row; in-memory copies go stale by design).
+    fn refresh_materialize_intent(
+        &self,
+        lease: &WorkspaceLease,
+    ) -> Result<SideEffectIntent, WorkspaceFailure> {
+        self.active_materialize_intent(lease)?
+            .ok_or_else(|| WorkspaceFailure::StorageFailure {
+                detail: format!(
+                    "materialize intent for lease {} vanished",
+                    lease.id().as_str()
+                ),
+            })
     }
 
     /// Independently observes that live Git matches the durable lease:
@@ -1633,26 +2132,89 @@ impl<G: GitPort, C: Clock> WorkspaceService<G, C> {
         Ok(true)
     }
 
-    fn recover_branch_only(
+    /// Branch-only continuation with the intent trail: re-proves
+    /// provenance (the caller proved it to select this path; the world
+    /// may have moved), attaches, and records the classified outcome.
+    /// Errors match the pre-0126 behavior exactly.
+    fn recover_branch_only_with_intent(
         &mut self,
         lease: &WorkspaceLease,
         request: &WorkspaceRequest,
-    ) -> Result<Option<EnsuredWorkspace>, WorkspaceFailure> {
+        anchor: &TrustedCommonGit,
+        intent: &SideEffectIntent,
+    ) -> Result<EnsuredWorkspace, WorkspaceFailure> {
         if !self.prove_branch_only_recovery(lease, request)? {
-            return Ok(None);
+            // Provenance lapsed between selection and continuation:
+            // back to AMBIGUOUS for a fresh reconcile round.
+            self.transition_intent(
+                intent,
+                TransitionEvent::MarkAmbiguous,
+                &["branch-only-provenance-lapsed".to_owned()],
+            )?;
+            let intent = self.refresh_materialize_intent(lease)?;
+            self.transition_intent(&intent, TransitionEvent::BeginReconcile, &[])?;
+            let intent = self.refresh_materialize_intent(lease)?;
+            self.transition_intent(
+                &intent,
+                TransitionEvent::Escalate,
+                &["continuation-precondition-lapsed".to_owned()],
+            )?;
+            let intent = self.refresh_materialize_intent(lease)?;
+            let now = self.clock.now_millis();
+            self.store
+                .record_side_effect_escalation(
+                    intent.intent_id(),
+                    "ambiguous-target-unrecognized",
+                    &["crash-c-ambiguous-partial-state".to_owned()],
+                    i64::try_from(now).unwrap_or(i64::MAX),
+                )
+                .map_err(store_failure)?;
+            return Err(WorkspaceFailure::CheckoutFailed {
+                detail: format!(
+                    "lease {} has ambiguous partial Git state; refusing blind replay; \
+                     inspect explicitly (cleanup owned by TASK-0043)",
+                    lease.id().as_str()
+                ),
+            });
         }
-        let anchor = self.load_anchor(lease.id())?;
-        self.git.attach_worktree(
+        match self.git.attach_worktree(
             lease,
             &request.repository_path,
             lease.worktree_ref(),
-            &anchor,
-        )?;
+            anchor,
+        ) {
+            Ok(()) => {
+                self.transition_intent(
+                    intent,
+                    TransitionEvent::Confirm,
+                    &["attach-postconditions-verified".to_owned()],
+                )?;
+            }
+            Err(error) => {
+                match classify_dispatch_error(&error) {
+                    DispatchOutcome::Failed => {
+                        self.transition_intent(
+                            intent,
+                            TransitionEvent::Fail,
+                            &[format!("attach-refused:{}", error.kind())],
+                        )?;
+                    }
+                    _ => {
+                        self.transition_intent(
+                            intent,
+                            TransitionEvent::MarkAmbiguous,
+                            &[format!("unknown-attach-outcome:{}", error.kind())],
+                        )?;
+                    }
+                }
+                return Err(error);
+            }
+        }
         let ready = self.finalize_ready(lease.id(), &request.repository_path)?;
-        Ok(Some(EnsuredWorkspace {
+        Ok(EnsuredWorkspace {
             lease: ready,
             outcome: EnsureOutcome::RecoveredBranchOnly,
-        }))
+        })
     }
 
     /// Conservative side-effect probe for the crash-A vs crash-C decision:

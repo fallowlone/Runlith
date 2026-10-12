@@ -1,0 +1,15 @@
+[package]
+name = "finder-local"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "finder_local"
+path = "src/lib.rs"
+
+[dependencies]
+repo-finder = { path = "../../crates/repo-finder" }
+ignore = "0.4"
+
+[dev-dependencies]
+repo-finder-contract = { path = "../../crates/repo-finder-contract" }

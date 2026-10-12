@@ -22,7 +22,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use app_services::{ApprovalService, HumanDecisionService, SystemClock, TaskService};
+use app_services::{
+    ApprovalService, FinderService, HumanDecisionService, SystemClock, TaskService,
+};
 use bytes::BytesMut;
 #[cfg(unix)]
 use ipc_control::{ClientConfig, ClientSession};
@@ -38,6 +40,7 @@ pub mod approval;
 pub mod data_dir;
 pub mod dispatch;
 pub mod execution;
+pub mod finder;
 pub mod human_decision;
 pub mod planning;
 mod provider_credential;
@@ -185,10 +188,11 @@ impl DaemonConfig {
     /// G5 daemon configuration (TASK-0047): protocols `[0, 1, 2]` with
     /// the durable database at `path`, enabling the execution surface
     /// (`run`/`status`/`cancel`) through the real-provider composition.
-    /// Production default from TASK-0047 on.
+    /// Production default from TASK-0047 on; G9 negotiates through v7
+    /// (repository finder) while preserving every older surface.
     pub fn with_execution(path: impl Into<PathBuf>) -> Self {
         Self {
-            server_config: ServerConfig::g7_default(),
+            server_config: ServerConfig::g9_default(),
             database_path: Some(path.into()),
             provider_executable: None,
         }
@@ -214,6 +218,11 @@ pub type BusinessHandle = Arc<tokio::sync::Mutex<TaskService>>;
 pub type ApprovalHandle = Arc<tokio::sync::Mutex<ApprovalService<SystemClock>>>;
 pub type HumanDecisionHandle = Arc<tokio::sync::Mutex<HumanDecisionService<SystemClock>>>;
 
+/// Shared trusted G9 finder service. Stateless and `Sync`: no mutex,
+/// no database — every handle and token is self-describing, so pages
+/// and reopens serve from any connection concurrently.
+pub type FinderHandle = Arc<FinderService>;
+
 #[derive(Clone)]
 struct ConnectionServices {
     business: Option<BusinessHandle>,
@@ -221,6 +230,7 @@ struct ConnectionServices {
     approval: Option<ApprovalHandle>,
     human_decision: Option<HumanDecisionHandle>,
     vault: Option<vault::VaultHandle>,
+    finder: FinderHandle,
 }
 
 /// Terminal outcome of a daemon run.
@@ -317,6 +327,21 @@ fn open_approval_service(config: &DaemonConfig) -> Result<Option<ApprovalHandle>
     ))))
 }
 
+/// Opens the finder composition: snapshot-indexed engine plus Git
+/// revision backend behind the trusted service, with INV-008
+/// redaction on all display bytes. No database, no provider — always
+/// present, including on control-only daemons.
+fn open_finder() -> FinderHandle {
+    let revision: Arc<dyn repo_finder::RepoRevisionPort> = Arc::new(git_cli::GitCli::new());
+    let engine = Arc::new(finder_local::IndexedFinder::new(revision.clone()));
+    let search: Arc<dyn repo_finder::RepoSearchPort> = engine.clone();
+    let read: Arc<dyn repo_finder::RepoReadPort> = engine;
+    Arc::new(
+        FinderService::new(search, read, revision)
+            .with_filter(Arc::new(app_services::RedactingFilter)),
+    )
+}
+
 fn open_human_decision_service(
     config: &DaemonConfig,
 ) -> Result<Option<HumanDecisionHandle>, DaemonError> {
@@ -393,7 +418,7 @@ where
                 let response = match &services.business {
                     Some(handle) => {
                         let mut service = handle.lock().await;
-                        dispatch::dispatch(&mut service, request)
+                        dispatch::dispatch(&mut service, request, services.execution.as_deref())
                     }
                     None => dispatch::unavailable(),
                 };
@@ -449,7 +474,11 @@ where
                 let response = match &services.human_decision {
                     Some(handle) => {
                         let mut service = handle.lock().await;
-                        human_decision::dispatch(&mut service, request)
+                        human_decision::dispatch(
+                            &mut service,
+                            request,
+                            session.negotiated_version().unwrap_or(0),
+                        )
                     }
                     None => human_decision::unavailable(),
                 };
@@ -478,6 +507,22 @@ where
                     None => dispatch::task_authoring_unavailable(),
                 };
                 if session.respond_task_authoring(response).await.is_err() {
+                    return ConnectionOutcome::Ended;
+                }
+            }
+            Ok(ReadyRequest::Finder(request)) => {
+                // Scans are seconds-long filesystem work: off the serve
+                // loop onto the blocking pool (safe on either runtime
+                // flavor), so other connections never stall behind one.
+                let service = services.finder.clone();
+                let response =
+                    match tokio::task::spawn_blocking(move || finder::dispatch(&service, request))
+                        .await
+                    {
+                        Ok(response) => response,
+                        Err(_) => finder::failed(),
+                    };
+                if session.respond_finder(response).await.is_err() {
                     return ConnectionOutcome::Ended;
                 }
             }
@@ -773,6 +818,7 @@ mod unix_daemon {
                 approval,
                 human_decision,
                 vault,
+                finder: open_finder(),
             },
         )
         .await;
@@ -878,6 +924,7 @@ mod windows_daemon {
                 approval,
                 human_decision,
                 vault,
+                finder: super::open_finder(),
             },
         )
         .await)

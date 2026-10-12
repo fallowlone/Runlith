@@ -48,6 +48,9 @@ without making any provider-native state authoritative.
 
 ## 2. Context Epoch
 
+> Epoch identity and chain scope decided by
+> [`ADR-0043`](./adr/ADR-0043-g9-continuity-contract.md) (TASK-0168).
+
 Work is organized as bounded active context windows:
 
 ```text
@@ -58,8 +61,11 @@ Task
  └── ...
 ```
 
-An epoch is a bounded active context window. No final Epoch ID format is
-selected, and no provider-specific Epoch types exist.
+An epoch is a bounded active context window. Epoch identity is
+`ctxepoch_<ulid26>` with a per-chain monotonic `epoch_seq`; chains are
+scoped to (task, execution) with exactly one ACTIVE epoch, older epochs
+INDEXED and read-only (ADR-0043 §1). No provider-specific Epoch types
+exist.
 
 ## 3. Three continuity levels
 
@@ -78,6 +84,9 @@ knowledge boundaries. Continuity may retrieve Memory; Continuity is not
 Memory itself.
 
 ## 4. Rollover algorithm
+
+> Transaction, verification, threshold and crash semantics decided by
+> [`ADR-0043`](./adr/ADR-0043-g9-continuity-contract.md) (TASK-0168).
 
 The accepted sequence (SoT §33):
 
@@ -123,11 +132,16 @@ execution behavior belongs to later implementation and recovery policy.
 
 ## 5. Checkpoints, history, and provider migration
 
+> Checkpoint schema, history contract and migration protocol decided
+> by [`ADR-0043`](./adr/ADR-0043-g9-continuity-contract.md) (TASK-0168).
+
 A checkpoint is structured continuity state sufficient to continue work
 without treating the full previous transcript as authoritative state. It
 may conceptually carry working state, important notes, source references,
-evidence references, and continuation information — no exact schema and
-no mandatory fields are defined. A checkpoint helps resume but replaces
+evidence references, and continuation information, with exact schema
+and mandatory fields per ADR-0043 §2 (`ctxckpt_<ulid26>`, epoch/task/
+execution refs, version, parent chain, working-state refs, source and
+evidence refs, continuation, plan ref, sensitivity ceiling). A checkpoint helps resume but replaces
 nothing: not the source file, Task, decision, event, artifact, or Git
 state where exact evidence is needed. Raw evidence stays authoritative;
 summary-of-summary chains must never become truth.
@@ -154,6 +168,10 @@ raw chat transcript retention (INV-110).
 
 ## 6. Boundaries
 
+> Working-notes representation per ADR-0043 §6 and privacy bounds per
+> ADR-0043 §13 decided by
+> [`ADR-0043`](./adr/ADR-0043-g9-continuity-contract.md) (TASK-0168).
+
 Working notes belong to Level 2 execution continuity. They are never
 automatically promoted to Memory, Decision, ADR, or Task state —
 promotion to durable project knowledge requires the owning subsystem and
@@ -167,9 +185,12 @@ Journal evidence, but they never replace the journal, rollover never
 rewrites domain history, and no continuity event taxonomy is created.
 
 Context, history, and checkpoints remain subject to Data Classification
-and Privacy Architecture: SECRET, PII, and raw tool payloads must not be
-preserved merely because keeping them would make resumption easier.
-Exact retention and cleanup policies are separate privacy/storage work.
+and Privacy Architecture: SECRET material is never persisted in
+continuity state — opaque refs and scoped bindings only (INV-151) —
+while PII and raw tool payloads travel by reference only, never
+embedded (ADR-0043 §13).
+Exact retention and cleanup durations are owned by privacy/storage
+policy; enforcement mechanics are TASK-0171's.
 
 Rendered context packages are disposable; Context Plans, checkpoints, and
 continuity references are durable or reconstructible execution evidence
@@ -203,29 +224,38 @@ Full bounded-context registry: ARCHITECTURE.md §2 (not duplicated here).
 
 ## 8. Open Context Continuity Design Items
 
-Unresolved by accepted architecture; listed, not decided:
+Mostly resolved by accepted architecture; the rest stay open. Items
+marked [ADR-0043] were decided by
+[`ADR-0043`](./adr/ADR-0043-g9-continuity-contract.md) (TASK-0168):
 
-- Context Epoch ID format
-- checkpoint identity format
-- checkpoint schema
-- checkpoint persistence format
-- checkpoint transaction API
-- checkpoint verification criteria
-- soft/hard rollover thresholds
-- Budget Monitor ownership/API
-- current-working-set definition
-- working-notes representation
-- history reference format
-- history index/storage implementation
-- history result ranking
-- history retention/cleanup
-- provider Session ↔ Epoch linkage
-- crash during checkpoint semantics
-- crash between checkpoint commit and new-epoch activation
-- concurrent execution/epoch semantics
-- provider migration resume protocol
-- checkpoint version compatibility
-- checkpoint supersession semantics
+- Context Epoch ID format [ADR-0043 §1, with chain scope]
+- checkpoint identity format [ADR-0043 §2]
+- checkpoint schema [ADR-0043 §2]
+- checkpoint persistence format [open; exact tables are TASK-0171's]
+- checkpoint transaction API [ADR-0043 §3 semantics; exact Rust
+  shapes are TASK-0171's]
+- checkpoint verification criteria [ADR-0043 §3]
+- soft/hard rollover thresholds [ADR-0042 budgets as source, ADR-0043
+  §4 gating semantics]
+- Budget Monitor ownership/API [ADR-0043 §4 ownership and
+  trigger/gating semantics; call mechanics are TASK-0171's]
+- current-working-set definition [ADR-0043 §5]
+- working-notes representation [ADR-0043 §6]
+- history reference format [ADR-0043 §7; search/read Rust shapes
+  are TASK-0171's]
+- history index/storage implementation [open]
+- history result ranking [ADR-0043 §7 signal disclosure; weight
+  tuning is TASK-0171's]
+- history retention/cleanup [durations open, owned by privacy/storage
+  policy; enforcement mechanics are TASK-0171's]
+- provider Session ↔ Epoch linkage [ADR-0043 §8]
+- crash during checkpoint semantics [ADR-0043 §9]
+- crash between checkpoint commit and new-epoch activation [ADR-0043
+  §9]
+- concurrent execution/epoch semantics [ADR-0043 §10]
+- provider migration resume protocol [ADR-0043 §11]
+- checkpoint version compatibility [ADR-0043 §12]
+- checkpoint supersession semantics [ADR-0043 §12]
 
 ## 9. Non-goals
 
@@ -233,4 +263,5 @@ This document does NOT define: Continuity Rust implementation; SQLite
 tables; checkpoint schema; history index implementation; Memory Engine
 implementation; Provider adapter implementation; Checkpoint JSON Schema;
 provider-specific compaction protocol; retention durations; migration
-resume protocol implementation.
+resume protocol implementation. This list scopes this document only —
+decisions themselves may live in accepted ADRs (e.g. ADR-0043).

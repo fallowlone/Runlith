@@ -398,7 +398,10 @@ async fn success_leaves_task_verifying_never_completed() {
     // event as the Task reaching VERIFYING: the lifecycle runs
     // SUBMITTED -> AWAITING_REVIEW -> VERIFYING, so waiting on
     // `outcome != OPEN` can observe AWAITING_REVIEW under load and fail on
-    // timing rather than on behaviour.
+    // timing rather than on behaviour. Likewise, background work
+    // (evidence persistence, the TASK-0165 advisory stage) legitimately
+    // outlives the submit, so liveness release is awaited, not assumed on
+    // the first VERIFYING response.
     let status = poll_status(
         &sandbox.endpoint,
         "E-1",
@@ -407,6 +410,7 @@ async fn success_leaves_task_verifying_never_completed() {
             let get = get_payload(response);
             get.attempts.iter().any(|attempt| attempt.outcome != "OPEN")
                 && get.task_state == "VERIFYING"
+                && !get.execution_live
         },
     )
     .await;

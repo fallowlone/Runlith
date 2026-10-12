@@ -11,7 +11,12 @@ use agent_runtime::{AttemptId, ExecutionId, ProviderRef};
 use agentd::{execution::ExecutionComposition, DaemonConfig};
 use app_services::{
     FixedClock, OrchestrationIds, OrchestrationOutcome, OrchestrationService,
-    PlannedOrchestrationOutcome, PlanningPolicyContext, PlanningService,
+    PlannedOrchestrationError, PlannedOrchestrationOutcome, PlanningPolicyContext, PlanningService,
+    ServiceError, TaskService,
+};
+use evaluation::{
+    subject_fingerprint, ClaimVerdict, ClaimedOutcome, ClaimedSubject, EffectKind, EffectPayload,
+    EffectProvenance, EffectSubjectRef, EvidenceRefs, Sha256Digest,
 };
 use fake_evaluator::{EvaluatorMode, FakeEvaluator};
 use fake_planner::{FakePlanner, FakePlannerScenario};
@@ -22,7 +27,7 @@ use plan_domain::{
 };
 use policy::CapabilityKind;
 use scheduler::{ExecutionPort, ExecutionProblem, WorkEvidence, WorkItem};
-use task_domain::{Project, ProjectId, Task, TaskId, TaskState};
+use task_domain::{DomainError, Project, ProjectId, Task, TaskId, TaskState};
 
 const FIXED_MILLIS: u64 = 1_704_067_200_000;
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -231,6 +236,7 @@ fn agentd_composes_planning_validation_persistence_execution_and_bounded_replan(
             ids("PLANNING"),
             &executor,
             &evaluator,
+            None,
         )
         .expect("bounded planning + execution path");
 
@@ -296,6 +302,7 @@ fn plan_dependency_direction_runs_predecessor_before_successor() {
             ids("PLANNING-CHAIN"),
             &executor,
             &evaluator,
+            None,
         )
         .expect("dependent task is held by plan readiness");
 
@@ -324,6 +331,109 @@ fn plan_dependency_direction_runs_predecessor_before_successor() {
         .expect("read successor")
         .expect("successor exists");
     assert_eq!(successor.state(), TaskState::Ready);
+}
+
+/// TASK-0125 fixture: admits completion through the trusted gate with
+/// durable, subject-bound evidence — one captured observed effect for the
+/// concluded attempt, one claim plus a current VERIFIED verdict per
+/// criterion, then the admissible transition under the declaring policy
+/// fingerprint. Stands in for the capture/evaluation pipeline the product
+/// still has to wire (TASK-0125 follow-up).
+fn complete_with_captured_evidence(
+    tasks: &mut TaskService<FixedClock>,
+    task_id: &TaskId,
+    execution_id: &ExecutionId,
+    attempt_id: &AttemptId,
+    policy_fingerprint: &str,
+) {
+    let task = tasks
+        .store()
+        .get_task(task_id)
+        .expect("task")
+        .expect("task");
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let subject_ref =
+        EffectSubjectRef::new(format!("attempt:{}", attempt_id.as_str())).expect("ref");
+    let fingerprint = subject_fingerprint(
+        EffectKind::ArtifactHash,
+        subject_ref.as_str(),
+        &[("content", digest.as_str())],
+    )
+    .expect("fingerprint");
+    let effect = tasks
+        .store_mut()
+        .append_observed_effect(
+            subject_ref,
+            fingerprint.clone(),
+            EffectPayload::ArtifactHash {
+                bytes: 3,
+                sha256: Sha256Digest::new(digest).expect("digest"),
+            },
+            "2024-01-01T00:00:00Z",
+            EffectProvenance::new(
+                execution_id.clone(),
+                attempt_id.clone(),
+                "runlith.local-observer.v1",
+            )
+            .expect("provenance"),
+        )
+        .expect("captured effect");
+    for requirement in task.evidence_requirements().to_vec() {
+        let claim = tasks
+            .store_mut()
+            .append_agent_claim(
+                task_id,
+                &requirement.criterion_id,
+                ClaimedOutcome::Satisfied,
+                ClaimedSubject {
+                    subject_ref: format!("subject:{}", requirement.criterion_id),
+                    subject_fingerprint: fingerprint.clone(),
+                },
+                EvidenceRefs::default(),
+                "agent:fixture-builder",
+                "2024-01-01T00:00:00Z",
+            )
+            .expect("claim");
+        tasks
+            .store_mut()
+            .append_claim_verification(
+                &claim.claim_id,
+                requirement.requirement_kind,
+                fingerprint.clone(),
+                evaluation::requirement_revision(&requirement),
+                requirement.policy_fingerprint.clone(),
+                ClaimVerdict::Verified,
+                EvidenceRefs::new(vec![], vec![effect.effect_id().as_str().to_owned()], vec![])
+                    .expect("refs"),
+                None,
+                "2024-01-01T00:00:00Z",
+            )
+            .expect("verdict");
+    }
+    tasks
+        .verification_succeeded_under_policy(
+            task_id,
+            "verified with durable captured evidence",
+            Some(policy_fingerprint),
+        )
+        .expect("evidence-backed completion is admitted");
+}
+
+/// TASK-0125: a completion attempt refused by the admission gate — the
+/// task stays VERIFYING with typed per-criterion outcomes.
+fn assert_completion_admission_refusal(error: PlannedOrchestrationError) {
+    match error {
+        PlannedOrchestrationError::Orchestration(ServiceError::Domain(
+            DomainError::InvalidTransition(reason),
+        )) => {
+            assert!(
+                reason.contains("completion admission refused"),
+                "expected a completion-admission refusal, got {reason:?}"
+            );
+            assert!(reason.contains("UNVERIFIED"), "got {reason:?}");
+        }
+        other => panic!("expected a completion-admission refusal, got {other:?}"),
+    }
 }
 
 /// R2-02: an accepted multi-step plan is executed step by step against its
@@ -359,6 +469,7 @@ fn accepted_plan_chain_runs_successor_after_predecessor_without_replanning() {
             ids("E2E-PLAN"),
             &executor,
             &evaluator,
+            None,
         )
         .expect("plan accepted");
     assert!(matches!(
@@ -377,6 +488,7 @@ fn accepted_plan_chain_runs_successor_after_predecessor_without_replanning() {
             ids("E2E-B-EARLY"),
             &executor,
             &evaluator,
+            None,
         )
         .expect("plan gate outcome");
     match early {
@@ -387,8 +499,10 @@ fn accepted_plan_chain_runs_successor_after_predecessor_without_replanning() {
     }
     assert_eq!(executor.calls(), 0);
 
-    // 3 + 4. step-a executes and independent evaluation completes it.
-    let ran_a = orchestration
+    // 3 + 4. step-a executes; TASK-0125 refuses to complete it on the
+    // evaluator verdict alone, and the trusted boundary admits it only
+    // after durable, subject-bound captured evidence exists.
+    let refused_a = orchestration
         .schedule_from_current_plan(
             &planning,
             &branch,
@@ -396,16 +510,24 @@ fn accepted_plan_chain_runs_successor_after_predecessor_without_replanning() {
             ids("E2E-A"),
             &executor,
             &evaluator,
+            None,
         )
-        .expect("step-a runs from the accepted plan");
-    assert!(matches!(
-        ran_a,
-        PlannedOrchestrationOutcome::Executed {
-            execution: OrchestrationOutcome::ExecutionSucceededAndVerified { .. },
-            replan: None,
-            ..
-        }
-    ));
+        .expect_err("a claim without durable captured evidence must not complete");
+    assert_completion_admission_refusal(refused_a);
+    let a_state = orchestration
+        .tasks()
+        .get_task(&step_a)
+        .unwrap()
+        .expect("step-a")
+        .state();
+    assert_eq!(a_state, TaskState::Verifying);
+    complete_with_captured_evidence(
+        orchestration.tasks_mut(),
+        &step_a,
+        &ExecutionId::new("E-E2E-A").unwrap(),
+        &AttemptId::new("A-E2E-A").unwrap(),
+        "policy:agentd-plan-e2e",
+    );
     let a_state = orchestration
         .tasks()
         .get_task(&step_a)
@@ -414,8 +536,9 @@ fn accepted_plan_chain_runs_successor_after_predecessor_without_replanning() {
         .state();
     assert_eq!(a_state, TaskState::Completed);
 
-    // 5 + 6. The plan-gated path runs step-b.
-    let ran_b = orchestration
+    // 5 + 6. The plan-gated path runs step-b; the same evidence-gated
+    // completion applies to it.
+    let refused_b = orchestration
         .schedule_from_current_plan(
             &planning,
             &branch,
@@ -423,19 +546,35 @@ fn accepted_plan_chain_runs_successor_after_predecessor_without_replanning() {
             ids("E2E-B"),
             &executor,
             &evaluator,
+            None,
         )
-        .expect("step-b runs from the accepted plan");
-    match ran_b {
-        PlannedOrchestrationOutcome::Executed {
-            plan,
-            execution: OrchestrationOutcome::ExecutionSucceededAndVerified { task_id, .. },
-            replan: None,
-        } => {
-            assert_eq!(task_id, step_b);
-            assert_eq!(plan.revision().revision_seq, 1);
-        }
-        other => panic!("expected step-b execution, got {other:?}"),
-    }
+        .expect_err("a claim without durable captured evidence must not complete");
+    assert_completion_admission_refusal(refused_b);
+    assert_eq!(
+        orchestration
+            .tasks()
+            .get_task(&step_b)
+            .unwrap()
+            .expect("step-b")
+            .state(),
+        TaskState::Verifying
+    );
+    complete_with_captured_evidence(
+        orchestration.tasks_mut(),
+        &step_b,
+        &ExecutionId::new("E-E2E-B").unwrap(),
+        &AttemptId::new("A-E2E-B").unwrap(),
+        "policy:agentd-plan-e2e",
+    );
+    assert_eq!(
+        orchestration
+            .tasks()
+            .get_task(&step_b)
+            .unwrap()
+            .expect("step-b")
+            .state(),
+        TaskState::Completed
+    );
     assert_eq!(executor.calls(), 2);
 
     // 7-9. No planner call, head still 1, no revision created to run step-b.
@@ -457,6 +596,7 @@ fn accepted_plan_chain_runs_successor_after_predecessor_without_replanning() {
             ids("E2E-B-AGAIN"),
             &executor,
             &evaluator,
+            None,
         )
         .expect("scheduler outcome");
     assert!(matches!(

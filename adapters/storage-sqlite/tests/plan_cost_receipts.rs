@@ -85,6 +85,11 @@ fn schema_12_database_upgrades_to_current_without_plan_cost_data() {
                  DROP TABLE candidate_input_assessments;
                  DROP TABLE candidate_input_operations;
                  DROP TABLE observed_effects;
+                 DROP TABLE agent_claims;
+                 DROP TABLE claim_verifications;
+                 DROP TABLE policy_exemptions;
+                 DROP TABLE approval_discharges;
+                 DROP TABLE completion_admissions;
                  DROP TABLE planning_input_candidate_tasks;
                  DROP TABLE human_decision_evidence;
                  DROP TABLE human_decision_options;
@@ -102,13 +107,45 @@ fn schema_12_database_upgrades_to_current_without_plan_cost_data() {
                  DROP TABLE plan_guardrail_events;
                  DROP TABLE plan_revision_lineage;
                  DROP TABLE plan_cost_receipts;
+                 DROP TABLE review_records;
+                 DROP TABLE review_path_settings;
+                 DROP TABLE reviewer_profiles;
+                 DROP TABLE owner_presence_proofs;
+                 DROP TABLE binding_proof_consumption;
+                 DROP TABLE side_effect_escalations;
+                 DROP TABLE side_effect_transitions;
+                 DROP TABLE side_effect_intents;
+                 DROP TABLE context_trace_revs;
+                 DROP TABLE context_trace_decisions;
+                 DROP TABLE context_traces;
+                 DROP TABLE context_cache_boundary_items;
+                 DROP TABLE context_cache_boundaries;
+                 DROP TABLE context_plan_hashes;
+                 DROP TABLE context_item_transforms;
+                 DROP TABLE context_items;
+                 DROP TABLE context_plans;
+                 DROP TABLE continuity_receipt_refs;
+                 DROP TABLE continuity_budget_events;
+                 DROP TABLE continuity_migration_links;
+                 DROP TABLE continuity_session_links;
+                 DROP TABLE continuity_history_refs;
+                 DROP TABLE continuity_activations;
+                 DROP TABLE continuity_checkpoint_notes;
+                 DROP TABLE continuity_checkpoint_evidence;
+                 DROP TABLE continuity_checkpoint_sources;
+                 DROP TABLE continuity_notes;
+                 DROP TABLE continuity_checkpoints;
+                 DROP TABLE continuity_epochs;
+                 DROP TABLE continuity_meta;
+                 DROP TABLE takeover_admission_anchors;
+                 DROP TABLE takeover_admissions;
                  PRAGMA user_version = 12;",
             )
             .expect("simulate historical v12 schema");
     }
 
     let mut store = SqliteStore::open(&db.path).expect("migrate v12 to current");
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 25);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 33);
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
     let receipt_ref = PlanningCostReceiptRef::new("planning-receipt:after-upgrade").unwrap();
     let evidence = receipt(1);

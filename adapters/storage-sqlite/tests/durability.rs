@@ -675,11 +675,11 @@ fn fresh_database_migrates_to_current() {
     let db = TestDb::new("fresh");
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 25);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 33);
 }
 
 #[test]
-fn schema_21_upgrades_once_to_candidate_assessments_22_and_reopens() {
+fn schema_21_upgrades_through_candidate_assessments_to_current_33_and_reopens() {
     let db = TestDb::new("schema-21-to-22");
     {
         let connection = rusqlite::Connection::open(&db.path).unwrap();
@@ -702,11 +702,11 @@ fn schema_21_upgrades_once_to_candidate_assessments_22_and_reopens() {
     secure_raw_fixture(&db.path);
     {
         let upgraded = db.open();
-        assert_eq!(upgraded.schema_version().unwrap(), 25);
-        assert_eq!(SUPPORTED_SCHEMA_VERSION, 25);
+        assert_eq!(upgraded.schema_version().unwrap(), 33);
+        assert_eq!(SUPPORTED_SCHEMA_VERSION, 33);
     }
     let reopened = db.open();
-    assert_eq!(reopened.schema_version().unwrap(), 25);
+    assert_eq!(reopened.schema_version().unwrap(), 33);
     let assessment_columns: i64 = rusqlite::Connection::open(&db.path)
         .unwrap()
         .query_row(
@@ -725,6 +725,55 @@ fn schema_21_upgrades_once_to_candidate_assessments_22_and_reopens() {
         )
         .unwrap();
     assert_eq!(operation_columns, 20);
+}
+
+#[test]
+fn schema_22_upgrades_through_claim_verification_to_current_29_and_reopens() {
+    let db = TestDb::new("schema-22-to-23");
+    {
+        let connection = rusqlite::Connection::open(&db.path).unwrap();
+        for migration in MIGRATIONS_THROUGH_16 {
+            connection.execute_batch(migration).unwrap();
+        }
+        for migration in [
+            include_str!("../migrations/0017_evidence_requirements.sql"),
+            include_str!("../migrations/0018_planning_input_evidence_requirements.sql"),
+            include_str!("../migrations/0019_observed_effects.sql"),
+            include_str!("../migrations/0020_task_prerequisites.sql"),
+            include_str!("../migrations/0021_test_mutation_policy.sql"),
+            include_str!("../migrations/0022_candidate_input_assessments.sql"),
+        ] {
+            connection.execute_batch(migration).unwrap();
+        }
+        connection
+            .execute_batch("PRAGMA user_version = 22")
+            .unwrap();
+    }
+    secure_raw_fixture(&db.path);
+    {
+        let upgraded = db.open();
+        assert_eq!(upgraded.schema_version().unwrap(), 30);
+        assert_eq!(SUPPORTED_SCHEMA_VERSION, 30);
+    }
+    let reopened = db.open();
+    assert_eq!(reopened.schema_version().unwrap(), 30);
+    for (table, columns) in [
+        ("agent_claims", 11),
+        ("claim_verifications", 13),
+        ("policy_exemptions", 7),
+        ("approval_discharges", 10),
+        ("completion_admissions", 6),
+    ] {
+        let found: i64 = rusqlite::Connection::open(&db.path)
+            .unwrap()
+            .query_row(
+                &format!("SELECT COUNT(*) FROM pragma_table_info('{table}')"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(found, columns, "unexpected column count for {table}");
+    }
 }
 
 #[test]

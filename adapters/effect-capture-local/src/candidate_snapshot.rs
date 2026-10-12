@@ -1135,4 +1135,86 @@ mod tests {
         );
         std::fs::remove_dir_all(base).expect("remove linked metadata test tree");
     }
+
+    // TASK-0151 finding 12: independent fault-injection proof that a G6
+    // authorization failure at any point of a live worktree scan aborts
+    // the scan — no partial snapshot is ever returned. The call-count
+    // assertions keep the test non-vacuous: the injected failure must
+    // land strictly mid-scan, after at least one granted authorization.
+    #[test]
+    fn scan_aborts_when_authorization_fails_mid_scan() {
+        let root = std::env::temp_dir().join(format!(
+            "runlith-candidate-scan-fault-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).expect("create isolated scan root");
+        let root = root.canonicalize().expect("canonicalize scan root");
+        std::fs::write(root.join(".git"), b"gitdir: .git/worktrees/task\n")
+            .expect("create linked worktree pointer fixture");
+        std::fs::create_dir_all(root.join("src")).expect("create source directory");
+        std::fs::write(root.join("src/input.txt"), b"candidate input")
+            .expect("create source fixture");
+        std::fs::write(root.join("src/second.txt"), b"second input")
+            .expect("create second source fixture");
+
+        let mut granted = 0usize;
+        let mut allow = |_: &[u8], _: DescriptorReadOperation| {
+            granted += 1;
+            Ok(())
+        };
+        let snapshot = scan_live_worktree(&root, &mut allow).expect("baseline scan succeeds");
+        assert_eq!(snapshot.files.len(), 2);
+        assert!(
+            granted >= 3,
+            "baseline scan must authorize several reads, got {granted}"
+        );
+
+        // Fail the authorization at every strictly-mid-scan position: the
+        // scan must abort with the injected error at each one.
+        for fail_at in 1..granted {
+            let mut calls = 0usize;
+            let mut injected = 0usize;
+            let mut flaky = |_: &[u8], _: DescriptorReadOperation| {
+                calls += 1;
+                if calls > fail_at {
+                    injected += 1;
+                    return Err(evaluation::EffectError::CaptureFailed(
+                        "injected G6 failure",
+                    ));
+                }
+                Ok(())
+            };
+            let error = scan_live_worktree(&root, &mut flaky)
+                .expect_err("mid-scan authorization failure must abort the scan");
+            assert!(
+                matches!(
+                    error,
+                    evaluation::EffectError::CaptureFailed("injected G6 failure")
+                ),
+                "the injected failure must propagate, got {error:?}"
+            );
+            assert_eq!(injected, 1, "the scan must stop at the first denial");
+        }
+
+        // Targeted: denying file-content reads (after granting everything
+        // else) aborts rather than skipping the file and continuing with
+        // a partial snapshot.
+        let mut content_denied = |_: &[u8], operation: DescriptorReadOperation| {
+            if operation == DescriptorReadOperation::ReadFile {
+                return Err(evaluation::EffectError::CaptureFailed(
+                    "injected content denial",
+                ));
+            }
+            Ok(())
+        };
+        assert!(matches!(
+            scan_live_worktree(&root, &mut content_denied),
+            Err(evaluation::EffectError::CaptureFailed(
+                "injected content denial"
+            ))
+        ));
+
+        std::fs::remove_dir_all(root).expect("remove isolated scan root");
+    }
 }

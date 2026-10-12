@@ -17,6 +17,7 @@ pub enum HumanContinuation {
     Resume,
     Replan,
     Abort,
+    Takeover,
 }
 
 impl HumanContinuation {
@@ -26,6 +27,7 @@ impl HumanContinuation {
             Self::Resume => "RESUME",
             Self::Replan => "REPLAN",
             Self::Abort => "ABORT",
+            Self::Takeover => "TAKEOVER",
         }
     }
 
@@ -34,6 +36,7 @@ impl HumanContinuation {
             "RESUME" => Ok(Self::Resume),
             "REPLAN" => Ok(Self::Replan),
             "ABORT" => Ok(Self::Abort),
+            "TAKEOVER" => Ok(Self::Takeover),
             _ => Err(PlanDomainError::InvalidInput(format!(
                 "unknown human continuation {value:?}"
             ))),

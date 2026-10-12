@@ -69,6 +69,10 @@ pub enum StorageError {
     /// A HumanDecisionRequest is durable but its lifecycle does not permit
     /// the requested resolve/consume transition (including replay).
     HumanDecisionState { request_id: String, state: String },
+    /// A takeover return found live workspace bindings that no longer
+    /// match the anchors captured at admission. Fail closed: the scope
+    /// stays Blocked. The service maps this to `GitBackendFailure`.
+    TakeoverAnchorMismatch { record_id: String, detail: String },
 }
 
 impl fmt::Display for StorageError {
@@ -131,6 +135,10 @@ impl fmt::Display for StorageError {
             Self::HumanDecisionState { request_id, state } => write!(
                 f,
                 "human decision {request_id} cannot transition from {state}"
+            ),
+            Self::TakeoverAnchorMismatch { record_id, detail } => write!(
+                f,
+                "takeover {record_id} workspace anchor mismatch: {detail}"
             ),
         }
     }

@@ -355,7 +355,7 @@ impl CandidateIntegrityAssessment {
     }
 }
 
-fn valid_sha256(value: &str) -> bool {
+pub(crate) fn valid_sha256(value: &str) -> bool {
     value.strip_prefix("sha256:").is_some_and(|hex| {
         hex.len() == 64
             && hex
@@ -411,30 +411,33 @@ impl CandidateSelector {
         if !valid_sha256(policy_fingerprint) {
             return Err(CandidateError::InvalidRequirement);
         }
-        let mut revision = Sha256::new();
-        revision.update(b"runlith:evidence-requirement:v1\0");
-        field(&mut revision, requirement.criterion_id.as_bytes());
-        field(
-            &mut revision,
-            requirement.requirement_kind.as_str().as_bytes(),
-        );
-        field(
-            &mut revision,
-            requirement.subject_binding.as_str().as_bytes(),
-        );
-        field(&mut revision, policy_fingerprint.as_bytes());
-        revision.update([u8::from(requirement.required)]);
-        for param in &requirement.params {
-            field(&mut revision, param.key().as_bytes());
-            field(&mut revision, param.value().as_bytes());
-        }
         Ok(Self {
             criterion_id: requirement.criterion_id.clone(),
             selector: requirement.params[2].value().to_owned(),
             path: path.to_owned(),
             literal: literal.to_owned(),
-            requirement_revision: format!("sha256:{:x}", revision.finalize()),
+            requirement_revision: requirement_revision(requirement),
         })
+    }
+
+    /// Resolves the selector only when the requirement's policy pin equals
+    /// the currently effective Policy fingerprint. A well-formed pin to a
+    /// superseded policy resolves no scope: the producer must not evaluate
+    /// or record evidence under a policy that is no longer current
+    /// (TASK-0151 finding 7).
+    pub fn from_requirement_under_policy(
+        requirement: &task_domain::EvidenceRequirement,
+        current_policy_fingerprint: &str,
+    ) -> Result<Self, CandidateError> {
+        let selector = Self::from_requirement(requirement)?;
+        let pinned = requirement
+            .policy_fingerprint
+            .as_deref()
+            .ok_or(CandidateError::InvalidRequirement)?;
+        if pinned != current_policy_fingerprint {
+            return Err(CandidateError::InvalidRequirement);
+        }
+        Ok(selector)
     }
 
     pub fn matches_invocation(&self, selector: &str, path: &str, literal: &str) -> bool {
@@ -1036,6 +1039,41 @@ fn field(hash: &mut Sha256, bytes: &[u8]) {
     hash.update(bytes);
 }
 
+/// Canonical requirement revision (ADR-0032 rule 4): domain-separated
+/// `sha256:` hash over criterion id, kind, subject binding, policy
+/// fingerprint (empty when absent), required flag and sorted params.
+/// `CandidateSelector::from_requirement` uses this exact function, so the
+/// candidate revision equals the generic revision for candidate-shaped
+/// requirements; other shapes get a stable revision without a selector.
+#[must_use]
+pub fn requirement_revision(requirement: &task_domain::EvidenceRequirement) -> String {
+    let mut revision = Sha256::new();
+    revision.update(b"runlith:evidence-requirement:v1\0");
+    field(&mut revision, requirement.criterion_id.as_bytes());
+    field(
+        &mut revision,
+        requirement.requirement_kind.as_str().as_bytes(),
+    );
+    field(
+        &mut revision,
+        requirement.subject_binding.as_str().as_bytes(),
+    );
+    field(
+        &mut revision,
+        requirement
+            .policy_fingerprint
+            .as_deref()
+            .unwrap_or("")
+            .as_bytes(),
+    );
+    revision.update([u8::from(requirement.required)]);
+    for param in &requirement.params {
+        field(&mut revision, param.key().as_bytes());
+        field(&mut revision, param.value().as_bytes());
+    }
+    format!("sha256:{:x}", revision.finalize())
+}
+
 fn lowercase_hex(value: &str) -> bool {
     value
         .bytes()
@@ -1244,6 +1282,34 @@ mod tests {
         .unwrap();
         assert_eq!(
             CandidateSelector::from_requirement(&extra),
+            Err(CandidateError::InvalidRequirement)
+        );
+    }
+
+    // TASK-0151 finding 7: a well-formed but superseded policy pin must
+    // not resolve — the pin is reconciled against the current Policy.
+    #[test]
+    fn candidate_selector_reconciles_policy_pin_against_current_policy() {
+        use task_domain::{EvidenceRequirement, RequirementKind, RequirementParam, SubjectBinding};
+
+        let pinned = format!("sha256:{}", "a".repeat(64));
+        let current = format!("sha256:{}", "b".repeat(64));
+        let requirement = EvidenceRequirement::new(
+            "criterion-a",
+            RequirementKind::TestSuite,
+            SubjectBinding::ContentToolchainAndConfig,
+            vec![
+                RequirementParam::new("selector", "candidate.file-contains.v1").unwrap(),
+                RequirementParam::new("path", "src/example.rs").unwrap(),
+                RequirementParam::new("literal", "accepted_code").unwrap(),
+            ],
+            Some(pinned.clone()),
+            true,
+        )
+        .unwrap();
+        assert!(CandidateSelector::from_requirement_under_policy(&requirement, &pinned).is_ok());
+        assert_eq!(
+            CandidateSelector::from_requirement_under_policy(&requirement, &current),
             Err(CandidateError::InvalidRequirement)
         );
     }

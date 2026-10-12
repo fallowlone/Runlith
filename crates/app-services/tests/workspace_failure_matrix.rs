@@ -298,9 +298,12 @@ fn allocated_with_foreign_target_content_never_replays() {
 
 #[test]
 fn materialize_failure_writes_nothing_to_durable_state() {
-    // INV-145 at the seam: `materialize_allocated` borrows `&self` (no
-    // store write is possible across the Git subprocess) and a failing
-    // mutation leaves durable state byte-identical.
+    // INV-145 at the seam: a failing mutation leaves the journal and
+    // lease lifecycle byte-identical. ADR-0031 (TASK-0126) adds one
+    // deliberate exception: the side-effect intent row itself, which
+    // must be durable before any dispatch (SE-1) and records the
+    // classified outcome (SE-2/SE-5) — journal and lease behavior are
+    // unchanged.
     let env = TestEnv::new("materialize-clean");
     let (_, _, exec) = seed_execution(&env, "P-1", "T-1", "E-1");
     let service = env.workspace_service();

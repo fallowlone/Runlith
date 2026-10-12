@@ -1,4 +1,5 @@
 [package]
+license = "Apache-2.0"
 name = "agentd"
 version = "0.1.0"
 edition = "2021"
@@ -13,7 +14,9 @@ app-services = { path = "../../crates/app-services" }
 bytes = "1"
 evaluation = { path = "../../crates/evaluation" }
 effect-capture-local = { path = "../../adapters/effect-capture-local" }
+finder-local = { path = "../../adapters/finder-local" }
 git-cli = { path = "../../adapters/git-cli" }
+repo-finder = { path = "../../crates/repo-finder" }
 ipc-contracts = { path = "../../crates/ipc-contracts" }
 ipc-control = { path = "../../crates/ipc-control" }
 ipc-transport = { path = "../../crates/ipc-transport" }
@@ -38,9 +41,12 @@ agent-runtime = { path = "../../crates/agent-runtime" }
 bytes = "1"
 fake-evaluator = { path = "../../adapters/fake-evaluator" }
 fake-planner = { path = "../../adapters/fake-planner" }
+finder-local = { path = "../../adapters/finder-local" }
 git-cli = { path = "../../adapters/git-cli" }
 prost = "0.14.4"
 provider-claude = { path = "../../adapters/provider-claude", features = ["trusted-host"] }
+repo-finder = { path = "../../crates/repo-finder" }
+repo-finder-contract = { path = "../../crates/repo-finder-contract" }
 secrets-vault = { path = "../../adapters/secrets-vault", features = ["test-params"] }
 storage-sqlite = { path = "../../adapters/storage-sqlite" }
 task-domain = { path = "../../crates/task" }

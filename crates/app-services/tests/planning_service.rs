@@ -6,12 +6,16 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 
-use agent_runtime::{AttemptId, ExecutionId, ProviderRef};
+use agent_runtime::{AttemptId, Execution, ExecutionId, ProviderRef};
 use app_services::{
     FixedClock, HumanDecisionCreate, HumanDecisionService, OrchestrationIds, OrchestrationService,
     PlanApplicabilityRefusal, PlannedExecutionEntryOutcome, PlannedOrchestrationOutcome,
     PlanningAssessmentOutcome, PlanningPolicyContext, PlanningProposalOutcome, PlanningService,
-    PlanningServiceError, RuntimeService, TaskService,
+    PlanningServiceError, RuntimeService, ServiceError, TaskService,
+};
+use evaluation::{
+    subject_fingerprint, ClaimVerdict, ClaimedOutcome, ClaimedSubject, EffectKind, EffectPayload,
+    EffectProvenance, EffectSubjectRef, EvidenceRefs, Sha256Digest,
 };
 use fake_evaluator::{EvaluatorMode, FakeEvaluator};
 use fake_planner::{FakePlanner, FakePlannerScenario};
@@ -28,10 +32,15 @@ use plan_domain::{
 };
 use scheduler::{ExecutionPort, ExecutionProblem, WorkEvidence, WorkItem};
 use storage_sqlite::{
-    EventType, ExecutionEntryAdmission, PlanHeadPrecondition, PlanningInputPrecondition,
-    SecurityAuditEvent, SqliteStore, StorageError,
+    EventType, ExecutionEntryAdmission, NewJournalEvent, PlanHeadPrecondition,
+    PlanningInputPrecondition, SecurityAuditEvent, SqliteStore, StorageError,
 };
-use task_domain::{Project, ProjectId, Task, TaskId, TaskState};
+use takeover::TakeoverStatus;
+use task_domain::{DomainError, Project, ProjectId, Task, TaskId, TaskState};
+use workspace::{
+    BranchRef, RepositoryRef, Revision, TrustedCommonGit, WorkspaceId, WorkspaceLease,
+    WorkspaceStore,
+};
 
 const FIXED_MILLIS: u64 = 1_704_067_200_000;
 const MIGRATIONS_THROUGH_16: [&str; 16] = [
@@ -1992,6 +2001,7 @@ fn task_not_in_candidate_plan_is_refused_before_commit() {
             ids("NOT-IN-PLAN"),
             &executor,
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .expect("applicability refusal is a typed outcome");
     assert!(matches!(
@@ -2029,6 +2039,7 @@ fn plan_predecessor_without_owned_canonical_task_is_refused_before_commit() {
             ids("PREDECESSOR"),
             &executor,
             &FakeEvaluator::new(EvaluatorMode::AlwaysVerified),
+            None,
         )
         .expect("applicability refusal is a typed outcome");
     assert!(matches!(
@@ -2150,6 +2161,7 @@ fn planning_path_errors_never_follow_a_plan_mutation() {
             ids("PROVIDER-ERROR"),
             &executor,
             &evaluator,
+            None,
         )
         .expect_err("provider failure is an error");
     assert!(matches!(
@@ -2169,6 +2181,7 @@ fn planning_path_errors_never_follow_a_plan_mutation() {
             ids("NO-EVIDENCE"),
             &executor,
             &evaluator,
+            None,
         )
         .expect_err("invalid context is an error");
     assert!(matches!(
@@ -2185,6 +2198,7 @@ fn planning_path_errors_never_follow_a_plan_mutation() {
             ids("DUPLICATE"),
             &executor,
             &evaluator,
+            None,
         )
         .expect("unrelated execution");
     assert!(matches!(
@@ -2202,6 +2216,7 @@ fn planning_path_errors_never_follow_a_plan_mutation() {
             ids("DUPLICATE"),
             &executor,
             &evaluator,
+            None,
         )
         .expect("post-commit failure is an outcome, never Err");
     match outcome {
@@ -2235,6 +2250,7 @@ fn current_plan_scheduling_reports_missing_plan_and_unrepresented_task_without_p
             ids("NO-PLAN"),
             &executor,
             &evaluator,
+            None,
         )
         .expect("no plan is an outcome");
     assert!(matches!(none, PlannedOrchestrationOutcome::NoAcceptedPlan));
@@ -2259,6 +2275,7 @@ fn current_plan_scheduling_reports_missing_plan_and_unrepresented_task_without_p
             ids("UNREPRESENTED"),
             &executor,
             &evaluator,
+            None,
         )
         .expect("unrepresented task is an outcome");
     assert!(matches!(
@@ -2850,6 +2867,107 @@ fn child_behind_running_predecessor_trips_l4_without_materializing() {
         .is_none());
 }
 
+/// TASK-0125 fixture: admits completion through the trusted gate with
+/// durable, subject-bound evidence — one captured observed effect for the
+/// concluded attempt, one claim plus a current VERIFIED verdict per
+/// criterion, then the admissible transition under the declaring policy
+/// fingerprint. Stands in for the capture/evaluation pipeline the product
+/// still has to wire (TASK-0125 follow-up).
+fn complete_with_captured_evidence(
+    tasks: &mut TaskService<FixedClock>,
+    task_id: &TaskId,
+    execution_id: &ExecutionId,
+    attempt_id: &AttemptId,
+    policy_fingerprint: &str,
+) {
+    let task = tasks
+        .store()
+        .get_task(task_id)
+        .expect("task")
+        .expect("task");
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let subject_ref =
+        EffectSubjectRef::new(format!("attempt:{}", attempt_id.as_str())).expect("ref");
+    let fingerprint = subject_fingerprint(
+        EffectKind::ArtifactHash,
+        subject_ref.as_str(),
+        &[("content", digest.as_str())],
+    )
+    .expect("fingerprint");
+    let effect = tasks
+        .store_mut()
+        .append_observed_effect(
+            subject_ref,
+            fingerprint.clone(),
+            EffectPayload::ArtifactHash {
+                bytes: 3,
+                sha256: Sha256Digest::new(digest).expect("digest"),
+            },
+            "2024-01-01T00:00:00Z",
+            EffectProvenance::new(
+                execution_id.clone(),
+                attempt_id.clone(),
+                "runlith.local-observer.v1",
+            )
+            .expect("provenance"),
+        )
+        .expect("captured effect");
+    for requirement in task.evidence_requirements().to_vec() {
+        let claim = tasks
+            .store_mut()
+            .append_agent_claim(
+                task_id,
+                &requirement.criterion_id,
+                ClaimedOutcome::Satisfied,
+                ClaimedSubject {
+                    subject_ref: format!("subject:{}", requirement.criterion_id),
+                    subject_fingerprint: fingerprint.clone(),
+                },
+                EvidenceRefs::default(),
+                "agent:fixture-builder",
+                "2024-01-01T00:00:00Z",
+            )
+            .expect("claim");
+        tasks
+            .store_mut()
+            .append_claim_verification(
+                &claim.claim_id,
+                requirement.requirement_kind,
+                fingerprint.clone(),
+                evaluation::requirement_revision(&requirement),
+                requirement.policy_fingerprint.clone(),
+                ClaimVerdict::Verified,
+                EvidenceRefs::new(vec![], vec![effect.effect_id().as_str().to_owned()], vec![])
+                    .expect("refs"),
+                None,
+                "2024-01-01T00:00:00Z",
+            )
+            .expect("verdict");
+    }
+    tasks
+        .verification_succeeded_under_policy(
+            task_id,
+            "verified with durable captured evidence",
+            Some(policy_fingerprint),
+        )
+        .expect("evidence-backed completion is admitted");
+}
+
+/// TASK-0125: a completion attempt refused by the admission gate — the
+/// task stays VERIFYING with typed per-criterion outcomes.
+fn assert_completion_admission_refusal(error: ServiceError) {
+    match error {
+        ServiceError::Domain(DomainError::InvalidTransition(reason)) => {
+            assert!(
+                reason.contains("completion admission refused"),
+                "expected a completion-admission refusal, got {reason:?}"
+            );
+            assert!(reason.contains("UNVERIFIED"), "got {reason:?}");
+        }
+        other => panic!("expected a completion-admission refusal, got {other:?}"),
+    }
+}
+
 #[test]
 fn child_behind_completed_predecessor_is_runnable_and_can_be_accepted() {
     let db = TestDb::new("child-l4-completed");
@@ -2857,9 +2975,36 @@ fn child_behind_completed_predecessor_is_runnable_and_can_be_accepted() {
     let node = TaskId::new("node-1").unwrap();
     let executor = CountingExecutor::new();
     let evaluator = FakeEvaluator::new(EvaluatorMode::AlwaysVerified);
-    db.orchestration()
-        .schedule(&node, ids("complete-predecessor"), &executor, &evaluator)
-        .expect("predecessor completes through independent evaluation");
+    // TASK-0125: the independent-evaluation verdict alone is no longer
+    // completion authority. An evaluator/agent claim without durable,
+    // subject-bound evidence is refused and the Task stays VERIFYING.
+    let refused = db
+        .orchestration()
+        .schedule(
+            &node,
+            ids("complete-predecessor"),
+            &executor,
+            &evaluator,
+            None,
+        )
+        .expect_err("a claim without durable captured evidence must not complete");
+    assert_completion_admission_refusal(refused);
+    assert_eq!(
+        db.store().get_task(&node).unwrap().unwrap().state(),
+        TaskState::Verifying
+    );
+    // The trusted boundary admits completion once the plan-materialized
+    // criterion holds a current VERIFIED claim verification bound to a
+    // captured observed effect (the fixture stands in for capture).
+    let mut tasks = TaskService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("tasks");
+    complete_with_captured_evidence(
+        &mut tasks,
+        &node,
+        &ExecutionId::new("E-complete-predecessor").unwrap(),
+        &AttemptId::new("A-complete-predecessor").unwrap(),
+        "policy:test",
+    );
+    drop(tasks);
     assert_eq!(
         db.store().get_task(&node).unwrap().unwrap().state(),
         TaskState::Completed
@@ -4305,4 +4450,215 @@ fn failed_replan_is_superseded_without_erasing_decision_evidence() {
     assert_eq!(persisted.selected, Some(HumanContinuation::Replan));
     assert_eq!(persisted.decided_by.as_deref(), Some("operator:test"));
     assert_eq!(db.store().get_plan_head(&branch()).unwrap(), Some(1));
+}
+
+/// Drives TASK-0078 to RUNNING, accepts one revision, then admits a
+/// TAKEOVER through the service boundary. Returns the record.
+fn seed_active_takeover(db: &TestDb, expires_at_ms: u64) -> takeover::TakeoverAdmission {
+    let task_id = TaskId::new("TASK-0078").expect("task id");
+    let mut tasks = TaskService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("tasks");
+    tasks.claim(&task_id).expect("claim parent");
+    tasks.start(&task_id).expect("start parent");
+    drop(tasks);
+    seed_head(db, 1);
+    let decision = create_human_decision(db, "TASK-0078", vec![HumanContinuation::Takeover]);
+    let mut human = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS));
+    human
+        .decide(&decision.id, HumanContinuation::Takeover, "human:operator")
+        .expect("decide takeover");
+    human
+        .apply_takeover(&decision.id, expires_at_ms)
+        .expect("admit takeover")
+}
+
+fn seed_leased_execution(db: &TestDb, exec: &str, ws: &str) {
+    let mut store = db.store();
+    let task_id = TaskId::new("TASK-0078").expect("task id");
+    let project = store
+        .get_task(&task_id)
+        .expect("read task")
+        .expect("task exists")
+        .project_id()
+        .clone();
+    let execution = Execution::begin(ExecutionId::new(exec).expect("exec id"), task_id);
+    store
+        .create_execution_with_event(
+            &execution,
+            &NewJournalEvent {
+                event_type: EventType::ExecutionCreated,
+                task_id: Some(execution.task_id().clone()),
+                project_id: Some(project),
+                from_state: None,
+                to_state: None,
+                reason: None,
+                correlation_id: "op-takeover-return-test".to_owned(),
+                causation_id: "req-takeover-return-test".to_owned(),
+                occurred_at: "2024-01-01T00:00:00Z".to_owned(),
+                provenance: "runtime-application-service/test".to_owned(),
+                execution_id: Some(execution.id().clone()),
+                attempt_id: None,
+                attempt_outcome: None,
+                workspace_id: None,
+                from_workspace_state: None,
+                to_workspace_state: None,
+                plan_revision: None,
+            },
+        )
+        .expect("create execution");
+    let lease = WorkspaceLease::allocate(
+        WorkspaceId::new(ws).expect("ws id"),
+        RepositoryRef::new("repo-local:test").expect("repo"),
+        execution.id().clone(),
+        Revision::new("a".repeat(40)).expect("revision"),
+        BranchRef::new(format!("refs/heads/agent/{exec}")).expect("branch ref"),
+        format!("/tmp/runlith-takeover-return-test/{ws}"),
+    )
+    .expect("allocate lease");
+    let anchor_dir = db.dir.join("anchor.git");
+    std::fs::create_dir_all(&anchor_dir).expect("anchor dir");
+    let canonical = std::fs::canonicalize(&anchor_dir).expect("canonical anchor");
+    let anchor = TrustedCommonGit::restore(canonical.to_str().expect("anchor path"))
+        .expect("restore anchor");
+    store
+        .insert_allocated_lease_with_anchor(&lease, &anchor, FIXED_MILLIS)
+        .expect("insert lease");
+}
+
+#[test]
+fn takeover_return_unparks_on_accepted() {
+    let db = TestDb::new("takeover-return-accepted");
+    let record = seed_active_takeover(&db, FIXED_MILLIS + 3_600_000);
+    let task_id = TaskId::new("TASK-0078").expect("task id");
+
+    let mut service = db.service();
+    let outcome = service
+        .propose_decomposition(
+            &TestPlanner::new(ProposalCase::Valid),
+            &branch(),
+            request("takeover-return-evidence"),
+            &policy(false),
+        )
+        .expect("return planning call");
+    assert!(
+        matches!(outcome, PlanningProposalOutcome::Accepted(_)),
+        "return plans normally, got {outcome:?}"
+    );
+    let tasks = TaskService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("tasks");
+    let task = tasks
+        .get_task(&task_id)
+        .expect("read task")
+        .expect("task exists");
+    assert_eq!(task.state(), TaskState::Running);
+    let completed = db
+        .store()
+        .get_takeover(&record.id)
+        .expect("read record")
+        .expect("record exists");
+    assert_eq!(completed.status, TakeoverStatus::Completed);
+}
+
+#[test]
+fn takeover_return_refuses_moved_anchor() {
+    let db = TestDb::new("takeover-return-anchor");
+    let record = seed_active_takeover(&db, FIXED_MILLIS + 3_600_000);
+    seed_leased_execution(&db, "exec-return", "ws-return");
+    let task_id = TaskId::new("TASK-0078").expect("task id");
+
+    let mut service = db.service();
+    let refusal = service
+        .propose_decomposition(
+            &TestPlanner::new(ProposalCase::Valid),
+            &branch(),
+            request("takeover-return-evidence"),
+            &policy(false),
+        )
+        .expect_err("a moved anchor must refuse return");
+    assert!(
+        matches!(
+            refusal,
+            PlanningServiceError::Workspace(workspace::WorkspaceFailure::GitBackendFailure { .. })
+        ),
+        "GitBackendFailure, got {refusal:?}"
+    );
+    let tasks = TaskService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("tasks");
+    let task = tasks
+        .get_task(&task_id)
+        .expect("read task")
+        .expect("task exists");
+    assert_eq!(task.state(), TaskState::Blocked);
+    let active = db
+        .store()
+        .get_takeover(&record.id)
+        .expect("read record")
+        .expect("record exists");
+    assert_eq!(active.status, takeover::TakeoverStatus::Active);
+}
+
+#[test]
+fn takeover_return_abandons_when_expired() {
+    let db = TestDb::new("takeover-return-expired");
+    let record = seed_active_takeover(&db, FIXED_MILLIS + 100);
+    let task_id = TaskId::new("TASK-0078").expect("task id");
+
+    let mut service = PlanningService::attach(db.store(), FixedClock(FIXED_MILLIS + 200));
+    let outcome = service
+        .propose_decomposition(
+            &TestPlanner::new(ProposalCase::Valid),
+            &branch(),
+            request("takeover-return-evidence"),
+            &policy(false),
+        )
+        .expect("return planning call");
+    assert!(
+        matches!(outcome, PlanningProposalOutcome::Accepted(_)),
+        "planning proceeds after abandonment, got {outcome:?}"
+    );
+    let tasks = TaskService::open(&db.path, FixedClock(FIXED_MILLIS + 200)).expect("tasks");
+    let task = tasks
+        .get_task(&task_id)
+        .expect("read task")
+        .expect("task exists");
+    assert_eq!(task.state(), TaskState::Running);
+    let expired = db
+        .store()
+        .get_takeover(&record.id)
+        .expect("read record")
+        .expect("record exists");
+    assert_eq!(expired.status, TakeoverStatus::Expired);
+}
+
+#[test]
+fn takeover_return_leaves_blocked_when_planner_fails() {
+    let db = TestDb::new("takeover-return-failure");
+    let record = seed_active_takeover(&db, FIXED_MILLIS + 3_600_000);
+    let task_id = TaskId::new("TASK-0078").expect("task id");
+
+    let mut service = db.service();
+    let refusal = service
+        .propose_decomposition(
+            &FaultPlanner::new(PlannerFault::ProviderFailure {
+                typed_cause: "test outage".to_owned(),
+                spend: PlannerCallSpend::NotStarted,
+            }),
+            &branch(),
+            request("takeover-return-evidence"),
+            &policy(false),
+        )
+        .expect_err("a planner failure must propagate");
+    assert!(
+        matches!(refusal, PlanningServiceError::Planner(_)),
+        "planner fault propagates, got {refusal:?}"
+    );
+    let tasks = TaskService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("tasks");
+    let task = tasks
+        .get_task(&task_id)
+        .expect("read task")
+        .expect("task exists");
+    assert_eq!(task.state(), TaskState::Blocked);
+    let active = db
+        .store()
+        .get_takeover(&record.id)
+        .expect("read record")
+        .expect("record exists");
+    assert_eq!(active.status, TakeoverStatus::Active);
 }

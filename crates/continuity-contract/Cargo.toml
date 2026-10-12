@@ -1,0 +1,14 @@
+[package]
+name = "continuity-contract"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "continuity_contract"
+path = "src/lib.rs"
+
+[dependencies]
+continuity = { path = "../continuity" }
+context-engine = { path = "../context-engine" }
+task-domain = { path = "../task" }
+agent-runtime = { path = "../agent-runtime" }

@@ -44,6 +44,8 @@ pub const IPC_PROTOCOL_VERSION_V6: u32 = 6;
 
 /// ADR-0039 operator credential vault: adds the bounded `vault_core`
 /// envelope (unlock, lock, store, status, rotate, password and recovery).
+/// G9 repository finder (TASK-0147): bounded search pages and span
+/// reopens through the `finder_core` envelope.
 pub const IPC_PROTOCOL_VERSION_V7: u32 = 7;
 
 /// Current IPC protocol version: the highest version this build speaks.
@@ -169,12 +171,30 @@ pub fn supports_planning_ipc(negotiated_version: u32) -> bool {
 
 /// Task planning-metadata authoring is new authority and is never enabled for
 /// v0-v5, whose `CreateTaskRequest` keeps its original objective-only shape.
+/// Version 7 preserves it.
 #[must_use]
 pub fn supports_task_authoring_ipc(negotiated_version: u32) -> bool {
     matches!(
         negotiated_version,
         IPC_PROTOCOL_VERSION_V6 | IPC_PROTOCOL_VERSION_V7
     )
+}
+
+/// Repository finder pages and span reopens are new authority and are
+/// never enabled below v7.
+#[must_use]
+pub fn supports_finder_ipc(negotiated_version: u32) -> bool {
+    negotiated_version == IPC_PROTOCOL_VERSION_V7
+}
+
+/// Reports whether a negotiated session version accepts the TAKEOVER
+/// human continuation (TASK-0169 amendment): version 8 or higher only.
+/// No `IPC_PROTOCOL_VERSION_V8` exists yet — TASK-0172 implements the
+/// value and the refusal but assigns no version, so every negotiable
+/// session today refuses TAKEOVER by construction.
+#[must_use]
+pub fn supports_takeover_continuation(negotiated_version: u32) -> bool {
+    negotiated_version >= 8
 }
 
 /// The operator credential vault is new authority and is never enabled for
@@ -388,6 +408,36 @@ mod tests {
             })),
         };
         assert!(!format!("{response:?}").contains(MARKER));
+    }
+
+    #[test]
+    fn v7_adds_finder_without_granting_it_to_historical_sessions() {
+        for historical in IPC_PROTOCOL_VERSION_V0..=IPC_PROTOCOL_VERSION_V6 {
+            assert!(
+                !supports_finder_ipc(historical),
+                "v{historical} never gains finder authority"
+            );
+        }
+        assert!(supports_finder_ipc(IPC_PROTOCOL_VERSION_V7));
+        assert!(!supports_finder_ipc(99));
+        assert!(supports_business_ipc(IPC_PROTOCOL_VERSION_V7));
+        assert!(supports_execution_ipc(IPC_PROTOCOL_VERSION_V7));
+        assert!(supports_policy_ipc(IPC_PROTOCOL_VERSION_V7));
+        assert!(supports_human_decision_ipc(IPC_PROTOCOL_VERSION_V7));
+        assert!(supports_planning_ipc(IPC_PROTOCOL_VERSION_V7));
+        assert!(supports_task_authoring_ipc(IPC_PROTOCOL_VERSION_V7));
+    }
+
+    #[test]
+    fn takeover_continuation_requires_v8_or_higher() {
+        for historical in IPC_PROTOCOL_VERSION_V0..=IPC_PROTOCOL_VERSION_V7 {
+            assert!(
+                !supports_takeover_continuation(historical),
+                "v{historical} never accepts the TAKEOVER continuation"
+            );
+        }
+        assert!(supports_takeover_continuation(8));
+        assert!(supports_takeover_continuation(9));
     }
 
     #[test]
@@ -839,5 +889,58 @@ mod contract_tests {
             }
             other => panic!("expected create_project, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn finder_core_envelope_uses_field_ten_and_round_trips() {
+        use crate::proto::{
+            finder_core_request, finder_core_response, FinderCoreRequest, FinderCoreResponse,
+            FinderErrorResponse, FinderPageResponse, FinderQueryRequest,
+        };
+        let request = FinderCoreRequest {
+            payload: Some(finder_core_request::Payload::Query(FinderQueryRequest {
+                repository_path: "/repo".to_owned(),
+                text: "needle".to_owned(),
+                scope: "src".to_owned(),
+                limit: 10,
+                continuation: String::new(),
+            })),
+        };
+        let envelope = ControlRequest {
+            payload: Some(control_request::Payload::FinderCore(request)),
+        };
+        let bytes = envelope.encode_to_vec();
+        let decoded = ControlRequest::decode(bytes.as_slice()).expect("must decode");
+        match decoded.payload {
+            Some(control_request::Payload::FinderCore(inner)) => match inner.payload {
+                Some(finder_core_request::Payload::Query(query)) => {
+                    assert_eq!(query.repository_path, "/repo");
+                    assert_eq!(query.text, "needle");
+                    assert_eq!(query.scope, "src");
+                    assert_eq!(query.limit, 10);
+                }
+                other => panic!("expected finder query, got {other:?}"),
+            },
+            other => panic!("expected finder_core envelope, got {other:?}"),
+        }
+        let response = FinderCoreResponse {
+            payload: Some(finder_core_response::Payload::Error(FinderErrorResponse {
+                code: "stale".to_owned(),
+                detail: String::new(),
+                expected_rev: "r1".to_owned(),
+                actual_rev: "r2".to_owned(),
+            })),
+        };
+        let bytes = response.encode_to_vec();
+        let decoded = FinderCoreResponse::decode(bytes.as_slice()).expect("must decode");
+        match decoded.payload {
+            Some(finder_core_response::Payload::Error(error)) => {
+                assert_eq!(error.code, "stale");
+                assert_eq!(error.expected_rev, "r1");
+                assert_eq!(error.actual_rev, "r2");
+            }
+            other => panic!("expected finder error, got {other:?}"),
+        }
+        let _ = FinderPageResponse::default();
     }
 }

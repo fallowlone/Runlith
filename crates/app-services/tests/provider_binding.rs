@@ -195,6 +195,8 @@ fn workspace_bound_cycle_verifies_through_independent_evaluation() {
                 executor
             },
             &evaluator,
+            None,
+            None,
         )
         .expect("workspace-bound cycle");
     assert!(
@@ -239,6 +241,8 @@ fn provider_success_without_verification_never_completes() {
             workspace_request(&env, &ExecutionId::new("E-1").unwrap()),
             |_, _| executor,
             &evaluator,
+            None,
+            None,
         )
         .expect("workspace-bound cycle");
     assert!(
@@ -290,6 +294,8 @@ fn provider_failure_is_attempt_failure_never_task_failure() {
             workspace_request(&env, &ExecutionId::new("E-1").unwrap()),
             |_, _| executor,
             &evaluator,
+            None,
+            None,
         )
         .expect("cycle reports failure");
     assert!(
@@ -336,6 +342,8 @@ fn execution_id_mismatch_fails_before_any_mutation() {
             bad_request,
             |_, _| executor,
             &evaluator,
+            None,
+            None,
         )
         .expect_err("mismatched execution must fail");
     let state = orchestration
@@ -374,6 +382,8 @@ fn lease_failure_leaves_honest_recoverable_intermediate() {
             bad_request,
             |_, _| executor,
             &evaluator,
+            None,
+            None,
         )
         .expect_err("bad base must fail at the lease step");
     // Honest intermediate: RUNNING + execution committed, no attempt, no
@@ -619,6 +629,8 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture 
                     .expect("bind executor to lease path")
                 },
                 &evaluator,
+                None,
+                None,
             )
             .expect("claude-shaped cycle");
         assert!(
@@ -713,6 +725,8 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture 
                     .expect("bind isolated executor")
                 },
                 &evaluator,
+                None,
+                None,
             )
             .expect("isolated claude-shaped cycle");
         assert!(matches!(
@@ -837,6 +851,8 @@ fn failed_prerequisites_block_before_provider_invocation_with_durable_report() {
             workspace_request(&env, &ExecutionId::new("E-1").unwrap()),
             |_, _| executor,
             &evaluator,
+            None,
+            None,
         )
         .expect("preflight block is a decided outcome, not an error");
     let OrchestrationOutcome::BlockedByPrerequisite {
@@ -935,6 +951,8 @@ fn satisfied_prerequisites_let_the_workspace_cycle_proceed() {
             workspace_request(&env, &ExecutionId::new("E-1").unwrap()),
             |_, _| executor,
             &evaluator,
+            None,
+            None,
         )
         .expect("satisfied prerequisites never block the cycle");
     assert!(
@@ -968,6 +986,8 @@ fn task_without_prerequisites_skips_the_gate_entirely() {
             workspace_request(&env, &ExecutionId::new("E-1").unwrap()),
             |_, _| executor,
             &evaluator,
+            None,
+            None,
         )
         .expect("empty declaration is not a blocker");
     assert!(matches!(

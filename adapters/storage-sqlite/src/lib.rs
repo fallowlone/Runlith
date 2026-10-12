@@ -18,6 +18,9 @@ mod approval_store;
 mod approved_proposal_codec;
 mod audit_store;
 mod candidate_assessment_store;
+mod claim_verification_store;
+mod context_store;
+mod continuity_store;
 mod entry_store;
 mod error;
 mod event;
@@ -34,8 +37,11 @@ mod plan_cost_store;
 mod plan_guardrail_store;
 mod plan_store;
 mod planning_control_store;
+mod review_authority_store;
 mod runtime_store;
 mod secret_store;
+mod side_effect_store;
+mod takeover_store;
 mod task_store;
 mod test_mutation_store;
 mod workspace_store;
@@ -44,6 +50,7 @@ pub use approval_store::{
     ApprovalCapabilityRecord, ApprovalRecord, ApprovalState, NewApprovalRecord,
 };
 pub use candidate_assessment_store::{CandidateEvidence, CandidateSelectionOutcome};
+pub use claim_verification_store::CompletionAdmissionRecord;
 pub use entry_store::{
     AdmittedExecutionEntry, ExecutionEntryAdmission, PlanHeadPrecondition,
     PlanningInputPrecondition, StrandedPreAttemptEntry,
@@ -62,12 +69,17 @@ pub use plan_store::{
     PlanRevisionLineage, PlanRevisionLineageRecord, CHILD_TASK_MATERIALIZATION_PROVENANCE,
 };
 pub use planning_control_store::{PlanningRunRecord, PlanningRunState};
+pub use review_authority_store::ReviewRecordState;
 pub use security_audit::{
     AuditCapability, NewSecurityAuditRecord, SecurityAuditAuthor, SecurityAuditEvent,
     SecurityAuditId, SecurityAuditOutcome, SecurityAuditRecord, SecurityAuditSubject,
     SecurityAuditSubjectKind, SECURITY_AUDIT_RECORD_VERSION,
 };
-pub use task_store::SqliteStore;
+pub use side_effect_store::{SideEffectEscalation, SideEffectTransition};
+pub use takeover_store::{
+    AbandonTakeover, AdmitTakeover, AppendTakeover, CompleteTakeoverReturn, TakeoverCompletion,
+};
+pub use task_store::{BindingProofConsumption, SqliteStore};
 pub use test_mutation_store::EvaluatedPolicyBase;
 
 /// Fixture support for tamper tests. Re-chains the journal after a test has

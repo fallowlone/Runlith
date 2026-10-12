@@ -13,6 +13,7 @@ enum HumanContinuationDecision {
   RESUME = 1;
   REPLAN = 2;
   ABORT = 3;
+  TAKEOVER = 4;
 }
 
 message HumanDecisionDto {

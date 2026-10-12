@@ -18,6 +18,7 @@ const LOCAL_DECIDER_PROVENANCE: &str = "authenticated-local-control-plane";
 pub fn dispatch<C: Clock>(
     service: &mut HumanDecisionService<C>,
     request: HumanDecisionCoreRequest,
+    negotiated_version: u32,
 ) -> HumanDecisionCoreResponse {
     match request.payload {
         Some(human_decision_core_request::Payload::ListPending(_)) => {
@@ -54,6 +55,16 @@ pub fn dispatch<C: Clock>(
                 Ok(HumanContinuationDecision::Resume) => HumanContinuation::Resume,
                 Ok(HumanContinuationDecision::Replan) => HumanContinuation::Replan,
                 Ok(HumanContinuationDecision::Abort) => HumanContinuation::Abort,
+                Ok(HumanContinuationDecision::Takeover)
+                    if ipc_contracts::supports_takeover_continuation(negotiated_version) =>
+                {
+                    HumanContinuation::Takeover
+                }
+                Ok(HumanContinuationDecision::Takeover) => {
+                    return unsupported_protocol(
+                        "takeover continuation requires protocol version 8 or higher",
+                    )
+                }
                 _ => {
                     return invalid_argument("human continuation must be resume, replan, or abort")
                 }
@@ -134,6 +145,18 @@ fn continuation_wire(value: HumanContinuation) -> i32 {
         HumanContinuation::Resume => HumanContinuationDecision::Resume as i32,
         HumanContinuation::Replan => HumanContinuationDecision::Replan as i32,
         HumanContinuation::Abort => HumanContinuationDecision::Abort as i32,
+        HumanContinuation::Takeover => HumanContinuationDecision::Takeover as i32,
+    }
+}
+
+fn unsupported_protocol(message: &str) -> HumanDecisionCoreResponse {
+    HumanDecisionCoreResponse {
+        payload: Some(human_decision_core_response::Payload::Error(
+            BusinessError {
+                code: BusinessErrorCode::UnsupportedProtocol as i32,
+                message: message.to_owned(),
+            },
+        )),
     }
 }
 
@@ -174,5 +197,100 @@ fn not_found(id: &str) -> HumanDecisionCoreResponse {
                 message: format!("human decision {id} does not exist"),
             },
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use app_services::FixedClock;
+    use ipc_contracts::proto::{human_decision_core_request, DecideHumanDecisionRequest};
+
+    use super::*;
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDb(PathBuf);
+
+    impl TestDb {
+        fn new() -> Self {
+            let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!(
+                "runlith-agentd-human-decision-{}-{id}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir.join("state.sqlite3"))
+        }
+    }
+
+    impl Drop for TestDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+            if let Some(parent) = self.0.parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
+        }
+    }
+
+    fn decide_request(continuation: i32) -> HumanDecisionCoreRequest {
+        HumanDecisionCoreRequest {
+            payload: Some(human_decision_core_request::Payload::Decide(
+                DecideHumanDecisionRequest {
+                    request_id: "hdr-1".to_owned(),
+                    continuation,
+                },
+            )),
+        }
+    }
+
+    fn error_code(response: &HumanDecisionCoreResponse) -> i32 {
+        match &response.payload {
+            Some(human_decision_core_response::Payload::Error(error)) => error.code,
+            other => panic!("expected typed error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn takeover_decide_refuses_below_v8_without_touching_service() {
+        let db = TestDb::new();
+        let store = storage_sqlite::SqliteStore::open(&db.0).unwrap();
+        let mut service = HumanDecisionService::attach(store, FixedClock(10));
+        let response = dispatch(
+            &mut service,
+            decide_request(HumanContinuationDecision::Takeover as i32),
+            ipc_contracts::IPC_PROTOCOL_VERSION_V4,
+        );
+        assert_eq!(
+            error_code(&response),
+            BusinessErrorCode::UnsupportedProtocol as i32
+        );
+    }
+
+    #[test]
+    fn unknown_continuation_stays_invalid_argument() {
+        let db = TestDb::new();
+        let store = storage_sqlite::SqliteStore::open(&db.0).unwrap();
+        let mut service = HumanDecisionService::attach(store, FixedClock(10));
+        let response = dispatch(&mut service, decide_request(99), 8);
+        assert_eq!(
+            error_code(&response),
+            BusinessErrorCode::InvalidArgument as i32
+        );
+    }
+
+    #[test]
+    fn takeover_decide_reaches_service_on_v8() {
+        let db = TestDb::new();
+        let store = storage_sqlite::SqliteStore::open(&db.0).unwrap();
+        let mut service = HumanDecisionService::attach(store, FixedClock(10));
+        let response = dispatch(
+            &mut service,
+            decide_request(HumanContinuationDecision::Takeover as i32),
+            8,
+        );
+        assert_eq!(error_code(&response), BusinessErrorCode::NotFound as i32);
     }
 }

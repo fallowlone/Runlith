@@ -8,9 +8,8 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-completed_through: TASK-0150
-current_gate: G8
-gate_status: IN_PROGRESS  # G7 closed by TASK-0120; G8 bookkeeping through TASK-0150, independent gate closure remains pending
+current_gate: G9
+gate_status: IN_PROGRESS  # TASK-0167 activated G9 (ADR-0042 accepted); G8 closed by TASK-0127
 
 items:
   - id: TASK-0012
@@ -3743,9 +3742,32 @@ items:
     blocked_by: []
     references:
       - docs/architecture/adr/ADR-0018-independent-evaluation.md
+      - docs/architecture/adr/ADR-0041-g8-candidate-only-verdict-minting.md
       - crates/evaluation
       - crates/app-services/src/orchestration_service.rs
+      - crates/app-services/src/candidate_verdict.rs
       - docs/architecture/task-engine.md
+    outcome: >-
+      Resuscitated onto the TASK-0157..TASK-0159 stack on branch
+      task-0125-resuscitation. Phases (a)-(b) (commit 4e015f1):
+      migration renumbered to 0023_claim_verification.sql, CV-9 wiring
+      (ADR-0032 rules 4-5) with requirement_revision plus policy echo,
+      current policy fingerprint derived in agentd from
+      composition.planning_policy_fingerprint and plumbed through
+      orchestration/dispatch (D1 refuted: plan-revision fingerprint
+      bricks completion; the verification_succeeded alias removed).
+      Phase (c) (commit 509f810): candidate-only verdict minting via the
+      new trusted boundary mint_candidate_verdicts, called solely from
+      the shared orchestration concluding boundary after revalidation;
+      operator dispatch only attempts admission and never mints; missing
+      measurement mints nothing; HUMAN_APPROVAL discharges only via
+      CV-8; re-minting skips already-VERIFIED criteria. Minting
+      authority ratified as accepted ADR-0041 (commits 768fa31/6568680;
+      review pack 6eaffd4). completion_admission 16/16, orchestration
+      16/16; full workspace verification green (127 suites, EXIT=0).
+      Known limitation: admit_completion does not re-read inputs inside
+      the transaction; strict rule-5 is a separate follow-up task.
+      Integration into main is not claimed.
 
   - id: TASK-0126
     gate: G8
@@ -3776,6 +3798,27 @@ items:
       - adapters/git-cli
       - crates/workspace
       - docs/architecture/INVARIANTS.md
+    outcome: >-
+      Done on branch task-0126-side-effect-dogfood. Delivered: (a)
+      side-effect intent domain + §2 machine in the workspace crate:
+      frozen v1 kinds (materialize/cleanup), the 12-edge transition
+      table, SE-1..SE-8 semantics verbatim (11 unit tests). (b)
+      Migration 0027: intent rows with the §2 edge table as a trigger,
+      append-only transition audit, sticky escalations, and a partial
+      unique active slot (one live intent per lease+kind); reads replay
+      the audit trail and refuse on any drift (6 store tests; fixtures
+      and pins follow to 27). (c) Recovery wiring: intent-gated
+      materialize_allocated, crash-A (pre-dispatch) / crash-B
+      (post-effect) / crash-C (partial state) reconcile via
+      ensure_workspace_ready, branch-only continuation with re-proved
+      provenance, typed escalation when the target state is unprovable,
+      and ReconciliationRequired as the refusal kind; 8 adversarial
+      restart tests prove no duplicate external mutation and no silent
+      retry. Full workspace run 134/134 suites green, EXIT=0; fmt +
+      clippy clean. Author security pass: any non-terminal intent
+      refuses blind re-dispatch until RECONCILE; dispatch errors map to
+      FAILED only on proven pre-dispatch refusal, otherwise AMBIGUOUS;
+      the cleanup kind is reserved (cleanup owned by TASK-0043).
 
   - id: TASK-0127
     gate: G8
@@ -3803,6 +3846,22 @@ items:
       - docs/development/G7_TASK_0120_FINAL_CLOSURE_REAUDIT.md
       - planning/roadmap.yaml
       - docs/architecture/INDEX.md
+    outcome: >-
+      Verdict G8_CLOSED on branch task-0127-g8-closure-audit, audited
+      main 8e290b7. All 28 G8 tasks merged (PRs #10-#23);
+      acceptance re-tested on a clean tree: full workspace 134/134
+      green EXIT=0, fmt + clippy clean, 22 fresh targeted re-runs
+      green; candidate-only minting proven single-caller; recovery
+      matrix, migration upgrades to 27, review/binding chains and
+      G5/G6/G7 envelopes re-pass. One minor hygiene finding (3
+      /Users paths in the 0152 probe doc, no secrets) rides the
+      recorded pre-publication follow-up; product identity repaired
+      to task0127 in the audit commit; CI billing, two key
+      revocations and live quota stay owner actions required by no
+      G8 exit criterion. Records:
+      docs/development/G8_TASK_0127_CLOSURE_AUDIT.md (verdict +
+      findings) and G8_TASK_0127_CLOSURE_GATE.md (GATE_PASS, 22/22
+      claims proven). No production behavior changed.
 
   - id: TASK-0128
     gate: G8
@@ -3966,6 +4025,22 @@ items:
     references:
       - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
       - ADR-0030
+      - crates/app-services/src/verification_levels.rs
+    outcome: >-
+      Implemented on branch task-0134-verify-levels as pure orchestrator-side
+      selection: V0..V3 from changed-path classes (lockfiles/manifests/
+      schema to V3, docs-only to V0, interface files to V1, else V2, max
+      wins), observed-effect subject fallback with empty-input no-op V0,
+      elevated-risk floor at V1, first-signal ecosystem detection, and
+      conventional per-ecosystem commands as data (never fabricated for
+      unknown ecosystems, never executed). Levels map to TASK-0123
+      RequirementKind obligations (V0 none, V1 ProcessExit, V2 TestSuite,
+      V3 TestSuite+SecurityCheck) as the repair-loop input seam; TASK-0125
+      contract untouched. 13 unit tests RED->GREEN incl. effect fixtures;
+      fmt/clippy clean, app-services lib 46/46. No executor built: no
+      TASK-0123 runner exists in-tree to execute through, and process
+      execution belongs to the G6 runner boundary; executor wiring is
+      tracked as TASK-0162. Integration into main is not claimed.
       - ADR-0031
 
   - id: TASK-0135
@@ -4012,6 +4087,15 @@ items:
     depends_on: []
     blocked_by: []
     references:
+      - crates/policy/src/risk_signals.rs
+    outcome: >-
+      Implemented on branch task-0136-risk-baseline as pure std-only
+      policy::classify_risk_signals (no new dependencies, no callers in
+      any decision path): six signals in canonical order with keyword
+      evidence, 11 unit tests on synthetic samples RED->GREEN, module
+      docs stating advisory non-authority explicitly. fmt/clippy clean,
+      policy suite green (36+25+15). No behavior change to existing
+      paths; integration into main is not claimed.
 
 
   - id: TASK-0137
@@ -4035,6 +4119,13 @@ items:
     references:
       - docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
       - docs/architecture/context-engine.md
+    outcome: >-
+      Done on branch task-0137-context-consolidation (PR #27, merged
+      as 9cf2485): context-engine.md section 12 maps V10/V11/C2/C3/C4/C5
+      to owning ports and persistence stories; C1, in-memory registries,
+      reviewer-as-authority, and hardcoded tables rejected with reasons;
+      boundaries restated unchanged; no section 10 items closed; design
+      note accepted by owner; docs-only, no code.
 
   - id: TASK-0138
     gate: G14
@@ -4621,6 +4712,32 @@ items:
       - docs/architecture/adr/ADR-0024-g5-provider-execution-seam.md
       - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
       - docs/architecture/INVARIANTS.md
+    outcome: >-
+      Done on branch task-0145-review-authority. Delivered: policy
+      ReviewPath/ReviewPathSetting/HumanPrincipal/ImplementationPrincipal/
+      ReviewerProfile; evaluation ReviewRecord with exact bindings,
+      staleness, and fingerprint verification; presence primitives
+      (DenyPresence production fail-closed, TestPresenceAuthority);
+      pure decide_review_admission table; exact read-only review scope
+      mapping; migration 0025 (presence proofs, revisioned per-task
+      settings, profiles, records with proof-checked nonces, linear
+      supersession, sticky invalidation); review_authority_store with
+      validated restore; ReviewService (presence-gated setting changes
+      with 5-minute freshness, B1 reviews bound to current setting with
+      live-head auto-chain, setting switch invalidates the live head,
+      durable admission queries). 42 new tests: 6 policy + 6 record +
+      8 admission + 2 scope + 4 presence + 8 store (incl. trigger probes,
+      replay, reopen durability) + 8 service (incl. deny/stale presence,
+      dead parent, full admit flow). Full workspace run 129/129 suites
+      EXIT=0; fmt + clippy clean. Author security pass: races arbitrated
+      by schema (loser fails closed, orphan proofs unusable via op
+      binding); admission_ref bound opaquely (no durable
+      runner-admission registry exists to cross-verify — documented in
+      code); reviewer input digest must come from the trusted UI
+      (documented). Out of scope per task: TASK-0144 assessment-path
+      enforcement wiring (candidate path still requires Forbidden),
+      B2 prerequisite demonstration (selectable, always blocked, no
+      fallback), trusted control host (production denies).
   - id: TASK-0147
     gate: G9
     title: Dogfoodable repository information finder
@@ -4661,6 +4778,21 @@ items:
     references:
       - docs/architecture/context-engine.md
       - docs/architecture/adr/ADR-0010-context-derived-state.md
+      - docs/development/TASK_0147_FINDER_BENCHMARK.md
+    outcome: >-
+      Done on branch task-0147-repo-finder (PR #29, merged as 0097019):
+      dogfoodable agentctl find over the repo-finder seam (contract suite,
+      lexical finder-local engine, git-cli revision backend, rev-bound
+      FinderService with ContentFilter seam, protocol v7 IPC, agentd
+      dispatch); benchmark R1-R5 on the same question set and conditions:
+      finder 16/16 relevance+support equal to RTK-style, R5 byte-identical
+      replay proves determinism; cost axes honestly missed (output tokens
+      ~2.6x on the evidence-id tax, elapsed ~4-10x on unindexed scans)
+      with seam-stable follow-ups recorded (id shortening, phase-C index,
+      symbol-aware ranking); PassthroughFilter shipped, INV-008 redaction
+      stays the named follow-up; 145 workspace suites green (1 pre-existing
+      execution_recovery load flake triaged); version to task0147, gate
+      held G8.
 
   - id: TASK-0151
     gate: G8
@@ -4700,6 +4832,34 @@ items:
     blocked_by: []
     references:
       - docs/architecture/adr/ADR-0035-g8-immutable-git-candidate-proposal.md
+    outcome: >-
+      Implemented on branch task-0151-evidence-hardening. Storage batch
+      (migration 0024, schema 24): finding 1 BEFORE DELETE trigger on
+      candidate_input_operations; finding 2 invalidation check inside the
+      append transaction; findings 3+4 invalidated results unreadable
+      through get_observed_effect / get_candidate_evidence_for_completion
+      with atomic read+invalidation; finding 5 status_history 8192-byte
+      CHECK retained with a regression test; finding 6 assessment-requires-
+      selection trigger; finding 14 IF NOT EXISTS repair of the 0022-drifted
+      operations shape plus fail-closed recreate directive for pre-column
+      assessment shapes (no fabricated evidence). Producer batch: finding 7
+      CandidateSelector::from_requirement_under_policy reconciles the
+      requirement pin against the current policy (evaluator carries the
+      composition-derived fingerprint, None fails closed); finding 10
+      FileScope refuses non-lone interior "." spellings; finding 11 pinned
+      gitdir canonicalizes and re-checks the anchor (lexical path kept for
+      back-reference comparison); finding 13 operator IPC
+      VerificationSucceeded refuses candidate-routed tasks (completion only
+      through the revalidating production cycle); finding 12 mid-scan G6
+      fault-injection test proves abort-without-partial-snapshot at every
+      denial position. Findings 8 (repo-local config surface matrix) and 9
+      (per-descriptor audit volume, ~130K rows worst case) explicitly
+      re-deferred to TASK-0163/TASK-0164: both need G6-side design, not a
+      hardening-task pattern tweak. Every fix RED-first; production order
+      (selection before result) verified before enforcing the trigger;
+      completion_admission seeds updated to the producer order. Full
+      workspace verification green (127 suites, EXIT=0). Integration into
+      main is not claimed.
 
   # Cross-gate remediation: blocks running the Claude provider under
   # mandatory G6 confinement on macOS, needed before real-provider
@@ -4736,6 +4896,28 @@ items:
     references:
       - docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md
       - docs/development/G7_TASK_0112_PROVIDER_AUTH_DIAGNOSIS.md
+    outcome: >-
+      ADR-only, implemented on branch task-0152-provider-auth-adr by
+      adopting the owner's own draft branch
+      (origin/task-0152-confined-provider-auth-adr, head 3924bb7) via
+      merge (INDEX-only conflict, authorship preserved). ADR-0037 selects
+      Option B (trusted-host authenticated loopback credential gateway,
+      in-process in agentd, D1-D27); Option A (credential broker injecting
+      into child env) rejected on the measured Seatbelt *:443
+      host-confinement gap; Option C (in-sandbox Keychain grant) stays
+      rejected per TASK-0112. Evidence: owner-run real-credential
+      receipts for both classes plus agent-run invalid-credential and
+      round-6/7 hardening probes (docs/development/
+      G8_TASK_0152_PROVIDER_AUTH_PROBES.md + task0152-probes/); no secret
+      values in the adopted tree (scanned). Third independent
+      architecture/security review PASS recorded in docs/development/
+      ADR-0037_RATIFICATION_REVIEW_PACK.md (all code/doc/probe citations
+      re-verified current on the adoption base; one non-blocking line-drift
+      note); ratified to Accepted + INDEX link under the owner's standing
+      G8-closure directive. No production code changes; implementation
+      follow-ups proposed-not-created per the ADR (orchestrator registers
+      them); sibling WIP branch (PR #9 probe scripts) intentionally not
+      adopted (unreferenced). Integration into main is not claimed.
 
   # Cross-gate governance: repository licensing/product-monetization decision,
   # not scoped to any single implementation gate.
@@ -4899,6 +5081,24 @@ items:
       - SECURITY.md
       - .gitleaks.toml
       - docs/development/PUBLICATION_RUNBOOK.md
+    outcome: >-
+      Hygiene landed earlier via PR #11 (2779b70); this task verified
+      every exit clause against current main and recorded it here (no
+      tree changes needed). Verified: Support/openvidia/
+      proxy_config.json, data/sessions.db, .zcode/plans/*.md absent from
+      the tracked tree; .gitignore covers /Support/, data/sessions.db,
+      /.zcode/; git grep for /Users/[A-Za-z0-9_] returns nothing;
+      CONTRIBUTING.md states Apache-2.0 1.1 open source + no external PRs
+      (D7); SECURITY.md is private-reporting only; .gitleaks.toml carries
+      the nvidia-api-key rule; PUBLICATION_RUNBOOK.md is owner-executed
+      with no-history rationale, export steps, License Date bookkeeping
+      and trademark self-check. gitleaks dir: no leaks found.
+      gitleaks git over the file history: 8 nvidia-api-key hits = the 4
+      known findings at 6b9cacf (visible in tree at 56b8a68) plus the
+      same 4 lines on stale branch task-0057-branch-only-recovery
+      (b1f2493, same blob, no new exposure); history not rewritten per
+      scope. Key revocation remains an owner action. Integration into
+      main is not claimed.
 
   # Cross-gate test hygiene: app-services integration tests depended on the
   # runner's ambient temp directory and login session, so they failed on a
@@ -4959,3 +5159,866 @@ items:
       is inherited through exact tree identity. Real-provider smokes remain
       ignored; full workspace was not run or required for this task scope.
       G8 remains IN_PROGRESS.
+
+  # ADR-0036 implementation follow-ups (IMPL-A..D), registered separately
+  # from TASK-0150 per the ADR; renumbered to TASK-0157..0160 because
+  # TASK-0156 is taken by the codex provider readiness worktree.
+  - id: TASK-0157
+    gate: G8
+    title: ADR-0036 IMPL-A - selector catalog and binding boundary
+    objective: >-
+      Provide the lawful production source for candidate-input selectors
+      on exact EvidenceRequirement revisions: a Policy-owned closed,
+      versioned, fingerprinted selector catalog plus the trusted
+      application-service binding boundary that validates and mints new
+      non-empty-params requirement revisions, gated on B1-grade fresh
+      presence authority.
+    scope: >-
+      crates/policy selector catalog (v1: only candidate.file-contains.v1)
+      mirroring TestMutationPolicy's closed/versioned/fingerprinted shape,
+      with ADR-0035-style hostile-path validation and bounded literals
+      including the SECRET-material screen; app-services binding boundary
+      that requires FreshPresenceProof, binds only unbound required
+      TestSuite/content+toolchain+config requirements, takes a
+      sha256:-shaped policy fingerprint, and mints new revisions with
+      binder/catalog/fingerprint provenance without mutating the input.
+      No production proof minting exists yet, so operator binding stays
+      unreachable outside tests (fail-closed by absence; IMPL-C must
+      provide the sole production minter). No V9
+      change (IMPL-B/TASK-0158), no materialization wiring (IMPL-C/
+      TASK-0160), no migration, no IPC/version change. Allowed paths:
+      crates/policy/src/, crates/policy/tests/,
+      crates/app-services/src/requirement_binding.rs,
+      crates/app-services/tests/requirement_binding.rs, lib.rs exports,
+      planning/tasks/queue.yaml, product/version.toml.
+    exit_criteria_summary: >-
+      Catalog membership, revision/fingerprint/restore, path, literal, and
+      secret-screen rules covered by focused tests; boundary tests prove
+      proof-gating, unbound-only binding, shape/fingerprint checks, sorted
+      literal/path/selector params, provenance, and catalog relay; no
+      behavior change in production paths; fmt, clippy -D warnings,
+      focused package suites, and independent security review green.
+    depends_on:
+      - TASK-0150
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0036-g8-evidence-requirement-parameter-binding-authority.md
+      - docs/architecture/adr/ADR-0034-g8-candidate-bound-test-execution.md
+      - docs/architecture/adr/ADR-0035-g8-immutable-git-candidate-proposal.md
+      - crates/policy/src/selector_catalog.rs
+      - crates/app-services/src/requirement_binding.rs
+    outcome: >-
+      Implemented ADR-0036 IMPL-A on branch task-0157-selector-catalog:
+      Policy-owned closed v1 catalog (only candidate.file-contains.v1,
+      revisioned/fingerprinted, ADR-0035-style path rules, bounded
+      literals with SECRET-form screen, no input echo in errors) plus the
+      app-services binding boundary (FreshPresenceProof-gated, unbound
+      required TestSuite/content+toolchain+config only, sha256: policy
+      fingerprint up front, new revision with sorted literal/path/selector
+      params and binder/catalog/fingerprint provenance, input never
+      mutated, re-binding refused). TDD: RED shown as E0432 on both new
+      test files, GREEN 15 catalog + 5 boundary tests; mutation proof
+      (neutered membership check fails uncatalogued_selector_is_rejected,
+      revert restores green). Independent security review returned
+      CHANGES-REQUIRED with 4 Low findings (F1 validated-vs-persisted
+      trim gap, F2 for_test overclaim, F3 JSON-quoted assignment
+      evasion, F4 selector echo); all fixed test-first and re-review
+      returned PASS. Verification: cargo fmt --all --check clean; cargo
+      clippy --workspace --all-targets -D warnings clean; policy, task-
+      domain, product-version, and full app-services suites green. No
+      production behavior change (no production proof minter or callers);
+      full workspace run not required for this scope. Operator binding
+      stays unreachable outside tests until TASK-0145/IMPL-C (TASK-0160).
+      G8 remains IN_PROGRESS.
+
+  - id: TASK-0158
+    gate: G8
+    title: ADR-0036 IMPL-B - V9 preservation-check update
+    objective: >-
+      Recognize an authorized, catalog-validated bound-params requirement
+      as non-escalating in V9 check_criteria_preservation (Option 2a),
+      within the D3 authorized bound.
+    scope: >-
+      Scoped change to the crates/plan/src/validation.rs V9 comparison
+      only: non-escalating solely for non-empty params produced by the
+      TASK-0157 binding boundary for a catalogued selector; any other
+      non-empty params source still escalates requirement_changed and
+      fails closed. No other validation, planning, or catalog change.
+    exit_criteria_summary: >-
+      V9 tests prove bound/catalogued vs foreign params handling; full
+      workspace verification and independent security review green.
+    depends_on:
+      - TASK-0157
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0036-g8-evidence-requirement-parameter-binding-authority.md
+      - crates/plan/src/validation.rs
+    outcome: >-
+      Implemented ADR-0036 IMPL-B on branch task-0158-v9-bound-params
+      (stacked on TASK-0157): V9 check_criteria_preservation treats a
+      parent requirement as non-escalating only for the exact
+      boundary-minted shape (TestSuite + content+toolchain+config, 3
+      params, keys literal/path/selector in order, catalogued
+      candidate.file-contains.v1 id); any other non-empty params still
+      routes to RISK_GATE_OPEN. Shape-only by design, no plan->policy
+      dependency (domain layering precedent); catalog growth fails closed
+      into escalation. TDD: behavioral RED via public validate_proposal,
+      GREEN 58 validation_rules tests; mutation proof (id-value check
+      removed fails the foreign guard, revert restores green).
+      Independent security review PASS with 2 optional notes; F1
+      (kind/binding pin) implemented test-first with delta re-review PASS,
+      F2 (sole-producer premise comment) applied. Verification: cargo
+      fmt --all --check clean; cargo clippy --workspace --all-targets -D
+      warnings clean; full plan-domain and app-services suites green. No
+      production behavior change (bound requirements unreachable until
+      TASK-0160 wiring); full workspace run not required for this scope.
+      G8 remains IN_PROGRESS.
+
+  - id: TASK-0159
+    gate: G8
+    title: ADR-0036 IMPL-D - TASK-0144 evaluator integration
+    objective: >-
+      Make the TASK-0144 candidate-input evaluator consume bound
+      requirements through the accepted
+      CandidateSelector::from_requirement contract, so evaluator
+      reachability no longer stops at the manual/pending path for bound
+      Tasks.
+    scope: >-
+      Integration only: consume TASK-0157-bound requirements; no evidence
+      scope widening beyond ADR-0035, no completion authority, no
+      producer-shape change.
+    exit_criteria_summary: >-
+      Governed candidate-input check end-to-end over a bound requirement
+      yields a durable structured result plus integrity assessment;
+      unbound stays fail-closed; full workspace verification and
+      independent security review green.
+    depends_on:
+      - TASK-0157
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0036-g8-evidence-requirement-parameter-binding-authority.md
+      - crates/evaluation/src/candidate.rs
+    outcome: >-
+      Implemented ADR-0036 IMPL-D on branch
+      task-0159-bound-evidence-integration (stacked on TASK-0158) as a
+      test-only integration proof: the TASK-0144 evaluator already
+      consumed bound requirements via CandidateSelector::from_requirement
+      in all three places (selection, evaluate, revalidate), so no
+      production change was needed. Added a focused interop test proving
+      TASK-0157 boundary output satisfies from_requirement, and rewired
+      the agentd candidate_requirement seed helper to mint through the
+      authorized boundary, so the full candidate e2e now exercises a
+      boundary-produced revision through the real production dispatch
+      path; malformed-requirement rejection seeds stay hand-built and
+      green. TDD note: RED was impossible (integration pre-existed), so
+      the interop test was proven by mutation (broken boundary key fails
+      it, revert restores green). Independent review PASS with no
+      findings. Verification: cargo fmt --all --check clean; cargo
+      clippy --workspace --all-targets -D warnings clean; app-services
+      requirement_binding 6/6, agentd lib 70 passed / 1 ignored (live
+      smoke), candidate subset 16/16. Full workspace run not required
+      (test-only change). G8 remains IN_PROGRESS.
+
+  - id: TASK-0160
+    gate: G8
+    title: ADR-0036 IMPL-C - operator binding control-surface path
+    objective: >-
+      Expose the TASK-0157 binding operation through the trusted Runlith
+      control surface with D1 fresh user-presence authority enforced at
+      the boundary, including plan-application timing (Option 2a).
+    scope: >-
+      Trusted control-surface binding path only, parallel to ADR-0033 B1
+      review; binding without fresh presence proof is impossible on every
+      path including IPC. May depend on TASK-0145 trusted
+      control-surface primitives.
+    exit_criteria_summary: >-
+      Presence-spoof, stale-proof, and IPC-impersonation tests fail
+      closed; full workspace verification and independent security
+      review green.
+    depends_on:
+      - TASK-0157
+      - TASK-0145
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0036-g8-evidence-requirement-parameter-binding-authority.md
+      - docs/architecture/adr/ADR-0033-g8-independent-test-mutation-review-authority.md
+    outcome: >-
+      Done on branch task-0160-binding-control-surface. Delivered:
+      (a) bind_candidate_input_params enforces the exact operation,
+      input digest, and 5-minute freshness before any value validation
+      (the TASK-0157 let-underscore bypass is dead), with canonical
+      binding_operation/binding_input_digest constructors;
+      PRESENCE_FRESHNESS_MS moved to presence.rs as the shared constant.
+      (b) Migration 0026 binding_proof_consumption (exact-operation and
+      candidate-binding-prefix triggers, durable AlreadyBound) plus
+      atomic save_task_with_binding_proof (task image + consumption in
+      one transaction; double-bind losers roll back entirely). (c)
+      BindingService: presence-minted proofs, DRAFT-only timing (Option
+      2a — never a later update), atomic persist; DenyPresence refuses
+      before anything is stored. 16 new tests: 4 boundary spoof/stale,
+      5 store (replay, atomic double-bind, op mismatch, cross-protocol
+      review proof), 6 service (deny/stale/timing/double/missing), 1
+      dispatch IPC test proving lifecycle IPC cannot bind or widen
+      params. Full workspace run 131/132 suites green plus 8/8
+      execution_composition on repeat (one execution_live timing flake
+      under load, green in isolation); fmt + clippy clean. Author
+      security pass: races arbitrated by UNIQUE (loser loses task image
+      too); orphan proofs unusable via op binding; no IPC binding
+      fields exist. Production binding stays impossible until the
+      trusted control host lands (DenyPresence).
+
+  # Follow-up carved out of TASK-0134: plan selection is done, but no
+  # in-tree runner executes the derived commands yet, and execution must
+  # go through the G6 runner boundary, not a bare orchestrator spawn.
+  # (Kept below the merged TASK-0161 entry on main-merge resolution.)
+  - id: TASK-0161
+    gate: G8
+    title: Sealed admission snapshot in admit_completion (strict rule-5)
+    objective: >-
+      Close the TOCTOU window between completion-admission reads and the
+      atomic commit so a concurrent evidence writer cannot smuggle a stale
+      ADMIT through.
+    scope: >-
+      admit_completion re-reads the exact report inputs inside the
+      committing transaction and refuses with typed Stale on any drift
+      (requirements, current subject fingerprint, claims, verdicts,
+      exemptions, discharges, integrity basis). Snapshot shape lives in
+      the evaluation crate as a pure canonical struct; the store
+      enforces snapshot identity, never re-implements admission logic.
+      No schema change; admit_completion signature gains the snapshot.
+      Allowed paths: crates/evaluation/src/,
+      adapters/storage-sqlite/src/claim_verification_store.rs,
+      crates/app-services/src/task_service.rs, tests, queue entry.
+    exit_criteria_summary: >-
+      A concurrent subject move / verdict supersession / REFUTED insert
+      between report and commit refuses with Stale, leaves the task
+      VERIFYING and writes no completion_admissions row, proven by an
+      adversarial two-handle test; uncontended admission still
+      completes; full workspace verification green.
+    depends_on:
+      - TASK-0125
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0030-g8-observed-effect-claim-verification-contract.md
+      - adapters/storage-sqlite/src/claim_verification_store.rs
+      - crates/app-services/src/task_service.rs
+      - crates/evaluation/src/claim_verification.rs
+    outcome: >-
+      Implemented on branch task-0161-strict-rule5 (commit 909bc80,
+      stacked on the TASK-0125 branch). New pure
+      evaluation::AdmissionSnapshot seals every report input through one
+      shared constructor; admit_completion re-reads the same rows inside
+      the committing transaction and refuses with typed Stale naming the
+      drifted section (vanished rows and fresh invalidations count as
+      drift). Connection-level reader extraction keeps one SQL shape per
+      list with zero behavior change to existing reads; admission_report
+      returns the snapshot alongside the report. Adversarial two-handle
+      RED test (stale subject move commits admission-1 pre-fix, refuses
+      with Stale post-fix); completion_admission 17/17, orchestration
+      16/16; full workspace verification green (127 suites, EXIT=0; one
+      earlier full run showed 2 load flakes, green in isolation and on
+      repeat). No schema change. Integration into main is not claimed.
+  - id: TASK-0162
+    gate: G8
+    title: Verification-plan executor wiring through the runner boundary
+    objective: >-
+      Execute TASK-0134 verification plans through the existing G6 runner
+      boundary and record results as observed effects, closing the
+      "verification runner executes selected level" exit clause.
+    scope: >-
+      Runner-adapter consumer of VerificationPlan only: sandboxed command
+      execution per the runner security levels, stdout/stderr capture as
+      bounded evidence, failures typed without leaking secrets. No new
+      selection logic, no TASK-0125 contract change.
+    exit_criteria_summary: >-
+      V1..V3 plans execute under confinement with captured evidence and
+      typed failures; adversarial command-injection and secret-leak tests
+      fail closed; full workspace verification green.
+    depends_on:
+      - TASK-0134
+    blocked_by: []
+    references:
+      - crates/app-services/src/verification_levels.rs
+      - docs/architecture/adr/ADR-0013-policy-engine-os-isolation.md
+    outcome: >-
+      Implemented on branch task-0162-verify-executor:
+      crates/app-services/src/verification_execution.rs
+      (VerificationRunner service + validate_plan_commands). Every plan
+      command must exactly equal the derive_commands derivation for its
+      (ecosystem, level) or the plan refuses before any process exists;
+      execution is argv-only (never a shell) through
+      prepare_process_launch with per-command G6 authorization
+      (workspace read+write, exact executable, no network), injected
+      backend + requirements (strict on sandboxing backends, trusted-host
+      on native with env still cleared), canonicalized PATH-resolved
+      executables, timeout kill with orphan-safe pipe draining, and
+      bounded per-stream capture. Only digests+sizes persist as
+      ProcessExit observed effects — raw output never reaches the DB,
+      journal, or a typed error, so secret-shaped output cannot leak by
+      construction (asserted by a DB-bytes scan test). Fail-fast across
+      commands; executed commands (incl. nonzero/timeout signal exits)
+      always record their effect first. Tests: 2 allowlist unit + 11
+      integration (smuggled/V0/unresolved/strict-refusal/strict-ok/
+      happy+env-isolation/nonzero+no-leak/timeout/flood-truncation/
+      v3-order/fail-fast). No orchestrator-cycle call site by design:
+      automatic invocation needs product decisions (when/blocking/which
+      tasks) specified nowhere; the runner is available for that
+      follow-up. No TASK-0125 change, no schema change. Full workspace
+      verification green (128 suites, EXIT=0). Integration into main is
+      not claimed.
+  # Re-deferred from TASK-0151 finding 8: the residual needs a
+  # pinned-command inventory crossed with the executable-config surface
+  # (review-grade matrix), not a one-line pattern tweak that would grant
+  # false confidence. Invocation env/config neutralization
+  # (adapters/git-cli/src/runner.rs) is already comprehensive; git
+  # lowercases section+key on parse (verified empirically), so the
+  # existing lowercase pattern has no case bypass.
+  - id: TASK-0163
+    gate: G6
+    title: Pinned-git repository-config executable-surface matrix
+    objective: >-
+      Enumerate the pinned read-only git command set and prove each
+      repository-local executable configuration surface (askpass, pager,
+      insteadOf rewrites, worktree/extension flags, and any further
+      config-or-env helper execution) either neutralized, fail-closed, or
+      unreachable from that set.
+    scope: >-
+      Review plus focused tests: command inventory, per-surface
+      disposition with evidence, pattern/env completions only where the
+      matrix proves a reachable hole. No new git commands, no behavior
+      change to accepted repositories.
+    exit_criteria_summary: >-
+      Matrix recorded (per command x surface, with disposition and
+      evidence); reachable holes closed with regression tests; unreachable
+      surfaces documented with the reason; full workspace verification
+      green.
+    depends_on:
+      - TASK-0151
+    blocked_by: []
+    references:
+      - adapters/git-cli/src/runner.rs
+  # Re-deferred from TASK-0151 finding 9: per-descriptor authorization
+  # appends >=2 audit rows per call (PolicyRequest/Requested + decision),
+  # so a worst-case scan (16,384 entries, 256 MiB) journals ~130K rows.
+  # Bounded by existing constants, but heavy; batching changes G6 audit
+  # trail semantics and needs G6-side design.
+  - id: TASK-0164
+    gate: G6
+    title: Bounded G6 audit volume for descriptor scans
+    objective: >-
+      Bound per-scan G6 audit volume without losing the fail-closed
+      per-descriptor authorization or audit-trail completeness required by
+      the G6 contracts.
+    scope: >-
+      G6-side design (batched authorization decisions, aggregated scan
+      receipts, or sized caps with fail-closed overflow): decision record
+      plus implementation. No silent authorization skipping; no audit gap
+      for denied operations.
+    exit_criteria_summary: >-
+      Worst-case per-scan audit rows bounded by an explicit constant with
+      a regression test; denials still individually journaled; full
+      workspace verification green.
+    depends_on:
+      - TASK-0151
+    blocked_by: []
+    references:
+      - crates/app-services/src/security_service.rs
+      - adapters/effect-capture-local/src/candidate_snapshot.rs
+
+  # DRAFT (TASK-0127 follow-up): owner decision recorded 2026-10-07
+  # (mode B advisory, all submits, V1-V3 auto / V0 skips by
+  # construction); step 1 done, wiring not started.
+  - id: TASK-0165
+    gate: G9
+    title: Verification auto-invocation decision and orchestration wiring
+    objective: >-
+      Decide when the orchestrator automatically executes verification
+      plans through the TASK-0162 VerificationRunner, then wire that
+      decision into the orchestration cycle so selected levels produce
+      evidence without manual invocation.
+    scope: >-
+      Step 1 (blocking): owner product decision — which tasks trigger
+      automatic verification, whether results block completion or stay
+      advisory, which levels auto-run (V0 never runs), timeout/quota
+      behavior — recorded as a decision note referenced here. Step 2:
+      wire the decided call site only (orchestration cycle consumer of
+      VerificationPlan); no new selection logic, no TASK-0125 contract
+      change, runner semantics unchanged. G8 verification thread
+      continued under G9.
+    exit_criteria_summary: >-
+      Owner decision recorded and referenced; the decided trigger
+      executes V1..V3 plans with captured evidence and typed failures;
+      negative tests prove no auto-run outside the decision (V0,
+      excluded tasks, timeout); TASK-0125 admission behavior unchanged
+      except where the decision explicitly says otherwise; full
+      workspace verification green.
+    depends_on:
+      - TASK-0162
+      - TASK-0134
+    blocked_by: []
+    references:
+      - crates/app-services/src/verification_execution.rs
+      - crates/app-services/src/orchestration_service.rs
+      - docs/development/G8_TASK_0127_CLOSURE_AUDIT.md
+      - docs/development/G9_TASK_0165_AUTO_INVOCATION_DECISION.md
+    outcome: >-
+      Done on branch task-0165-advisory-auto-invocation (PR #26,
+      merged as 257120c): the workspace cycle auto-executes derived
+      V1..V3 plans through the TASK-0162 runner as advisory evidence
+      (mode B per the decision note); V0 and empty plans skip by
+      construction; the trigger fires on every submit including the
+      post-submit error path; the runner resolves lazily (Ready/Build)
+      so failure paths never pay construction; TASK-0125 admission
+      unchanged; 9 unit + 4 integration tests; full workspace green
+      (135 suites); two agentctl timing races hardened to quiescence
+      polls with purposes preserved.
+
+  - id: TASK-0166
+    gate: G9
+    title: Deprecate queue completed_through
+    objective: >-
+      Remove the legacy-stale queue.completed_through header field and
+      its runbook reference; completion state lives in per-task
+      outcomes plus merged main history.
+    scope: >-
+      Delete the completed_through line from planning/tasks/queue.yaml;
+      drop queue.completed_through from ORCHESTRATOR_RUNBOOK.md Step C;
+      prove no code, test, CI, or script reads the field. Historical
+      docs mentioning it are frozen records and stay untouched. No
+      production behavior change.
+    exit_criteria_summary: >-
+      Field absent from the queue header; runbook Step C reconciles
+      version.task, queue outcomes, roadmap.current_gate, merged main
+      history, and active worktrees only; queue YAML parses; grep
+      over code/tests/CI/scripts finds no completed_through reader;
+      product-version suite green.
+    depends_on:
+      - TASK-0127
+    blocked_by: []
+    references:
+      - planning/tasks/queue.yaml
+      - docs/development/ORCHESTRATOR_RUNBOOK.md
+      - docs/development/G8_TASK_0127_CLOSURE_AUDIT.md
+    outcome: >-
+      Done on branch plan-g9-followup-drafts: completed_through
+      removed from the queue header; ORCHESTRATOR_RUNBOOK.md Step C
+      reconciles version.task, queue outcomes, roadmap.current_gate,
+      merged main history, and active worktrees; grep over
+      code/tests/CI/scripts finds no field reader (two task.rs hits
+      are an unrelated test name); historical docs untouched;
+      product-version 6/6; queue YAML parses (154 items).
+
+  # DRAFT (G9 activation breakdown, owner-approved 2026-10-07; execution
+  # starts with TASK-0167, which also flips roadmap G9 to in_progress
+  # and queue current_gate to G9).
+  - id: TASK-0167
+    gate: G9
+    title: G9 activation and Context Engine contract (ADR)
+    objective: >-
+      Freeze the G9 context vocabulary as an accepted contract ADR before
+      any implementation, in the TASK-0075 and TASK-0121 pattern, and
+      formally activate G9.
+    scope: >-
+      Contract only: one ADR plus context-engine.md amendments resolving
+      the section 10 open items needed for TASK-0170 through TASK-0175
+      (ContextItem and ContextPlan shapes, ContextKind taxonomy, SourceRef
+      and ID formats, Provenance Envelope schema with source, time, type,
+      sensitivity, permission scope, confidence and supersession, budget
+      representation with soft and hard units, selection and rejection
+      reason taxonomy, RetrievalTrace contract, security-filter API,
+      replay and reproducibility mechanism); every adopted section 12
+      pattern named against its contract surface; DOGFOOD_DETACHMENT
+      stated per capability; roadmap G9 to in_progress and queue
+      current_gate to G9. No production code, no migration, no IPC change.
+    exit_criteria_summary: >-
+      An accepted ADR an implementer can transcribe to tests without
+      guessing, referenced from docs/architecture/INDEX.md; roadmap and
+      queue flips recorded in the same task; queue YAML parses and ID
+      uniqueness holds.
+    depends_on:
+      - TASK-0127
+    blocked_by: []
+    references:
+      - docs/architecture/context-engine.md
+      - docs/architecture/adr/ADR-0010-context-derived-state.md
+      - planning/roadmap.yaml
+    outcome: >-
+      ACCEPTED 2026-10-07 by owner decision after three independent
+      review rounds. Round 1 returned CHANGES-REQUIRED with 15 findings
+      (envelope facets, V10/V11 grounding, tiktoken mandate, banners);
+      round 2 resolved 13 and found 3 new (trace counter method, 0173
+      scope, C1 framing); round 3 verified every resolution and returned
+      PASS with no new findings. Record:
+      docs/architecture/adr/ADR-0042-g9-context-engine-contract.md.
+      The ADR freezes ContextItem/ContextPlan vocabulary, the 9-field
+      Provenance Envelope, TokenCounter-port budgets, the RetrievalTrace
+      contract and rules CX-1..CX-10; status Accepted in the ADR and both
+      indexes. context-engine.md sections 4, 5, 6, 10 and 12.2 updated.
+      G9 activated in the same task: roadmap current_gate G9 with G9
+      in_progress, queue current_gate G9 with gate_status IN_PROGRESS,
+      product identity 0.1.0-dev.task0167. Contract only: no production
+      code, migration or IPC change. Verification observed on the branch:
+      queue YAML parses (163 items, IDs unique), product-version 6/6,
+      fmt clean, clippy -D warnings clean, diff-check clean.
+
+  - id: TASK-0168
+    gate: G9
+    title: Continuity contract - epochs, checkpoints, history (ADR)
+    objective: >-
+      Freeze the durable continuity contract as an accepted ADR before
+      implementation, so executions survive provider switches without
+      losing authoritative state.
+    scope: >-
+      Contract only: bounded Context Epochs, structured checkpoints, the
+      strict rollover algorithm with NO CHECKPOINT then NO ROLLOVER,
+      history search with history.read of exact refs only, working notes,
+      C5 compaction-receipt consumption as history references (a receipt
+      is never a checkpoint), and the privacy rule that SECRET, PII and
+      raw tool payloads are not preserved merely to ease resumption.
+      No production code.
+    exit_criteria_summary: >-
+      An accepted ADR naming durable fields, transitions, recovery
+      obligations and privacy bounds precisely enough for TASK-0171 to
+      implement without inventing semantics.
+    depends_on:
+      - TASK-0167
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0011-provider-independent-context-continuity.md
+      - docs/architecture/context-engine.md
+    outcome: >-
+      ACCEPTED 2026-10-07 by owner decision after three independent
+      review rounds. Round 1 returned CHANGES-REQUIRED with 14 findings
+      (2 HIGH: qualified SECRET/PII wording against DATA_CLASSIFICATION
+      and INV-151, CR-5 against the never-embed rule); round 2 resolved
+      14 of 15 and found 3 new minor items; round 3 verified every
+      resolution and returned PASS with no new findings. Record:
+      docs/architecture/adr/ADR-0043-g9-continuity-contract.md.
+      The ADR freezes epoch identity and chain scope, the 11-field
+      checkpoint schema with atomic commit and activation idempotence,
+      Budget Monitor ownership with fail-closed hard gating, working
+      set and notes representation, the history search/read contract,
+      session linkage, three fail-closed crash windows, per-chain
+      concurrency, the migration resume protocol, version compat and
+      supersession, absolute SECRET/PII privacy bounds and rules
+      CR-1..CR-10; status Accepted in the ADR and both indexes.
+      continuity.md sections 2, 4, 5, 6, 8 and 9 updated. TASK-0171
+      scope gains retention enforcement mechanics (durations stay
+      policy-owned). Product identity 0.1.0-dev.task0168, gate G9.
+      Contract only: no production code, migration or IPC change.
+      Verification observed on the branch: queue YAML parses (163
+      items, IDs unique), product-version 6/6, fmt clean, clippy
+      -D warnings clean, diff-check clean.
+
+  - id: TASK-0169
+    gate: G9
+    title: TAKEOVER continuation and full HandoffPacket contract
+    objective: >-
+      Settle the TAKEOVER semantics deferred from G7 by the ADR-0027
+      TASK-0097 amendment, as an ADR-0027 amendment, before any
+      implementation.
+    scope: >-
+      Contract only, amending ADR-0027 (never restating the wide form in
+      a queue entry): what happens to the active planning run, the
+      claimed Task, the workspace lease and the in-flight execution when
+      a human assumes authority mid-flight, and how the Task returns to
+      machine execution afterwards; the resulting-revision reference;
+      rendering of the remaining packet fields (goal, state, actions,
+      blockers, uncertainty, question). No production code.
+    exit_criteria_summary: >-
+      An accepted ADR-0027 amendment with executable TAKEOVER and
+      rendering semantics that TASK-0172 can transcribe without guessing.
+    depends_on:
+      - TASK-0168
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - docs/architecture/adr/ADR-0011-provider-independent-context-continuity.md
+    outcome: >-
+      ACCEPTED 2026-10-07 by owner decision after three independent
+      review rounds. Round 1 returned CHANGES-REQUIRED with 15 findings
+      (6 HIGH: skipped RESOLVED step, unconditional Blocked parking,
+      unrecoverable abandonment, record timing, untranscribable return,
+      Consumed supersession); round 2 verified all 15 and returned PASS
+      with 2 new minor notes; round 3 verified both notes and returned
+      PASS with no new findings. Record: the TASK-0169 amendment in
+      docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md,
+      superseding the TASK-0097 deferral. The amendment freezes TAKEOVER
+      as a fourth HumanContinuation through the shipped decide-consume
+      lifecycle, admission preconditions with fencing, atomic effects
+      with a TakeoverAdmission record, human-authored appends,
+      TriggerPlanning return, expiry abandonment, the
+      resulting-revision reference, six-field HandoffPacket rendering,
+      a failure matrix and the v8 wire assignment; status Accepted.
+      Product identity 0.1.0-dev.task0169, gate G9. Contract only: no
+      production code, migration or IPC change. Verification observed
+      on the branch: queue YAML parses (163 items, IDs unique),
+      product-version 6/6, fmt clean, clippy -D warnings clean,
+      diff-check clean.
+
+  - id: TASK-0170
+    gate: G9
+    title: Provenance Envelope and selection trace implementation
+    objective: >-
+      Implement durable per-execution selection evidence answering why
+      any item entered context, per the TASK-0167 contract.
+    scope: >-
+      Provenance Envelope domain types, persistence and read surface;
+      C3 source attribution and RetrievalTrace wiring as durable
+      selection evidence; trust and sensitivity separation with SECRET
+      never entering model context. Token and cost measures stay with
+      the future G14 usage rollup and are not built here.
+    exit_criteria_summary: >-
+      A bounded selection is durable, reopenable and explainable after
+      restart; inaccessible sources refuse explicitly; full workspace
+      verification green.
+    depends_on:
+      - TASK-0167
+    blocked_by: []
+    references:
+      - docs/architecture/context-engine.md
+      - docs/architecture/adr/ADR-0010-context-derived-state.md
+    outcome: >-
+      ACCEPTED 2026-10-07 by owner decision after four independent
+      code-review rounds. Round 1 returned CHANGES-REQUIRED with 16
+      findings (save-coherence pre-checks, migration CHECK coverage,
+      fingerprint/replay binding, trust floor and staleness, scalar
+      validation); round 2 verified the resolutions and returned
+      CHANGES-REQUIRED with 8 findings (1 HIGH: envelope source
+      aliased on decode; 2 MED: trace budget/renderer unchecked,
+      one-sided section coverage; 5 LOW: contract-case masking,
+      orphan-assert gap, fingerprint taxonomy, trim-vs-raw bound,
+      dangling supersedes); round 3 verified all 8 and returned
+      CHANGES-REQUIRED with 3 new LOW findings (validate-on-save
+      taxonomy, exact boundary coverage, required-over-superseded
+      ADR wording); round 4 verified all 3 and returned PASS with no
+      new findings. Record: crates/context-engine (domain model,
+      mint, admit, verify_replay, ContextStorePort),
+      crates/context-engine-contract (store contract suite),
+      adapters/storage-sqlite migration 0028 plus context_store,
+      crates/app-services ContextService, and a one-sentence ADR-0042
+      section 4 correction (superseded optional items defer;
+      required items win with rule required-over-superseded).
+      Product identity 0.1.0-dev.task0170, gate G9. Verification
+      observed on the branch: queue YAML parses (163 items, IDs
+      unique), product-version 6/6, fmt clean, clippy -D warnings
+      clean, diff-check clean, domain 28/28, store contract green
+      (roundtrip, explain, missing, idempotency, reopen, SECRET,
+      14 coherence negatives, cross-plan, envelope-source,
+      supersession), service 4/4, full storage-sqlite and
+      app-services packages green, full workspace 148 suites green
+      with 2 load-induced timeouts re-verified green in isolation;
+      the live-ownership race flake fails on the unmodified base
+      too (pre-existing, out of scope).
+
+  - id: TASK-0171
+    gate: G9
+    title: Epochs, checkpoints and history implementation
+    objective: >-
+      Implement durable execution continuity per the TASK-0168 contract,
+      so a Task migrates between providers mid-flight with authoritative
+      state intact.
+    scope: >-
+      Epoch and checkpoint persistence, the strict rollover algorithm,
+      indexed old epochs, history search with exact-ref reads only,
+      working notes, and retention enforcement mechanics (durations
+      stay owned by privacy/storage policy). Provider-native compaction
+      stays an optimization and never becomes the durability story.
+    exit_criteria_summary: >-
+      Rollover without a persisted checkpoint refuses; history serves
+      bounded reads with provenance after restart; retention enforcement
+      honors policy-owned durations; full workspace verification green.
+    depends_on:
+      - TASK-0168
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0011-provider-independent-context-continuity.md
+    outcome: >-
+      ACCEPTED 2026-10-08 by owner decision after two independent
+      review rounds. Round 1 returned CHANGES-REQUIRED with 11
+      findings (1 HIGH: SECRET allowed Inline via staged notes,
+      violating CR-8; 2 MED: CR-10 version-on-read missing on
+      SQLite decode, purge ignored to_epoch FK side; 8 LOW:
+      notes purge-count gap, load_note staged visibility, port
+      search-doc staleness, budget-event taxonomy, activate
+      single-shot vs recover semantics, receipt sensitivity
+      exclusion, lineage-guard depth, ceiling coherence layering).
+      All 10 applicable fixes verified against bodies by round 2;
+      the budget taxonomy item was adjudicated a wrong premise
+      (plan_ref is a validated ContextPlanId, unreachable by
+      malformed shapes) and upheld as no-change. Round 2 returned
+      PASS with one non-blocking LOW doc residue (history.rs
+      comment wording), fixed before commit. Record:
+      crates/continuity (EpochId/CheckpointId/HistoryRef/NoteId
+      minting, model, strict rollover, history ranking,
+      ContinuityStorePort), crates/continuity-contract (store
+      contract suite), adapters/storage-sqlite migration 0029
+      plus continuity_store, crates/app-services
+      ContinuityService (open/commit/activate/recover/gate/
+      search/read/migrate/purge/rebuild). No IPC changes; one
+      pub(crate) test helper relaxation in context_store.
+      Product identity 0.1.0-dev.task0171, gate G9. Verification
+      observed on the branch: queue YAML parses, product-version
+      6/6, fmt clean, clippy -D warnings clean, diff-check
+      clean, domain 18/18, store contract green (search, read,
+      committed-only notes, purge counts, lineage guard,
+      version probe), service 7/7, full workspace green except
+      the known load-induced execution_recovery flake,
+      re-verified 14/14 green in isolation.
+
+  - id: TASK-0172
+    gate: G9
+    title: TAKEOVER continuation implementation
+    objective: >-
+      Implement the TAKEOVER continuation and full HandoffPacket rendering
+      per the TASK-0169 amendment, through the shipped versioned control
+      plane.
+    scope: >-
+      HumanDecision continuation extension, trusted agentd IPC and agentctl
+      operations, durable resulting-revision reference, packet rendering,
+      and the failure matrix (TAKEOVER with an active run, consumed or
+      stale decision, stale lease, return to machine execution). No
+      weakening of existing G6 or G7 fences.
+    exit_criteria_summary: >-
+      A human can assume and return authority mid-flight with durable
+      evidence; stale or conflicting TAKEOVER attempts refuse typed;
+      full workspace verification green.
+    depends_on:
+      - TASK-0169
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+    outcome: >-
+      ACCEPTED 2026-10-08 by owner decision after two independent
+      review rounds. Round 1 returned PASS with 2 LOW findings
+      (store append did not re-enforce the SECRET-reference rule
+      against struct-literal values; the handoff lease-id selection
+      rule was undocumented). Both fixed test-first and verified by
+      a focused round 2 (PASS). Record: crates/takeover (record,
+      status, authored fields, anchors, packet, expiry and anchor
+      comparison), TAKEOVER continuation in plan-domain and in
+      human_decision_core.proto with a v8+ session gate (no V8
+      version assigned, so the wire refuses by construction),
+      storage-sqlite migration 0030 (CHECK widening rebuild plus
+      takeover_admissions and takeover_admission_anchors) with
+      fenced admit/append/return/abandon transactions, Planning
+      Application Service operations (apply/append/render/
+      reconcile plus the TriggerPlanning return hook), trusted
+      agentd IPC (decide gate, error mapping) and agentctl
+      operations (takeover spelling, rendering). No production HDR
+      offers TAKEOVER and no daemon expiry tick: both are explicit
+      later rollout decisions recorded in the task ledger. Product
+      identity 0.1.0-dev.task0172, gate G9. Verification observed
+      on the branch: queue YAML parses, product-version 6/6, fmt
+      clean, clippy -D warnings clean, diff-check clean, domain
+      7/7, store 26/26, service 7/7, planning return 4/4, agentd
+      gate 3/3, agentctl mapping 2/2, wire 24/24, decide race
+      single-winner pinned, v4 binary refusal green with HDR left
+      PENDING, full workspace green except the known load-induced
+      execution_recovery flake (fails identically on the base
+      commit, passes solo).
+
+  - id: TASK-0173
+    gate: G9
+    title: Finder evidence-id shortening and symbol-aware ranking
+    objective: >-
+      Cut finder output-token and call-count cost without changing the
+      repo-finder seam, per the TASK-0147 benchmark follow-ups.
+    scope: >-
+      Evidence-id shortening (hash16 shape), symbol-aware ranking to cut
+      tight-page cutoffs and follow-up calls; benchmark rerun on the same
+      question set proving equal relevance and support at lower cost.
+      No seam change, no index (that is TASK-0174).
+    exit_criteria_summary: >-
+      Same-question-set rerun matches R4 and R5 scores with fewer output
+      tokens and fewer calls; determinism replay stays byte-identical.
+    depends_on:
+      - TASK-0147
+    blocked_by: []
+    references:
+      - docs/development/TASK_0147_FINDER_BENCHMARK.md
+    outcome: >-
+      Done on branch task-0173-finder-cost: hash16 rf2 evidence ids
+      (mint short, parse rf1+rf2, prefix verify, legacy reopenable),
+      symbol-aware ranking (whole-token +2, Rust definition +4 with
+      attribute/qualifier handling, external-usage file tiebreak that
+      never overrides score), no seam change (contract suite untouched,
+      ids opaque on the wire). Benchmark rerun R6 on the same question
+      set and corpus (40754ae): 16/16 relevance+support at 18 calls
+      (Q1 continuation cut) and ~6,676 output tokens vs R4 19/~7,678;
+      R7 replay byte-identical (26,722/26,722). Elapsed unchanged
+      (~11s: the unindexed scan is TASK-0174's scope). Independent
+      review R1 CHANGES-REQUIRED (8 findings, 7 fixed + 1 optional
+      skipped) then R2 PASS. Full workspace verification green
+      (see task ledger); daemon-methodology note: R6 ran under
+      AI_ENGINEERING_OS_{RUNTIME,DATA}_DIR overrides because the
+      canonical v27 dev-database fails the 0030 migration — reproduced
+      identically on the unmodified TASK-0172 binary (pre-existing,
+      out of scope).
+
+  - id: TASK-0174
+    gate: G9
+    title: Finder index and INV-008 redaction filter
+    objective: >-
+      Remove the unindexed full-corpus scan from finder elapsed time and
+      replace the shipped PassthroughFilter with INV-008 redaction,
+      through the existing ContentFilter seam.
+    scope: >-
+      Phase-C index behind the repo-finder seam; a redacting ContentFilter
+      implementation per the TASK-0167 security-filter API; benchmark
+      rerun proving lower elapsed at equal scores. No seam-shape change.
+    exit_criteria_summary: >-
+      Elapsed no longer pays a full-corpus scan per query; secret-shaped
+      content cannot reach finder output by construction, pinned by a
+      regression test; full workspace verification green.
+    depends_on:
+      - TASK-0167
+      - TASK-0173
+    blocked_by: []
+    references:
+      - docs/development/TASK_0147_FINDER_BENCHMARK.md
+      - docs/architecture/INVARIANTS.md
+      - docs/architecture/context-engine.md
+    outcome: >-
+      Done on branch task-0174-finder-index: IndexedFinder behind the
+      unchanged seam ports (rev-bound in-memory snapshot, per-file
+      trigram-Bloom prefilter + exact verify, dirty/cap delegation to
+      scan; distinct backend finder-local-indexed/0.1.0) and
+      RedactingFilter as the production ContentFilter (canonical
+      policy shapes + vendor prefixes, display-only, hashes bind
+      pre-filter bytes). Benchmark R8: 16/16 at 8.8s vs R6 11.5s
+      (warm median 380ms vs 528ms), bodies byte-identical to R6
+      except backend id; R9 replay byte-identical; zero redactions
+      (predicted + verified). Independent review R1
+      CHANGES-REQUIRED (12 findings: 11 fixed, 1 refuted with
+      clean-rebuild evidence), R2 CHANGES-REQUIRED (2 LOW
+      mechanical), R3 PASS. Full workspace verification green (163
+      ok, 0 failed); daemon overrides as in R6 (canonical-DB 0030
+      failure still pre-existing).
+
+  - id: TASK-0175
+    gate: G9
+    title: Planner evidence resolution boundary (ADR-0029 option B)
+    objective: >-
+      Make planner input real by resolving EvidenceRefs to bounded
+      classified content at a trusted boundary, with the privacy and
+      budget questions settled before implementation.
+    scope: >-
+      Privacy first: a classification and redaction policy under the
+      technical privacy contract plus an explicit DATA_FLOW_MAP entry,
+      then the resolution boundary where the trusted planning service
+      resolves refs to bounded content (the planner still never holds a
+      handle, query or store). Content growth against the planner token
+      budget is measured and bounded.
+    exit_criteria_summary: >-
+      Resolved content crosses the provider boundary only under the
+      accepted policy; unresolved or denied refs stay identity-only and
+      fail closed; planner budget impact measured; full workspace
+      verification green.
+    depends_on:
+      - TASK-0167
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0029-planner-evidence-resolution.md
+      - docs/privacy/TECHNICAL_PRIVACY_CONTRACT.md
+      - docs/privacy/DATA_FLOW_MAP.md

@@ -1,4 +1,5 @@
 [package]
+license = "Apache-2.0"
 name = "workspace"
 version = "0.1.0"
 edition = "2021"
@@ -10,3 +11,4 @@ path = "src/lib.rs"
 [dependencies]
 task-domain = { path = "../task" }
 agent-runtime = { path = "../agent-runtime" }
+sha2 = "0.10"

@@ -144,7 +144,7 @@ fn fresh_database_reaches_current_schema() {
     let db = TestDb::new("fresh-current");
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 25);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 33);
     assert!(store.list_events_ordered().unwrap().is_empty());
     assert!(store
         .get_execution(&ExecutionId::new("MISSING").unwrap())
