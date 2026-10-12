@@ -5160,6 +5160,43 @@ items:
       ignored; full workspace was not run or required for this task scope.
       G8 remains IN_PROGRESS.
 
+  - id: TASK-0156
+    gate: G8
+    title: Codex provider readiness bounded pass (evidence only, not merged)
+    objective: >-
+      Assess codex CLI provider readiness without implementing anything:
+      capture the cleaned installed CLI identity, help, commands, exit
+      codes and hashes under an empty environment; resolve exact
+      versioned primary sources with SHA-pinned excerpts; trace
+      execution/planning integration; then write one launch/protocol
+      candidate and a READY verdict or a concrete owner decision package.
+    scope: >-
+      Evidence only. docs/development/task0156-probes/ capture scripts
+      and cli.json, this queue registration, and a local checkpoint
+      commit on task-0156-codex-provider-readiness. No product edits,
+      no merge, no push (owner envelope 2026-09-30).
+    exit_criteria_summary: >-
+      Capture PASS (exact 0.159.2 help/version, exit codes recorded,
+      temp state removed); primary-source manifest SHA-pinned with no
+      newer-version substitution; readiness review proves auth
+      isolation and tool-free planner or explicitly blocks READY with
+      at most 3 owner options; queue registration references the
+      TASK-0152 deferral checkpoint; local checkpoint commit recorded.
+    depends_on: []
+    blocked_by: []
+    references:
+      - task-0156-codex-provider-readiness:docs/development/task0156-probes/capture_cli.py
+      - task-0156-codex-provider-readiness:docs/development/task0156-probes/capture_sources.py
+      - task-0156-codex-provider-readiness:docs/development/task0156-probes/cli.json
+    outcome: >-
+      Partial: CLI capture checkpointed on
+      task-0156-codex-provider-readiness as c7af8fa
+      (codex 0.159.2-aarch64-apple-darwin, executable SHA-256
+      16593cc2f422d5f398a8e40f550ebbaf1245392528957be342c295920a300704).
+      Versioned primary sources, READY/decision package, independent
+      review and the TASK-0152 deferral reference remain open.
+      NOT_MERGED per envelope; worktree retained for owner handoff.
+
   # ADR-0036 implementation follow-ups (IMPL-A..D), registered separately
   # from TASK-0150 per the ADR; renumbered to TASK-0157..0160 because
   # TASK-0156 is taken by the codex provider readiness worktree.

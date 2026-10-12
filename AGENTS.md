@@ -14,13 +14,14 @@ orchestrator contract is subordinate to the authority order in `AGENT.md`.
 
 ## Generated repository map
 
-Derived navigation, generated 2026-09-30 from commit `5362f6e` on
-`docs/init-deep-agent-guidance`. Recheck claims against linked sources when
-those sources change; this map does not add to the canonical policy.
+Derived navigation, refreshed 2026-10-12 from commit `86acb9f` on
+`main` (prior stamp: 2026-09-30, `5362f6e`, object absent from this clone).
+Recheck claims against linked sources when those sources change; this map
+does not add to the canonical policy.
 
 Runlith is a local Rust modular monolith with Ports & Adapters. The current
-[Cargo workspace](./Cargo.toml) contains 30 packages: 18 shared crates,
-10 adapters, and the `agentd` daemon / `agentctl` CLI. UI and cloud concepts
+[Cargo workspace](./Cargo.toml) contains 40 packages: 26 shared crates,
+12 adapters, and the `agentd` daemon / `agentctl` CLI. UI and cloud concepts
 in architecture documents are not implemented workspace packages.
 
 ### Structure and routing
