@@ -98,13 +98,13 @@ pub mod test_support {
         }
         let connection = rusqlite::Connection::open(path)?;
         let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version < 24 {
+        if version < 32 {
             return Ok(());
         }
         connection.execute_batch("DROP TRIGGER IF EXISTS event_journal_no_update")?;
         crate::journal_store::backfill_journal_chain(&connection)?;
         connection
-            .execute_batch(crate::migration::MIGRATION_0024_GUARD)
+            .execute_batch(crate::migration::MIGRATION_0032_GUARD)
             .map_err(|error| StorageError::Migration(error.to_string()))
     }
 }

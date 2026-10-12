@@ -1,4 +1,4 @@
--- 0023_journal_append_only: the Event Journal and its plan-cause sidecar
+-- 0031_journal_append_only: the Event Journal and its plan-cause sidecar
 -- are evidence, not mutable state. 0010 already guards security_audit with
 -- BEFORE UPDATE/DELETE triggers; the journal had only decoder-side checks,
 -- so a compromised writer with raw SQL access could rewrite history and

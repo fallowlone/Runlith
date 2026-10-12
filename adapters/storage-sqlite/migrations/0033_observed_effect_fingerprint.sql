@@ -1,4 +1,4 @@
--- 0025_observed_effect_fingerprint: observed_effects.subject_fingerprint
+-- 0033_observed_effect_fingerprint: observed_effects.subject_fingerprint
 -- binds the subject only, so a type-valid edit to payload_ref, captured_at
 -- or provenance survived restore (audit F16). record_fingerprint is a
 -- SHA-256 over every persisted field (evaluation::ObservedEffect::
