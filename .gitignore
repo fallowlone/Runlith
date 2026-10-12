@@ -5,3 +5,7 @@
 /.jevrouter/
 /.claude/
 /CLAUDE.md
+# TASK-0154 backport (audit): never track local-tool/session artifacts.
+/.zcode/
+/Support/
+data/sessions.db
