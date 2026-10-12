@@ -5,12 +5,10 @@ issue, starting a discussion, or considering a pull request.
 
 ## Licensing
 
-Runlith is **open source**, not OSI Open Source. The repository's
-default license is the [Apache License, Version 2.0](LICENSE) (Apache-2.0,
-SPDX id `Apache-2.0`). See [LICENSE](LICENSE) for what that means
-in practice, and
-[ADR-0038](docs/architecture/adr/ADR-0038-product-licensing.md) for the
-decision record. Nothing in this file changes the license.
+Runlith is **open source** under the [Apache License,
+Version 2.0](LICENSE) (SPDX id `Apache-2.0`). See
+[LICENSING.md](LICENSING.md) for what that means in practice. Nothing in
+this file changes the license.
 
 ## Issues and discussions
 
@@ -19,19 +17,13 @@ GitHub Issues and Discussions. Please search existing issues first.
 
 ## Pull requests
 
-**External pull requests are not accepted at this time.** Per
-[ADR-0038](docs/architecture/adr/ADR-0038-product-licensing.md) (D7),
-contributor terms sufficient for this project's free/commercial licensing
-model — for example a Contributor License Agreement (CLA) — have not yet
-been established. A Developer Certificate of Origin (DCO) sign-off alone
-would not be sufficient, since it is not itself a grant of commercial
-relicensing rights.
-
-Until contributor terms are in place, please do not open a pull request
-expecting it to be reviewed or merged. Unsolicited pull requests may be
-closed without review for this reason alone. If you would like to
-contribute code in the future, open a discussion first so the maintainer
-can note interest ahead of the contributor-terms work.
+**External pull requests are welcome.** Contributions intentionally
+submitted for inclusion are under the Apache License, Version 2.0
+(`LICENSE` section 5, inbound = outbound). No separate Contributor
+License Agreement (CLA) is established yet; please sign off your commits
+(`git commit -s`, Developer Certificate of Origin) so authorship is
+attributable. If you would like to contribute a larger change, opening a
+discussion first is appreciated so the maintainer can coordinate.
 
 ## Security issues
 
