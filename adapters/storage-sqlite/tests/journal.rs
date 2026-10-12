@@ -1150,7 +1150,7 @@ fn legacy_journal_without_hashes_is_backfilled_on_upgrade() {
     let mut store = db.open();
     claimed_task_journal(&mut store);
     drop(store);
-    // Rebuild the schema-23 shape: no hash columns, 0023 UPDATE guard intact.
+    // Rebuild the schema-31 shape: no hash columns, 0031 UPDATE guard intact.
     db.raw()
         .execute_batch(
             "DROP TRIGGER event_journal_no_update;
@@ -1159,7 +1159,7 @@ fn legacy_journal_without_hashes_is_backfilled_on_upgrade() {
              ALTER TABLE observed_effects DROP COLUMN record_fingerprint;
              CREATE TRIGGER event_journal_no_update BEFORE UPDATE ON event_journal
              BEGIN SELECT RAISE(ABORT, 'event journal is append-only'); END;
-             PRAGMA user_version = 23;",
+             PRAGMA user_version = 31;",
         )
         .unwrap();
     let mut store = db.open();

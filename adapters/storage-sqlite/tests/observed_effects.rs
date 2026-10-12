@@ -2086,12 +2086,19 @@ fn migration_repairs_pretrigger_operations_shape() {
              DROP TABLE takeover_admission_anchors;
              DROP TABLE takeover_admissions;
              DROP TRIGGER IF EXISTS candidate_input_assessments_require_selection;
+             DROP TRIGGER IF EXISTS event_journal_no_update;
+             DROP TRIGGER IF EXISTS event_journal_no_delete;
+             DROP TRIGGER IF EXISTS event_plan_causes_no_update;
+             DROP TRIGGER IF EXISTS event_plan_causes_no_delete;
+             ALTER TABLE event_journal DROP COLUMN previous_hash;
+             ALTER TABLE event_journal DROP COLUMN record_hash;
+             ALTER TABLE observed_effects DROP COLUMN record_fingerprint;
              PRAGMA user_version = 22;",
         )
         .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 30);
+    assert_eq!(store.schema_version().unwrap(), 33);
     drop(store);
     let conn = raw(&db.path);
     let tables: i64 = conn
