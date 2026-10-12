@@ -1095,3 +1095,38 @@ The only novel/partial gap found already has accepted architectural direction in
 DeepSeek Harness is highly useful as implementation evidence, but it does not justify a broad Runlith roadmap expansion. Its best recovery, security, context and capability ideas mostly confirm architecture Runlith already has. The one actionable new implementation item is to enforce the architecture-fitness invariant that Runlith has already documented but not yet implemented.
 
 The most important negative lessons are equally clear: do not allow unbounded retry/agent loops, do not make holder/process workflow objects durable product truth, and do not treat a custom sandbox wrapper as proven enforcement merely because configuration says it is.
+
+## Addendum 2026-10-10 — re-check at `d7432673` (release 0.2.1-alpha.2)
+
+Re-fetched at `master@d743267388641bc76f17c45ce8b4c231aed1d32c` (2026-10-09). Landing page `https://deepseek.com/harness/` (via reader): desktop + `npx @deepseek-ai/dsh web`, Cordis plugin substrate, `SAFETY.md` (experimental, no audit, least-privilege + disposable-VM guidance). Source-read: `AGENTS.md` (package layout + gates), `packages/interaction/README.md`, `packages/guard/README.md`, `docs/subsystems/approval.md`, `docs/subsystems/permission-presets.md`.
+
+New detail beyond the 2026-09-15 review:
+
+- ADD-F01 — Approval outcome closed + fail-closed: `ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'`; missing/throwing/non-conforming answerer becomes `unavailable`, callers deny. Policy `ask | never`; `never` enforced inside service before waterfall dispatch (later `prepend` cannot bypass). Audit pair `approval/asked` + `approval/decided`, log-only, requires open turn. Request omits tool args, links via `callId` to already-streamed call (no drifted second copy).
+- ADD-F02 — Permission presets bundle two independent knobs (`sandbox/mode` + `approval/policy`) into one selector: `workspace-write` (confine + ask), `danger-full-access` (+ never). `custom` derived-only (never a switch target); `auto` fixed current-session registration via `registerAuto(admit)` with effect-lifetime disposal. `permission/preset` event durable + log-only, precedes knob events. Requires confining shell executor, else load fails.
+- ADD-F03 — Guard family: `repeat-tool-reminder` (advisory stuck-loop nudge) + `timeout-policy` (declared-limit timeout → clear error). Both ship enabled.
+- ADD-F04 — `AGENTS.md` conventions worth noting: registrations are effects (`ctx.effect()`/disposer); waterfall listeners MUST call `next()`; model-visible ⟺ logged (new model-visible input requires session event); explicit `resolve(request): Spec` over hidden defaults; misconfiguration fails loud; branded opaque ids; `SESSION_FORMAT_VERSION` bump discipline; pre-stable APIs with upgrade-guide requirement.
+
+Что лучше у них:
+
+- Замкнутый approval-словарь с `unavailable`-по-умолчанию и `never`-до-waterfall — защита от позже-подключённого answerer. У Runlith fail-closed есть, но явного «политика применяется до диспетча, bypass невозможен» стоит зафиксировать.
+- Связка sandbox+approval в один пресет с derived `custom` — удобно и честно (показывает дрейф от пресетов). У Runlith пресеты политики/изоляции разделены.
+- `callId`-линковка аппрува к уже-показанному вызову вместо дублирования аргументов.
+- Дисциплина `model-visible ⟺ logged` как явное правило репозитория.
+
+Что лучше у меня:
+
+- G6: exact-bound single-use approvals с fingerprint/provenance/validity против их `allowed-once`-без-границ; child-subset против их делегирования.
+- Durability barrier до side-effect + `TOOL_OUTCOME_UNKNOWN` против их repair-текста.
+- Хеш-цепочка журнала против их log-only audit-пары.
+- DNS-pinning они делают, у меня запроектировано за NetworkAccessPolicy с per-hop receipts — паритет по намерению.
+
+Вердикты аддендума:
+
+- R-01 — ADAPT, P3: зафиксировать «policy-before-dispatch, no bypass» как G6-инвариант (нужен ли ADR — решить при ближайшем касании G6).
+- R-02 — ADAPT, P3: derived `custom`-индикатор дрейфа для UI пресетов политики/изоляции.
+- R-03 — EXTERNAL_VALIDATION, P3: `callId`-линковка как образец для approval-UX.
+- R-04 — EXTERNAL_VALIDATION, P3: `model-visible ⟺ logged` подтверждает журнальную дисциплину G8.
+- REJECT: Cordis-движок/пакеты/TS-код, `danger-full-access` как продуктовая норма, unbounded-конструкции (подтверждён прежний REJECT), `ee/`-аналогов нет, телеметрия хоста.
+
+Evidence (addendum): `https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/d743267388641bc76f17c45ce8b4c231aed1d32c/docs/subsystems/approval.md`, `.../docs/subsystems/permission-presets.md`, `.../AGENTS.md`, `.../SAFETY.md`, `.../packages/interaction/README.md`, `.../packages/guard/README.md`; commits `https://github.com/deepseek-ai/deepseek-harness/commits/master.atom` (head `d743267388641bc76f17c45ce8b4c231aed1d32c`, 2026-10-09). Landing: `https://deepseek.com/harness/` (reader 2026-10-08).
