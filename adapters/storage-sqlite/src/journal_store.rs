@@ -1141,7 +1141,7 @@ pub(crate) fn verify_journal_chain(connection: &Connection) -> StorageResult<()>
     Ok(())
 }
 
-/// Migration 0024: chains every pre-chain row in `seq` order.
+/// Migration 0032: chains every pre-chain row in `seq` order.
 pub(crate) fn backfill_journal_chain(connection: &Connection) -> StorageResult<()> {
     let sql = format!("SELECT {JOURNAL_SELECT} FROM event_journal ORDER BY seq");
     let mut statement = connection.prepare(&sql)?;

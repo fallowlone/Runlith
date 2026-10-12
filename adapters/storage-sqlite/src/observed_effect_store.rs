@@ -128,15 +128,17 @@ pub(crate) fn insert_effect(
     Ok(())
 }
 
-/// Migration 0025: fingerprints every pre-existing effect from its stored
-/// (already restore-validated) content.
+/// Migration 0033: fingerprints every pre-existing effect from its stored
+/// (already restore-validated) content. Reads past the evidence
+/// quarantine: quarantined rows still need their fingerprint column, and
+/// the migration must not fail on databases that contain them.
 pub(crate) fn backfill_effect_fingerprints(connection: &rusqlite::Connection) -> StorageResult<()> {
     let ids: Vec<String> = connection
         .prepare("SELECT effect_id FROM observed_effects")?
         .query_map([], |row| row.get(0))?
         .collect::<Result<_, _>>()?;
     for id in ids {
-        let effect = load_row(connection, &id)?
+        let effect = load_row(connection, &id, true)?
             .ok_or_else(|| StorageError::Corrupt("observed effect vanished".to_owned()))?
             .0;
         connection.execute(
@@ -151,7 +153,7 @@ pub(crate) fn load(
     connection: &rusqlite::Connection,
     id: &str,
 ) -> StorageResult<Option<ObservedEffect>> {
-    let Some((effect, stored)) = load_row(connection, id)? else {
+    let Some((effect, stored)) = load_row(connection, id, false)? else {
         return Ok(None);
     };
     if stored.as_deref() != Some(effect.record_fingerprint().as_str()) {
@@ -163,9 +165,13 @@ pub(crate) fn load(
 }
 
 /// Decodes one row; returns the stored record fingerprint unverified.
+/// `include_quarantined` is true only for the 0033 backfill, which must
+/// fingerprint every row including quarantined ones; all evidence reads
+/// keep the quarantine filter.
 fn load_row(
     connection: &rusqlite::Connection,
     id: &str,
+    include_quarantined: bool,
 ) -> StorageResult<Option<(ObservedEffect, Option<String>)>> {
     type Row = (
         String,
@@ -186,37 +192,41 @@ fn load_row(
     // operation never resolve as evidence. The quarantine is part of
     // this single statement (not a second read plus a check), so no
     // interleaving invalidation can slip between read and verdict.
-    let row: Option<Row> = connection
-        .query_row(
-            "SELECT effect_id, subject_ref, subject_fingerprint, effect_kind,
-                    captured_by, captured_at, payload_ref, execution_id,
-                    attempt_id, runtime_ref, evaluator_ref, receipt_ref, record_fingerprint
-             FROM observed_effects WHERE effect_id = ?1
-             AND NOT EXISTS (
+    // Only the 0033 backfill reads past it (every row needs a fingerprint).
+    let mut sql = String::from(
+        "SELECT effect_id, subject_ref, subject_fingerprint, effect_kind,
+                captured_by, captured_at, payload_ref, execution_id,
+                attempt_id, runtime_ref, evaluator_ref, receipt_ref, record_fingerprint
+         FROM observed_effects WHERE effect_id = ?1",
+    );
+    if !include_quarantined {
+        sql.push_str(
+            " AND NOT EXISTS (
                  SELECT 1 FROM candidate_input_operations o
                  WHERE o.execution_id = observed_effects.execution_id
                    AND o.attempt_id = observed_effects.attempt_id
                    AND o.invalidated_at_ms IS NOT NULL
              )",
-            params![id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                    row.get(9)?,
-                    row.get(10)?,
-                    row.get(11)?,
-                    row.get(12)?,
-                ))
-            },
-        )
+        );
+    }
+    let row: Option<Row> = connection
+        .query_row(&sql, params![id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+                row.get(11)?,
+                row.get(12)?,
+            ))
+        })
         .optional()?;
     let Some((
         id,

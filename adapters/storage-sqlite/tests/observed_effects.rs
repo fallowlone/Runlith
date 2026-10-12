@@ -1827,6 +1827,67 @@ fn get_observed_effect_quarantines_invalidated_results() {
     );
 }
 
+// 0033 backfill must fingerprint quarantined effects too: it enumerates
+// every row, so it must read past the evidence quarantine instead of
+// failing the whole migration as Corrupt.
+#[test]
+fn upgrade_backfills_fingerprint_for_quarantined_effect() {
+    let db = TestDb::new("quarantine-backfill-0033");
+    let effect_id = {
+        let mut store = db.open();
+        let seed = seed_candidate(&mut store);
+        for (from, to) in [
+            ("PENDING", "RESULT_ADMITTED"),
+            ("RESULT_ADMITTED", "COMPLETE"),
+        ] {
+            store
+                .update_candidate_operation_status(
+                    seed.execution.as_str(),
+                    seed.attempt.as_str(),
+                    from,
+                    to,
+                    None,
+                    21,
+                )
+                .unwrap();
+        }
+        store
+            .invalidate_candidate_operation(
+                seed.execution.as_str(),
+                seed.attempt.as_str(),
+                "TAMPERED",
+                "post-admission-tamper",
+                22,
+            )
+            .unwrap();
+        assert!(store
+            .get_observed_effect(&seed.effect_id)
+            .unwrap()
+            .is_none());
+        seed.effect_id
+    };
+    // Rewind to the pre-0033 shape: fingerprint column gone.
+    raw(&db.path)
+        .execute_batch(
+            "ALTER TABLE observed_effects DROP COLUMN record_fingerprint;
+             PRAGMA user_version = 32;",
+        )
+        .unwrap();
+    // Upgrade must succeed (not fail with Corrupt 'observed effect vanished').
+    let store = db.open();
+    assert_eq!(store.schema_version().unwrap(), 33);
+    // Fingerprint backfilled although the row stays quarantined.
+    let fingerprint: Option<String> = raw(&db.path)
+        .query_row(
+            "SELECT record_fingerprint FROM observed_effects WHERE effect_id = ?1",
+            [effect_id.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(fingerprint.is_some());
+    assert!(store.get_observed_effect(&effect_id).unwrap().is_none());
+}
+
 // Findings 3+4, consumer side: the per-attempt effect list (the mint
 // basis) skips quarantined rows instead of erroring.
 #[test]

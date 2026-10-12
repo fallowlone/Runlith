@@ -1,4 +1,4 @@
--- 0032_journal_hash_chain_guard: restore the 0023 append-only UPDATE guard
+-- 0032_journal_hash_chain_guard: restore the 0031 append-only UPDATE guard
 -- after the legacy backfill. Hash columns are covered by the same trigger.
 
 CREATE TRIGGER event_journal_no_update
