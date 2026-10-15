@@ -6,7 +6,8 @@
 
 **A local-first control plane for durable, verified, AI-assisted software engineering.**
 
-Claude Code, Codex, OpenCode, Gemini — they are *replaceable executors*.<br>
+Claude Code, Codex, OpenCode, Gemini — they are *replaceable executors*. The core is provider-neutral;
+the Claude adapter is the only real provider adapter today.<br>
 Runlith is the layer above them that remembers, plans, isolates, verifies, and recovers.
 
 <br>
@@ -205,7 +206,7 @@ flowchart LR
     T --> S{{Scheduler /<br/>Reconciler}}
     S --> POL[Policy<br/>ALLOW · DENY · APPROVE]
     POL --> R[Isolated Runner<br/>worktree + sandbox]
-    R --> A[[Agent<br/>Claude · Codex · …]]
+    R --> A[[Agent<br/>Claude today · other providers by design]]
     A -- submits result --> E[Evaluation]
     E -- VERIFIED --> H{Human gate}
     E -- REJECTED --> S
@@ -689,8 +690,9 @@ flowchart LR
 
 - **No epoch is discarded before a durable checkpoint** — and old evidence stays retrievable after rollover.
 - **Raw evidence stays authoritative;** summaries of summaries never become truth.
-- **A Task can migrate** Claude → Codex (or anywhere) without losing state: a new Attempt, a new Session, a new
-  rendered context — same Task and continuity truth.
+- **A Task can migrate** between providers by design (for example Claude → another adapter) without losing
+  state: a new Attempt, a new Session, a new rendered context — same Task and continuity truth. Claude is the
+  only provider adapter implemented today.
 - Continuity restores *context and evidence*, never *permission* to blindly replay side effects across providers.
 
 Source: [`docs/architecture/continuity.md`](docs/architecture/continuity.md) ·
