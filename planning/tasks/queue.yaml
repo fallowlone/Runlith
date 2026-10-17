@@ -6146,3 +6146,48 @@ items:
       - docs/development/G9_CLOSURE_AUDIT.md
       - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
       - docs/architecture/ipc.md
+    outcome: >-
+      Done: merged to main as 452da5f (fast-forward of branch
+      task-0177-takeover-rollout). IPC protocol V8 assigned
+      additively; TAKEOVER continuation and apply/append/render/
+      reconcile ops refuse typed below V8 before any service access;
+      production human-decision requests offer Takeover; daemon
+      expiry tick (1s, shutdown-safe) reconciles without a service
+      call. Independent orchestrator verification on the branch:
+      fmt and clippy clean, shipped-binary cycle plus refusal matrix
+      green (execution_binaries 17/17), full workspace 1864 passed /
+      0 failed. Disclosed test changes: five offer-expectation
+      assertions updated to include Takeover; one binary test
+      renamed because a shipped V8 client can no longer be forced
+      below V8 (below-V8 refusal pinned in ipc-control/agentd unit
+      suites). Post-merge main verification: 1864 passed / 0 failed
+      (one stale-binary false start triaged and rerun green).
+      TASK-0172 exit criterion now demonstrably met; G9 closure
+      re-audit is TASK-0178.
+
+  - id: TASK-0178
+    gate: G9
+    title: G9 closure re-audit after TASK-0177
+    objective: >-
+      Re-audit G9 closure from a fresh context after the TASK-0177
+      remediation and return exactly G9_CLOSED or
+      G9_REMEDIATION_REQUIRED without implementing repairs.
+    scope: >-
+      Audit only: verify blocker B1 is closed through the shipped
+      control plane (V8 negotiation, TAKEOVER assume/return cycle,
+      refusal matrix, expiry tick), re-check the TASK-0170..0175
+      evidence and the non-blocking residuals recorded in
+      docs/development/G9_CLOSURE_AUDIT.md, and confirm the
+      Conditional Entity Graph condition. No production behavior
+      changes.
+    exit_criteria_summary: >-
+      A closure re-audit report records one hard G9 verdict backed
+      by current code and executable evidence; on G9_CLOSED the
+      roadmap gate advances and G10 may be registered.
+    depends_on:
+      - TASK-0177
+    blocked_by: []
+    references:
+      - docs/development/G9_CLOSURE_AUDIT.md
+      - planning/roadmap.yaml
+      - docs/architecture/INDEX.md
