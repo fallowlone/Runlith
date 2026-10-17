@@ -6059,3 +6059,18 @@ items:
       - docs/architecture/adr/ADR-0029-planner-evidence-resolution.md
       - docs/privacy/TECHNICAL_PRIVACY_CONTRACT.md
       - docs/privacy/DATA_FLOW_MAP.md
+    outcome: >-
+      Done: merged to main as 461a286 (fast-forward of branch
+      task-0175-planner-evidence-boundary). Trusted PlanningService
+      resolves attempt:/human-decision: refs to bounded classified
+      content (PROJECT/RESTRICTED, INV-008 screened, decided_by never
+      crosses); unknown, missing or secret-shaped refs stay
+      identity-only; planner holds no handle, query or store.
+      PLANNER_EVIDENCE_RESOLUTION_POLICY.md plus DATA_FLOW_MAP
+      FLOW-013 added. Independent orchestrator review PASS on every
+      exit-criteria clause; branch full workspace green except one
+      process-suite failure proven non-regression standalone on both
+      branch and base. Post-merge main verification green: fmt,
+      clippy -D warnings, full workspace 1853 passed / 0 failed.
+      One minor non-blocking doc mismatch noted (policy truncation
+      suffix wording vs code marker).
