@@ -25,6 +25,8 @@ integrates the concrete SQLite adapter.
 | Isolation plan / backend contract | [runner/src/lib.rs](./runner/src/lib.rs) | Verifies policy-derived authority before process launch |
 | Secret metadata, backend and release | [secrets/src/lib.rs](./secrets/src/lib.rs) | Separate `SecretMetadataStore`, `SecretBackend`, `SecretDelivery` |
 | Security audit record contract | [security-audit/src/lib.rs](./security-audit/src/lib.rs) | Durable audit values, distinct from execution journal |
+| Structured memory domain and store port | [memory/src/lib.rs](./memory/src/lib.rs) | ADR-0044 records, trust lifecycle, dedup, staleness, eligibility; `MemoryStorePort` |
+| Memory adapter conformance runner | [memory-contract](./memory-contract/src/lib.rs) | Shared contract suite every memory store must pass |
 | IPC schemas / version capabilities | [ipc-contracts/src/lib.rs](./ipc-contracts/src/lib.rs) | Seven checked-in [proto files](./ipc-contracts/proto) |
 | Handshake / negotiation / sessions | [ipc-control/src/lib.rs](./ipc-control/src/lib.rs) | Version/capability checks above byte transport |
 | Framing / endpoints / peer identity | [ipc-transport/src/lib.rs](./ipc-transport/src/lib.rs) | Platform modules below control semantics |

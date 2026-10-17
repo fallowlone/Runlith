@@ -45,8 +45,9 @@ async fn main() -> ExitCode {
         Some("planning") => cmd_planning(args.collect()).await,
         Some("vault") => vault::cmd(args.collect()).await,
         Some("find") => cmd_find(args.collect()).await,
+        Some("memory") => cmd_memory(args.collect()).await,
         _ => {
-            eprintln!("usage: agentctl <start|ping|shutdown|project|task|execution|approval|human-decision|planning|vault|find> ...");
+            eprintln!("usage: agentctl <start|ping|shutdown|project|task|execution|approval|human-decision|planning|vault|find|memory> ...");
             eprintln!("  {}", vault::USAGE);
             eprintln!("  agentctl project create <id> <name>");
             eprintln!("  agentctl project get <id>");
@@ -1100,6 +1101,40 @@ async fn cmd_find(args: Vec<String>) -> ExitCode {
 #[cfg(windows)]
 async fn cmd_find(_args: Vec<String>) -> ExitCode {
     eprintln!("agentctl: finder control is unavailable on this build");
+    ExitCode::FAILURE
+}
+
+#[cfg(unix)]
+async fn cmd_memory(args: Vec<String>) -> ExitCode {
+    let endpoint = match resolve_production_endpoint() {
+        Ok(value) => value,
+        Err(error) => return fail(&error),
+    };
+    let request = match agentctl::parse_memory_args(&args) {
+        Ok(value) => value,
+        Err(usage) => {
+            eprintln!("{usage}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match agentctl::memory_request(&endpoint, spawn_sibling_daemon, request).await {
+        Ok(response) => match agentctl::format_memory_response(&response) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                ExitCode::FAILURE
+            }
+        },
+        Err(error) => fail(&error),
+    }
+}
+
+#[cfg(windows)]
+async fn cmd_memory(_args: Vec<String>) -> ExitCode {
+    eprintln!("agentctl: memory control is unavailable on this build");
     ExitCode::FAILURE
 }
 

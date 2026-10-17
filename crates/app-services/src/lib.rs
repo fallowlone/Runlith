@@ -20,6 +20,7 @@ mod error;
 mod finder_service;
 mod human_decision_service;
 mod managed_identity;
+mod memory_service;
 mod observed_effect_service;
 mod op_id;
 mod orchestration_service;
@@ -64,6 +65,7 @@ pub use managed_identity::{
     is_windows_reserved_basename, managed_slug, MANAGED_DIGEST_PREFIX, MANAGED_READABLE_PREFIX,
     WINDOWS_RESERVED_BASENAMES,
 };
+pub use memory_service::{CaptureRequest, MemoryService};
 pub use observed_effect_service::{ObservedEffectService, ObservedEffectServiceError};
 pub use orchestration_service::{
     ExecutionEntry, OrchestrationIds, OrchestrationService, PreAttemptResumePlan,

@@ -89,6 +89,7 @@ Context / continuity work
 
 Memory work
 → adr/ADR-0012-structured-memory-provenance.md
+→ adr/ADR-0044-g10-memory-engine-contract.md
 
 Security / runtime isolation work
 → adr/ADR-0013-policy-engine-os-isolation.md

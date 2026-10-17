@@ -8,8 +8,8 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-current_gate: G9
-gate_status: IN_PROGRESS  # TASK-0167 activated G9 (ADR-0042 accepted); G8 closed by TASK-0127
+current_gate: G10
+gate_status: IN_PROGRESS  # TASK-0179 activated G10 (G9 closed by TASK-0178)
 
 items:
   - id: TASK-0012
@@ -6212,3 +6212,302 @@ items:
       matching the TASK-0177 record of 1864 passed / 0 failed on
       identical Rust code. Roadmap gate advances to G10; G10 may be
       registered. Audit only: no production behavior changes.
+
+  - id: TASK-0179
+    gate: G10
+    title: G10 governance reconciliation and registration
+    objective: >-
+      Reconcile canonical planning drift (roadmap at G10; queue and
+      product version still at G9) and register the G10 task sequence
+      TASK-0180 through TASK-0187. Governance only; no Rust code.
+    scope: >-
+      planning/tasks/queue.yaml, planning/roadmap.yaml,
+      product/version.toml and docs/architecture/INDEX.md only.
+    exit_criteria_summary: >-
+      Queue parses with unique IDs and current_gate G10; product
+      version gate/task agree with the queue; G10 tasks registered
+      with dependencies; product-version tests green.
+    depends_on:
+      - TASK-0178
+    blocked_by: []
+    references:
+      - planning/roadmap.yaml
+      - docs/architecture/adr/ADR-0012-structured-memory-provenance.md
+      - docs/development/G9_CLOSURE_REAUDIT.md
+    outcome: >-
+      Done on branch task-0179-g10-governance: roadmap already at
+      G10; queue current_gate reconciled G9 -> G10 (gate_status
+      IN_PROGRESS, TASK-0179 activated); product version advanced to
+      0.1.0-dev.task0179 / TASK-0179 / G10; G10 sequence TASK-0180
+      through TASK-0187 registered with dependencies. Verification:
+      product-version 6/6 green (includes queue YAML parse and
+      gate_matches_planning_queue); queue holds 176 unique task IDs.
+      Governance only: no Rust production code changed.
+
+  - id: TASK-0180
+    gate: G10
+    title: G10 Memory Engine contract (ADR-0044)
+    objective: >-
+      Pin the G10 memory contract before code: record fields,
+      provenance, trust lifecycle, dedup identity, anchor staleness,
+      context eligibility and error taxonomy per ADR-0012 and the
+      Architecture Source of Truth sections 39-42.
+    scope: >-
+      ADR-0044, docs/architecture/INDEX.md, ADR index and queue
+      outcome only; no Rust code, no migrations, no IPC changes.
+    exit_criteria_summary: >-
+      ADR-0044 Accepted; every ADR-0012 field and Source-of-Truth G10
+      lifecycle state mapped or explicitly deferred with rationale;
+      INV-008, INV-029 and INV-082 compliance stated.
+    depends_on:
+      - TASK-0179
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0012-structured-memory-provenance.md
+      - docs/architecture/INVARIANTS.md
+      - AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
+    outcome: >-
+      Done on branch task-0179-g10-governance: ADR-0044 Accepted
+      (docs/architecture/adr/ADR-0044-g10-memory-engine-contract.md),
+      pinning MemoryRecord fields, closed kind/trust-state enums,
+      CAPTURE-VALIDATE-REFRESH-SUPERSEDE-ARCHIVE transitions (M-1..M-12),
+      dedup identity, anchor staleness, context eligibility, SECRET
+      capture refusal (INV-008) and validator!=author (INV-029). ADR
+      index and architecture index updated. No Rust code changed.
+
+  - id: TASK-0181
+    gate: G10
+    title: Memory domain and conformance contract suite
+    objective: >-
+      Implement the pure memory domain per ADR-0044 (typed records,
+      provenance, trust lifecycle, dedup/link/supersede, anchor
+      staleness, context eligibility, MemoryStorePort) plus the
+      reusable memory-contract conformance suite.
+    scope: >-
+      New crates/memory and crates/memory-contract plus workspace
+      Cargo manifests only; no SQLite, no IPC, no app-services.
+    exit_criteria_summary: >-
+      Domain implements the ADR-0044 lifecycle with exhaustive
+      transition tests; the contract suite passes against a test
+      double; workspace fmt, clippy and tests green.
+    depends_on:
+      - TASK-0180
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0012-structured-memory-provenance.md
+    outcome: >-
+      Done on branch task-0179-g10-governance: new pure crates/memory
+      (MemoryRecord, closed kind/trust enums, CAPTURE/VALIDATE/
+      CONTRADICT/REFRESH/STALE/SUPERSEDE/RETIRE transitions, dedup
+      key, anchor staleness, context eligibility, MemoryStorePort)
+      and crates/memory-contract (shared conformance suite, proven
+      against an in-memory double). Verification: memory 8/8
+      (mint 2, model 6), memory-contract 1/1, fmt clean, clippy
+      -D warnings clean. Workspace members and Cargo.lock updated.
+
+  - id: TASK-0182
+    gate: G10
+    title: SQLite memory adapter (migration 0034)
+    objective: >-
+      Durable SQLite persistence behind MemoryStorePort (memories,
+      memory_links, entities, entity_links) with atomic
+      state-plus-journal commits and restart durability.
+    scope: >-
+      adapters/storage-sqlite migration 0034, memory_store and tests
+      only; no domain, IPC or service changes.
+    exit_criteria_summary: >-
+      The shared contract suite passes against SQLite; upgrade from
+      schema v33 passes; memories survive restart with journal
+      evidence; full storage-sqlite package green.
+    depends_on:
+      - TASK-0181
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0012-structured-memory-provenance.md
+    outcome: >-
+      Done on branch task-0179-g10-governance: migration 0034
+      (memories, memory_source_refs, memory_anchors, memory_links,
+      entities, entity_links) with SUPPORTED_SCHEMA_VERSION 34;
+      SqliteStore implements MemoryStorePort with single-transaction
+      multi-row writes and fail-closed decode. Shared contract suite
+      passes against SQLite incl. reopen durability. Disclosed test
+      changes (version-pin class only): schema literals 33 -> 34 in
+      durability, journal, observed_effects, plan_cost_receipts,
+      plan_persistence, runtime and security_audit tests, plus
+      memory-table drops added to the v31/v22/v13/v12 rewind
+      fixtures. Full storage-sqlite package: 258 passed / 0 failed.
+      Deviation recorded: Event Journal taxonomy has no memory event
+      types (event.rs is task-scoped); journal coupling for memory
+      mutations is deferred to a follow-up contract task, atomicity
+      is preserved transactionally.
+
+  - id: TASK-0183
+    gate: G10
+    title: Memory application service
+    objective: >-
+      Trusted lifecycle orchestration (capture, normalize,
+      deduplicate, link, validate, refresh, supersede, archive) in
+      app-services with authority checks; agent self-validation
+      refused; every mutation journaled.
+    scope: >-
+      crates/app-services memory_service and tests only; no IPC or
+      wire changes, no Context Engine internals.
+    exit_criteria_summary: >-
+      Service tests cover the full lifecycle, single-winner
+      concurrent validation and refusal of agent self-promotion;
+      app-services package green.
+    depends_on:
+      - TASK-0182
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0012-structured-memory-provenance.md
+      - docs/architecture/INVARIANTS.md
+    outcome: >-
+      Done on branch task-0179-g10-governance: MemoryService and
+      CaptureRequest in crates/app-services (generic over
+      MemoryStorePort; capture/validate/contradict/staleness/
+      supersede/retire/eligible). Tests over real SQLite files:
+      memory_service 2/2 (full lifecycle incl. INV-029 author
+      refusal, dedup, anchor-drift staleness, confirmed-successor
+      supersession, restart persistence; SECRET capture refusal).
+      Clippy -D warnings clean for app-services.
+
+  - id: TASK-0184
+    gate: G10
+    title: Memory control plane - IPC V9 and agentctl
+    objective: >-
+      Make memory reachable through the shipped versioned control
+      plane: additive IPC protocol V9, trusted agentd operations and
+      agentctl commands, with shipped-binary evidence for the full
+      cycle and the refusal matrix.
+    scope: >-
+      crates/ipc-contracts, crates/ipc-control, bins/agentd,
+      bins/agentctl and IPC docs; no weakening of V1-V8 gates.
+    exit_criteria_summary: >-
+      Through shipped binaries an operator can capture, validate,
+      retrieve and supersede memory across a daemon restart; below-V9
+      sessions refuse typed; existing binary suites green.
+    depends_on:
+      - TASK-0183
+    blocked_by: []
+    references:
+      - docs/architecture/ipc.md
+      - docs/architecture/adr/ADR-0012-structured-memory-provenance.md
+    outcome: >-
+      Done on branch task-0179-g10-governance: memory_core.proto
+      (field 12), IPC protocol V9 additive (V1-V8 gates unchanged),
+      supports_memory_ipc >= V9; ipc-control ReadyRequest::Memory
+      with below-V9 typed refusal (v8 rejects, v9 surfaces, 55/55);
+      agentd MemoryService composition on its own SQLite connection
+      with production ServerConfig::g10_default; agentctl memory
+      capture/get/validate/supersede/retire/list. Shipped-binary
+      evidence: execution_binaries memory cycle 1/1 (capture,
+      author refusal, validate, list, daemon-restart durability,
+      SECRET refusal). Disclosed changes: ReadyRequest drops Eq
+      (prost derives no Eq for repeated message fields);
+      negotiation current-version pin V8 -> V9. agentd/agentctl
+      suites green except the documented execution_recovery load
+      flake, green standalone (1/1).
+
+  - id: TASK-0185
+    gate: G10
+    title: Context Engine memory integration
+    objective: >-
+      Serve only context-eligible memory (confirmed, fresh,
+      unexpired, sensitivity-cleared) as a provenance-bearing context
+      source; proposed, stale, superseded and retired memory excluded
+      by construction.
+    scope: >-
+      Context selection integration in app-services (and
+      context-engine only if ADR-0044 requires a new source kind);
+      no bypass of admission, budget or provenance rules.
+    exit_criteria_summary: >-
+      Falsification tests pass: anchor drift excludes memory,
+      unvalidated memory never enters a selection, SECRET memory is
+      refused, superseded memory is never served as current;
+      selections remain explainable after restart.
+    depends_on:
+      - TASK-0184
+    blocked_by: []
+    references:
+      - docs/architecture/adr/ADR-0010-context-derived-state.md
+      - docs/architecture/INVARIANTS.md
+    outcome: >-
+      Done on branch task-0179-g10-governance: MemoryService::
+      context_candidates maps eligible memory to ADR-0042 MemoryNote
+      candidates (SourceRef::Memory bound to content hash,
+      ProvenanceEnvelope with reopen handle, Verified trust from
+      CONFIRMED state); admission/budget/provenance rules unchanged.
+      Tests memory_context 2/2: validated memory enters selection
+      and explains after restart; stale, superseded and retired
+      memory never become candidates. Proposed memory yields zero
+      candidates by construction.
+
+  - id: TASK-0186
+    gate: G10
+    title: G10 failure matrix and dogfood evidence
+    objective: >-
+      Verify the deterministic G10 failure matrix (crash/restart
+      mid-capture, duplicate capture, conflicting supersession,
+      expiry, anchor drift, cross-user refusal, malformed provenance,
+      SECRET leakage probes) plus a dogfood capture-validate-retrieve
+      run. Verification only; no repairs.
+    scope: >-
+      Failure-matrix and dogfood evidence only; any blocker is
+      assigned to a separate remediation task before audit.
+    exit_criteria_summary: >-
+      Every scenario behaves per contract with durable evidence;
+      full workspace verification green.
+    depends_on:
+      - TASK-0185
+    blocked_by: []
+    references:
+      - docs/architecture/INVARIANTS.md
+    outcome: >-
+      Done on branch task-0179-g10-governance: failure matrix
+      memory_failure_matrix 3/3 (duplicate dedup, id conflict,
+      malformed provenance, expiry, conflicting supersession,
+      unknown-id refusals, crash-restart durability); cross-user /
+      below-version refusal is the ipc-control v8-rejects-memory
+      test (TASK-0184); shipped-binary matrix in execution_binaries
+      memory cycle 1/1. Dogfood through shipped binaries (temp
+      dirs): captured mem_01M55M779S0000000000000000, author
+      validation refused untrusted_promotion, reviewer validation
+      confirmed, eligible 1, survived daemon shutdown/restart with
+      state intact.
+
+  - id: TASK-0187
+    gate: G10
+    title: G10 independent closure audit
+    objective: >-
+      Re-audit G10 closure from a fresh context and return exactly
+      G10_CLOSED or G10_REMEDIATION_REQUIRED without implementing
+      repairs.
+    scope: >-
+      Audit only: pristine-clone red-on-base and green-on-main checks
+      for staleness, INV-029 promotion refusal and INV-008 leakage;
+      confirm non-goals held (no graph or vector database, no
+      transcript-as-memory). No production behavior changes.
+    exit_criteria_summary: >-
+      A closure audit report records one hard G10 verdict backed by
+      executable evidence; on G10_CLOSED the roadmap advances to G11.
+    depends_on:
+      - TASK-0186
+    blocked_by: []
+    references:
+      - planning/roadmap.yaml
+      - docs/architecture/adr/ADR-0012-structured-memory-provenance.md
+    outcome: >-
+      G10_CLOSED (docs/development/G10_CLOSURE_AUDIT.md, gate
+      docs/development/G10_CLOSURE_GATE.md GATE_PASS). Independent
+      fresh-context auditor verified all six falsification claims
+      in code and tests with a full agentd/agentctl run at exit 0;
+      orchestrator gates: fmt clean, clippy -D warnings clean,
+      full workspace 1885 passed / 0 failed. An earlier workspace
+      run read 1883/2 (failure_matrix schema pin 33 -> 34 fixed;
+      documented execution_recovery load flake green standalone
+      and in the final run). Red-on-base 22d35fe confirmed (queue
+      G9 drift, no V9/memory surface). Residuals non-blocking:
+      Event Journal memory event types deferred (TASK-0182
+      outcome); AGENTS.md generated map still stamps 40 packages
+      (now 42). Audit only: no production behavior changes.

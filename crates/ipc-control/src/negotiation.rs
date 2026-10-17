@@ -199,6 +199,22 @@ pub fn is_takeover_allowed(negotiated_version: u32) -> bool {
     ipc_contracts::supports_takeover_continuation(negotiated_version)
 }
 
+#[must_use]
+pub fn is_memory_allowed(negotiated_version: u32) -> bool {
+    ipc_contracts::supports_memory_ipc(negotiated_version)
+}
+
+pub fn validate_memory_allowed(negotiated_version: u32) -> ControlResult<()> {
+    if is_memory_allowed(negotiated_version) {
+        Ok(())
+    } else {
+        Err(ControlError::UnsupportedProtocol {
+            negotiated: negotiated_version,
+            required: ipc_contracts::IPC_PROTOCOL_VERSION_V9,
+        })
+    }
+}
+
 pub fn validate_takeover_allowed(negotiated_version: u32) -> ControlResult<()> {
     if is_takeover_allowed(negotiated_version) {
         Ok(())
@@ -382,6 +398,28 @@ impl ServerConfig {
                 IPC_PROTOCOL_VERSION_V6,
                 IPC_PROTOCOL_VERSION_V7,
                 IPC_PROTOCOL_VERSION_V8,
+            ],
+            daemon_build_version: default_daemon_build_version(),
+            supported_capabilities: Vec::new(),
+        }
+    }
+
+    /// G10 daemon configuration (TASK-0184): v9 enables structured
+    /// memory while preserving every historical surface. Production
+    /// default from TASK-0184 on.
+    pub fn g10_default() -> Self {
+        Self {
+            supported_versions: vec![
+                IPC_PROTOCOL_VERSION_V0,
+                IPC_PROTOCOL_VERSION_V1,
+                IPC_PROTOCOL_VERSION_V2,
+                IPC_PROTOCOL_VERSION_V3,
+                IPC_PROTOCOL_VERSION_V4,
+                IPC_PROTOCOL_VERSION_V5,
+                IPC_PROTOCOL_VERSION_V6,
+                IPC_PROTOCOL_VERSION_V7,
+                IPC_PROTOCOL_VERSION_V8,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V9,
             ],
             daemon_build_version: default_daemon_build_version(),
             supported_capabilities: Vec::new(),
@@ -577,7 +615,7 @@ mod tests {
     fn g6_daemon_adds_v3_policy_without_weakening_older_profiles() {
         let g6 = ServerConfig::g6_default();
         assert_eq!(g6.supported_versions, vec![0, 1, 2, 3]);
-        assert_eq!(IPC_PROTOCOL_VERSION, ipc_contracts::IPC_PROTOCOL_VERSION_V8);
+        assert_eq!(IPC_PROTOCOL_VERSION, ipc_contracts::IPC_PROTOCOL_VERSION_V9);
         assert!(validate_policy_allowed(3).is_ok());
         assert!(validate_policy_allowed(2).is_err());
         assert!(!is_policy_allowed(0));

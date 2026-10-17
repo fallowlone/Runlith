@@ -1760,3 +1760,97 @@ fn assert_absent_under(root: &Path, needle: &[u8]) {
         }
     }
 }
+
+#[test]
+fn memory_capture_validate_list_cycle_through_shipped_binaries() {
+    let sandbox = Sandbox::new("memory-cycle", SUCCESS_BODY);
+    let mut daemon = DaemonGuard::spawn(&sandbox);
+    sandbox.wait_ready();
+    let fingerprint = format!("sha256:{}", "ab".repeat(32));
+    let anchor = format!("CODE:crates/x/src/lib.rs:{fingerprint}");
+    let captured = sandbox.agentctl(&[
+        "memory",
+        "capture",
+        "--kind",
+        "SEMANTIC",
+        "--content",
+        "run codegen after protobuf changes",
+        "--source",
+        "TASK:TASK-1:rev1",
+        "--confidence",
+        "900",
+        "--sensitivity",
+        "PROJECT",
+        "--anchor",
+        &anchor,
+        "--author",
+        "agent-a",
+    ]);
+    assert!(captured.status.success(), "capture: {}", stderr(&captured));
+    let out = stdout(&captured);
+    assert!(out.contains("PROPOSED"), "capture {out}");
+    let id = out.split_whitespace().next().expect("memory id").to_owned();
+    assert!(id.starts_with("mem_"), "id {id}");
+
+    // Author self-validation refuses through the shipped CLI.
+    let refused = sandbox.agentctl(&["memory", "validate", &id, "--validator", "agent-a"]);
+    assert!(!refused.status.success(), "author validation must refuse");
+    assert!(
+        stderr(&refused).contains("untrusted_promotion"),
+        "refusal: {}",
+        stderr(&refused)
+    );
+
+    // Proposed memory is not eligible; after reviewer validation it is.
+    let listed = sandbox.agentctl(&["memory", "list"]);
+    assert!(
+        stdout(&listed).contains("eligible 0"),
+        "list {}",
+        stdout(&listed)
+    );
+    let validated = sandbox.agentctl(&["memory", "validate", &id, "--validator", "reviewer"]);
+    assert!(
+        validated.status.success(),
+        "validate: {}",
+        stderr(&validated)
+    );
+    assert!(stdout(&validated).contains("CONFIRMED"));
+    let listed = sandbox.agentctl(&["memory", "list"]);
+    assert!(
+        stdout(&listed).contains("eligible 1"),
+        "list {}",
+        stdout(&listed)
+    );
+
+    // Durability: kill and restart the daemon; memory survives.
+    daemon.restart(&sandbox);
+    let got = sandbox.agentctl(&["memory", "get", &id]);
+    assert!(got.status.success(), "get: {}", stderr(&got));
+    assert!(stdout(&got).contains("CONFIRMED"), "get {}", stdout(&got));
+
+    // SECRET capture refuses typed through the shipped binaries.
+    let secret = sandbox.agentctl(&[
+        "memory",
+        "capture",
+        "--kind",
+        "SEMANTIC",
+        "--content",
+        "hidden",
+        "--source",
+        "TASK:TASK-1:rev1",
+        "--confidence",
+        "1",
+        "--sensitivity",
+        "SECRET",
+        "--anchor",
+        &anchor,
+        "--author",
+        "agent-a",
+    ]);
+    assert!(!secret.status.success(), "SECRET capture must refuse");
+    assert!(
+        stderr(&secret).contains("sensitivity_refusal"),
+        "secret refusal: {}",
+        stderr(&secret)
+    );
+}

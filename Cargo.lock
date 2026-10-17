@@ -70,6 +70,7 @@ dependencies = [
  "ipc-contracts",
  "ipc-control",
  "ipc-transport",
+ "memory",
  "plan-domain",
  "policy",
  "prost",
@@ -117,6 +118,7 @@ dependencies = [
  "fake-evaluator",
  "fake-planner",
  "git-cli",
+ "memory",
  "plan-domain",
  "policy",
  "provider-claude",
@@ -1146,6 +1148,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "memory"
+version = "0.1.0"
+dependencies = [
+ "context-engine",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "memory-contract"
+version = "0.1.0"
+dependencies = [
+ "context-engine",
+ "memory",
+]
+
+[[package]]
 name = "mio"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1873,6 +1891,8 @@ dependencies = [
  "continuity",
  "continuity-contract",
  "evaluation",
+ "memory",
+ "memory-contract",
  "plan-domain",
  "policy",
  "rusqlite",

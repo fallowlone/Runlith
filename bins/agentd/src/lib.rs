@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use app_services::{
-    ApprovalService, FinderService, HumanDecisionService, SystemClock, TaskService,
+    ApprovalService, FinderService, HumanDecisionService, MemoryService, SystemClock, TaskService,
 };
 use bytes::BytesMut;
 #[cfg(unix)]
@@ -42,6 +42,7 @@ pub mod dispatch;
 pub mod execution;
 pub mod finder;
 pub mod human_decision;
+pub mod memory;
 pub mod planning;
 mod provider_credential;
 pub mod vault;
@@ -188,11 +189,11 @@ impl DaemonConfig {
     /// G5 daemon configuration (TASK-0047): protocols `[0, 1, 2]` with
     /// the durable database at `path`, enabling the execution surface
     /// (`run`/`status`/`cancel`) through the real-provider composition.
-    /// Production default from TASK-0047 on; G9 negotiates through v8
-    /// (TASK-0177 TAKEOVER rollout) while preserving every older surface.
+    /// Production default from TASK-0047 on; G10 negotiates through v9
+    /// (TASK-0184 memory rollout) while preserving every older surface.
     pub fn with_execution(path: impl Into<PathBuf>) -> Self {
         Self {
-            server_config: ServerConfig::g9_takeover_default(),
+            server_config: ServerConfig::g10_default(),
             database_path: Some(path.into()),
             provider_executable: None,
         }
@@ -223,6 +224,9 @@ pub type HumanDecisionHandle = Arc<tokio::sync::Mutex<HumanDecisionService<Syste
 /// and reopens serve from any connection concurrently.
 pub type FinderHandle = Arc<FinderService>;
 
+/// Shared trusted G10 memory service over its own SQLite connection.
+pub type MemoryHandle = Arc<tokio::sync::Mutex<MemoryService<storage_sqlite::SqliteStore>>>;
+
 #[derive(Clone)]
 struct ConnectionServices {
     business: Option<BusinessHandle>,
@@ -231,6 +235,7 @@ struct ConnectionServices {
     human_decision: Option<HumanDecisionHandle>,
     vault: Option<vault::VaultHandle>,
     finder: FinderHandle,
+    memory: Option<MemoryHandle>,
 }
 
 /// Terminal outcome of a daemon run.
@@ -340,6 +345,16 @@ fn open_finder() -> FinderHandle {
         FinderService::new(search, read, revision)
             .with_filter(Arc::new(app_services::RedactingFilter)),
     )
+}
+
+fn open_memory_service(config: &DaemonConfig) -> Result<Option<MemoryHandle>, DaemonError> {
+    let Some(path) = config.database_path.as_ref() else {
+        return Ok(None);
+    };
+    let store = storage_sqlite::SqliteStore::open(path)?;
+    Ok(Some(Arc::new(tokio::sync::Mutex::new(MemoryService::new(
+        store,
+    )))))
 }
 
 fn open_human_decision_service(
@@ -532,6 +547,18 @@ where
                         Err(_) => finder::failed(),
                     };
                 if session.respond_finder(response).await.is_err() {
+                    return ConnectionOutcome::Ended;
+                }
+            }
+            Ok(ReadyRequest::Memory(request)) => {
+                let response = match &services.memory {
+                    Some(handle) => {
+                        let mut service = handle.lock().await;
+                        memory::dispatch(&mut service, request)
+                    }
+                    None => memory::unavailable(),
+                };
+                if session.respond_memory(response).await.is_err() {
                     return ConnectionOutcome::Ended;
                 }
             }
@@ -872,6 +899,7 @@ mod unix_daemon {
                 human_decision,
                 vault,
                 finder: open_finder(),
+                memory: open_memory_service(&config)?,
             },
         )
         .await;
@@ -978,6 +1006,7 @@ mod windows_daemon {
                 human_decision,
                 vault,
                 finder: super::open_finder(),
+                memory: super::open_memory_service(&config)?,
             },
         )
         .await)

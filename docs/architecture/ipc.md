@@ -533,3 +533,35 @@ express):
 - Unknown `execution_core` oneof payloads and empty execution payloads
   are typed errors; the sequential one-in-flight model is preserved
   (no request IDs, multiplexing, streaming, gRPC, or HTTP).
+
+## 17. G10 protocol v9: structured memory IPC (implemented)
+
+Implemented in TASK-0184 (contract: ADR-0044): protocol `9` adds the
+bounded `memory_core` envelope (`crates/ipc-contracts/proto/memory_core.proto`,
+carried as `ControlRequest.memory_core = 12` /
+`ControlResponse.memory_core = 12`; all earlier field allocations are
+frozen). Every earlier surface is preserved: a memory frame on a
+sub-v9 session is rejected as unsupported for the negotiated protocol
+and never executes; V9 clients negotiate down against older daemons
+and refuse memory with a typed `UnsupportedProtocol`.
+
+The v9 surface is exactly: `MemoryCaptureRequest` (kind, content,
+typed revision-bound source refs, per-mille confidence, sensitivity,
+anchor fingerprints, author, optional expiry/supersession),
+`MemoryGetRequest`, `MemoryValidateRequest`,
+`MemorySupersedeRequest`, `MemoryRetireRequest`, and
+`MemoryListEligibleRequest`. Responses carry the full record shape
+(id, kind, content, content hash, confidence, sensitivity, trust
+state, author, timestamps, supersession, dedup flag), a list shape,
+or a typed `MemoryErrorResponse` (`invalid_input`, `unknown_kind`,
+`unbound_source_ref`, `sensitivity_refusal`, `untrusted_promotion`,
+`stale_anchor`, `already_superseded`, `conflict`, `not_found`,
+`backend_failure`, `unavailable`).
+
+Business semantics: the server mints ids and owns every lifecycle
+transition; the record's author can never validate their own memory
+(INV-029, refused as `untrusted_promotion`); SECRET sensitivity is
+refused at capture (INV-008) so no read path can leak it; only
+`CONFIRMED`, unexpired, anchor-fresh memory is listed as eligible.
+Memory mutations are never replayed automatically by the client —
+an ambiguous reply is re-probed with `memory get`.

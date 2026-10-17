@@ -675,11 +675,11 @@ fn fresh_database_migrates_to_current() {
     let db = TestDb::new("fresh");
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 33);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 34);
 }
 
 #[test]
-fn schema_21_upgrades_through_candidate_assessments_to_current_33_and_reopens() {
+fn schema_21_upgrades_through_candidate_assessments_to_current_34_and_reopens() {
     let db = TestDb::new("schema-21-to-22");
     {
         let connection = rusqlite::Connection::open(&db.path).unwrap();
@@ -702,11 +702,11 @@ fn schema_21_upgrades_through_candidate_assessments_to_current_33_and_reopens() 
     secure_raw_fixture(&db.path);
     {
         let upgraded = db.open();
-        assert_eq!(upgraded.schema_version().unwrap(), 33);
-        assert_eq!(SUPPORTED_SCHEMA_VERSION, 33);
+        assert_eq!(upgraded.schema_version().unwrap(), 34);
+        assert_eq!(SUPPORTED_SCHEMA_VERSION, 34);
     }
     let reopened = db.open();
-    assert_eq!(reopened.schema_version().unwrap(), 33);
+    assert_eq!(reopened.schema_version().unwrap(), 34);
     let assessment_columns: i64 = rusqlite::Connection::open(&db.path)
         .unwrap()
         .query_row(
@@ -728,7 +728,7 @@ fn schema_21_upgrades_through_candidate_assessments_to_current_33_and_reopens() 
 }
 
 #[test]
-fn schema_22_upgrades_through_claim_verification_to_current_33_and_reopens() {
+fn schema_22_upgrades_through_claim_verification_to_current_34_and_reopens() {
     let db = TestDb::new("schema-22-to-23");
     {
         let connection = rusqlite::Connection::open(&db.path).unwrap();
@@ -752,11 +752,11 @@ fn schema_22_upgrades_through_claim_verification_to_current_33_and_reopens() {
     secure_raw_fixture(&db.path);
     {
         let upgraded = db.open();
-        assert_eq!(upgraded.schema_version().unwrap(), 33);
-        assert_eq!(SUPPORTED_SCHEMA_VERSION, 33);
+        assert_eq!(upgraded.schema_version().unwrap(), 34);
+        assert_eq!(SUPPORTED_SCHEMA_VERSION, 34);
     }
     let reopened = db.open();
-    assert_eq!(reopened.schema_version().unwrap(), 33);
+    assert_eq!(reopened.schema_version().unwrap(), 34);
     for (table, columns) in [
         ("agent_claims", 11),
         ("claim_verifications", 13),

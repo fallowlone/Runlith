@@ -18,6 +18,7 @@ secrets = { path = "../../crates/secrets" }
 security-audit = { path = "../../crates/security-audit" }
 plan-domain = { path = "../../crates/plan" }
 takeover = { path = "../../crates/takeover" }
+memory = { path = "../../crates/memory" }
 evaluation = { path = "../../crates/evaluation" }
 policy = { path = "../../crates/policy" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
@@ -25,6 +26,7 @@ sha2 = "0.10"
 
 [dev-dependencies]
 continuity-contract = { path = "../../crates/continuity-contract" }
+memory-contract = { path = "../../crates/memory-contract" }
 context-engine-contract = { path = "../../crates/context-engine-contract" }
 policy = { path = "../../crates/policy" }
 # Raw-SQL probes for trigger/migration guarantees (TASK-0151): no public

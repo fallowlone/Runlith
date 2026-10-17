@@ -19,9 +19,10 @@ use bytes::Bytes;
 use ipc_contracts::proto::{
     control_request, control_response, ControlRequest, ControlResponse, ExecutionCoreRequest,
     ExecutionCoreResponse, FinderCoreRequest, FinderCoreResponse, HumanDecisionCoreRequest,
-    HumanDecisionCoreResponse, PlanningCoreRequest, PlanningCoreResponse, PolicyCoreRequest,
-    PolicyCoreResponse, ShutdownRequest, TaskAuthoringCoreRequest, TaskAuthoringCoreResponse,
-    TaskCoreRequest, TaskCoreResponse, VaultCoreRequest, VaultCoreResponse,
+    HumanDecisionCoreResponse, MemoryCoreRequest, MemoryCoreResponse, PlanningCoreRequest,
+    PlanningCoreResponse, PolicyCoreRequest, PolicyCoreResponse, ShutdownRequest,
+    TaskAuthoringCoreRequest, TaskAuthoringCoreResponse, TaskCoreRequest, TaskCoreResponse,
+    VaultCoreRequest, VaultCoreResponse,
 };
 use ipc_control::{ClientConfig, ClientSession, ControlError, CLIENT_KIND_AGENTCTL};
 use ipc_transport::{FramedTransport, TransportError};
@@ -150,6 +151,10 @@ pub enum ClientError {
     /// operator may re-issue explicitly; the client never retries
     /// automatically because the revision may move between attempts.
     FinderAmbiguous(String),
+    /// A G10 memory exchange was sent (or may have been sent) but its
+    /// reply is unconfirmed. Memory mutations are never replayed
+    /// automatically; callers re-probe with `memory get` instead.
+    MemoryAmbiguous(String),
     /// OS/runtime I/O failure.
     Io(io::Error),
 }
@@ -181,6 +186,9 @@ impl fmt::Display for ClientError {
             }
             Self::FinderAmbiguous(detail) => {
                 write!(f, "ambiguous finder result (re-issue explicitly): {detail}")
+            }
+            Self::MemoryAmbiguous(detail) => {
+                write!(f, "ambiguous memory result (not replayed): {detail}")
             }
             Self::HumanDecisionAmbiguous(detail) => {
                 write!(
@@ -1166,6 +1174,91 @@ pub async fn finder_request(
     }
 }
 
+/// Performs a protocol-v9 handshake for structured memory.
+#[cfg(unix)]
+async fn handshake_stream_memory<S>(stream: S) -> Result<ClientSession<S>, ClientError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut session = ClientSession::new(
+        FramedTransport::new(stream),
+        ClientConfig::memory_default(CLIENT_KIND_AGENTCTL),
+    );
+    session
+        .perform_handshake()
+        .await
+        .map_err(classify_control)?;
+    if !session.memory_allowed() {
+        return Err(ClientError::Control(ControlError::UnsupportedProtocol {
+            negotiated: session.negotiated_version().unwrap_or(0),
+            required: ipc_contracts::IPC_PROTOCOL_VERSION_V9,
+        }));
+    }
+    Ok(session)
+}
+
+/// Sends one protocol-v9 memory exchange. A lost or ambiguous reply is
+/// [`ClientError::MemoryAmbiguous`]; mutations are never replayed.
+#[cfg(unix)]
+pub async fn memory_request(
+    endpoint: &UnixEndpoint,
+    spawn: impl FnOnce() -> io::Result<Child>,
+    request: MemoryCoreRequest,
+) -> Result<MemoryCoreResponse, ClientError> {
+    let session = connect_or_start_with(spawn, || async {
+        let stream = transport_connect(endpoint)
+            .await
+            .map_err(classify_transport)?;
+        handshake_stream_memory(stream).await
+    })
+    .await?;
+    let absence = absence_note(endpoint);
+    let mut transport = session.into_inner();
+    let frame = Bytes::from(
+        ControlRequest {
+            payload: Some(control_request::Payload::MemoryCore(request)),
+        }
+        .encode_to_vec(),
+    );
+    transport.write_frame(frame).await.map_err(|error| {
+        ClientError::MemoryAmbiguous(format!(
+            "MemoryCoreRequest send failed ({error}); endpoint {absence}; not replaying"
+        ))
+    })?;
+    let frame = tokio::time::timeout(BUSINESS_RESPONSE_TIMEOUT, transport.read_frame())
+        .await
+        .map_err(|_| {
+            ClientError::MemoryAmbiguous(format!(
+                "memory response timeout; endpoint {absence}; not replaying"
+            ))
+        })?
+        .map_err(|error| {
+            ClientError::MemoryAmbiguous(format!(
+                "memory response lost ({error}); endpoint {absence}; not replaying"
+            ))
+        })?;
+    let response = ControlResponse::decode(&frame[..]).map_err(|error| {
+        ClientError::MemoryAmbiguous(format!(
+            "memory response undecodable ({error}); endpoint {absence}; not replaying"
+        ))
+    })?;
+    match response.payload {
+        Some(control_response::Payload::MemoryCore(response)) => Ok(response),
+        other => Err(ClientError::MemoryAmbiguous(format!(
+            "unexpected memory reply ({other:?}); endpoint {absence}; not replaying"
+        ))),
+    }
+}
+
+#[cfg(not(unix))]
+pub async fn memory_request(
+    _endpoint: &str,
+    _spawn: impl FnOnce() -> io::Result<Child>,
+    _request: MemoryCoreRequest,
+) -> Result<MemoryCoreResponse, ClientError> {
+    Err(ClientError::NotRunning)
+}
+
 #[cfg(windows)]
 pub async fn human_decision_request(
     pipe_name: &str,
@@ -1587,6 +1680,158 @@ pub fn format_finder_response(
                  \"expected_rev\":\"\",\"actual_rev\":\"\"}"
                 .to_owned(),
         }),
+    }
+}
+
+/// Usage text for the `memory` command family.
+pub const MEMORY_USAGE: &str = "usage: agentctl memory <capture|get|validate|supersede|retire|list> ...\n  capture --kind SEMANTIC --content <text> --source KIND:REF:REV --confidence 0..1000 --sensitivity PROJECT --anchor KIND:REF:sha256:<hex> --author <ref> [--expires <millis>] [--supersedes <mem_id>]\n  get <mem_id> | validate <mem_id> --validator <ref> | supersede <old_id> <successor_id> | retire <mem_id> | list";
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.windows(2)
+        .find(|pair| pair[0] == flag)
+        .map(|pair| pair[1].as_str())
+}
+
+/// Parses `memory` CLI arguments into one wire request.
+pub fn parse_memory_args(args: &[String]) -> Result<MemoryCoreRequest, String> {
+    use ipc_contracts::proto::{
+        memory_core_request, MemoryAnchor, MemoryCaptureRequest, MemoryGetRequest,
+        MemoryListEligibleRequest, MemoryRetireRequest, MemorySourceRef, MemorySupersedeRequest,
+        MemoryValidateRequest,
+    };
+    let usage = || MEMORY_USAGE.to_owned();
+    let verb = args.first().map(String::as_str).ok_or_else(usage)?;
+    let payload = match verb {
+        "capture" => {
+            let kind = flag_value(args, "--kind").ok_or_else(usage)?.to_owned();
+            let content = flag_value(args, "--content").ok_or_else(usage)?.to_owned();
+            let author = flag_value(args, "--author").ok_or_else(usage)?.to_owned();
+            let confidence: u32 = flag_value(args, "--confidence")
+                .ok_or_else(usage)?
+                .parse()
+                .map_err(|_| usage())?;
+            let sensitivity = flag_value(args, "--sensitivity")
+                .unwrap_or("PROJECT")
+                .to_owned();
+            let mut source_refs = Vec::new();
+            let mut anchors = Vec::new();
+            let mut rest = &args[1..];
+            while let Some((head, tail)) = rest.split_first() {
+                let value = tail.first().cloned().ok_or_else(usage)?;
+                match head.as_str() {
+                    "--source" => {
+                        let parts: Vec<&str> = value.splitn(3, ':').collect();
+                        if parts.len() != 3 {
+                            return Err(usage());
+                        }
+                        source_refs.push(MemorySourceRef {
+                            kind: parts[0].to_owned(),
+                            reference: parts[1].to_owned(),
+                            revision: parts[2].to_owned(),
+                        });
+                    }
+                    "--anchor" => {
+                        let parts: Vec<&str> = value.splitn(3, ':').collect();
+                        if parts.len() != 3 {
+                            return Err(usage());
+                        }
+                        anchors.push(MemoryAnchor {
+                            kind: parts[0].to_owned(),
+                            reference: parts[1].to_owned(),
+                            fingerprint: parts[2].to_owned(),
+                        });
+                    }
+                    _ => {}
+                }
+                rest = if head.starts_with("--") {
+                    &tail[1..]
+                } else {
+                    tail
+                };
+            }
+            if source_refs.is_empty() {
+                return Err(usage());
+            }
+            memory_core_request::Payload::Capture(MemoryCaptureRequest {
+                kind,
+                content,
+                source_refs,
+                confidence,
+                sensitivity,
+                anchors,
+                author_ref: author,
+                now_millis: now_millis(),
+                expires_at: flag_value(args, "--expires")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+                supersedes: flag_value(args, "--supersedes").unwrap_or("").to_owned(),
+            })
+        }
+        "get" => memory_core_request::Payload::Get(MemoryGetRequest {
+            memory_id: args.get(1).cloned().ok_or_else(usage)?,
+        }),
+        "validate" => memory_core_request::Payload::Validate(MemoryValidateRequest {
+            memory_id: args.get(1).cloned().ok_or_else(usage)?,
+            validator_ref: flag_value(args, "--validator")
+                .ok_or_else(usage)?
+                .to_owned(),
+            now_millis: now_millis(),
+        }),
+        "supersede" => memory_core_request::Payload::Supersede(MemorySupersedeRequest {
+            old_memory_id: args.get(1).cloned().ok_or_else(usage)?,
+            successor_id: args.get(2).cloned().ok_or_else(usage)?,
+        }),
+        "retire" => memory_core_request::Payload::Retire(MemoryRetireRequest {
+            memory_id: args.get(1).cloned().ok_or_else(usage)?,
+        }),
+        "list" => memory_core_request::Payload::ListEligible(MemoryListEligibleRequest {
+            now_millis: now_millis(),
+        }),
+        _ => return Err(usage()),
+    };
+    Ok(MemoryCoreRequest {
+        payload: Some(payload),
+    })
+}
+
+/// Renders a memory response for the CLI. Errors never render as
+/// blank success.
+pub fn format_memory_response(response: &MemoryCoreResponse) -> Result<String, String> {
+    use ipc_contracts::proto::memory_core_response;
+    fn line(r: &ipc_contracts::proto::MemoryRecordResponse) -> String {
+        format!(
+            "{} {} {} conf={} sens={} author={} dedup={} {}",
+            r.memory_id,
+            r.kind,
+            r.trust_state,
+            r.confidence,
+            r.sensitivity,
+            r.author_ref,
+            r.deduplicated,
+            r.content
+        )
+    }
+    match &response.payload {
+        Some(memory_core_response::Payload::Record(r)) => Ok(line(r)),
+        Some(memory_core_response::Payload::List(list)) => {
+            let mut out = format!("# memory eligible {}", list.records.len());
+            for r in &list.records {
+                out.push('\n');
+                out.push_str(&line(r));
+            }
+            Ok(out)
+        }
+        Some(memory_core_response::Payload::Error(e)) => {
+            Err(format!("memory {}: {}", e.code, e.detail))
+        }
+        None => Err("memory: empty response".to_owned()),
     }
 }
 

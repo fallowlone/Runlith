@@ -26,6 +26,7 @@ mod error;
 mod event;
 mod human_decision_store;
 mod journal_store;
+mod memory_store;
 mod migration;
 mod observed_effect_store;
 #[cfg(unix)]

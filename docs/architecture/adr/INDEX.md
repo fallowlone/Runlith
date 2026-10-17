@@ -47,5 +47,6 @@
 | [ADR-0041](./ADR-0041-g8-candidate-only-verdict-minting.md) | G8 candidate-only verdict minting authority | Accepted | verification, claims, observed effects, completion authority, g8 sequencing |
 | [ADR-0042](./ADR-0042-g9-context-engine-contract.md) | G9 Context Engine contract (`ContextItem`/`ContextPlan`, Provenance Envelope, budgets, trace, CX-1..CX-10) | Accepted | context engine, selection, provenance, budgets, retrieval trace, g9 |
 | [ADR-0043](./ADR-0043-g9-continuity-contract.md) | G9 Continuity contract (epochs, checkpoints, rollover, history, migration, CR-1..CR-10) | Accepted | continuity, epochs, checkpoints, rollover, history, migration, g9 |
+| [ADR-0044](./ADR-0044-g10-memory-engine-contract.md) | G10 Memory Engine contract (MemoryRecord, trust lifecycle, dedup, staleness, eligibility, M-1..M-12) | Accepted | memory engine, provenance, lifecycle, staleness, g10 |
 
 Coverage register (not an ADR): [COVERAGE.md](./COVERAGE.md).
