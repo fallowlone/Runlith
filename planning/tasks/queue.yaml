@@ -6104,3 +6104,45 @@ items:
       - docs/architecture/adr/ADR-0042-g9-context-engine-contract.md
       - docs/architecture/adr/ADR-0043-g9-continuity-contract.md
       - docs/architecture/INDEX.md
+    outcome: >-
+      G9_REMEDIATION_REQUIRED (docs/development/G9_CLOSURE_AUDIT.md).
+      Independent fresh-context audit on main a19a3e5: TASK-0170,
+      0171, 0173, 0174, 0175 PASS (0173/0174/0175 with recorded
+      non-blocking caveats); TASK-0172 FAIL as blocker B1: the
+      TAKEOVER service is built but unreachable through the shipped
+      control plane (protocol V8 unassigned, no IPC/agentctl
+      exposure, no production offer). Conditional Entity Graph
+      condition recorded UNMET with evidence. Orchestrator full
+      workspace on main: 1852 passed / 1 failed (known
+      execution_recovery load flake, green standalone); fmt and
+      clippy clean. G9 stays in_progress; remediation assigned to
+      TASK-0177, then re-audit.
+
+  - id: TASK-0177
+    gate: G9
+    title: TAKEOVER control-plane rollout (TASK-0172 blocker B1 remediation)
+    objective: >-
+      Make TAKEOVER reachable through the shipped versioned control
+      plane so a human can assume and return authority mid-flight,
+      satisfying the TASK-0172 exit criterion as written.
+    scope: >-
+      Assign IPC protocol V8 and gate TAKEOVER continuation on it;
+      expose apply/append/render/reconcile TAKEOVER operations (or an
+      equivalent operator surface) through trusted agentd IPC and
+      agentctl; offer TAKEOVER in production human-decision
+      requests; add the daemon expiry tick so reconcile fires
+      without a service call; shipped-binary evidence for the full
+      assume/return cycle plus the stale/conflict refusal matrix.
+      No weakening of existing G6 or G7 fences.
+    exit_criteria_summary: >-
+      Through shipped binaries, a human can assume and return
+      authority mid-flight with durable evidence; stale or
+      conflicting TAKEOVER attempts refuse typed; full workspace
+      verification green; TASK-0172 exit criterion demonstrably met.
+    depends_on:
+      - TASK-0176
+    blocked_by: []
+    references:
+      - docs/development/G9_CLOSURE_AUDIT.md
+      - docs/architecture/adr/ADR-0027-g7-planning-orchestration-contract.md
+      - docs/architecture/ipc.md
