@@ -6191,3 +6191,24 @@ items:
       - docs/development/G9_CLOSURE_AUDIT.md
       - planning/roadmap.yaml
       - docs/architecture/INDEX.md
+    outcome: >-
+      G9_CLOSED (docs/development/G9_CLOSURE_REAUDIT.md, gate
+      docs/development/G9_CLOSURE_REAUDIT_GATE.md GATE_PASS).
+      Independent fresh-context re-audit in pristine scratch clones:
+      blocker B1 red on base a19a3e5 (protocol current 7, TAKEOVER
+      refused by construction) and green on main 298696a through the
+      shipped binaries — V8 negotiation, TAKEOVER
+      assume/append/render/return cycle, active-run/stale-decision/
+      stale-lease/consumed-HDR refusal matrix, and the daemon expiry
+      tick with no service call (execution_binaries 17/17 incl. 6/6
+      takeover; ipc-contracts 3/3, agentd 4/4, ipc-control 53/53
+      gate suites). TASK-0170..0175 evidence re-verified
+      (context-engine 28/28, continuity 18/18, takeover 7/7,
+      context_selection 4/4, planning_service 70/70, finder green);
+      G9_CLOSURE_AUDIT.md section 5 residuals unchanged and
+      non-blocking; Conditional Entity Graph condition confirmed
+      UNMET and compliantly non-blocking. fmt and clippy -D warnings
+      clean; full workspace run completed with no failures,
+      matching the TASK-0177 record of 1864 passed / 0 failed on
+      identical Rust code. Roadmap gate advances to G10; G10 may be
+      registered. Audit only: no production behavior changes.
