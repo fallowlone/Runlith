@@ -207,7 +207,7 @@ fn fake_planner_matrix_refuses_malformed_fanout_and_stale_proposals_with_durable
                 PlanningProposalOutcome::WaitingForHuman(ref decision)
                     if decision.reason == HumanDecisionReason::NoProgress
                         && decision.options
-                            == [HumanContinuation::Replan, HumanContinuation::Abort]
+                            == [HumanContinuation::Replan, HumanContinuation::Abort, HumanContinuation::Takeover]
             ));
             assert_eq!(planner.call_count(), 2);
             assert_no_plan_mutation(&db);
@@ -241,7 +241,11 @@ fn depth_exhaustion_escalates_before_fake_planner_invocation_and_survives_restar
     assert_eq!(decision.reason, HumanDecisionReason::PlannerBlocked);
     assert_eq!(
         decision.options,
-        vec![HumanContinuation::Replan, HumanContinuation::Abort]
+        vec![
+            HumanContinuation::Replan,
+            HumanContinuation::Abort,
+            HumanContinuation::Takeover
+        ]
     );
     assert_eq!(
         planner.call_count(),

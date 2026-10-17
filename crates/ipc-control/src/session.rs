@@ -233,6 +233,17 @@ impl ClientConfig {
             .push(ipc_contracts::IPC_PROTOCOL_VERSION_V7);
         config
     }
+
+    /// G9 TAKEOVER client profile (TASK-0177). Offers every version
+    /// through v8 and requires `takeover_allowed` before TAKEOVER use;
+    /// older daemons negotiate down and refuse TAKEOVER typed.
+    pub fn takeover_default(client_kind: impl Into<String>) -> Self {
+        let mut config = Self::finder_default(client_kind);
+        config
+            .supported_versions
+            .push(ipc_contracts::IPC_PROTOCOL_VERSION_V8);
+        config
+    }
 }
 
 /// Client side of the bootstrap control protocol.
@@ -332,6 +343,12 @@ where
     pub fn finder_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_finder_allowed)
+    }
+
+    #[must_use]
+    pub fn takeover_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_takeover_allowed)
     }
 
     /// Unwraps into the framed transport for lifecycle-owned exchanges
@@ -692,6 +709,12 @@ where
     pub fn finder_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_finder_allowed)
+    }
+
+    #[must_use]
+    pub fn takeover_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_takeover_allowed)
     }
 
     /// Reads the first request (within [`HANDSHAKE_TIMEOUT`]), requires it
@@ -1801,6 +1824,14 @@ mod tests {
         assert_eq!(config.supported_versions, vec![0, 1, 2, 3, 4, 5, 6, 7]);
         let historical = ClientConfig::task_authoring_default(CLIENT_KIND_AGENTCTL);
         assert_eq!(historical.supported_versions, vec![0, 1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn takeover_client_profile_extends_the_finder_profile_with_v8() {
+        let config = ClientConfig::takeover_default(CLIENT_KIND_AGENTCTL);
+        assert_eq!(config.supported_versions, vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        let historical = ClientConfig::finder_default(CLIENT_KIND_AGENTCTL);
+        assert_eq!(historical.supported_versions, vec![0, 1, 2, 3, 4, 5, 6, 7]);
     }
 
     #[tokio::test]

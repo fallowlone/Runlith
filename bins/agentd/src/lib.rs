@@ -188,11 +188,11 @@ impl DaemonConfig {
     /// G5 daemon configuration (TASK-0047): protocols `[0, 1, 2]` with
     /// the durable database at `path`, enabling the execution surface
     /// (`run`/`status`/`cancel`) through the real-provider composition.
-    /// Production default from TASK-0047 on; G9 negotiates through v7
-    /// (repository finder) while preserving every older surface.
+    /// Production default from TASK-0047 on; G9 negotiates through v8
+    /// (TASK-0177 TAKEOVER rollout) while preserving every older surface.
     pub fn with_execution(path: impl Into<PathBuf>) -> Self {
         Self {
-            server_config: ServerConfig::g9_default(),
+            server_config: ServerConfig::g9_takeover_default(),
             database_path: Some(path.into()),
             provider_executable: None,
         }
@@ -471,15 +471,24 @@ where
                 }
             }
             Ok(ReadyRequest::HumanDecision(request)) => {
+                let negotiated = session.negotiated_version().unwrap_or(0);
                 let response = match &services.human_decision {
-                    Some(handle) => {
-                        let mut service = handle.lock().await;
-                        human_decision::dispatch(
-                            &mut service,
-                            request,
-                            session.negotiated_version().unwrap_or(0),
-                        )
-                    }
+                    Some(handle) => match &services.business {
+                        Some(business) => {
+                            let tasks = business.lock().await;
+                            let mut service = handle.lock().await;
+                            human_decision::dispatch(
+                                &mut service,
+                                Some(&tasks),
+                                request,
+                                negotiated,
+                            )
+                        }
+                        None => {
+                            let mut service = handle.lock().await;
+                            human_decision::dispatch(&mut service, None, request, negotiated)
+                        }
+                    },
                     None => human_decision::unavailable(),
                 };
                 if session.respond_human_decision(response).await.is_err() {
@@ -540,6 +549,42 @@ where
     }
 }
 
+/// Bounded cadence for the daemon TAKEOVER expiry tick (TASK-0177).
+const TAKEOVER_EXPIRY_TICK: Duration = Duration::from_secs(1);
+
+/// Reconciles expired ACTIVE takeovers without any service call.
+/// Shutdown-safe: exits when the shutdown watch flips and is aborted
+/// during wind-down; a reconcile failure is logged, never fatal.
+async fn takeover_expiry_loop(
+    handle: HumanDecisionHandle,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+            _ = tokio::time::sleep(TAKEOVER_EXPIRY_TICK) => {
+                let mut service = handle.lock().await;
+                match service.reconcile_takeover_expiry(None) {
+                    Ok(abandoned) if !abandoned.is_empty() => {
+                        eprintln!(
+                            "agentd: takeover expiry abandoned {} record(s)",
+                            abandoned.len()
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        eprintln!("agentd: takeover expiry reconcile failed: {error}");
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Shared serve loop: admits authenticated streams from the accept pump
 /// until a shutdown is initiated, then winds down. Each item carries an
 /// optional prefetched first frame (Windows staging; `None` on Unix).
@@ -567,6 +612,10 @@ where
         .vault
         .clone()
         .map(|handle| tokio::spawn(vault::idle_watch(handle)));
+    let takeover_tick = services
+        .human_decision
+        .clone()
+        .map(|handle| tokio::spawn(takeover_expiry_loop(handle, shutdown_rx.clone())));
     let admissions = Arc::new(tokio::sync::Semaphore::new(MAX_CONTROL_CLIENTS));
     let mut joins = tokio::task::JoinSet::new();
     let mut connections_served: u64 = 0;
@@ -614,6 +663,10 @@ where
     joins.abort_all();
     while joins.join_next().await.is_some() {}
     if let Some(task) = vault_idle {
+        task.abort();
+        let _ = task.await;
+    }
+    if let Some(task) = takeover_tick {
         task.abort();
         let _ = task.await;
     }

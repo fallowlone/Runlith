@@ -54,11 +54,93 @@ message DecideHumanDecisionRequest {
   HumanContinuationDecision continuation = 2;
 }
 
+// TASK-0177 (protocol v8): TAKEOVER operations. Valid only on sessions
+// that negotiated protocol version 8 or higher; older sessions refuse
+// typed and never execute. Each operation is a thin adapter over the
+// trusted HumanDecisionService TAKEOVER operations.
+message ApplyTakeoverRequest {
+  string request_id = 1;
+  uint64 expires_at_ms = 2;
+}
+
+message TakeoverAuthoredField {
+  string text = 1;
+  // DATA_CLASSIFICATION label: PUBLIC, PROJECT, PRIVATE, RESTRICTED or
+  // SECRET. SECRET fields must set is_ref and carry a reference only.
+  string sensitivity = 2;
+  bool is_ref = 3;
+}
+
+message AppendTakeoverRequest {
+  string record_id = 1;
+  optional TakeoverAuthoredField actions = 2;
+  optional TakeoverAuthoredField uncertainty = 3;
+  optional TakeoverAuthoredField question = 4;
+  optional uint64 resulting_revision = 5;
+}
+
+message RenderHandoffPacketRequest {
+  string record_id = 1;
+}
+
+message ReconcileTakeoverExpiryRequest {
+  optional string task_id = 1;
+}
+
+message TakeoverRecordDto {
+  string record_id = 1;
+  string hdr_id = 2;
+  string task_id = 3;
+  string plan_branch_id = 4;
+  uint64 basis_plan_revision = 5;
+  uint64 expires_at_ms = 6;
+  string status = 7;
+  optional TakeoverAuthoredField actions = 8;
+  optional TakeoverAuthoredField uncertainty = 9;
+  optional TakeoverAuthoredField question = 10;
+  optional uint64 resulting_revision = 11;
+  uint64 created_at_ms = 12;
+  optional uint64 resolved_at_ms = 13;
+}
+
+message HandoffPacketDto {
+  string goal = 1;
+  string task_id = 2;
+  uint64 task_event_seq = 3;
+  string plan_branch_id = 4;
+  uint64 plan_head = 5;
+  optional string lease_id = 6;
+  optional TakeoverAuthoredField actions = 7;
+  repeated string blockers = 8;
+  optional TakeoverAuthoredField uncertainty = 9;
+  optional TakeoverAuthoredField question = 10;
+}
+
+message ApplyTakeoverResponse {
+  TakeoverRecordDto record = 1;
+}
+
+message AppendTakeoverResponse {
+  TakeoverRecordDto record = 1;
+}
+
+message RenderHandoffPacketResponse {
+  HandoffPacketDto packet = 1;
+}
+
+message ReconcileTakeoverExpiryResponse {
+  repeated TakeoverRecordDto records = 1;
+}
+
 message HumanDecisionCoreRequest {
   oneof payload {
     ListHumanDecisionsRequest list_pending = 1;
     GetHumanDecisionRequest get = 2;
     DecideHumanDecisionRequest decide = 3;
+    ApplyTakeoverRequest apply_takeover = 4;
+    AppendTakeoverRequest append_takeover = 5;
+    RenderHandoffPacketRequest render_handoff_packet = 6;
+    ReconcileTakeoverExpiryRequest reconcile_takeover_expiry = 7;
   }
 }
 
@@ -80,5 +162,9 @@ message HumanDecisionCoreResponse {
     GetHumanDecisionResponse get = 2;
     DecideHumanDecisionResponse decide = 3;
     BusinessError error = 4;
+    ApplyTakeoverResponse apply_takeover = 5;
+    AppendTakeoverResponse append_takeover = 6;
+    RenderHandoffPacketResponse render_handoff_packet = 7;
+    ReconcileTakeoverExpiryResponse reconcile_takeover_expiry = 8;
   }
 }

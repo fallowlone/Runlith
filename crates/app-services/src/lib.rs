@@ -50,7 +50,9 @@ pub use binding_service::{
 };
 pub use candidate_verdict::mint_candidate_verdicts;
 pub use clock::{format_rfc3339, Clock, FixedClock, SystemClock};
+pub use context_engine::model::Sensitivity;
 pub use context_service::{ContextService, SelectionRequest};
+pub use continuity::model::NoteBody;
 pub use continuity_service::{CommitRequest, ContinuityService, NewNote};
 pub use error::{ServiceError, ServiceResult};
 pub use finder_service::{
@@ -97,6 +99,9 @@ pub use runtime_service::{AppliedExecution, PlannedExecution, RuntimeService};
 pub use secret_redaction::{redact_line, redact_lines, REDACTED};
 pub use security_service::{
     G6Authorization, G6SecurityError, G6SecurityService, PrivilegedOperation, ProcessSecuritySpec,
+};
+pub use takeover::{
+    AuthoredField, HandoffPacket, TakeoverAdmission, TakeoverRecordId, TakeoverStatus,
 };
 pub use task_service::{AppliedTransition, PlannedTransition, ReconcileReport, TaskService};
 pub use verification_execution::{

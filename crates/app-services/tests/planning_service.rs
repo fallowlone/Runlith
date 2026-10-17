@@ -1158,7 +1158,7 @@ fn provider_failure_consumes_conservative_budget_without_fabricating_usage_evide
         stopped,
         PlanningProposalOutcome::WaitingForHuman(ref decision)
             if decision.reason == HumanDecisionReason::PlannerBudget
-                && decision.options == [HumanContinuation::Replan, HumanContinuation::Abort]
+                && decision.options == [HumanContinuation::Replan, HumanContinuation::Abort, HumanContinuation::Takeover]
     ));
     assert_eq!(
         planner.call_count(),
@@ -1794,7 +1794,11 @@ fn planner_call_budget_is_hard_and_prevents_ninth_call() {
             assert_eq!(decision.reason, HumanDecisionReason::PlannerBudget);
             assert_eq!(
                 decision.options,
-                vec![HumanContinuation::Replan, HumanContinuation::Abort]
+                vec![
+                    HumanContinuation::Replan,
+                    HumanContinuation::Abort,
+                    HumanContinuation::Takeover
+                ]
             );
         }
         other => panic!("expected planner-budget human decision, got {other:?}"),
@@ -1869,7 +1873,11 @@ fn l3_no_progress_survives_restart_for_same_evidence() {
             assert_eq!(decision.reason, HumanDecisionReason::NoProgress);
             assert_eq!(
                 decision.options,
-                vec![HumanContinuation::Replan, HumanContinuation::Abort]
+                vec![
+                    HumanContinuation::Replan,
+                    HumanContinuation::Abort,
+                    HumanContinuation::Takeover
+                ]
             );
             decision.id
         }

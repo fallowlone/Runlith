@@ -731,15 +731,17 @@ pub async fn policy_request(
     policy_session(session, request, absence_note(pipe_name)).await
 }
 
-/// Performs a protocol-v4 handshake for the bounded G7 Human Decision
-/// Queue surface.
+/// Performs a handshake for the bounded G7 Human Decision Queue
+/// surface. TASK-0177 offers through protocol v8 so TAKEOVER can
+/// negotiate; older daemons negotiate down (v4-v7 keep list/get/decide
+/// for the older continuations and refuse TAKEOVER typed).
 async fn handshake_stream_v4<S>(stream: S) -> Result<ClientSession<S>, ClientError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut session = ClientSession::new(
         FramedTransport::new(stream),
-        ClientConfig::human_decision_default(CLIENT_KIND_AGENTCTL),
+        ClientConfig::takeover_default(CLIENT_KIND_AGENTCTL),
     );
     session
         .perform_handshake()
