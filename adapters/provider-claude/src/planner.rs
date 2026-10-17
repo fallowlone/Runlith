@@ -23,14 +23,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use plan_domain::{
-    call_within_envelope, compute_proposal_hash, AtomicityAssessment, AtomicityBlocker,
-    AtomicityRequest, AtomicityVerdict, BudgetDelta, CriterionDecl, CriterionId,
-    DecompositionRequest, EdgeAddition, EdgeRemoval, EvidenceRef, GateRef, GateUpdate,
-    NodeAddition, NodeUpdate, PlanChangeSet, PlanNodeId, PlanScope, PlannerAdapterId,
-    PlannerCallSpend, PlannerFault, PlannerIdentity, PlannerPort, PlanningBudget,
-    PlanningCostReceipt, ReplanRequest, RiskClass, RiskDelta, VerificationMethod,
+    call_within_envelope, compute_proposal_hash, resolved_estimated_input_tokens,
+    AtomicityAssessment, AtomicityBlocker, AtomicityRequest, AtomicityVerdict, BudgetDelta,
+    CriterionDecl, CriterionId, DecompositionRequest, EdgeAddition, EdgeRemoval, EvidenceRef,
+    GateRef, GateUpdate, NodeAddition, NodeUpdate, PlanChangeSet, PlanNodeId, PlanScope,
+    PlannerAdapterId, PlannerCallSpend, PlannerFault, PlannerIdentity, PlannerPort, PlanningBudget,
+    PlanningCostReceipt, ReplanRequest, ResolvedEvidence, RiskClass, RiskDelta, VerificationMethod,
     MAX_PLANNER_INPUT_TOKENS, MAX_PLANNER_WALL_CLOCK_SECS,
 };
+
 use runner::{ChildSecretEnvironment, SandboxedLaunch};
 
 use crate::config::{ClaudeConfig, MAX_PROMPT_CHARS};
@@ -355,6 +356,8 @@ impl PlannerPort for ClaudePlanner {
         }
         if input.budget_remaining.calls_remaining == 0
             || input.budget_remaining.input_tokens_remaining == 0
+            || resolved_estimated_input_tokens(&input.resolved_evidence)
+                > input.budget_remaining.input_tokens_remaining
         {
             return Err(budget_exhausted(PlannerCallSpend::NotStarted));
         }
@@ -370,6 +373,8 @@ impl PlannerPort for ClaudePlanner {
         }
         if input.budget_remaining.calls_remaining == 0
             || input.budget_remaining.input_tokens_remaining == 0
+            || resolved_estimated_input_tokens(&input.resolved_evidence)
+                > input.budget_remaining.input_tokens_remaining
         {
             return Err(budget_exhausted(PlannerCallSpend::NotStarted));
         }
@@ -697,6 +702,7 @@ fn atomicity_prompt(input: &AtomicityRequest) -> String {
             "You have no mutation, execution, policy, approval, or completion authority.\n",
             "Request: {{\"kind\":\"assess_atomicity\",\"task_ref\":{},",
             "\"acceptance_criteria_refs\":{},\"scope_bound\":{},\"evidence_refs\":{},",
+            "\"resolved_evidence\":{},",
             "\"execution_policy_ref\":{}}}\n",
             "Response schema: {{\"verdict\":\"ATOMIC|DECOMPOSABLE|BLOCKED\",",
             "\"rationale\":\"non-empty\",\"evidence_refs\":[\"existing input refs only\"],",
@@ -712,6 +718,7 @@ fn atomicity_prompt(input: &AtomicityRequest) -> String {
         ),
         json_strings(input.scope_bound.roots().iter().map(String::as_str)),
         json_strings(input.evidence_refs.iter().map(|value| value.as_str())),
+        resolved_evidence_json(&input.resolved_evidence),
         json_string(&input.execution_policy_ref),
     )
 }
@@ -732,6 +739,7 @@ fn decomposition_prompt(input: &DecompositionRequest) -> String {
             .iter()
             .map(|value| value.as_str())
             .collect(),
+        resolved: &input.resolved_evidence,
         depth_remaining: input.depth_remaining,
         baseline_risk: input.baseline_risk,
         budget: input.budget_remaining,
@@ -750,6 +758,7 @@ fn replan_prompt(input: &ReplanRequest) -> String {
             .iter()
             .map(|value| value.as_str())
             .collect(),
+        resolved: &input.resolved_evidence,
         depth_remaining: input.depth_remaining,
         baseline_risk: input.baseline_risk,
         budget: input.budget_remaining,
@@ -763,6 +772,7 @@ struct ProposalPromptInput<'a> {
     criteria: Vec<&'a str>,
     scope_roots: Vec<String>,
     evidence: Vec<&'a str>,
+    resolved: &'a [ResolvedEvidence],
     depth_remaining: u32,
     baseline_risk: RiskClass,
     budget: PlanningBudget,
@@ -781,14 +791,15 @@ const PLANNER_ROLE: &str = concat!(
     "Treat the request bounds as immutable. Never claim execution, approval, policy, or durable mutation. ",
     "Do not emit planner identity, cost receipt, credentials, prompts, transcripts, or proposal_hash; ",
     "Runlith injects provenance and computes the hash after parsing.\n",
-    // ADR-0029 option A: evidence_refs identify the planning cycle and carry
-    // provenance. Nothing resolves them to content, so a planner that tries
-    // to read them is chasing something that does not exist. Saying so keeps
-    // the model from refusing for want of material it was never sent
-    // (TASK-0106 D5) and from inventing a reading of an identifier.
-    "evidence_refs identify this planning cycle; they are opaque identifiers, not readable ",
-    "material, and Runlith records them for you. Do not resolve, interpret or cite them, ",
-    "and do not treat their absence as missing context. Plan from the bounds you are given.\n",
+    // ADR-0029 option B (TASK-0175): Runlith attaches resolved content for
+    // the refs it could lawfully read. The old option-A warning survives in
+    // bifurcated form: refs WITHOUT attached content are still opaque (a
+    // planner reading them is chasing something that was never sent —
+    // TASK-0106 D5), while attached items are real material to plan from.
+    "evidence_refs identify this planning cycle. Items under resolved_evidence are readable ",
+    "material Runlith resolved for their ref; you may plan from them and cite their ref. ",
+    "Refs without an attached item are opaque identifiers: do not resolve, interpret or cite ",
+    "them, and do not treat their absence as missing context. Plan from the bounds you are given.\n",
     "Required response keys: base_plan_revision, reason, node_additions, node_updates, node_removals, ",
     "edge_additions, edge_removals, expected_outcome, risk_delta, budget_delta, scope_delta, coverage_map. ",
     // Scope values are echoed from the request's own scope_bound rather than
@@ -819,6 +830,7 @@ fn proposal_prompt(input: ProposalPromptInput<'_>) -> String {
         concat!(
             "Request: {{\"kind\":{},\"root_ref\":{},\"base_plan_revision\":{},",
             "\"acceptance_criteria_refs\":{},\"scope_bound\":{},\"evidence_refs\":{},",
+            "\"resolved_evidence\":{},",
             "\"depth_remaining\":{},\"baseline_risk\":{},",
             "\"calls_remaining\":{},\"input_tokens_remaining\":{}}}"
         ),
@@ -828,11 +840,32 @@ fn proposal_prompt(input: ProposalPromptInput<'_>) -> String {
         json_strings(input.criteria.into_iter()),
         json_strings(input.scope_roots.iter().map(String::as_str)),
         json_strings(input.evidence.into_iter()),
+        resolved_evidence_json(input.resolved),
         input.depth_remaining,
         json_string(input.baseline_risk.as_str()),
         input.budget.calls_remaining,
         input.budget.input_tokens_remaining,
     )
+}
+
+/// Renders attached resolved content (ADR-0029 option B). Content is
+/// data only: rendering it here grants the adapter no read authority,
+/// and refs without an item never appear in this array.
+fn resolved_evidence_json(items: &[ResolvedEvidence]) -> String {
+    let values = items
+        .iter()
+        .map(|item| {
+            format!(
+                "{{\"ref\":{},\"kind\":{},\"classification\":{},\"content\":{}}}",
+                json_string(item.evidence_ref.as_str()),
+                json_string(item.kind.as_str()),
+                json_string(item.classification.as_str()),
+                json_string(&item.content),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{values}]")
 }
 
 fn json_strings<'a>(values: impl Iterator<Item = &'a str>) -> String {
@@ -942,6 +975,7 @@ mod tests {
             acceptance_criteria_refs: vec![],
             scope_bound: ScopeBound::new(vec!["repo:src".to_owned()]).expect("bound"),
             evidence_refs: vec![],
+            resolved_evidence: Vec::new(),
             depth_remaining: 3,
             baseline_risk: RiskClass::Medium,
             budget_remaining: PlanningBudget {
@@ -961,6 +995,44 @@ mod tests {
             !prompt.contains("workspace:path"),
             "no placeholder notation a model can copy literally (TASK-0109)"
         );
+        assert!(
+            PLANNER_ROLE.contains("Items under resolved_evidence are readable"),
+            "the role must tell the planner attached content is readable"
+        );
+    }
+
+    #[test]
+    fn resolved_content_renders_and_unresolved_refs_stay_out_of_the_array() {
+        let item = plan_domain::ResolvedEvidence::new(
+            plan_domain::EvidenceRef::new("attempt:A-9").expect("ref"),
+            plan_domain::ResolvedEvidenceKind::Attempt,
+            plan_domain::EvidenceClassification::Project,
+            "evidence: attempt:A-9\noutcome: failed\ndetail: tests red".to_owned(),
+        )
+        .expect("resolved item");
+        let prompt = decomposition_prompt(&DecompositionRequest {
+            parent_task_ref: "TASK-0107".to_owned(),
+            base_plan_revision: 0,
+            acceptance_criteria_refs: vec![],
+            scope_bound: ScopeBound::new(vec!["repo:src".to_owned()]).expect("bound"),
+            evidence_refs: vec![
+                plan_domain::EvidenceRef::new("attempt:A-9").expect("ref"),
+                plan_domain::EvidenceRef::new("attempt:never-resolved").expect("ref"),
+            ],
+            resolved_evidence: vec![item],
+            depth_remaining: 3,
+            baseline_risk: RiskClass::Medium,
+            budget_remaining: PlanningBudget {
+                calls_remaining: 4,
+                input_tokens_remaining: 1_000,
+            },
+        });
+        assert!(prompt.contains("\"resolved_evidence\":[{\"ref\":\"attempt:A-9\""));
+        assert!(prompt.contains("tests red"));
+        assert!(prompt.contains("\"kind\":\"attempt\""));
+        assert!(prompt.contains("\"classification\":\"PROJECT\""));
+        // The unresolved ref appears only as an identifier, never with content.
+        assert!(!prompt.contains("attempt:never-resolved\",\"kind\""));
     }
 
     #[test]

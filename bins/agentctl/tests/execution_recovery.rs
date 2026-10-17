@@ -341,6 +341,7 @@ fn seed_accepted_plan(sandbox: &Sandbox, task: &str) {
         acceptance_criteria_refs: vec![],
         scope_bound: scope.clone(),
         evidence_refs: vec![plan_domain::EvidenceRef::new(format!("fixture-plan:{task}")).unwrap()],
+        resolved_evidence: Vec::new(),
         depth_remaining: plan_domain::MAX_DECOMPOSITION_DEPTH,
         baseline_risk: plan_domain::RiskClass::Low,
         budget_remaining: plan_domain::PlanningBudget {

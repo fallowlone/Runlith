@@ -291,6 +291,9 @@ pub fn dispatch_control(
                 acceptance_criteria_refs: Vec::new(),
                 scope_bound: policy.scope_bound.clone(),
                 evidence_refs: vec![evidence],
+                // Filled by the trusted planning service (TASK-0175);
+                // caller-attached content is never forwarded.
+                resolved_evidence: Vec::new(),
                 baseline_risk: policy.baseline_risk,
                 depth_remaining: MAX_DECOMPOSITION_DEPTH,
                 budget_remaining: PlanningBudget {

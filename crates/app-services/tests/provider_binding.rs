@@ -533,6 +533,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture 
                 acceptance_criteria_refs: vec![],
                 scope_bound: ScopeBound::new(vec!["repo:src".into()]).unwrap(),
                 evidence_refs: vec![],
+                resolved_evidence: Vec::new(),
                 execution_policy_ref: "fixture-policy".into(),
             }),
             Err(PlannerFault::ProviderFailure { typed_cause, spend: PlannerCallSpend::NotStarted })

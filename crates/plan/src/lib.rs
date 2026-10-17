@@ -16,6 +16,7 @@ pub mod hash;
 pub mod human_decision;
 pub mod ids;
 pub mod model;
+pub mod resolved_evidence;
 pub mod risk;
 pub mod scope;
 pub mod task_authority;
@@ -48,6 +49,12 @@ pub use model::{
     PlanChangeSet, PlanGraph, PlanNode, PlanRevision, PlannerCallSpend, PlannerFault,
     PlannerIdentity, PlannerPort, PlanningBudget, PlanningCostReceipt, ReplanRequest,
     RevisionProposedBy, ValidatedBy,
+};
+pub use resolved_evidence::{
+    resolved_estimated_input_tokens, resolved_within_call_bounds, EvidenceClassification,
+    ResolvedEvidence, ResolvedEvidenceKind, MAX_RESOLVED_EVIDENCE_BYTES_PER_CALL,
+    MAX_RESOLVED_EVIDENCE_BYTES_PER_ITEM, MAX_RESOLVED_EVIDENCE_ITEMS_PER_CALL,
+    RESOLVED_EVIDENCE_TOKENS_PER_ITEM_OVERHEAD,
 };
 pub use risk::{
     method_for_requirement_kind, requirement_kind_for_method, CriterionDecl, GateRef, RiskClass,

@@ -164,6 +164,7 @@ fn request() -> DecompositionRequest {
         acceptance_criteria_refs: vec![CriterionId::new(PARENT_CRITERION).expect("criterion id")],
         scope_bound: ScopeBound::new(vec![SCOPE_ROOT.to_owned()]).expect("scope bound"),
         evidence_refs: vec![evidence()],
+        resolved_evidence: Vec::new(),
         depth_remaining: 4,
         baseline_risk: RiskClass::Low,
         budget_remaining: PlanningBudget {

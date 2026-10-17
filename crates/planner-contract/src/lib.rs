@@ -6,9 +6,9 @@
 
 use plan_domain::{
     call_within_envelope, verify_proposal_hash, AtomicityRequest, AtomicityVerdict, CriterionId,
-    DecompositionRequest, EvidenceRef, PlannerCallSpend, PlannerFault, PlannerPort, PlanningBudget,
-    ReplanRequest, RiskClass, ScopeBound, MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
-    MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
+    DecompositionRequest, EvidenceClassification, EvidenceRef, PlannerCallSpend, PlannerFault,
+    PlannerPort, PlanningBudget, ReplanRequest, ResolvedEvidence, ResolvedEvidenceKind, RiskClass,
+    ScopeBound, MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH, MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
 };
 
 /// Concrete planner behaviors supplied by one adapter's test target.
@@ -26,6 +26,7 @@ pub fn run_planner_port_contract(planners: &ContractPlanners<'_>) {
     atomicity_is_proposal_only_data(planners.valid);
     decomposition_is_bounded_untrusted_data(planners.valid);
     replan_is_branch_scoped_bounded_data(planners.valid);
+    resolved_content_is_readable_material(planners.valid);
     guardrail_faults_are_typed_before_proposal(planners.valid);
     provider_failure_is_typed(planners.failure);
     malformed_never_becomes_a_valid_proposal(planners.malformed);
@@ -58,6 +59,7 @@ pub fn contract_atomicity_request() -> AtomicityRequest {
         acceptance_criteria_refs: vec![criterion()],
         scope_bound: bound(),
         evidence_refs: vec![evidence()],
+        resolved_evidence: Vec::new(),
         execution_policy_ref: "policy:contract".to_owned(),
     }
 }
@@ -71,10 +73,47 @@ pub fn contract_decomposition_request() -> DecompositionRequest {
         acceptance_criteria_refs: vec![criterion()],
         scope_bound: bound(),
         evidence_refs: vec![evidence()],
+        resolved_evidence: Vec::new(),
         depth_remaining: 4,
         baseline_risk: RiskClass::Low,
         budget_remaining: budget(),
     }
+}
+
+/// Decomposition request with one attached resolved item (ADR-0029
+/// option B): content only for [`evidence()`]; the ref itself stays.
+#[must_use]
+pub fn contract_decomposition_request_resolved() -> DecompositionRequest {
+    let mut request = contract_decomposition_request();
+    request.resolved_evidence = vec![ResolvedEvidence::new(
+        evidence(),
+        ResolvedEvidenceKind::Attempt,
+        EvidenceClassification::Project,
+        "evidence: attempt:fixture-attempt\noutcome: failed\ndetail: verification failed on the base revision"
+            .to_owned(),
+    )
+    .expect("contract resolved item")];
+    request
+}
+
+fn resolved_content_is_readable_material(planner: &dyn PlannerPort) {
+    let request = contract_decomposition_request_resolved();
+    let proposal = planner
+        .propose_decomposition(request.clone())
+        .expect("valid planner must accept attached resolved content");
+    assert!(proposal.check_wellformed().is_ok());
+    assert!(verify_proposal_hash(&proposal));
+
+    // Attached content never buys budget back: an over-estimate request
+    // is refused before spend, exactly like an empty-budget request.
+    let mut over_budget = contract_decomposition_request_resolved();
+    over_budget.budget_remaining.input_tokens_remaining = 1;
+    assert!(matches!(
+        planner.propose_decomposition(over_budget),
+        Err(PlannerFault::BudgetExhausted {
+            spend: PlannerCallSpend::NotStarted
+        })
+    ));
 }
 
 /// Shared deterministic replan request.
@@ -84,6 +123,7 @@ pub fn contract_replan_request() -> ReplanRequest {
         branch_root_ref: "TASK-CONTRACT".to_owned(),
         base_plan_revision: 1,
         triggering_evidence_refs: vec![evidence()],
+        resolved_evidence: Vec::new(),
         scope_bound: bound(),
         depth_remaining: 3,
         baseline_risk: RiskClass::Low,

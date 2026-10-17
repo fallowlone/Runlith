@@ -281,6 +281,38 @@ worker. Provider transfer ≠ our-cloud transfer, always.
 - **Relevant PRIV/INV/ADR:** PRIV-009 (opt-in principle); INV-011;
   ADR-0014.
 
+## FLOW-013 — Planning Service → external planner provider (resolved evidence)
+
+- **Source:** durable local records named by triggering `EvidenceRef`s
+  (attempt conclusions, human decision outcomes), resolved and screened by
+  the trusted planning service.
+- **Destination:** AI provider infrastructure via the planner provider
+  adapter (same destination class as FLOW-003).
+- **Data involved:** bounded classified content attached to the planner
+  request: `attempt:` items (PROJECT) and `human-decision:` decision
+  outcomes (RESTRICTED), both INV-008 redaction-screened; the `decided_by`
+  human identity and any SECRET material never transfer. All other refs
+  remain identity-only.
+- **Default classification:** PROJECT / RESTRICTED as resolved; SECRET
+  excluded by construction (see
+  [`PLANNER_EVIDENCE_RESOLUTION_POLICY.md`](./PLANNER_EVIDENCE_RESOLUTION_POLICY.md)).
+- **Purpose:** make planner input real so decomposition proposals can use
+  prior attempt and decision evidence (ADR-0029 option B).
+- **Local or external:** EXTERNAL PROVIDER TRANSFER.
+- **User action / feature causing flow:** a planning cycle triggered by
+  execution/decision evidence, routed to the selected planner provider.
+- **Policy/consent expectation:** provider choice is user-visible;
+  transfer shown clearly (PRIV-010) via planning evidence and durable
+  planner-call settlements (measured input tokens include resolved bytes);
+  per-call bounds in the resolution policy.
+- **Persistence at destination:** provider-owned retention applies — not
+  controlled by our application (PRIV-004 distinction).
+- **Observability requirement:** which refs resolved, classification per
+  item, measured input tokens; resolved content itself never enters
+  operational logs or journal payloads (INV-008).
+- **Relevant PRIV/INV/ADR:** PRIV-003, PRIV-004, PRIV-010; INV-008,
+  INV-043, INV-093; ADR-0029 (option B), ADR-0042.
+
 ## Flows deliberately absent
 
 No flow exists for: provider-credential extraction (provider auth stays

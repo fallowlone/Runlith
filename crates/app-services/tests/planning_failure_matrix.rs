@@ -122,6 +122,7 @@ fn request(trigger: &str) -> DecompositionRequest {
         acceptance_criteria_refs: vec![],
         scope_bound: ScopeBound::new(vec!["caller:ignored".to_owned()]).expect("caller scope"),
         evidence_refs: vec![evidence(trigger)],
+        resolved_evidence: Vec::new(),
         depth_remaining: MAX_DECOMPOSITION_DEPTH,
         baseline_risk: RiskClass::Low,
         budget_remaining: PlanningBudget {

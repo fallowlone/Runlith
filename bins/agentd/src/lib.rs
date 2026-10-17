@@ -1245,6 +1245,7 @@ mod tests {
             acceptance_criteria_refs: vec![],
             scope_bound: scope.clone(),
             evidence_refs: vec![evidence],
+            resolved_evidence: Vec::new(),
             depth_remaining: plan_domain::MAX_DECOMPOSITION_DEPTH,
             baseline_risk: plan_domain::RiskClass::Low,
             budget_remaining: plan_domain::PlanningBudget {

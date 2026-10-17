@@ -5268,6 +5268,7 @@ mod tests {
             acceptance_criteria_refs: vec![],
             scope_bound: scope.clone(),
             evidence_refs: vec![evidence],
+            resolved_evidence: Vec::new(),
             depth_remaining: plan_domain::MAX_DECOMPOSITION_DEPTH,
             baseline_risk: plan_domain::RiskClass::Low,
             budget_remaining: plan_domain::PlanningBudget {
@@ -6097,6 +6098,7 @@ mod tests {
             acceptance_criteria_refs: Vec::new(),
             scope_bound: plan_domain::ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
             evidence_refs: vec![plan_domain::EvidenceRef::new("evidence-brokered").unwrap()],
+            resolved_evidence: Vec::new(),
             execution_policy_ref: "policy:brokered".to_owned(),
         }) {
             Err(plan_domain::PlannerFault::ProviderFailure { typed_cause, spend }) => {
@@ -6151,6 +6153,7 @@ mod tests {
                 acceptance_criteria_refs: Vec::new(),
                 scope_bound: plan_domain::ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
                 evidence_refs: vec![plan_domain::EvidenceRef::new("evidence-brokered").unwrap()],
+                resolved_evidence: Vec::new(),
                 execution_policy_ref: "policy:brokered".to_owned(),
             })
             .expect_err("401 fails the planner call");
@@ -6338,6 +6341,7 @@ mod tests {
             acceptance_criteria_refs: Vec::new(),
             scope_bound: plan_domain::ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
             evidence_refs: vec![plan_domain::EvidenceRef::new("evidence-brokered").unwrap()],
+            resolved_evidence: Vec::new(),
             execution_policy_ref: "policy:brokered".to_owned(),
         };
 
