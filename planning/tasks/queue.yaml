@@ -6074,3 +6074,33 @@ items:
       clippy -D warnings, full workspace 1853 passed / 0 failed.
       One minor non-blocking doc mismatch noted (policy truncation
       suffix wording vs code marker).
+
+  - id: TASK-0176
+    gate: G9
+    title: Independent G9 closure audit
+    objective: >-
+      Re-audit the complete accepted G9 contract from a fresh context and
+      return exactly G9_CLOSED or G9_REMEDIATION_REQUIRED without
+      implementing repairs.
+    scope: >-
+      Audit only: re-test the TASK-0170..TASK-0175 acceptance evidence
+      against the current tree (provenance envelope and selection trace,
+      epochs/checkpoints/history, TAKEOVER continuation and HandoffPacket
+      rendering, finder benchmark posture and INV-008 filtering, planner
+      evidence resolution boundary), record the Conditional Entity Graph
+      entry-condition verdict with its evidence, and check G8/G7
+      regression envelopes. No production behavior changes.
+    exit_criteria_summary: >-
+      A closure report records one hard G9 verdict backed by current
+      code, executable tests and benchmark evidence; any blocker is
+      assigned to a separate remediation task before another closure
+      audit. The Entity Graph condition is recorded as met with a cited
+      measurement or as unmet.
+    depends_on:
+      - TASK-0175
+    blocked_by: []
+    references:
+      - planning/roadmap.yaml
+      - docs/architecture/adr/ADR-0042-g9-context-engine-contract.md
+      - docs/architecture/adr/ADR-0043-g9-continuity-contract.md
+      - docs/architecture/INDEX.md
