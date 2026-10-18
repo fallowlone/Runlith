@@ -1,0 +1,113 @@
+syntax = "proto3";
+
+package ai_engineering_os.ipc;
+
+// G12 remote worker IPC (protocol version 11 only), worker_core = 14.
+// Authority: coordinator owns enrollment and job state; results are
+// accepted only with a fresh single-use ed25519-signed challenge
+// (ADR-0046 W-2..W-8). Private keys never appear on the wire.
+
+message WorkerEnrollRequest {
+  string name = 1;
+  string public_key_hex = 2;
+  string enrolled_by = 3;
+  uint64 now_millis = 4;
+}
+
+message WorkerDeviceIdRequest { string device_id = 1; }
+
+message WorkerOfferRequest {
+  string objective = 1;
+  string capability_scope = 2;
+  string authorized_by = 3;
+  uint64 now_millis = 4;
+}
+
+message WorkerChallengeRequest {
+  string device_id = 1;
+  string job_id = 2;
+  string nonce_hex = 3;
+  uint64 now_millis = 4;
+}
+
+message WorkerClaimRequest {
+  string job_id = 1;
+  string device_id = 2;
+  string challenge_id = 3;
+  string signature_hex = 4;
+  uint64 now_millis = 5;
+}
+
+message WorkerCompleteRequest {
+  string job_id = 1;
+  string device_id = 2;
+  string challenge_id = 3;
+  string signature_hex = 4;
+  string evidence_ref = 5;
+  uint64 now_millis = 6;
+}
+
+message WorkerListRequest {}
+
+message WorkerCoreRequest {
+  oneof payload {
+    WorkerEnrollRequest enroll = 1;
+    WorkerDeviceIdRequest revoke = 2;
+    WorkerDeviceIdRequest get_device = 3;
+    WorkerListRequest list_devices = 4;
+    WorkerOfferRequest offer = 5;
+    WorkerChallengeRequest issue_challenge = 6;
+    WorkerClaimRequest claim = 7;
+    WorkerCompleteRequest complete = 8;
+    WorkerListRequest list_jobs = 9;
+  }
+}
+
+message WorkerDeviceResponse {
+  string device_id = 1;
+  string name = 2;
+  string public_key_hex = 3;
+  string fingerprint = 4;
+  string state = 5;
+  string enrolled_by = 6;
+  uint64 enrolled_at = 7;
+}
+
+message WorkerJobResponse {
+  string job_id = 1;
+  string objective = 2;
+  string capability_scope = 3;
+  string authorized_by = 4;
+  string status = 5;
+  string claimed_by = 6;
+  uint64 created_at = 7;
+  uint64 finished_at = 8;
+  string evidence_ref = 9;
+}
+
+message WorkerChallengeResponse {
+  string challenge_id = 1;
+  string device_id = 2;
+  string job_id = 3;
+  string nonce_hex = 4;
+}
+
+message WorkerListResponse {
+  repeated WorkerDeviceResponse devices = 1;
+  repeated WorkerJobResponse jobs = 2;
+}
+
+message WorkerErrorResponse {
+  string code = 1;
+  string detail = 2;
+}
+
+message WorkerCoreResponse {
+  oneof payload {
+    WorkerDeviceResponse device = 1;
+    WorkerJobResponse job = 2;
+    WorkerChallengeResponse challenge = 3;
+    WorkerListResponse list = 4;
+    WorkerErrorResponse error = 5;
+  }
+}

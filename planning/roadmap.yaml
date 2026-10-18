@@ -8,7 +8,7 @@
 # Near-term work lives in planning/tasks/queue.yaml, not here.
 
 schema_version: 1
-current_gate: G12
+current_gate: G13
 task_queue: planning/tasks/queue.yaml
 
 gates:
@@ -152,8 +152,16 @@ gates:
 
   - id: G12
     name: Remote Worker
-    status: planned
+    status: completed
+    exit_criteria_ref: docs/development/G12_CLOSURE_AUDIT.md
     objective: Device identity, outbound worker connection, remote execution.
+    planned_capabilities:
+      - Device identity: per-device keypair, fingerprint enrollment and
+        revocation; private keys never leave the device vault.
+      - Outbound-only worker connection with challenge-response
+        authentication; no new inbound ports on workers.
+      - Remote execution: authorized jobs dispatched to enrolled
+        workers, results returned as verifiable evidence.
     scope_ref: AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
 
   - id: G13

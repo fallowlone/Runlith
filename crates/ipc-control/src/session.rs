@@ -29,7 +29,7 @@ use crate::negotiation::{
     validate_execution_allowed, validate_finder_allowed, validate_human_decision_allowed,
     validate_memory_allowed, validate_planning_allowed, validate_policy_allowed,
     validate_routine_allowed, validate_task_authoring_allowed, validate_vault_allowed,
-    ServerConfig,
+    validate_worker_allowed, ServerConfig,
 };
 
 /// Deadline for a full client/server handshake exchange.
@@ -90,6 +90,8 @@ pub enum ReadyRequest {
     Memory(ipc_contracts::proto::MemoryCoreRequest),
     /// Decoded G11 background routine request on a version-10 session.
     Routine(ipc_contracts::proto::RoutineCoreRequest),
+    /// Decoded G12 remote worker request on a version-11 session.
+    Worker(ipc_contracts::proto::WorkerCoreRequest),
 }
 
 /// Client-side handshake outcome.
@@ -272,6 +274,15 @@ impl ClientConfig {
             .push(ipc_contracts::IPC_PROTOCOL_VERSION_V10);
         config
     }
+
+    /// G12 worker client profile (TASK-0202).
+    pub fn worker_default(client_kind: impl Into<String>) -> Self {
+        let mut config = Self::routine_default(client_kind);
+        config
+            .supported_versions
+            .push(ipc_contracts::IPC_PROTOCOL_VERSION_V11);
+        config
+    }
 }
 
 /// Client side of the bootstrap control protocol.
@@ -389,6 +400,12 @@ where
     pub fn routine_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_routine_allowed)
+    }
+
+    #[must_use]
+    pub fn worker_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_worker_allowed)
     }
 
     /// Unwraps into the framed transport for lifecycle-owned exchanges
@@ -688,6 +705,23 @@ where
         }
     }
 
+    pub async fn respond_worker(
+        &mut self,
+        response: ipc_contracts::proto::WorkerCoreResponse,
+    ) -> ControlResult<()> {
+        self.require_ready()?;
+        let frame = bytes::Bytes::from(
+            ControlResponse {
+                payload: Some(control_response::Payload::WorkerCore(response)),
+            }
+            .encode_to_vec(),
+        );
+        match self.transport.write_frame(frame).await {
+            Ok(()) => Ok(()),
+            Err(error) => self.fail(error.into()),
+        }
+    }
+
     pub async fn respond_routine(
         &mut self,
         response: ipc_contracts::proto::RoutineCoreResponse,
@@ -804,6 +838,12 @@ where
     pub fn routine_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_routine_allowed)
+    }
+
+    #[must_use]
+    pub fn worker_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_worker_allowed)
     }
 
     /// Reads the first request (within [`HANDSHAKE_TIMEOUT`]), requires it
@@ -1007,6 +1047,15 @@ where
                     .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
                 match validate_routine_allowed(negotiated) {
                     Ok(()) => Ok(ReadyRequest::Routine(request)),
+                    Err(error) => self.fail(error),
+                }
+            }
+            Some(control_request::Payload::WorkerCore(request)) => {
+                let negotiated = self
+                    .negotiated_version
+                    .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
+                match validate_worker_allowed(negotiated) {
+                    Ok(()) => Ok(ReadyRequest::Worker(request)),
                     Err(error) => self.fail(error),
                 }
             }

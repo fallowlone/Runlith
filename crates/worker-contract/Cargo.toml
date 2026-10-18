@@ -1,0 +1,11 @@
+[package]
+name = "worker-contract"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "worker_contract"
+path = "src/lib.rs"
+
+[dependencies]
+worker = { path = "../worker" }

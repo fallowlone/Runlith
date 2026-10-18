@@ -21,6 +21,7 @@ import "vault_core.proto";
 import "finder_core.proto";
 import "memory_core.proto";
 import "routine_core.proto";
+import "worker_core.proto";
 
 // A single inbound control message from a local client to agentd.
 message ControlRequest {
@@ -51,6 +52,8 @@ message ControlRequest {
     MemoryCoreRequest memory_core = 12;
     // G11 background routines. Valid only on protocol-v10 sessions.
     RoutineCoreRequest routine_core = 13;
+    // G12 remote worker. Valid only on protocol-v11 sessions.
+    WorkerCoreRequest worker_core = 14;
   }
 }
 
@@ -80,6 +83,8 @@ message ControlResponse {
     MemoryCoreResponse memory_core = 12;
     // G11 background routines response. Protocol v10 only.
     RoutineCoreResponse routine_core = 13;
+    // G12 remote worker response. Protocol v11 only.
+    WorkerCoreResponse worker_core = 14;
   }
 }
 

@@ -46,6 +46,7 @@ mod side_effect_store;
 mod takeover_store;
 mod task_store;
 mod test_mutation_store;
+mod worker_store;
 mod workspace_store;
 
 pub use approval_store::{
