@@ -1,0 +1,10 @@
+name: "Runlith CodeQL config"
+
+# Test code is excluded from analysis: fixture passwords/nonces and
+# assert/panic Debug output in tests are not production secrets or
+# logging (127 alerts triaged and dismissed as "used in tests" on
+# 2026-10-18). Unit tests inside src/ files (#[cfg(test)] mod tests)
+# cannot be path-excluded without losing production coverage of the
+# same files, so src/ stays fully analyzed.
+paths-ignore:
+  - "**/tests/**"
