@@ -8,7 +8,7 @@
 # Near-term work lives in planning/tasks/queue.yaml, not here.
 
 schema_version: 1
-current_gate: G11
+current_gate: G12
 task_queue: planning/tasks/queue.yaml
 
 gates:
@@ -136,8 +136,18 @@ gates:
 
   - id: G11
     name: Background daemon
-    status: planned
+    status: completed
+    exit_criteria_ref: docs/development/G11_CLOSURE_AUDIT.md
     objective: Authorized work continues with UI closed.
+    planned_capabilities:
+      - Daemon lifecycle (start/status/stop, single-instance) for agentd
+        running without any UI or client connected.
+      - Durable RoutineDefinition/RoutineRun workflows: only work
+        authorized before UI closure runs in background; routines carry
+        capability scope, run budgets, evidence and escalation.
+      - Supervision: draining on shutdown, restart reconciliation of
+        in-flight runs (never silently duplicated), watchdog escalation
+        for blocked routines.
     scope_ref: AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
 
   - id: G12

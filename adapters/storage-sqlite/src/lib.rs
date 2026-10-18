@@ -39,6 +39,7 @@ mod plan_guardrail_store;
 mod plan_store;
 mod planning_control_store;
 mod review_authority_store;
+mod routine_store;
 mod runtime_store;
 mod secret_store;
 mod side_effect_store;

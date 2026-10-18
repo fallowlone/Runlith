@@ -91,6 +91,9 @@ Memory work
 → adr/ADR-0012-structured-memory-provenance.md
 → adr/ADR-0044-g10-memory-engine-contract.md
 
+Background daemon work
+→ adr/ADR-0045-g11-background-daemon-contract.md
+
 Security / runtime isolation work
 → adr/ADR-0013-policy-engine-os-isolation.md
 → adr/ADR-0026-g6-security-authority-and-capability-contracts.md

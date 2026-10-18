@@ -565,3 +565,16 @@ refused at capture (INV-008) so no read path can leak it; only
 `CONFIRMED`, unexpired, anchor-fresh memory is listed as eligible.
 Memory mutations are never replayed automatically by the client —
 an ambiguous reply is re-probed with `memory get`.
+
+## 18. G11 protocol v10: background routine IPC (implemented)
+
+Protocol version 10 adds the bounded `routine_core` envelope
+(`routine_core = 13`, ADR-0045). Verbs: `define`, `authorize`,
+`disable`, `get`, `run`, `tick`, `list`. Sessions below V10 receive a
+typed `UnsupportedProtocol` refusal and never execute routine requests.
+The server mints ids, owns the authorization lifecycle, and refuses
+author self-authorization typed (`self_authorization`). `agentctl
+daemon start|status|stop` maps to the existing start/ping/shutdown
+lifecycle; `agentd` ticks due AUTHORIZED routines once per second with
+no client connected, and restart reconciliation marks leftover RUNNING
+runs INTERRUPTED instead of re-executing them.
