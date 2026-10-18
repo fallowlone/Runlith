@@ -752,7 +752,7 @@ fn cv_2_schema_18_migrates_to_19_with_closed_capture_authority() {
     }
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 35);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 36);
     let connection = rusqlite::Connection::open(&db.path).unwrap();
     let sql: String = connection
         .query_row(
@@ -1875,6 +1875,9 @@ fn upgrade_backfills_fingerprint_for_quarantined_effect() {
              DROP TABLE IF EXISTS memory_links;
              DROP TABLE IF EXISTS memory_anchors;
              DROP TABLE IF EXISTS memory_source_refs;
+             DROP TABLE IF EXISTS worker_challenges;
+             DROP TABLE IF EXISTS worker_jobs;
+             DROP TABLE IF EXISTS worker_devices;
              DROP TABLE IF EXISTS routine_runs;
              DROP TABLE IF EXISTS routines;
              DROP TABLE IF EXISTS memories;
@@ -1883,7 +1886,7 @@ fn upgrade_backfills_fingerprint_for_quarantined_effect() {
         .unwrap();
     // Upgrade must succeed (not fail with Corrupt 'observed effect vanished').
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 35);
+    assert_eq!(store.schema_version().unwrap(), 36);
     // Fingerprint backfilled although the row stays quarantined.
     let fingerprint: Option<String> = raw(&db.path)
         .query_row(
@@ -2157,6 +2160,9 @@ fn migration_repairs_pretrigger_operations_shape() {
              DROP TABLE IF EXISTS memory_links;
              DROP TABLE IF EXISTS memory_anchors;
              DROP TABLE IF EXISTS memory_source_refs;
+             DROP TABLE IF EXISTS worker_challenges;
+             DROP TABLE IF EXISTS worker_jobs;
+             DROP TABLE IF EXISTS worker_devices;
              DROP TABLE IF EXISTS routine_runs;
              DROP TABLE IF EXISTS routines;
              DROP TABLE IF EXISTS memories;
@@ -2175,7 +2181,7 @@ fn migration_repairs_pretrigger_operations_shape() {
         .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 35);
+    assert_eq!(store.schema_version().unwrap(), 36);
     drop(store);
     let conn = raw(&db.path);
     let tables: i64 = conn

@@ -41,6 +41,7 @@ mod side_effect_recovery;
 mod task_service;
 mod verification_execution;
 mod verification_levels;
+pub mod worker_service;
 mod workspace_service;
 
 pub use advisory_verification::{

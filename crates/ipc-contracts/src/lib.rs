@@ -62,14 +62,18 @@ pub const IPC_PROTOCOL_VERSION_V9: u32 = 9;
 /// envelope (define, authorize, disable, get, run, tick, list).
 pub const IPC_PROTOCOL_VERSION_V10: u32 = 10;
 
+/// G12 remote worker (TASK-0202): adds the bounded `worker_core`
+/// envelope (enroll, revoke, offer, challenge, claim, complete, list).
+pub const IPC_PROTOCOL_VERSION_V11: u32 = 11;
+
 /// Current IPC protocol version: the highest version this build speaks.
-pub const IPC_PROTOCOL_VERSION: u32 = IPC_PROTOCOL_VERSION_V10;
+pub const IPC_PROTOCOL_VERSION: u32 = IPC_PROTOCOL_VERSION_V11;
 
 /// Alias making "current" explicit at call sites.
-pub const IPC_PROTOCOL_VERSION_CURRENT: u32 = IPC_PROTOCOL_VERSION_V10;
+pub const IPC_PROTOCOL_VERSION_CURRENT: u32 = IPC_PROTOCOL_VERSION_V11;
 
 /// Every protocol version this build negotiates, oldest first.
-pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 11] = [
+pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 12] = [
     IPC_PROTOCOL_VERSION_V0,
     IPC_PROTOCOL_VERSION_V1,
     IPC_PROTOCOL_VERSION_V2,
@@ -81,6 +85,7 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 11] = [
     IPC_PROTOCOL_VERSION_V8,
     IPC_PROTOCOL_VERSION_V9,
     IPC_PROTOCOL_VERSION_V10,
+    IPC_PROTOCOL_VERSION_V11,
 ];
 
 /// Maximum length of a client-supplied human/request `reason` (block
@@ -132,6 +137,7 @@ pub fn supports_business_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V8
             | IPC_PROTOCOL_VERSION_V9
             | IPC_PROTOCOL_VERSION_V10
+            | IPC_PROTOCOL_VERSION_V11
     )
 }
 
@@ -151,6 +157,7 @@ pub fn supports_execution_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V8
             | IPC_PROTOCOL_VERSION_V9
             | IPC_PROTOCOL_VERSION_V10
+            | IPC_PROTOCOL_VERSION_V11
     )
 }
 
@@ -168,6 +175,7 @@ pub fn supports_policy_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V8
             | IPC_PROTOCOL_VERSION_V9
             | IPC_PROTOCOL_VERSION_V10
+            | IPC_PROTOCOL_VERSION_V11
     )
 }
 
@@ -185,6 +193,7 @@ pub fn supports_human_decision_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V8
             | IPC_PROTOCOL_VERSION_V9
             | IPC_PROTOCOL_VERSION_V10
+            | IPC_PROTOCOL_VERSION_V11
     )
 }
 
@@ -200,6 +209,7 @@ pub fn supports_planning_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V8
             | IPC_PROTOCOL_VERSION_V9
             | IPC_PROTOCOL_VERSION_V10
+            | IPC_PROTOCOL_VERSION_V11
     )
 }
 
@@ -215,6 +225,7 @@ pub fn supports_task_authoring_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V8
             | IPC_PROTOCOL_VERSION_V9
             | IPC_PROTOCOL_VERSION_V10
+            | IPC_PROTOCOL_VERSION_V11
     )
 }
 
@@ -228,6 +239,7 @@ pub fn supports_finder_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V8
             | IPC_PROTOCOL_VERSION_V9
             | IPC_PROTOCOL_VERSION_V10
+            | IPC_PROTOCOL_VERSION_V11
     )
 }
 
@@ -253,6 +265,12 @@ pub fn supports_routine_ipc(negotiated_version: u32) -> bool {
     negotiated_version >= IPC_PROTOCOL_VERSION_V10
 }
 
+/// Remote worker is new authority and is never enabled below v11.
+#[must_use]
+pub fn supports_worker_ipc(negotiated_version: u32) -> bool {
+    negotiated_version >= IPC_PROTOCOL_VERSION_V11
+}
+
 /// The operator credential vault is new authority and is never enabled for
 /// v0-v6 (ADR-0039).
 #[must_use]
@@ -263,6 +281,7 @@ pub fn supports_vault_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V8
             | IPC_PROTOCOL_VERSION_V9
             | IPC_PROTOCOL_VERSION_V10
+            | IPC_PROTOCOL_VERSION_V11
     )
 }
 
@@ -321,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn historical_versions_remain_supported_and_v10_is_current() {
+    fn historical_versions_remain_supported_and_v11_is_current() {
         assert_eq!(IPC_PROTOCOL_VERSION_V0, 0);
         assert_eq!(IPC_PROTOCOL_VERSION_V1, 1);
         assert_eq!(IPC_PROTOCOL_VERSION_V2, 2);
@@ -332,20 +351,25 @@ mod tests {
         assert_eq!(IPC_PROTOCOL_VERSION_V8, 8);
         assert_eq!(IPC_PROTOCOL_VERSION_V9, 9);
         assert_eq!(IPC_PROTOCOL_VERSION_V10, 10);
-        assert_eq!(IPC_PROTOCOL_VERSION, 10);
-        assert_eq!(IPC_PROTOCOL_VERSION_CURRENT, 10);
+        assert_eq!(IPC_PROTOCOL_VERSION_V11, 11);
+        assert_eq!(IPC_PROTOCOL_VERSION, 11);
+        assert_eq!(IPC_PROTOCOL_VERSION_CURRENT, 11);
         assert_eq!(
             SUPPORTED_PROTOCOL_VERSIONS,
-            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
         );
-        for version in 0..=10 {
+        for version in 0..=11 {
             assert!(is_supported_version(version), "v{version} negotiates");
             assert!(is_compatible(version), "v{version} negotiates");
         }
-        assert!(!is_supported_version(11));
-        assert!(!is_compatible(11));
+        assert!(!is_supported_version(12));
+        assert!(!is_compatible(12));
         assert!(!supports_routine_ipc(IPC_PROTOCOL_VERSION_V9));
         assert!(supports_routine_ipc(IPC_PROTOCOL_VERSION_V10));
+        assert!(!supports_worker_ipc(IPC_PROTOCOL_VERSION_V10));
+        assert!(supports_worker_ipc(IPC_PROTOCOL_VERSION_V11));
+        assert!(!supports_worker_ipc(IPC_PROTOCOL_VERSION_V10));
+        assert!(supports_worker_ipc(IPC_PROTOCOL_VERSION_V11));
         assert!(!supports_memory_ipc(IPC_PROTOCOL_VERSION_V8));
         assert!(supports_memory_ipc(IPC_PROTOCOL_VERSION_V9));
     }

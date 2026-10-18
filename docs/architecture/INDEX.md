@@ -94,6 +94,9 @@ Memory work
 Background daemon work
 → adr/ADR-0045-g11-background-daemon-contract.md
 
+Remote worker work
+→ adr/ADR-0046-g12-remote-worker-contract.md
+
 Security / runtime isolation work
 → adr/ADR-0013-policy-engine-os-isolation.md
 → adr/ADR-0026-g6-security-authority-and-capability-contracts.md

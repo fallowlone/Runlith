@@ -117,7 +117,7 @@ fn fresh_database_reaches_current_schema() {
     let db = TestDb::new("fresh-current");
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 35);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 36);
     assert!(store.list_events_ordered().unwrap().is_empty());
 }
 
@@ -1158,6 +1158,9 @@ fn legacy_journal_without_hashes_is_backfilled_on_upgrade() {
              DROP TABLE IF EXISTS memory_links;
              DROP TABLE IF EXISTS memory_anchors;
              DROP TABLE IF EXISTS memory_source_refs;
+             DROP TABLE IF EXISTS worker_challenges;
+             DROP TABLE IF EXISTS worker_jobs;
+             DROP TABLE IF EXISTS worker_devices;
              DROP TABLE IF EXISTS routine_runs;
              DROP TABLE IF EXISTS routines;
              DROP TABLE IF EXISTS memories;

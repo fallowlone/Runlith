@@ -23,8 +23,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use app_services::{
-    background_service::BackgroundService, ApprovalService, FinderService, HumanDecisionService,
-    MemoryService, SystemClock, TaskService,
+    background_service::BackgroundService, worker_service::WorkerService, ApprovalService,
+    FinderService, HumanDecisionService, MemoryService, SystemClock, TaskService,
 };
 use bytes::BytesMut;
 #[cfg(unix)]
@@ -48,6 +48,7 @@ pub mod planning;
 mod provider_credential;
 pub mod routine;
 pub mod vault;
+pub mod worker;
 
 pub use data_dir::{resolve_data_dir, resolve_database_path};
 
@@ -195,7 +196,7 @@ impl DaemonConfig {
     /// (TASK-0193 routine rollout) while preserving every older surface.
     pub fn with_execution(path: impl Into<PathBuf>) -> Self {
         Self {
-            server_config: ServerConfig::g11_default(),
+            server_config: ServerConfig::g12_default(),
             database_path: Some(path.into()),
             provider_executable: None,
         }
@@ -232,6 +233,9 @@ pub type MemoryHandle = Arc<tokio::sync::Mutex<MemoryService<storage_sqlite::Sql
 /// Shared trusted G11 background service over its own SQLite connection.
 pub type RoutineHandle = Arc<tokio::sync::Mutex<BackgroundService<storage_sqlite::SqliteStore>>>;
 
+/// Shared trusted G12 worker service over its own SQLite connection.
+pub type WorkerHandle = Arc<tokio::sync::Mutex<WorkerService<storage_sqlite::SqliteStore>>>;
+
 #[derive(Clone)]
 struct ConnectionServices {
     business: Option<BusinessHandle>,
@@ -242,6 +246,7 @@ struct ConnectionServices {
     finder: FinderHandle,
     memory: Option<MemoryHandle>,
     routine: Option<RoutineHandle>,
+    worker: Option<WorkerHandle>,
 }
 
 /// Terminal outcome of a daemon run.
@@ -367,6 +372,16 @@ fn open_routine_service(config: &DaemonConfig) -> Result<Option<RoutineHandle>, 
         .unwrap_or(0);
     let _ = service.reconcile(now);
     Ok(Some(Arc::new(tokio::sync::Mutex::new(service))))
+}
+
+fn open_worker_service(config: &DaemonConfig) -> Result<Option<WorkerHandle>, DaemonError> {
+    let Some(path) = config.database_path.as_ref() else {
+        return Ok(None);
+    };
+    let store = storage_sqlite::SqliteStore::open(path)?;
+    Ok(Some(Arc::new(tokio::sync::Mutex::new(WorkerService::new(
+        store,
+    )))))
 }
 
 fn open_memory_service(config: &DaemonConfig) -> Result<Option<MemoryHandle>, DaemonError> {
@@ -593,6 +608,18 @@ where
                     None => routine::unavailable(),
                 };
                 if session.respond_routine(response).await.is_err() {
+                    return ConnectionOutcome::Ended;
+                }
+            }
+            Ok(ReadyRequest::Worker(request)) => {
+                let response = match &services.worker {
+                    Some(handle) => {
+                        let mut service = handle.lock().await;
+                        worker::dispatch(&mut service, request)
+                    }
+                    None => worker::unavailable(),
+                };
+                if session.respond_worker(response).await.is_err() {
                     return ConnectionOutcome::Ended;
                 }
             }
@@ -972,6 +999,7 @@ mod unix_daemon {
                 finder: open_finder(),
                 memory: open_memory_service(&config)?,
                 routine: open_routine_service(&config)?,
+                worker: open_worker_service(&config)?,
             },
         )
         .await;
@@ -1080,6 +1108,7 @@ mod windows_daemon {
                 finder: super::open_finder(),
                 memory: super::open_memory_service(&config)?,
                 routine: super::open_routine_service(&config)?,
+                worker: super::open_worker_service(&config)?,
             },
         )
         .await)

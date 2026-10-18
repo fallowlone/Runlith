@@ -22,7 +22,8 @@ use ipc_contracts::proto::{
     HumanDecisionCoreResponse, MemoryCoreRequest, MemoryCoreResponse, PlanningCoreRequest,
     PlanningCoreResponse, PolicyCoreRequest, PolicyCoreResponse, RoutineCoreRequest,
     RoutineCoreResponse, ShutdownRequest, TaskAuthoringCoreRequest, TaskAuthoringCoreResponse,
-    TaskCoreRequest, TaskCoreResponse, VaultCoreRequest, VaultCoreResponse,
+    TaskCoreRequest, TaskCoreResponse, VaultCoreRequest, VaultCoreResponse, WorkerCoreRequest,
+    WorkerCoreResponse,
 };
 use ipc_control::{ClientConfig, ClientSession, ControlError, CLIENT_KIND_AGENTCTL};
 use ipc_transport::{FramedTransport, TransportError};
@@ -156,6 +157,7 @@ pub enum ClientError {
     /// automatically; callers re-probe with `memory get` instead.
     MemoryAmbiguous(String),
     RoutineAmbiguous(String),
+    WorkerAmbiguous(String),
     /// OS/runtime I/O failure.
     Io(io::Error),
 }
@@ -193,6 +195,9 @@ impl fmt::Display for ClientError {
             }
             Self::RoutineAmbiguous(detail) => {
                 write!(f, "ambiguous routine result (not replayed): {detail}")
+            }
+            Self::WorkerAmbiguous(detail) => {
+                write!(f, "ambiguous worker result (not replayed): {detail}")
             }
             Self::HumanDecisionAmbiguous(detail) => {
                 write!(
@@ -1346,6 +1351,122 @@ pub async fn routine_request(
     Err(ClientError::NotRunning)
 }
 
+/// Performs a protocol-v11 handshake for remote worker.
+#[cfg(unix)]
+async fn handshake_stream_worker<S>(stream: S) -> Result<ClientSession<S>, ClientError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut session = ClientSession::new(
+        FramedTransport::new(stream),
+        ClientConfig::worker_default(CLIENT_KIND_AGENTCTL),
+    );
+    session
+        .perform_handshake()
+        .await
+        .map_err(classify_control)?;
+    if !session.worker_allowed() {
+        return Err(ClientError::Control(ControlError::UnsupportedProtocol {
+            negotiated: session.negotiated_version().unwrap_or(0),
+            required: ipc_contracts::IPC_PROTOCOL_VERSION_V11,
+        }));
+    }
+    Ok(session)
+}
+
+#[cfg(unix)]
+pub async fn worker_request(
+    endpoint: &UnixEndpoint,
+    spawn: impl FnOnce() -> io::Result<Child>,
+    request: WorkerCoreRequest,
+) -> Result<WorkerCoreResponse, ClientError> {
+    let session = connect_or_start_with(spawn, || async {
+        let stream = transport_connect(endpoint)
+            .await
+            .map_err(classify_transport)?;
+        handshake_stream_worker(stream).await
+    })
+    .await?;
+    let absence = absence_note(endpoint);
+    let mut transport = session.into_inner();
+    let frame = Bytes::from(
+        ControlRequest {
+            payload: Some(control_request::Payload::WorkerCore(request)),
+        }
+        .encode_to_vec(),
+    );
+    transport.write_frame(frame).await.map_err(|error| {
+        ClientError::WorkerAmbiguous(format!(
+            "WorkerCoreRequest send failed ({error}); endpoint {absence}; not replaying"
+        ))
+    })?;
+    let frame = tokio::time::timeout(BUSINESS_RESPONSE_TIMEOUT, transport.read_frame())
+        .await
+        .map_err(|_| {
+            ClientError::WorkerAmbiguous(format!(
+                "worker response timeout; endpoint {absence}; not replaying"
+            ))
+        })?
+        .map_err(|error| {
+            ClientError::WorkerAmbiguous(format!(
+                "worker response lost ({error}); endpoint {absence}; not replaying"
+            ))
+        })?;
+    let response = ControlResponse::decode(&frame[..]).map_err(|error| {
+        ClientError::WorkerAmbiguous(format!(
+            "worker response undecodable ({error}); endpoint {absence}; not replaying"
+        ))
+    })?;
+    match response.payload {
+        Some(control_response::Payload::WorkerCore(response)) => Ok(response),
+        other => Err(ClientError::WorkerAmbiguous(format!(
+            "unexpected worker reply ({other:?}); endpoint {absence}; not replaying"
+        ))),
+    }
+}
+
+#[cfg(not(unix))]
+pub async fn worker_request(
+    _endpoint: &str,
+    _spawn: impl FnOnce() -> io::Result<Child>,
+    _request: WorkerCoreRequest,
+) -> Result<WorkerCoreResponse, ClientError> {
+    Err(ClientError::NotRunning)
+}
+
+/// Generates a device keypair from OS randomness (worker-side, local).
+/// Returns (secret_hex, public_hex); the secret never goes to a daemon.
+pub fn worker_keygen() -> Result<(String, String), String> {
+    let mut secret = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut secret))
+        .map_err(|e| format!("keygen randomness failed: {e}"))?;
+    let (secret_bytes, public) =
+        worker::model::keypair_from_secret(&secret).map_err(|e| e.to_string())?;
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    Ok((hex(&secret_bytes), hex(&public)))
+}
+
+/// Signs a challenge locally (worker-side): secret stays in the CLI.
+pub fn worker_sign(secret_hex: &str, nonce_hex: &str, job_id: &str) -> Result<String, String> {
+    fn dec<const N: usize>(raw: &str) -> Result<[u8; N], String> {
+        if raw.len() != N * 2 {
+            return Err("bad hex length".to_owned());
+        }
+        let mut out = [0u8; N];
+        for i in 0..N {
+            out[i] =
+                u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16).map_err(|_| "bad hex".to_owned())?;
+        }
+        Ok(out)
+    }
+    let secret = dec::<32>(secret_hex)?;
+    let nonce = dec::<32>(nonce_hex)?;
+    let job = worker::model::JobId::new(job_id.to_owned()).map_err(|e| e.to_string())?;
+    let sig = worker::model::sign_challenge(&secret, &nonce, &job).map_err(|e| e.to_string())?;
+    Ok(sig.iter().map(|x| format!("{x:02x}")).collect())
+}
+
 #[cfg(windows)]
 pub async fn human_decision_request(
     pipe_name: &str,
@@ -2029,6 +2150,116 @@ pub fn format_routine_response(response: &RoutineCoreResponse) -> Result<String,
             Err(format!("routine {}: {}", e.code, e.detail))
         }
         None => Err("routine: empty response".to_owned()),
+    }
+}
+
+pub const WORKER_USAGE: &str = "usage: agentctl worker <enroll|revoke|device|devices|offer|jobs|challenge|claim|complete|keygen|sign> ...\n  enroll --name <n> --public-key <hex64> --by <operator> | revoke <dev_id> | device <dev_id> | devices\n  offer --objective <text> --scope EXECUTION --by <operator> | jobs\n  challenge --device <dev_id> --job <job_id> --nonce <hex64> | claim --job <id> --device <id> --challenge <id> --signature <hex128>\n  complete --job <id> --device <id> --challenge <id> --signature <hex128> --evidence <ref>\n  keygen (local) | sign --secret <hex64> --nonce <hex64> --job <job_id> (local)";
+
+pub fn parse_worker_args(args: &[String]) -> Result<WorkerCoreRequest, String> {
+    use ipc_contracts::proto::{
+        worker_core_request, WorkerChallengeRequest, WorkerClaimRequest, WorkerCompleteRequest,
+        WorkerDeviceIdRequest, WorkerEnrollRequest, WorkerListRequest, WorkerOfferRequest,
+    };
+    let usage = || WORKER_USAGE.to_owned();
+    let verb = args.first().map(String::as_str).ok_or_else(usage)?;
+    let payload = match verb {
+        "enroll" => worker_core_request::Payload::Enroll(WorkerEnrollRequest {
+            name: flag_value(args, "--name").ok_or_else(usage)?.to_owned(),
+            public_key_hex: flag_value(args, "--public-key")
+                .ok_or_else(usage)?
+                .to_owned(),
+            enrolled_by: flag_value(args, "--by").ok_or_else(usage)?.to_owned(),
+            now_millis: now_millis(),
+        }),
+        "revoke" => worker_core_request::Payload::Revoke(WorkerDeviceIdRequest {
+            device_id: args.get(1).cloned().ok_or_else(usage)?,
+        }),
+        "device" => worker_core_request::Payload::GetDevice(WorkerDeviceIdRequest {
+            device_id: args.get(1).cloned().ok_or_else(usage)?,
+        }),
+        "devices" => worker_core_request::Payload::ListDevices(WorkerListRequest {}),
+        "offer" => worker_core_request::Payload::Offer(WorkerOfferRequest {
+            objective: flag_value(args, "--objective")
+                .ok_or_else(usage)?
+                .to_owned(),
+            capability_scope: flag_value(args, "--scope")
+                .unwrap_or("EXECUTION")
+                .to_owned(),
+            authorized_by: flag_value(args, "--by").ok_or_else(usage)?.to_owned(),
+            now_millis: now_millis(),
+        }),
+        "jobs" => worker_core_request::Payload::ListJobs(WorkerListRequest {}),
+        "challenge" => worker_core_request::Payload::IssueChallenge(WorkerChallengeRequest {
+            device_id: flag_value(args, "--device").ok_or_else(usage)?.to_owned(),
+            job_id: flag_value(args, "--job").ok_or_else(usage)?.to_owned(),
+            nonce_hex: flag_value(args, "--nonce").ok_or_else(usage)?.to_owned(),
+            now_millis: now_millis(),
+        }),
+        "claim" => worker_core_request::Payload::Claim(WorkerClaimRequest {
+            job_id: flag_value(args, "--job").ok_or_else(usage)?.to_owned(),
+            device_id: flag_value(args, "--device").ok_or_else(usage)?.to_owned(),
+            challenge_id: flag_value(args, "--challenge")
+                .ok_or_else(usage)?
+                .to_owned(),
+            signature_hex: flag_value(args, "--signature")
+                .ok_or_else(usage)?
+                .to_owned(),
+            now_millis: now_millis(),
+        }),
+        "complete" => worker_core_request::Payload::Complete(WorkerCompleteRequest {
+            job_id: flag_value(args, "--job").ok_or_else(usage)?.to_owned(),
+            device_id: flag_value(args, "--device").ok_or_else(usage)?.to_owned(),
+            challenge_id: flag_value(args, "--challenge")
+                .ok_or_else(usage)?
+                .to_owned(),
+            signature_hex: flag_value(args, "--signature")
+                .ok_or_else(usage)?
+                .to_owned(),
+            evidence_ref: flag_value(args, "--evidence").ok_or_else(usage)?.to_owned(),
+            now_millis: now_millis(),
+        }),
+        _ => return Err(usage()),
+    };
+    Ok(WorkerCoreRequest {
+        payload: Some(payload),
+    })
+}
+
+pub fn format_worker_response(response: &WorkerCoreResponse) -> Result<String, String> {
+    use ipc_contracts::proto::worker_core_response;
+    match &response.payload {
+        Some(worker_core_response::Payload::Device(d)) => Ok(format!(
+            "{} {} {} fp={} by={}",
+            d.device_id, d.name, d.state, d.fingerprint, d.enrolled_by
+        )),
+        Some(worker_core_response::Payload::Job(j)) => Ok(format!(
+            "{} {} {} by={} claimed={} evidence={}",
+            j.job_id, j.status, j.capability_scope, j.authorized_by, j.claimed_by, j.evidence_ref
+        )),
+        Some(worker_core_response::Payload::Challenge(c)) => Ok(format!(
+            "{} device={} job={} nonce={}",
+            c.challenge_id, c.device_id, c.job_id, c.nonce_hex
+        )),
+        Some(worker_core_response::Payload::List(list)) => {
+            let mut out = format!("# devices {} jobs {}", list.devices.len(), list.jobs.len());
+            for d in &list.devices {
+                out.push_str(&format!(
+                    "\n{} {} {} fp={}",
+                    d.device_id, d.name, d.state, d.fingerprint
+                ));
+            }
+            for j in &list.jobs {
+                out.push_str(&format!(
+                    "\n{} {} claimed={} evidence={}",
+                    j.job_id, j.status, j.claimed_by, j.evidence_ref
+                ));
+            }
+            Ok(out)
+        }
+        Some(worker_core_response::Payload::Error(e)) => {
+            Err(format!("worker {}: {}", e.code, e.detail))
+        }
+        None => Err("worker: empty response".to_owned()),
     }
 }
 

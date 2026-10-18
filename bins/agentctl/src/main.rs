@@ -47,6 +47,7 @@ async fn main() -> ExitCode {
         Some("find") => cmd_find(args.collect()).await,
         Some("memory") => cmd_memory(args.collect()).await,
         Some("routine") => cmd_routine(args.collect()).await,
+        Some("worker") => cmd_worker(args.collect()).await,
         Some("daemon") => cmd_daemon(args.collect()).await,
         _ => {
             eprintln!("usage: agentctl <start|ping|shutdown|daemon|routine|project|task|execution|approval|human-decision|planning|vault|find|memory> ...");
@@ -1103,6 +1104,89 @@ async fn cmd_find(args: Vec<String>) -> ExitCode {
 #[cfg(windows)]
 async fn cmd_find(_args: Vec<String>) -> ExitCode {
     eprintln!("agentctl: finder control is unavailable on this build");
+    ExitCode::FAILURE
+}
+
+#[cfg(unix)]
+async fn cmd_worker(args: Vec<String>) -> ExitCode {
+    // Local key operations never touch the daemon.
+    match args.first().map(String::as_str) {
+        Some("keygen") => {
+            return match agentctl::worker_keygen() {
+                Ok((secret, public)) => {
+                    println!("secret={secret}");
+                    println!("public={public}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        Some("sign") => {
+            let secret = args
+                .windows(2)
+                .find(|p| p[0] == "--secret")
+                .map(|p| p[1].as_str());
+            let nonce = args
+                .windows(2)
+                .find(|p| p[0] == "--nonce")
+                .map(|p| p[1].as_str());
+            let job = args
+                .windows(2)
+                .find(|p| p[0] == "--job")
+                .map(|p| p[1].as_str());
+            return match (secret, nonce, job) {
+                (Some(secret), Some(nonce), Some(job)) => {
+                    match agentctl::worker_sign(secret, nonce, job) {
+                        Ok(sig) => {
+                            println!("{sig}");
+                            ExitCode::SUCCESS
+                        }
+                        Err(e) => {
+                            eprintln!("{e}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("{}", agentctl::WORKER_USAGE);
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        _ => {}
+    }
+    let endpoint = match resolve_production_endpoint() {
+        Ok(value) => value,
+        Err(error) => return fail(&error),
+    };
+    let request = match agentctl::parse_worker_args(&args) {
+        Ok(value) => value,
+        Err(usage) => {
+            eprintln!("{usage}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match agentctl::worker_request(&endpoint, spawn_sibling_daemon, request).await {
+        Ok(response) => match agentctl::format_worker_response(&response) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                ExitCode::FAILURE
+            }
+        },
+        Err(error) => fail(&error),
+    }
+}
+
+#[cfg(windows)]
+async fn cmd_worker(_args: Vec<String>) -> ExitCode {
+    eprintln!("agentctl: worker control is unavailable on this build");
     ExitCode::FAILURE
 }
 

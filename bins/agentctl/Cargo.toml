@@ -13,6 +13,7 @@ bytes = "1"
 ipc-contracts = { path = "../../crates/ipc-contracts" }
 ipc-control = { path = "../../crates/ipc-control" }
 ipc-transport = { path = "../../crates/ipc-transport" }
+worker = { path = "../../crates/worker" }
 prost = "0.14.4"
 tokio = { version = "~1.51", features = ["macros", "rt", "net", "time"] }
 zeroize = "1"
@@ -33,6 +34,7 @@ bytes = "1"
 ipc-contracts = { path = "../../crates/ipc-contracts" }
 ipc-control = { path = "../../crates/ipc-control" }
 ipc-transport = { path = "../../crates/ipc-transport" }
+worker = { path = "../../crates/worker" }
 prost = "0.14.4"
 storage-sqlite = { path = "../../adapters/storage-sqlite" }
 task-domain = { path = "../../crates/task" }

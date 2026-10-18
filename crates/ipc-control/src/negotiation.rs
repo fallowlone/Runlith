@@ -209,6 +209,22 @@ pub fn is_routine_allowed(negotiated_version: u32) -> bool {
     ipc_contracts::supports_routine_ipc(negotiated_version)
 }
 
+#[must_use]
+pub fn is_worker_allowed(negotiated_version: u32) -> bool {
+    ipc_contracts::supports_worker_ipc(negotiated_version)
+}
+
+pub fn validate_worker_allowed(negotiated_version: u32) -> ControlResult<()> {
+    if is_worker_allowed(negotiated_version) {
+        Ok(())
+    } else {
+        Err(ControlError::UnsupportedProtocol {
+            negotiated: negotiated_version,
+            required: ipc_contracts::IPC_PROTOCOL_VERSION_V11,
+        })
+    }
+}
+
 pub fn validate_routine_allowed(negotiated_version: u32) -> ControlResult<()> {
     if is_routine_allowed(negotiated_version) {
         Ok(())
@@ -464,6 +480,29 @@ impl ServerConfig {
         }
     }
 
+    /// G12 daemon configuration (TASK-0202): v11 enables remote
+    /// worker while preserving every historical surface.
+    pub fn g12_default() -> Self {
+        Self {
+            supported_versions: vec![
+                IPC_PROTOCOL_VERSION_V0,
+                IPC_PROTOCOL_VERSION_V1,
+                IPC_PROTOCOL_VERSION_V2,
+                IPC_PROTOCOL_VERSION_V3,
+                IPC_PROTOCOL_VERSION_V4,
+                IPC_PROTOCOL_VERSION_V5,
+                IPC_PROTOCOL_VERSION_V6,
+                IPC_PROTOCOL_VERSION_V7,
+                IPC_PROTOCOL_VERSION_V8,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V9,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V10,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V11,
+            ],
+            daemon_build_version: default_daemon_build_version(),
+            supported_capabilities: Vec::new(),
+        }
+    }
+
     /// G9 daemon configuration: v7 adds bounded repository finder pages
     /// and span reopens while preserving all historical surfaces.
     pub fn g9_default() -> Self {
@@ -655,7 +694,7 @@ mod tests {
         assert_eq!(g6.supported_versions, vec![0, 1, 2, 3]);
         assert_eq!(
             IPC_PROTOCOL_VERSION,
-            ipc_contracts::IPC_PROTOCOL_VERSION_V10
+            ipc_contracts::IPC_PROTOCOL_VERSION_V11
         );
         assert!(validate_policy_allowed(3).is_ok());
         assert!(validate_policy_allowed(2).is_err());

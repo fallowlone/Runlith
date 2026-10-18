@@ -8,8 +8,8 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-current_gate: G11
-gate_status: IN_PROGRESS  # TASK-0188 activated G11 (G10 closed by TASK-0187)
+current_gate: G12
+gate_status: IN_PROGRESS  # TASK-0197 activated G12 (G11 closed by TASK-0196)
 
 items:
   - id: TASK-0012
@@ -6643,3 +6643,91 @@ items:
       clean. First full run failed 5 targets on v35 rewind fixtures
       (routine table drops added, disclosed). Roadmap advances
       to G12.
+
+  - id: TASK-0197
+    gate: G12
+    title: G12 governance reconciliation and sequence registration
+    objective: Reconcile queue/version G11 to G12; register TASK-0197..TASK-0205.
+    scope: Governance only.
+    exit_criteria_summary: Queue, version, roadmap agree on G12 IN_PROGRESS.
+    depends_on: [TASK-0196]
+    blocked_by: []
+    references: [planning/roadmap.yaml]
+  - id: TASK-0198
+    gate: G12
+    title: ADR-0046 G12 remote-worker contract
+    objective: Device identity, enrollment/revoke, challenge-response auth, outbound-only, job/result shapes (W-1..W-10).
+    scope: Docs only.
+    exit_criteria_summary: ADR-0046 accepted with threat model.
+    depends_on: [TASK-0197]
+    blocked_by: []
+    references: [planning/roadmap.yaml]
+  - id: TASK-0199
+    gate: G12
+    title: Pure worker domain and contract crates
+    objective: worker + worker-contract crates; DeviceRecord, JobOffer/JobResult, signed challenge verification.
+    scope: crates/worker, crates/worker-contract, workspace.
+    exit_criteria_summary: Domain and in-memory contract green.
+    depends_on: [TASK-0198]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0046-g12-remote-worker-contract.md]
+  - id: TASK-0200
+    gate: G12
+    title: SQLite worker persistence (schema v36)
+    objective: Migration 0036 and worker store passing shared contract with reopen.
+    scope: adapters/storage-sqlite.
+    exit_criteria_summary: SQLite contract green incl. reopen.
+    depends_on: [TASK-0199]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0046-g12-remote-worker-contract.md]
+  - id: TASK-0201
+    gate: G12
+    title: WorkerService trusted composition
+    objective: Enroll/revoke/dispatch/accept-result; enroller != operator; revoked devices refused.
+    scope: crates/app-services.
+    exit_criteria_summary: Service tests green incl. refusal paths.
+    depends_on: [TASK-0200]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0046-g12-remote-worker-contract.md]
+  - id: TASK-0202
+    gate: G12
+    title: Worker IPC V11 and agentctl worker surface
+    objective: Additive worker_core proto (worker_core = 14, below-V11 refusal), agentd dispatch, agentctl worker enroll|list|revoke|dispatch|result|jobs.
+    scope: ipc-contracts, ipc-control, agentd, agentctl, ipc docs.
+    exit_criteria_summary: Shipped-binary worker cycle green.
+    depends_on: [TASK-0201]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0046-g12-remote-worker-contract.md]
+  - id: TASK-0203
+    gate: G12
+    title: Job executes on worker and returns evidence
+    objective: Authorized job is claimed by an enrolled worker, completed with evidence, visible to operator; no silent local fallback.
+    scope: Integration tests.
+    exit_criteria_summary: Integration green across daemon restart.
+    depends_on: [TASK-0202]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0046-g12-remote-worker-contract.md]
+  - id: TASK-0204
+    gate: G12
+    title: G12 failure matrix and two-daemon dogfood
+    objective: Revoked device, bad signature, offline mid-job, replayed result, double enroll; dogfood with two shipped agentd instances on loopback.
+    scope: Tests plus evidence.
+    exit_criteria_summary: Matrix green; dogfood recorded.
+    depends_on: [TASK-0203]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0046-g12-remote-worker-contract.md]
+  - id: TASK-0205
+    gate: G12
+    title: G12 closure audit
+    objective: Audit returning G12_CLOSED or G12_REMEDIATION_REQUIRED.
+    scope: Audit docs only.
+    exit_criteria_summary: Audit + gate docs; on G12_CLOSED roadmap advances to G13.
+    depends_on: [TASK-0204]
+    blocked_by: []
+    references: [planning/roadmap.yaml]
+
+    outcome: >-
+      G12_CLOSED (docs/development/G12_CLOSURE_AUDIT.md, gate
+      docs/development/G12_CLOSURE_GATE.md GATE_PASS). Inline
+      audit by implementing agent. Workspace 1917 passed / 0
+      failed; fmt and clippy clean. Roadmap advances to G13.

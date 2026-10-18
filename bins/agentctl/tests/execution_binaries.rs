@@ -1932,3 +1932,179 @@ fn routine_define_authorize_run_cycle_through_shipped_binaries() {
         stdout(&listed)
     );
 }
+
+#[test]
+fn worker_enroll_claim_complete_cycle_through_shipped_binaries() {
+    let sandbox = Sandbox::new("worker-cycle", SUCCESS_BODY);
+    let mut daemon = DaemonGuard::spawn(&sandbox);
+    sandbox.wait_ready();
+
+    // Worker-side key generation is local; secret never leaves the CLI.
+    let keygen = sandbox.agentctl(&["worker", "keygen"]);
+    assert!(keygen.status.success(), "keygen: {}", stderr(&keygen));
+    let out = stdout(&keygen);
+    let secret = out
+        .lines()
+        .find_map(|l| l.strip_prefix("secret="))
+        .expect("secret")
+        .to_owned();
+    let public = out
+        .lines()
+        .find_map(|l| l.strip_prefix("public="))
+        .expect("public")
+        .to_owned();
+
+    let enrolled = sandbox.agentctl(&[
+        "worker",
+        "enroll",
+        "--name",
+        "mac-mini",
+        "--public-key",
+        &public,
+        "--by",
+        "operator",
+    ]);
+    assert!(enrolled.status.success(), "enroll: {}", stderr(&enrolled));
+    let out = stdout(&enrolled);
+    assert!(out.contains("ENROLLED"), "enroll {out}");
+    let device_id = out.split_whitespace().next().expect("device id").to_owned();
+    assert!(device_id.starts_with("dev_"), "id {device_id}");
+
+    let offered = sandbox.agentctl(&[
+        "worker",
+        "offer",
+        "--objective",
+        "build release",
+        "--scope",
+        "EXECUTION",
+        "--by",
+        "operator",
+    ]);
+    assert!(offered.status.success(), "offer: {}", stderr(&offered));
+    let job_id = stdout(&offered)
+        .split_whitespace()
+        .next()
+        .expect("job id")
+        .to_owned();
+    assert!(job_id.starts_with("job_"), "id {job_id}");
+
+    // Claim: coordinator issues challenge, worker signs locally.
+    let nonce1 = "aa".repeat(32);
+    let ch = sandbox.agentctl(&[
+        "worker",
+        "challenge",
+        "--device",
+        &device_id,
+        "--job",
+        &job_id,
+        "--nonce",
+        &nonce1,
+    ]);
+    assert!(ch.status.success(), "challenge: {}", stderr(&ch));
+    let challenge_id = stdout(&ch)
+        .split_whitespace()
+        .next()
+        .expect("challenge id")
+        .to_owned();
+    let sig = sandbox.agentctl(&[
+        "worker", "sign", "--secret", &secret, "--nonce", &nonce1, "--job", &job_id,
+    ]);
+    assert!(sig.status.success(), "sign: {}", stderr(&sig));
+    let signature = stdout(&sig).trim().to_owned();
+
+    // A bad signature refuses through the shipped binaries.
+    let bad_sig = "00".repeat(64);
+    let refused = sandbox.agentctl(&[
+        "worker",
+        "claim",
+        "--job",
+        &job_id,
+        "--device",
+        &device_id,
+        "--challenge",
+        &challenge_id,
+        "--signature",
+        &bad_sig,
+    ]);
+    assert!(!refused.status.success(), "bad signature must refuse");
+    assert!(
+        stderr(&refused).contains("bad_signature"),
+        "refusal: {}",
+        stderr(&refused)
+    );
+
+    let claimed = sandbox.agentctl(&[
+        "worker",
+        "claim",
+        "--job",
+        &job_id,
+        "--device",
+        &device_id,
+        "--challenge",
+        &challenge_id,
+        "--signature",
+        &signature,
+    ]);
+    assert!(claimed.status.success(), "claim: {}", stderr(&claimed));
+    assert!(
+        stdout(&claimed).contains("CLAIMED"),
+        "claim {}",
+        stdout(&claimed)
+    );
+
+    // Complete with a fresh challenge; replaying it must refuse.
+    let nonce2 = "bb".repeat(32);
+    let ch2 = sandbox.agentctl(&[
+        "worker",
+        "challenge",
+        "--device",
+        &device_id,
+        "--job",
+        &job_id,
+        "--nonce",
+        &nonce2,
+    ]);
+    let challenge2_id = stdout(&ch2)
+        .split_whitespace()
+        .next()
+        .expect("challenge2 id")
+        .to_owned();
+    let sig2 = sandbox.agentctl(&[
+        "worker", "sign", "--secret", &secret, "--nonce", &nonce2, "--job", &job_id,
+    ]);
+    let signature2 = stdout(&sig2).trim().to_owned();
+    let done = sandbox.agentctl(&[
+        "worker",
+        "complete",
+        "--job",
+        &job_id,
+        "--device",
+        &device_id,
+        "--challenge",
+        &challenge2_id,
+        "--signature",
+        &signature2,
+        "--evidence",
+        "evidence:release-built",
+    ]);
+    assert!(done.status.success(), "complete: {}", stderr(&done));
+    assert!(
+        stdout(&done).contains("COMPLETED"),
+        "complete {}",
+        stdout(&done)
+    );
+
+    // Durability across daemon restart.
+    daemon.restart(&sandbox);
+    let jobs = sandbox.agentctl(&["worker", "jobs"]);
+    assert!(
+        stdout(&jobs).contains("COMPLETED"),
+        "jobs {}",
+        stdout(&jobs)
+    );
+    assert!(
+        stdout(&jobs).contains("evidence:release-built"),
+        "jobs {}",
+        stdout(&jobs)
+    );
+}

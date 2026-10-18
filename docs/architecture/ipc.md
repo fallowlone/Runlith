@@ -578,3 +578,14 @@ daemon start|status|stop` maps to the existing start/ping/shutdown
 lifecycle; `agentd` ticks due AUTHORIZED routines once per second with
 no client connected, and restart reconciliation marks leftover RUNNING
 runs INTERRUPTED instead of re-executing them.
+
+## 19. G12 protocol v11: remote worker IPC (implemented)
+
+Protocol version 11 adds the bounded `worker_core` envelope
+(`worker_core = 14`, ADR-0046). Verbs: `enroll`, `revoke`,
+`get_device`, `list_devices`, `offer`, `issue_challenge`, `claim`,
+`complete`, `list_jobs`. Sessions below V11 receive a typed
+`UnsupportedProtocol` refusal. Claim and complete require a fresh,
+single-use ed25519-signed challenge bound to device and job; private
+keys never cross the wire (`agentctl worker keygen|sign` are local).
+Revoked devices receive no challenges and their results refuse.
