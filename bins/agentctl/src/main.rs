@@ -1112,14 +1112,24 @@ async fn cmd_worker(args: Vec<String>) -> ExitCode {
     // Local key operations never touch the daemon.
     match args.first().map(String::as_str) {
         Some("keygen") => {
-            return match agentctl::worker_keygen() {
-                Ok((secret, public)) => {
-                    println!("secret={secret}");
-                    println!("public={public}");
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("{e}");
+            let out = args
+                .windows(2)
+                .find(|p| p[0] == "--secret-out")
+                .map(|p| p[1].clone());
+            return match out {
+                Some(path) => match agentctl::worker_keygen_to_file(std::path::Path::new(&path)) {
+                    Ok(public) => {
+                        println!("public={public}");
+                        println!("secret written to {path} (mode 0600); keep it in your vault");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        ExitCode::FAILURE
+                    }
+                },
+                None => {
+                    eprintln!("keygen requires --secret-out <path>: the secret is never printed");
                     ExitCode::FAILURE
                 }
             };

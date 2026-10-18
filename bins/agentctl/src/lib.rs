@@ -1434,6 +1434,25 @@ pub async fn worker_request(
     Err(ClientError::NotRunning)
 }
 
+/// Writes a fresh device secret to `path` (0600, worker-side local)
+/// and returns the public key hex. The secret is never printed or
+/// sent to a daemon (CodeQL rust/cleartext-logging).
+#[cfg(unix)]
+pub fn worker_keygen_to_file(path: &std::path::Path) -> Result<String, String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let (secret, public) = worker_keygen()?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("cannot create secret file {}: {e}", path.display()))?;
+    file.write_all(secret.as_bytes())
+        .map_err(|e| format!("cannot write secret file: {e}"))?;
+    Ok(public)
+}
+
 /// Generates a device keypair from OS randomness (worker-side, local).
 /// Returns (secret_hex, public_hex); the secret never goes to a daemon.
 pub fn worker_keygen() -> Result<(String, String), String> {
@@ -1453,12 +1472,12 @@ pub fn worker_sign(secret_hex: &str, nonce_hex: &str, job_id: &str) -> Result<St
         if raw.len() != N * 2 {
             return Err("bad hex length".to_owned());
         }
-        let mut out = [0u8; N];
-        for i in 0..N {
-            out[i] =
-                u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16).map_err(|_| "bad hex".to_owned())?;
-        }
-        Ok(out)
+        let bytes: Vec<u8> = (0..N)
+            .map(|i| {
+                u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16).map_err(|_| "bad hex".to_owned())
+            })
+            .collect::<Result<Vec<u8>, String>>()?;
+        bytes.try_into().map_err(|_| "bad hex length".to_owned())
     }
     let secret = dec::<32>(secret_hex)?;
     let nonce = dec::<32>(nonce_hex)?;
@@ -2153,7 +2172,7 @@ pub fn format_routine_response(response: &RoutineCoreResponse) -> Result<String,
     }
 }
 
-pub const WORKER_USAGE: &str = "usage: agentctl worker <enroll|revoke|device|devices|offer|jobs|challenge|claim|complete|keygen|sign> ...\n  enroll --name <n> --public-key <hex64> --by <operator> | revoke <dev_id> | device <dev_id> | devices\n  offer --objective <text> --scope EXECUTION --by <operator> | jobs\n  challenge --device <dev_id> --job <job_id> --nonce <hex64> | claim --job <id> --device <id> --challenge <id> --signature <hex128>\n  complete --job <id> --device <id> --challenge <id> --signature <hex128> --evidence <ref>\n  keygen (local) | sign --secret <hex64> --nonce <hex64> --job <job_id> (local)";
+pub const WORKER_USAGE: &str = "usage: agentctl worker <enroll|revoke|device|devices|offer|jobs|challenge|claim|complete|keygen|sign> ...\n  enroll --name <n> --public-key <hex64> --by <operator> | revoke <dev_id> | device <dev_id> | devices\n  offer --objective <text> --scope EXECUTION --by <operator> | jobs\n  challenge --device <dev_id> --job <job_id> --nonce <hex64> | claim --job <id> --device <id> --challenge <id> --signature <hex128>\n  complete --job <id> --device <id> --challenge <id> --signature <hex128> --evidence <ref>\n  keygen --secret-out <path> (local, secret never printed) | sign --secret <hex64> --nonce <hex64> --job <job_id> (local)";
 
 pub fn parse_worker_args(args: &[String]) -> Result<WorkerCoreRequest, String> {
     use ipc_contracts::proto::{

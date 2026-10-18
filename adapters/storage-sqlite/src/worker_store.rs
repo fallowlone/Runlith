@@ -41,15 +41,18 @@ fn hex_decode<const N: usize>(raw: &str, what: &str) -> Result<[u8; N], WorkerEr
             detail: format!("stored {what} has wrong length"),
         });
     }
-    let mut out = [0u8; N];
-    for i in 0..N {
-        out[i] = u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16).map_err(|_| {
-            WorkerError::BackendFailure {
-                detail: format!("stored {what} is not hex"),
-            }
-        })?;
-    }
-    Ok(out)
+    let bytes: Vec<u8> = (0..N)
+        .map(|i| {
+            u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16).map_err(|_| {
+                WorkerError::BackendFailure {
+                    detail: format!("stored {what} is not hex"),
+                }
+            })
+        })
+        .collect::<Result<Vec<u8>, WorkerError>>()?;
+    bytes.try_into().map_err(|_| WorkerError::BackendFailure {
+        detail: format!("stored {what} has wrong length"),
+    })
 }
 
 type DeviceRow = (String, String, String, String, String, String, i64);

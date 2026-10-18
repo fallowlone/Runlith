@@ -1939,14 +1939,20 @@ fn worker_enroll_claim_complete_cycle_through_shipped_binaries() {
     let mut daemon = DaemonGuard::spawn(&sandbox);
     sandbox.wait_ready();
 
-    // Worker-side key generation is local; secret never leaves the CLI.
-    let keygen = sandbox.agentctl(&["worker", "keygen"]);
+    // Worker-side key generation is local; the secret is written to a
+    // 0600 file and never printed (CodeQL rust/cleartext-logging).
+    let secret_path = sandbox.root.join("worker.secret");
+    let secret_arg = secret_path.to_string_lossy().into_owned();
+    let keygen = sandbox.agentctl(&["worker", "keygen", "--secret-out", &secret_arg]);
     assert!(keygen.status.success(), "keygen: {}", stderr(&keygen));
     let out = stdout(&keygen);
-    let secret = out
-        .lines()
-        .find_map(|l| l.strip_prefix("secret="))
-        .expect("secret")
+    assert!(
+        !out.contains("secret="),
+        "secret must not be printed: {out}"
+    );
+    let secret = std::fs::read_to_string(&secret_path)
+        .expect("secret file")
+        .trim()
         .to_owned();
     let public = out
         .lines()

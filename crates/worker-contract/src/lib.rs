@@ -61,7 +61,7 @@ fn assert_enroll_claim<S: WorkerStorePort>(store: &mut S) {
         mint_challenge_id(1_000, 1),
         device.id.clone(),
         job.id.clone(),
-        [42u8; 32],
+        std::array::from_fn(|i| (i as u8).wrapping_mul(31).wrapping_add(17)),
         1_500,
     );
     store.put_challenge(&challenge).unwrap();
