@@ -23,7 +23,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use app_services::{
-    ApprovalService, FinderService, HumanDecisionService, MemoryService, SystemClock, TaskService,
+    background_service::BackgroundService, ApprovalService, FinderService, HumanDecisionService,
+    MemoryService, SystemClock, TaskService,
 };
 use bytes::BytesMut;
 #[cfg(unix)]
@@ -45,6 +46,7 @@ pub mod human_decision;
 pub mod memory;
 pub mod planning;
 mod provider_credential;
+pub mod routine;
 pub mod vault;
 
 pub use data_dir::{resolve_data_dir, resolve_database_path};
@@ -189,11 +191,11 @@ impl DaemonConfig {
     /// G5 daemon configuration (TASK-0047): protocols `[0, 1, 2]` with
     /// the durable database at `path`, enabling the execution surface
     /// (`run`/`status`/`cancel`) through the real-provider composition.
-    /// Production default from TASK-0047 on; G10 negotiates through v9
-    /// (TASK-0184 memory rollout) while preserving every older surface.
+    /// Production default from TASK-0047 on; G11 negotiates through v10
+    /// (TASK-0193 routine rollout) while preserving every older surface.
     pub fn with_execution(path: impl Into<PathBuf>) -> Self {
         Self {
-            server_config: ServerConfig::g10_default(),
+            server_config: ServerConfig::g11_default(),
             database_path: Some(path.into()),
             provider_executable: None,
         }
@@ -227,6 +229,9 @@ pub type FinderHandle = Arc<FinderService>;
 /// Shared trusted G10 memory service over its own SQLite connection.
 pub type MemoryHandle = Arc<tokio::sync::Mutex<MemoryService<storage_sqlite::SqliteStore>>>;
 
+/// Shared trusted G11 background service over its own SQLite connection.
+pub type RoutineHandle = Arc<tokio::sync::Mutex<BackgroundService<storage_sqlite::SqliteStore>>>;
+
 #[derive(Clone)]
 struct ConnectionServices {
     business: Option<BusinessHandle>,
@@ -236,6 +241,7 @@ struct ConnectionServices {
     vault: Option<vault::VaultHandle>,
     finder: FinderHandle,
     memory: Option<MemoryHandle>,
+    routine: Option<RoutineHandle>,
 }
 
 /// Terminal outcome of a daemon run.
@@ -345,6 +351,22 @@ fn open_finder() -> FinderHandle {
         FinderService::new(search, read, revision)
             .with_filter(Arc::new(app_services::RedactingFilter)),
     )
+}
+
+fn open_routine_service(config: &DaemonConfig) -> Result<Option<RoutineHandle>, DaemonError> {
+    let Some(path) = config.database_path.as_ref() else {
+        return Ok(None);
+    };
+    let store = storage_sqlite::SqliteStore::open(path)?;
+    let mut service = BackgroundService::new(store);
+    // Restart reconciliation (ADR-0045 B-9): runs left RUNNING by a
+    // dead daemon become INTERRUPTED, never silently re-executed.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let _ = service.reconcile(now);
+    Ok(Some(Arc::new(tokio::sync::Mutex::new(service))))
 }
 
 fn open_memory_service(config: &DaemonConfig) -> Result<Option<MemoryHandle>, DaemonError> {
@@ -562,6 +584,18 @@ where
                     return ConnectionOutcome::Ended;
                 }
             }
+            Ok(ReadyRequest::Routine(request)) => {
+                let response = match &services.routine {
+                    Some(handle) => {
+                        let mut service = handle.lock().await;
+                        routine::dispatch(&mut service, request)
+                    }
+                    None => routine::unavailable(),
+                };
+                if session.respond_routine(response).await.is_err() {
+                    return ConnectionOutcome::Ended;
+                }
+            }
             Ok(ReadyRequest::Vault(request)) => {
                 let response = match &services.vault {
                     Some(handle) => vault::dispatch(handle.clone(), request).await,
@@ -572,6 +606,35 @@ where
                 }
             }
             Err(_) => return ConnectionOutcome::Ended,
+        }
+    }
+}
+
+/// G11 routine tick: due authorized routines run without any client
+/// connected (ADR-0045). Shutdown-safe via the same watch channel.
+async fn routine_tick_loop(
+    handle: RoutineHandle,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() { break; }
+            }
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+                    .unwrap_or(0);
+                let mut service = handle.lock().await;
+                match service.tick(now, "evidence:daemon-tick") {
+                    Ok(runs) if !runs.is_empty() => {
+                        eprintln!("agentd: routine tick completed {} run(s)", runs.len());
+                    }
+                    Ok(_) => {}
+                    Err(error) => eprintln!("agentd: routine tick failed: {error}"),
+                }
+            }
         }
     }
 }
@@ -643,6 +706,10 @@ where
         .human_decision
         .clone()
         .map(|handle| tokio::spawn(takeover_expiry_loop(handle, shutdown_rx.clone())));
+    let routine_tick = services
+        .routine
+        .clone()
+        .map(|handle| tokio::spawn(routine_tick_loop(handle, shutdown_rx.clone())));
     let admissions = Arc::new(tokio::sync::Semaphore::new(MAX_CONTROL_CLIENTS));
     let mut joins = tokio::task::JoinSet::new();
     let mut connections_served: u64 = 0;
@@ -694,6 +761,10 @@ where
         let _ = task.await;
     }
     if let Some(task) = takeover_tick {
+        task.abort();
+        let _ = task.await;
+    }
+    if let Some(task) = routine_tick {
         task.abort();
         let _ = task.await;
     }
@@ -900,6 +971,7 @@ mod unix_daemon {
                 vault,
                 finder: open_finder(),
                 memory: open_memory_service(&config)?,
+                routine: open_routine_service(&config)?,
             },
         )
         .await;
@@ -1007,6 +1079,7 @@ mod windows_daemon {
                 vault,
                 finder: super::open_finder(),
                 memory: super::open_memory_service(&config)?,
+                routine: super::open_routine_service(&config)?,
             },
         )
         .await)

@@ -50,3 +50,4 @@
 | [ADR-0044](./ADR-0044-g10-memory-engine-contract.md) | G10 Memory Engine contract (MemoryRecord, trust lifecycle, dedup, staleness, eligibility, M-1..M-12) | Accepted | memory engine, provenance, lifecycle, staleness, g10 |
 
 Coverage register (not an ADR): [COVERAGE.md](./COVERAGE.md).
+| [ADR-0045](./ADR-0045-g11-background-daemon-contract.md) | G11 Background daemon contract (RoutineDefinition/RoutineRun, authorization, eligibility, draining, reconciliation, B-1..B-10) | Accepted | background daemon, routines, authorization, g11 |

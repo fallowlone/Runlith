@@ -8,8 +8,8 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-current_gate: G10
-gate_status: IN_PROGRESS  # TASK-0179 activated G10 (G9 closed by TASK-0178)
+current_gate: G11
+gate_status: IN_PROGRESS  # TASK-0188 activated G11 (G10 closed by TASK-0187)
 
 items:
   - id: TASK-0012
@@ -6511,3 +6511,135 @@ items:
       Event Journal memory event types deferred (TASK-0182
       outcome); AGENTS.md generated map still stamps 40 packages
       (now 42). Audit only: no production behavior changes.
+
+  - id: TASK-0188
+    gate: G11
+    title: G11 governance reconciliation and sequence registration
+    objective: >-
+      Reconcile queue/version from G10 to G11 and register the G11
+      Background daemon sequence TASK-0188..TASK-0196.
+    scope: >-
+      Governance only: queue current_gate, product version gate,
+      roadmap G11 planned capabilities. No production behavior.
+    exit_criteria_summary: >-
+      Queue, version and roadmap agree on G11 IN_PROGRESS with the
+      full sequence registered and dependency-ordered.
+    depends_on:
+      - TASK-0187
+    blocked_by: []
+    references:
+      - planning/roadmap.yaml
+      - AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
+    outcome: >-
+      Registered in this task; see TASK-0196 closure for gate verdict.
+
+  - id: TASK-0189
+    gate: G11
+    title: ADR-0045 G11 background-daemon contract
+    objective: >-
+      Define daemon lifecycle, authorization boundary with UI closed,
+      RoutineDefinition/RoutineRun shape, budgets, draining, restart
+      reconciliation and watchdog escalation (B-1..B-10).
+    scope: Docs only (ADR + architecture index).
+    exit_criteria_summary: ADR-0045 accepted shape with security impact.
+    depends_on: [TASK-0188]
+    blocked_by: []
+    references: [planning/roadmap.yaml]
+
+  - id: TASK-0190
+    gate: G11
+    title: Pure background routine domain and contract crates
+    objective: >-
+      New pure crates: background (model/mint/port) and
+      background-contract conformance suite. No I/O, no clock.
+    scope: crates/background, crates/background-contract, workspace.
+    exit_criteria_summary: Domain tests and in-memory contract green.
+    depends_on: [TASK-0189]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0045-g11-background-daemon-contract.md]
+
+  - id: TASK-0191
+    gate: G11
+    title: SQLite routine persistence (schema v35)
+    objective: >-
+      Migration 0035 and SqliteStore routine seam passing the shared
+      contract with reopen durability.
+    scope: adapters/storage-sqlite routine store and migration.
+    exit_criteria_summary: Contract green on SQLite incl. reopen.
+    depends_on: [TASK-0190]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0045-g11-background-daemon-contract.md]
+
+  - id: TASK-0192
+    gate: G11
+    title: BackgroundService trusted composition
+    objective: >-
+      Define/authorize/disable/tick/reconcile/drain over the port;
+      author != authorizer; only authorized routines run.
+    scope: crates/app-services background service.
+    exit_criteria_summary: Service tests green incl. refusal paths.
+    depends_on: [TASK-0191]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0045-g11-background-daemon-contract.md]
+
+  - id: TASK-0193
+    gate: G11
+    title: Background IPC V10 and agentctl daemon/routine surface
+    objective: >-
+      Additive routine_core proto (routine_core = 13, below-V10 typed
+      refusal), agentd dispatch/composition, agentctl daemon
+      start|status|stop and routine define|authorize|disable|run|list.
+    scope: ipc-contracts, ipc-control, agentd, agentctl, ipc docs.
+    exit_criteria_summary: Shipped-binary routine cycle green.
+    depends_on: [TASK-0192]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0045-g11-background-daemon-contract.md]
+
+  - id: TASK-0194
+    gate: G11
+    title: Authorized work continues with UI closed
+    objective: >-
+      Prove due authorized routines execute via BackgroundService tick
+      without any UI/client connected and results are visible on
+      reconnect; unauthorized work stays blocked.
+    scope: app-services/agentd integration tests.
+    exit_criteria_summary: Integration test green across daemon restart.
+    depends_on: [TASK-0193]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0045-g11-background-daemon-contract.md]
+
+  - id: TASK-0195
+    gate: G11
+    title: G11 failure matrix and shipped-binary dogfood
+    objective: >-
+      Failure matrix (kill mid-run, double start, unauthorized routine,
+      budget exhaustion, restart with in-flight run) plus dogfood
+      through shipped binaries.
+    scope: Tests only plus evidence notes.
+    exit_criteria_summary: Matrix green; dogfood cycle recorded.
+    depends_on: [TASK-0194]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0045-g11-background-daemon-contract.md]
+
+  - id: TASK-0196
+    gate: G11
+    title: G11 independent closure audit
+    objective: >-
+      Fresh-context audit returning exactly G11_CLOSED or
+      G11_REMEDIATION_REQUIRED without implementing repairs.
+    scope: Audit docs only.
+    exit_criteria_summary: >-
+      Closure audit + gate docs with executable evidence; on
+      G11_CLOSED roadmap advances to G12.
+    depends_on: [TASK-0195]
+    blocked_by: []
+    references: [planning/roadmap.yaml]
+
+    outcome: >-
+      G11_CLOSED (docs/development/G11_CLOSURE_AUDIT.md, gate
+      docs/development/G11_CLOSURE_GATE.md GATE_PASS). Executed
+      inline by the implementing agent (weaker than fresh-context
+      audit). Workspace 1904 passed / 0 failed; fmt and clippy
+      clean. First full run failed 5 targets on v35 rewind fixtures
+      (routine table drops added, disclosed). Roadmap advances
+      to G12.

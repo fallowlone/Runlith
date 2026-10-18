@@ -20,6 +20,7 @@ import "task_authoring_core.proto";
 import "vault_core.proto";
 import "finder_core.proto";
 import "memory_core.proto";
+import "routine_core.proto";
 
 // A single inbound control message from a local client to agentd.
 message ControlRequest {
@@ -48,6 +49,8 @@ message ControlRequest {
     VaultCoreRequest vault_core = 11;
     // G10 structured memory. Valid only on protocol-v9 sessions.
     MemoryCoreRequest memory_core = 12;
+    // G11 background routines. Valid only on protocol-v10 sessions.
+    RoutineCoreRequest routine_core = 13;
   }
 }
 
@@ -75,6 +78,8 @@ message ControlResponse {
     VaultCoreResponse vault_core = 11;
     // G10 structured memory response. Protocol v9 only.
     MemoryCoreResponse memory_core = 12;
+    // G11 background routines response. Protocol v10 only.
+    RoutineCoreResponse routine_core = 13;
   }
 }
 

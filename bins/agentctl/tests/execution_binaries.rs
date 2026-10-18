@@ -1854,3 +1854,81 @@ fn memory_capture_validate_list_cycle_through_shipped_binaries() {
         stderr(&secret)
     );
 }
+
+#[test]
+fn routine_define_authorize_run_cycle_through_shipped_binaries() {
+    let sandbox = Sandbox::new("routine-cycle", SUCCESS_BODY);
+    let mut daemon = DaemonGuard::spawn(&sandbox);
+    sandbox.wait_ready();
+    // daemon status through the new alias surface.
+    let status = sandbox.agentctl(&["daemon", "status"]);
+    assert!(
+        status.status.success(),
+        "daemon status: {}",
+        stderr(&status)
+    );
+
+    let defined = sandbox.agentctl(&[
+        "routine",
+        "define",
+        "--name",
+        "nightly",
+        "--objective",
+        "verify state",
+        "--interval",
+        "3600",
+        "--scope",
+        "READ_ONLY",
+        "--budget",
+        "2",
+        "--author",
+        "agent-a",
+    ]);
+    assert!(defined.status.success(), "define: {}", stderr(&defined));
+    let out = stdout(&defined);
+    assert!(out.contains("PROPOSED"), "define {out}");
+    let id = out
+        .split_whitespace()
+        .next()
+        .expect("routine id")
+        .to_owned();
+    assert!(id.starts_with("rou_"), "id {id}");
+
+    // Author self-authorization refuses through the shipped CLI.
+    let refused = sandbox.agentctl(&["routine", "authorize", &id, "--authorizer", "agent-a"]);
+    assert!(!refused.status.success(), "self-authorization must refuse");
+    assert!(
+        stderr(&refused).contains("self_authorization"),
+        "refusal: {}",
+        stderr(&refused)
+    );
+
+    // Unauthorized routine does not run.
+    let ran = sandbox.agentctl(&["routine", "run", &id]);
+    assert!(!ran.status.success(), "proposed routine must not run");
+
+    let authorized = sandbox.agentctl(&["routine", "authorize", &id, "--authorizer", "operator"]);
+    assert!(
+        authorized.status.success(),
+        "authorize: {}",
+        stderr(&authorized)
+    );
+    assert!(stdout(&authorized).contains("AUTHORIZED"));
+
+    let ran = sandbox.agentctl(&["routine", "run", &id, "--evidence", "evidence:dogfood"]);
+    assert!(ran.status.success(), "run: {}", stderr(&ran));
+    assert!(stdout(&ran).contains("COMPLETED"), "run {}", stdout(&ran));
+
+    // Durability: kill and restart the daemon; routine and run survive,
+    // and the background tick does not duplicate the completed run.
+    daemon.restart(&sandbox);
+    let got = sandbox.agentctl(&["routine", "get", &id]);
+    assert!(got.status.success(), "get: {}", stderr(&got));
+    assert!(stdout(&got).contains("runs=1"), "get {}", stdout(&got));
+    let listed = sandbox.agentctl(&["routine", "list"]);
+    assert!(
+        stdout(&listed).contains("COMPLETED"),
+        "list {}",
+        stdout(&listed)
+    );
+}

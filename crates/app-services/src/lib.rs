@@ -11,6 +11,7 @@
 
 mod advisory_verification;
 mod approval_service;
+pub mod background_service;
 mod binding_service;
 mod candidate_verdict;
 mod clock;
