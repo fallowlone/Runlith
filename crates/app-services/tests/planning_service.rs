@@ -4849,9 +4849,12 @@ fn human_decision_ref_resolves_the_decision_outcome_only() {
     let outcome = decisions
         .apply_replan(&mut service, &planner, &decision.id, &policy(false))
         .expect("replan call");
+    // No Debug output of the outcome here: it carries Restricted
+    // resolved evidence, which must never reach logs (CodeQL
+    // rust/cleartext-logging).
     assert!(
         matches!(outcome, PlanningProposalOutcome::Accepted(_)),
-        "unexpected replan outcome: {outcome:?}"
+        "unexpected replan outcome kind"
     );
 
     let captured = planner
