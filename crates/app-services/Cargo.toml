@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 continuity = { path = "../continuity" }
+memory = { path = "../memory" }
 context-engine = { path = "../context-engine" }
 task-domain = { path = "../task" }
 agent-runtime = { path = "../agent-runtime" }

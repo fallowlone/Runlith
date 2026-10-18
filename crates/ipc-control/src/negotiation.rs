@@ -9,7 +9,7 @@ use ipc_contracts::proto::{HandshakeRejected, HandshakeRequest};
 use ipc_contracts::{
     IPC_PROTOCOL_VERSION_V0, IPC_PROTOCOL_VERSION_V1, IPC_PROTOCOL_VERSION_V2,
     IPC_PROTOCOL_VERSION_V3, IPC_PROTOCOL_VERSION_V4, IPC_PROTOCOL_VERSION_V5,
-    IPC_PROTOCOL_VERSION_V6, IPC_PROTOCOL_VERSION_V7,
+    IPC_PROTOCOL_VERSION_V6, IPC_PROTOCOL_VERSION_V7, IPC_PROTOCOL_VERSION_V8,
 };
 
 use crate::error::{ControlError, ControlResult};
@@ -194,6 +194,38 @@ pub fn validate_finder_allowed(negotiated_version: u32) -> ControlResult<()> {
     }
 }
 
+#[must_use]
+pub fn is_takeover_allowed(negotiated_version: u32) -> bool {
+    ipc_contracts::supports_takeover_continuation(negotiated_version)
+}
+
+#[must_use]
+pub fn is_memory_allowed(negotiated_version: u32) -> bool {
+    ipc_contracts::supports_memory_ipc(negotiated_version)
+}
+
+pub fn validate_memory_allowed(negotiated_version: u32) -> ControlResult<()> {
+    if is_memory_allowed(negotiated_version) {
+        Ok(())
+    } else {
+        Err(ControlError::UnsupportedProtocol {
+            negotiated: negotiated_version,
+            required: ipc_contracts::IPC_PROTOCOL_VERSION_V9,
+        })
+    }
+}
+
+pub fn validate_takeover_allowed(negotiated_version: u32) -> ControlResult<()> {
+    if is_takeover_allowed(negotiated_version) {
+        Ok(())
+    } else {
+        Err(ControlError::UnsupportedProtocol {
+            negotiated: negotiated_version,
+            required: IPC_PROTOCOL_VERSION_V8,
+        })
+    }
+}
+
 /// Negotiated handshake parameters on success.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedParameters {
@@ -345,6 +377,49 @@ impl ServerConfig {
                 IPC_PROTOCOL_VERSION_V5,
                 IPC_PROTOCOL_VERSION_V6,
                 IPC_PROTOCOL_VERSION_V7,
+            ],
+            daemon_build_version: default_daemon_build_version(),
+            supported_capabilities: Vec::new(),
+        }
+    }
+
+    /// G9 TAKEOVER rollout daemon configuration (TASK-0177): v8 enables
+    /// the TAKEOVER continuation and its operations while preserving
+    /// every historical surface. Production default from TASK-0177 on.
+    pub fn g9_takeover_default() -> Self {
+        Self {
+            supported_versions: vec![
+                IPC_PROTOCOL_VERSION_V0,
+                IPC_PROTOCOL_VERSION_V1,
+                IPC_PROTOCOL_VERSION_V2,
+                IPC_PROTOCOL_VERSION_V3,
+                IPC_PROTOCOL_VERSION_V4,
+                IPC_PROTOCOL_VERSION_V5,
+                IPC_PROTOCOL_VERSION_V6,
+                IPC_PROTOCOL_VERSION_V7,
+                IPC_PROTOCOL_VERSION_V8,
+            ],
+            daemon_build_version: default_daemon_build_version(),
+            supported_capabilities: Vec::new(),
+        }
+    }
+
+    /// G10 daemon configuration (TASK-0184): v9 enables structured
+    /// memory while preserving every historical surface. Production
+    /// default from TASK-0184 on.
+    pub fn g10_default() -> Self {
+        Self {
+            supported_versions: vec![
+                IPC_PROTOCOL_VERSION_V0,
+                IPC_PROTOCOL_VERSION_V1,
+                IPC_PROTOCOL_VERSION_V2,
+                IPC_PROTOCOL_VERSION_V3,
+                IPC_PROTOCOL_VERSION_V4,
+                IPC_PROTOCOL_VERSION_V5,
+                IPC_PROTOCOL_VERSION_V6,
+                IPC_PROTOCOL_VERSION_V7,
+                IPC_PROTOCOL_VERSION_V8,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V9,
             ],
             daemon_build_version: default_daemon_build_version(),
             supported_capabilities: Vec::new(),
@@ -540,7 +615,7 @@ mod tests {
     fn g6_daemon_adds_v3_policy_without_weakening_older_profiles() {
         let g6 = ServerConfig::g6_default();
         assert_eq!(g6.supported_versions, vec![0, 1, 2, 3]);
-        assert_eq!(IPC_PROTOCOL_VERSION, ipc_contracts::IPC_PROTOCOL_VERSION_V7);
+        assert_eq!(IPC_PROTOCOL_VERSION, ipc_contracts::IPC_PROTOCOL_VERSION_V9);
         assert!(validate_policy_allowed(3).is_ok());
         assert!(validate_policy_allowed(2).is_err());
         assert!(!is_policy_allowed(0));
@@ -646,6 +721,37 @@ mod tests {
         assert!(validate_policy_allowed(7).is_ok());
         assert!(validate_execution_allowed(7).is_ok());
         assert!(validate_business_allowed(7).is_ok());
+    }
+
+    #[test]
+    fn v8_takeover_is_unavailable_to_historical_clients() {
+        let daemon = ServerConfig::g9_takeover_default();
+        assert_eq!(daemon.supported_versions, vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        for version in 0..=7u32 {
+            let client = request(&(0..=version).collect::<Vec<_>>(), "agentctl", "0.1.0", &[]);
+            let params = evaluate_handshake(&client, &daemon).expect("historical negotiates");
+            assert_eq!(params.selected_version, version);
+            assert!(!is_takeover_allowed(params.selected_version));
+            assert!(matches!(
+                validate_takeover_allowed(params.selected_version),
+                Err(ControlError::UnsupportedProtocol {
+                    negotiated,
+                    required: 8
+                }) if negotiated == version
+            ));
+        }
+        let v8 = request(&[0, 1, 2, 3, 4, 5, 6, 7, 8], "agentctl", "0.1.0", &[]);
+        let params = evaluate_handshake(&v8, &daemon).expect("v8 client negotiates");
+        assert_eq!(params.selected_version, 8);
+        assert!(validate_takeover_allowed(8).is_ok());
+        assert!(validate_business_allowed(8).is_ok());
+        assert!(validate_execution_allowed(8).is_ok());
+        assert!(validate_policy_allowed(8).is_ok());
+        assert!(validate_human_decision_allowed(8).is_ok());
+        assert!(validate_planning_allowed(8).is_ok());
+        assert!(validate_task_authoring_allowed(8).is_ok());
+        assert!(validate_vault_allowed(8).is_ok());
+        assert!(validate_finder_allowed(8).is_ok());
     }
 
     #[test]

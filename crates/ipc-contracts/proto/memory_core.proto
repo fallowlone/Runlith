@@ -1,0 +1,118 @@
+syntax = "proto3";
+
+package ai_engineering_os.ipc;
+
+// G10 memory IPC contract (protocol version 9 only).
+//
+// Imported by `agentd_control.proto`, which carries it as
+// `ControlRequest.memory_core = 12` / `ControlResponse.memory_core = 12`.
+// Authority rules (TASK-0184, ADR-0044):
+// - A memory request on a negotiated session below version 9 is
+//   rejected as unsupported for the negotiated protocol; it never
+//   executes.
+// - The client supplies facts and provenance; the server mints ids,
+//   owns lifecycle transitions and refuses author self-validation
+//   (INV-029). SECRET sensitivity is refused at capture (INV-008).
+// - Bounds chain: content <= 16384 chars, refs <= 1024 chars,
+//   confidence per-mille 0..1000, failure detail <= 2048 chars.
+
+message MemorySourceRef {
+  // TASK, ATTEMPT, GIT, DECISION, EVENT, or FILE.
+  string kind = 1;
+  string reference = 2;
+  string revision = 3;
+}
+
+message MemoryAnchor {
+  // CODE, TASK, DECISION, or EVENT.
+  string kind = 1;
+  string reference = 2;
+  // sha256:<64 lowercase hex>
+  string fingerprint = 3;
+}
+
+message MemoryCaptureRequest {
+  // SEMANTIC, EPISODIC, PROCEDURAL, or DECISION.
+  string kind = 1;
+  string content = 2;
+  repeated MemorySourceRef source_refs = 3;
+  uint32 confidence = 4;
+  // PUBLIC, PROJECT, PRIVATE, RESTRICTED (SECRET refused).
+  string sensitivity = 5;
+  repeated MemoryAnchor anchors = 6;
+  string author_ref = 7;
+  uint64 now_millis = 8;
+  uint64 expires_at = 9; // 0 means no expiry
+  string supersedes = 10; // blank means none
+}
+
+message MemoryGetRequest {
+  string memory_id = 1;
+}
+
+message MemoryValidateRequest {
+  string memory_id = 1;
+  string validator_ref = 2;
+  uint64 now_millis = 3;
+}
+
+message MemorySupersedeRequest {
+  string old_memory_id = 1;
+  string successor_id = 2;
+}
+
+message MemoryRetireRequest {
+  string memory_id = 1;
+}
+
+message MemoryListEligibleRequest {
+  uint64 now_millis = 1;
+}
+
+message MemoryCoreRequest {
+  oneof payload {
+    MemoryCaptureRequest capture = 1;
+    MemoryGetRequest get = 2;
+    MemoryValidateRequest validate = 3;
+    MemorySupersedeRequest supersede = 4;
+    MemoryRetireRequest retire = 5;
+    MemoryListEligibleRequest list_eligible = 6;
+  }
+}
+
+message MemoryRecordResponse {
+  string memory_id = 1;
+  string kind = 2;
+  string content = 3;
+  string content_hash = 4;
+  uint32 confidence = 5;
+  string sensitivity = 6;
+  string trust_state = 7;
+  string author_ref = 8;
+  uint64 created_at = 9;
+  uint64 last_verified_at = 10;
+  uint64 expires_at = 11;
+  string supersedes = 12;
+  bool deduplicated = 13;
+}
+
+message MemoryListResponse {
+  repeated MemoryRecordResponse records = 1;
+}
+
+// Typed memory failure. Codes: "invalid_input", "unknown_kind",
+// "unbound_source_ref", "sensitivity_refusal", "untrusted_promotion",
+// "stale_anchor", "already_superseded", "conflict", "not_found",
+// "backend_failure", "unavailable".
+message MemoryErrorResponse {
+  string code = 1;
+  string detail = 2;
+}
+
+message MemoryCoreResponse {
+  oneof payload {
+    MemoryRecordResponse record = 1;
+    MemoryListResponse list = 2;
+    MemoryErrorResponse error = 3;
+  }
+}

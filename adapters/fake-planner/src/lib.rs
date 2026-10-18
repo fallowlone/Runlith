@@ -8,11 +8,11 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use plan_domain::{
-    compute_proposal_hash, AtomicityAssessment, AtomicityRequest, AtomicityVerdict, BudgetDelta,
-    CriterionDecl, CriterionId, DecompositionRequest, EdgeAddition, EvidenceRef, NodeAddition,
-    PlanChangeSet, PlanNodeId, PlanScope, PlannerAdapterId, PlannerCallSpend, PlannerFault,
-    PlannerIdentity, PlannerPort, PlanningCostReceipt, ReplanRequest, RiskClass,
-    VerificationMethod, MAX_CHILDREN_PER_DECOMPOSITION,
+    compute_proposal_hash, resolved_estimated_input_tokens, AtomicityAssessment, AtomicityRequest,
+    AtomicityVerdict, BudgetDelta, CriterionDecl, CriterionId, DecompositionRequest, EdgeAddition,
+    EvidenceRef, NodeAddition, PlanChangeSet, PlanNodeId, PlanScope, PlannerAdapterId,
+    PlannerCallSpend, PlannerFault, PlannerIdentity, PlannerPort, PlanningCostReceipt,
+    ReplanRequest, ResolvedEvidence, RiskClass, VerificationMethod, MAX_CHILDREN_PER_DECOMPOSITION,
 };
 
 /// Deterministic behavior selected by tests.
@@ -32,6 +32,8 @@ pub struct FakePlanner {
     scenario: FakePlannerScenario,
     fixed_leaf: Option<PlanNodeId>,
     calls: Arc<Mutex<Vec<&'static str>>>,
+    /// Refs of resolved items received, in arrival order (`<method>:<ref>`).
+    received_resolved: Arc<Mutex<Vec<String>>>,
 }
 
 impl FakePlanner {
@@ -41,6 +43,7 @@ impl FakePlanner {
             scenario,
             fixed_leaf: None,
             calls: Arc::new(Mutex::new(Vec::new())),
+            received_resolved: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -55,6 +58,7 @@ impl FakePlanner {
             scenario: FakePlannerScenario::Valid,
             fixed_leaf: Some(node_id),
             calls: Arc::new(Mutex::new(Vec::new())),
+            received_resolved: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -66,6 +70,25 @@ impl FakePlanner {
     #[must_use]
     pub fn calls(&self) -> Vec<&'static str> {
         self.calls.lock().expect("fake planner calls lock").clone()
+    }
+
+    /// `<method>:<ref>` for every resolved item received, in order.
+    #[must_use]
+    pub fn received_resolved_refs(&self) -> Vec<String> {
+        self.received_resolved
+            .lock()
+            .expect("fake planner resolved lock")
+            .clone()
+    }
+
+    fn record_resolved(&self, method: &'static str, items: &[ResolvedEvidence]) {
+        let mut log = self
+            .received_resolved
+            .lock()
+            .expect("fake planner resolved lock");
+        for item in items {
+            log.push(format!("{method}:{}", item.evidence_ref.as_str()));
+        }
     }
 
     fn record(&self, method: &'static str) {
@@ -229,6 +252,7 @@ impl PlannerPort for FakePlanner {
         input: AtomicityRequest,
     ) -> Result<AtomicityAssessment, PlannerFault> {
         self.record("assess_atomicity");
+        self.record_resolved("assess_atomicity", &input.resolved_evidence);
         if self.scenario == FakePlannerScenario::ProviderFailure {
             return self.failure();
         }
@@ -249,6 +273,7 @@ impl PlannerPort for FakePlanner {
         input: DecompositionRequest,
     ) -> Result<PlanChangeSet, PlannerFault> {
         self.record("propose_decomposition");
+        self.record_resolved("propose_decomposition", &input.resolved_evidence);
         if self.scenario == FakePlannerScenario::ProviderFailure {
             return self.failure();
         }
@@ -257,6 +282,8 @@ impl PlannerPort for FakePlanner {
         }
         if input.budget_remaining.calls_remaining == 0
             || input.budget_remaining.input_tokens_remaining == 0
+            || resolved_estimated_input_tokens(&input.resolved_evidence)
+                > input.budget_remaining.input_tokens_remaining
         {
             return budget_exhausted();
         }
@@ -265,6 +292,7 @@ impl PlannerPort for FakePlanner {
 
     fn propose_replan(&self, input: ReplanRequest) -> Result<PlanChangeSet, PlannerFault> {
         self.record("propose_replan");
+        self.record_resolved("propose_replan", &input.resolved_evidence);
         if self.scenario == FakePlannerScenario::ProviderFailure {
             return self.failure();
         }
@@ -273,6 +301,8 @@ impl PlannerPort for FakePlanner {
         }
         if input.budget_remaining.calls_remaining == 0
             || input.budget_remaining.input_tokens_remaining == 0
+            || resolved_estimated_input_tokens(&input.resolved_evidence)
+                > input.budget_remaining.input_tokens_remaining
         {
             return budget_exhausted();
         }

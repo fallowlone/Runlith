@@ -23,18 +23,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 
+use agent_runtime::{AttemptId, AttemptOutcome};
 use plan_domain::{
     call_within_envelope, l3_no_progress_tripped, planning_evidence_key,
-    requirement_kind_for_method, validate_proposal, AffectedParentCriterion, AtomicityAssessment,
-    AtomicityBlocker, AtomicityRequest, DecompositionRequest, EvidenceRef, GuardrailTrip,
+    requirement_kind_for_method, resolved_estimated_input_tokens, resolved_within_call_bounds,
+    validate_proposal, AffectedParentCriterion, AtomicityAssessment, AtomicityBlocker,
+    AtomicityRequest, DecompositionRequest, EvidenceClassification, EvidenceRef, GuardrailTrip,
     HumanContinuation, HumanDecisionReason, HumanDecisionRequest, HumanDecisionRequestId,
     HumanDecisionStatus, PlanBranchId, PlanChangeSet, PlanDomainError, PlanGraph, PlanRevision,
     PlannerCallSpend, PlannerFault, PlannerPort, PlanningBudget, PlanningCostReceipt,
     PlanningCostReceiptRef, PlanningInputSnapshot, PlanningInputSnapshotId, ReplanRequest,
-    RevisionProposedBy, RiskClass, RiskEscalationGrant, ScopeBound, TaskPlanningAuthority,
-    ValidatedBy, ValidationContext, ValidationOutcome, ValidationRefusal, MAX_DECOMPOSITION_DEPTH,
-    MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH, MAX_PLANNER_CUMULATIVE_INPUT_TOKENS,
-    MAX_PLANNER_INPUT_TOKENS, MAX_PLANNER_OUTPUT_TOKENS, MAX_PLANNER_WALL_CLOCK_SECS,
+    ResolvedEvidence, ResolvedEvidenceKind, RevisionProposedBy, RiskClass, RiskEscalationGrant,
+    ScopeBound, TaskPlanningAuthority, ValidatedBy, ValidationContext, ValidationOutcome,
+    ValidationRefusal, MAX_DECOMPOSITION_DEPTH, MAX_PLANNER_CALLS_PER_EVENT_PER_BRANCH,
+    MAX_PLANNER_CUMULATIVE_INPUT_TOKENS, MAX_PLANNER_INPUT_TOKENS, MAX_PLANNER_OUTPUT_TOKENS,
+    MAX_PLANNER_WALL_CLOCK_SECS, MAX_RESOLVED_EVIDENCE_ITEMS_PER_CALL,
     MAX_REVISIONS_PER_CYCLE_PER_BRANCH,
 };
 use storage_sqlite::{
@@ -53,6 +56,7 @@ use crate::plan_graph::{
     apply_validated_changeset, has_runnable_node, merged_depth, plan_predecessors, remaining_depth,
     target_applicability,
 };
+use crate::secret_redaction::{redact_lines, REDACTED};
 
 const VALIDATOR_SERVICE_ID: &str = "plan-application-service";
 const PLAN_PROVENANCE: &str = "app-services/planning-service";
@@ -293,6 +297,11 @@ struct ProposalBase {
     remaining_depth: u32,
     snapshot: PlanningInputSnapshot,
     run: PlanningRunRecord,
+    /// ADR-0029 option B: content resolved for the triggering refs by
+    /// this service. Empty when nothing resolved; attached to the
+    /// planner request by the caller of `prepare_proposal` (caller-
+    /// supplied content is never forwarded).
+    resolved_evidence: Vec<ResolvedEvidence>,
 }
 
 /// Outcome of one budgeted, durably accounted planner call.
@@ -523,6 +532,13 @@ impl<C: Clock> PlanningService<C> {
             .iter()
             .map(|criterion| criterion.id.clone())
             .collect();
+        // ADR-0029 option B (TASK-0175): trusted overwrite before the run
+        // starts, so a refusal here reserves zero provider spend.
+        let resolved = self.resolve_evidence(&request.evidence_refs)?;
+        if let Some(trip) = resolved_evidence_trip(&resolved, &remaining_budget(&state)) {
+            return Ok(PlanningAssessmentOutcome::GuardrailTripped(trip));
+        }
+        request.resolved_evidence = resolved;
 
         let (head, _) = self.load_base(branch)?;
         // Assessment proposes nothing, so it reserves a run for its planner
@@ -674,6 +690,15 @@ impl<C: Clock> PlanningService<C> {
         request.baseline_risk = policy.baseline_risk;
         request.depth_remaining = request.depth_remaining.min(base.remaining_depth);
         request.budget_remaining = remaining_budget(&base.state);
+        // Trusted overwrite (TASK-0175): caller-attached content is never
+        // forwarded; only what this service resolved crosses the boundary.
+        // The estimate is charged against the headroom handed to the
+        // planner; the measured receipt settles the real charge after.
+        request.resolved_evidence = base.resolved_evidence.clone();
+        request.budget_remaining.input_tokens_remaining = request
+            .budget_remaining
+            .input_tokens_remaining
+            .saturating_sub(resolved_estimated_input_tokens(&base.resolved_evidence));
 
         let metered = self.metered_call(
             branch,
@@ -867,6 +892,12 @@ impl<C: Clock> PlanningService<C> {
         request.baseline_risk = policy.baseline_risk;
         request.depth_remaining = request.depth_remaining.min(base.remaining_depth);
         request.budget_remaining = remaining_budget(&base.state);
+        // Trusted overwrite + estimate charge (TASK-0175), as in `decompose`.
+        request.resolved_evidence = base.resolved_evidence.clone();
+        request.budget_remaining.input_tokens_remaining = request
+            .budget_remaining
+            .input_tokens_remaining
+            .saturating_sub(resolved_estimated_input_tokens(&base.resolved_evidence));
 
         let metered = self.metered_call(
             branch,
@@ -1057,6 +1088,8 @@ impl<C: Clock> PlanningService<C> {
             remaining_depth,
             snapshot,
             run,
+            // Approved replay makes no planner call; nothing resolves.
+            resolved_evidence: Vec::new(),
         })
     }
 
@@ -1118,6 +1151,13 @@ impl<C: Clock> PlanningService<C> {
         if let Some(trip) = pre_call_guardrail(&state, true) {
             return Ok(Err(trip));
         }
+        // ADR-0029 option B (TASK-0175): resolve trusted refs before any
+        // spend is reserved; over-budget content refuses here exactly like
+        // a pre-call guardrail trip.
+        let resolved_evidence = self.resolve_evidence(triggering_evidence)?;
+        if let Some(trip) = resolved_evidence_trip(&resolved_evidence, &remaining_budget(&state)) {
+            return Ok(Err(trip));
+        }
         let (snapshot, run) = self.start_control_run(
             branch,
             triggering_evidence,
@@ -1138,7 +1178,116 @@ impl<C: Clock> PlanningService<C> {
             remaining_depth,
             snapshot,
             run,
+            resolved_evidence,
         }))
+    }
+
+    /// ADR-0029 option B (TASK-0175): resolves trusted refs to bounded
+    /// classified content per
+    /// `docs/privacy/PLANNER_EVIDENCE_RESOLUTION_POLICY.md`.
+    ///
+    /// Only refs this runtime minted itself resolve (`attempt:`,
+    /// `human-decision:`); every other ref, unknown id, or missing
+    /// record stays identity-only. Resolution itself never fails the
+    /// planning call: worst case the planner gets today's identity-only
+    /// behavior.
+    fn resolve_evidence(
+        &self,
+        refs: &[EvidenceRef],
+    ) -> Result<Vec<ResolvedEvidence>, PlanningServiceError> {
+        let mut resolved: Vec<ResolvedEvidence> = Vec::new();
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for evidence_ref in refs {
+            let raw = evidence_ref.as_str();
+            if !seen.insert(raw) {
+                continue;
+            }
+            let item = if let Some(id) = raw.strip_prefix("attempt:") {
+                self.resolve_attempt_ref(evidence_ref, id)?
+            } else if let Some(id) = raw.strip_prefix("human-decision:") {
+                self.resolve_human_decision_ref(evidence_ref, id)?
+            } else {
+                None
+            };
+            if let Some(item) = item {
+                resolved.push(item);
+            }
+            if resolved.len() >= MAX_RESOLVED_EVIDENCE_ITEMS_PER_CALL {
+                break;
+            }
+        }
+        Ok(resolved)
+    }
+
+    fn resolve_attempt_ref(
+        &self,
+        evidence_ref: &EvidenceRef,
+        id: &str,
+    ) -> Result<Option<ResolvedEvidence>, PlanningServiceError> {
+        let Ok(attempt_id) = AttemptId::new(id) else {
+            return Ok(None);
+        };
+        let Some(attempt) = self.store.get_attempt(&attempt_id)? else {
+            return Ok(None);
+        };
+        let mut lines = vec![
+            format!("evidence: attempt:{}", attempt.id().as_str()),
+            format!("execution: {}", attempt.execution_id().as_str()),
+            format!("provider: {}", attempt.provider().as_str()),
+            format!("outcome: {}", attempt_outcome_label(attempt.outcome())),
+        ];
+        if let Some(detail) = attempt.detail() {
+            // INV-008 defense in depth (policy §2): the domain asserts
+            // adapter-minted details are never secrets, but nothing
+            // crosses the boundary unscreened.
+            let screened =
+                redact_lines(&detail.lines().map(str::to_owned).collect::<Vec<_>>()).join("\n");
+            if !screened.trim().is_empty() && screened.trim() != REDACTED {
+                lines.push(format!("detail: {screened}"));
+            }
+        }
+        Ok(Some(ResolvedEvidence::new(
+            evidence_ref.clone(),
+            ResolvedEvidenceKind::Attempt,
+            EvidenceClassification::Project,
+            lines.join("\n"),
+        )?))
+    }
+
+    fn resolve_human_decision_ref(
+        &self,
+        evidence_ref: &EvidenceRef,
+        id: &str,
+    ) -> Result<Option<ResolvedEvidence>, PlanningServiceError> {
+        let Ok(decision_id) = HumanDecisionRequestId::new(id) else {
+            return Ok(None);
+        };
+        let Some(record) = self.store.get_human_decision(&decision_id)? else {
+            return Ok(None);
+        };
+        // Decision outcome only (policy §2): reason, status, selected
+        // continuation, decided-at. `decided_by` never crosses.
+        let lines = vec![
+            format!("evidence: human-decision:{}", record.id.as_str()),
+            format!("reason: {}", record.reason.as_str()),
+            format!("status: {}", record.status.as_str()),
+            format!(
+                "selected: {}",
+                record.selected.map_or("NONE", HumanContinuation::as_str)
+            ),
+            format!(
+                "decided_at_ms: {}",
+                record
+                    .decided_at_ms
+                    .map_or_else(|| "NONE".to_owned(), |value| value.to_string())
+            ),
+        ];
+        Ok(Some(ResolvedEvidence::new(
+            evidence_ref.clone(),
+            ResolvedEvidenceKind::HumanDecision,
+            EvidenceClassification::Restricted,
+            redact_lines(&lines).join("\n"),
+        )?))
     }
 
     /// Opens a human gate from an assessment.
@@ -1411,7 +1560,11 @@ impl<C: Clock> PlanningService<C> {
             reason,
             risk: policy.baseline_risk,
             affected_scope: policy.scope_bound.clone(),
-            options: vec![HumanContinuation::Replan, HumanContinuation::Abort],
+            options: vec![
+                HumanContinuation::Replan,
+                HumanContinuation::Abort,
+                HumanContinuation::Takeover,
+            ],
             recommendation: None,
             evidence: evidence.to_vec(),
             proposal_hash: None,
@@ -1730,6 +1883,7 @@ impl<C: Clock> PlanningService<C> {
                                 HumanContinuation::Resume,
                                 HumanContinuation::Replan,
                                 HumanContinuation::Abort,
+                                HumanContinuation::Takeover,
                             ],
                             recommendation: None,
                             evidence: proposal.source_evidence_refs.clone(),
@@ -2117,6 +2271,38 @@ fn assessment_receipt(assessment: &AtomicityAssessment) -> &PlanningCostReceipt 
 
 /// Trusted triggering-evidence identity. Planning without evidence has no
 /// event to bound, so it is refused before any read or call.
+/// Wire label for one attempt conclusion state (`attempt:` resolution).
+fn attempt_outcome_label(outcome: Option<AttemptOutcome>) -> &'static str {
+    match outcome {
+        None => "open",
+        Some(AttemptOutcome::Succeeded) => "succeeded",
+        Some(AttemptOutcome::Failed) => "failed",
+        Some(AttemptOutcome::TimedOut) => "timed-out",
+        Some(AttemptOutcome::Cancelled) => "cancelled",
+    }
+}
+
+/// Pre-call refusal when attached resolved content would exceed the
+/// planner budget (`PLANNER_EVIDENCE_RESOLUTION_POLICY.md` §3): the
+/// per-call input cap or the cumulative remaining tokens, whichever
+/// binds. Fires before any provider spend is reserved.
+fn resolved_evidence_trip(
+    items: &[ResolvedEvidence],
+    budget: &PlanningBudget,
+) -> Option<GuardrailTrip> {
+    let estimate = resolved_estimated_input_tokens(items);
+    if !resolved_within_call_bounds(items)
+        || estimate > budget.input_tokens_remaining
+        || estimate > MAX_PLANNER_INPUT_TOKENS
+    {
+        return Some(GuardrailTrip::new(
+            "resolved-evidence-budget",
+            u64::from(estimate),
+        ));
+    }
+    None
+}
+
 fn trigger_key(evidence: &[EvidenceRef]) -> Result<String, PlanningServiceError> {
     if evidence.is_empty() {
         return Err(PlanningServiceError::InvalidContext(

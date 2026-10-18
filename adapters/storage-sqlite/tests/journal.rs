@@ -117,7 +117,7 @@ fn fresh_database_reaches_current_schema() {
     let db = TestDb::new("fresh-current");
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 33);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 34);
     assert!(store.list_events_ordered().unwrap().is_empty());
 }
 
@@ -1153,7 +1153,13 @@ fn legacy_journal_without_hashes_is_backfilled_on_upgrade() {
     // Rebuild the schema-31 shape: no hash columns, 0031 UPDATE guard intact.
     db.raw()
         .execute_batch(
-            "DROP TRIGGER event_journal_no_update;
+            "DROP TABLE IF EXISTS entity_links;
+             DROP TABLE IF EXISTS entities;
+             DROP TABLE IF EXISTS memory_links;
+             DROP TABLE IF EXISTS memory_anchors;
+             DROP TABLE IF EXISTS memory_source_refs;
+             DROP TABLE IF EXISTS memories;
+             DROP TRIGGER event_journal_no_update;
              ALTER TABLE event_journal DROP COLUMN previous_hash;
              ALTER TABLE event_journal DROP COLUMN record_hash;
              ALTER TABLE observed_effects DROP COLUMN record_fingerprint;

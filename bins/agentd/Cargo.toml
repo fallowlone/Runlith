@@ -20,6 +20,7 @@ repo-finder = { path = "../../crates/repo-finder" }
 ipc-contracts = { path = "../../crates/ipc-contracts" }
 ipc-control = { path = "../../crates/ipc-control" }
 ipc-transport = { path = "../../crates/ipc-transport" }
+memory = { path = "../../crates/memory" }
 provider-claude = { path = "../../adapters/provider-claude" }
 policy = { path = "../../crates/policy" }
 plan-domain = { path = "../../crates/plan" }

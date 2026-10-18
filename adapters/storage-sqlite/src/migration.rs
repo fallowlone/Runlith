@@ -1,7 +1,7 @@
 //! Deterministic checked-in migrations with an explicit schema version.
 //!
 //! Versioning uses SQLite `PRAGMA user_version`: 0 means a fresh database,
-//! 33 is the supported version (`0001_task_core.sql`, then
+//! 34 is the supported version (`0001_task_core.sql`, then
 //! `0002_event_journal.sql`, then `0003_event_scope.sql`, then
 //! `0004_runtime_core.sql`, then `0005_workspace_leases.sql`, then
 //! `0006_attempt_reservations.sql`, then
@@ -18,7 +18,8 @@
 //! then `0025_review_authority.sql`, then `0026_binding_proof_consumption.sql`, then
 //! `0027_side_effect_intents.sql`, then `0028_context_selection.sql`, then
 //! `0029_continuity.sql`, then `0030_takeover.sql`, then `0031_journal_append_only.sql`,
-//! then `0032_journal_hash_chain.sql`, then `0033_observed_effect_fingerprint.sql`). Newer
+//! then `0032_journal_hash_chain.sql`, then `0033_observed_effect_fingerprint.sql`,
+//! then `0034_memory.sql`). Newer
 //! versions fail closed; re-opening the current version is a no-op (never
 //! destructively re-applied). Executing migrations inside one SQLite
 //! transaction is storage consistency only — not TASK-0024 event atomicity.
@@ -28,7 +29,7 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::error::{StorageError, StorageResult};
 
 /// Schema version this adapter understands.
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 33;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 34;
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_task_core.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_event_journal.sql");
@@ -64,6 +65,7 @@ const MIGRATION_0030: &str = include_str!("../migrations/0030_takeover.sql");
 const MIGRATION_0031: &str = include_str!("../migrations/0031_journal_append_only.sql");
 const MIGRATION_0032: &str = include_str!("../migrations/0032_journal_hash_chain.sql");
 const MIGRATION_0033: &str = include_str!("../migrations/0033_observed_effect_fingerprint.sql");
+const MIGRATION_0034: &str = include_str!("../migrations/0034_memory.sql");
 pub(crate) const MIGRATION_0032_GUARD: &str =
     include_str!("../migrations/0032_journal_hash_chain_guard.sql");
 
@@ -317,7 +319,12 @@ pub(crate) fn migrate(connection: &mut Connection) -> StorageResult<u32> {
         })?;
         crate::observed_effect_store::backfill_effect_fingerprints(&transaction)?;
     }
-    transaction.execute_batch("PRAGMA user_version = 33")?;
+    if current < 34 {
+        transaction
+            .execute_batch(MIGRATION_0034)
+            .map_err(|error| StorageError::Migration(format!("0034_memory.sql failed: {error}")))?;
+    }
+    transaction.execute_batch("PRAGMA user_version = 34")?;
     transaction.commit()?;
     Ok(SUPPORTED_SCHEMA_VERSION)
 }

@@ -238,7 +238,89 @@ const RISK_PLANNING_BODY: &str = r#"printf '%s\n' '{"type":"result","subtype":"s
 const AUTHORITY_PLANNING_BODY: &str = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":0,\"reason\":\"canonical authority fixture\",\"node_additions\":[{\"id\":\"T-AUTH-CHILD\",\"scope\":[\"repo:canonical\"],\"criteria\":[{\"id\":\"criterion-canonical\",\"method\":\"automated-test\"}],\"risk_class\":\"medium\",\"required_gate\":null}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"canonical authority is preserved\",\"risk_delta\":[],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:canonical\"],\"coverage_map\":{\"criterion-canonical\":[\"criterion-canonical\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
 "#;
 
+const RETURN_PLANNING_BODY: &str = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":1,\"reason\":\"fixture takeover return\",\"node_additions\":[{\"id\":\"T-RETURN-CHILD\",\"scope\":[\"repo:src\"],\"criteria\":[{\"id\":\"criterion-root\",\"method\":\"automated-test\"}],\"risk_class\":\"low\",\"required_gate\":null}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"takeover return is executable\",\"risk_delta\":[],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:src\"],\"coverage_map\":{\"criterion-root\":[\"criterion-root\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
+"#;
+
 const SLOW_BODY: &str = "while :; do :; done\n";
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_millis() as u64
+}
+
+fn takeover_record_id(output: &Output) -> String {
+    stdout(output)
+        .lines()
+        .find_map(|line| line.strip_prefix("takeover "))
+        .and_then(|rest| rest.split_whitespace().next().map(str::to_owned))
+        .expect("takeover record id")
+}
+
+/// Authors a planning task, publishes its first plan, then drives it to
+/// RUNNING, so a TAKEOVER decision can be seeded against current state.
+fn setup_running_planned_task(sandbox: &Sandbox, project: &str, task: &str, branch: &str) {
+    author_ready_planning_task(sandbox, project, task, "repo:src", "criterion-root", "low");
+    let planning =
+        sandbox.agentctl(&["planning", "trigger", task, branch, "fixture:takeover-seed"]);
+    assert!(planning.status.success(), "planning: {}", stderr(&planning));
+    assert!(
+        stdout(&planning).contains("planning ACCEPTED"),
+        "planning output: {}",
+        stdout(&planning)
+    );
+    for verb in ["claim", "start"] {
+        let out = sandbox.agentctl(&["task", verb, task]);
+        assert!(out.status.success(), "task {verb}: {}", stderr(&out));
+    }
+}
+
+fn seed_takeover_decision(sandbox: &Sandbox, task: &str, branch: &str) -> String {
+    let db = sandbox
+        .root
+        .join("data")
+        .join("ai-engineering-os")
+        .join("state.sqlite3");
+    let branch_id = plan_domain::PlanBranchId::new(branch).unwrap();
+    let planning = app_services::PlanningService::open(&db, app_services::SystemClock)
+        .expect("open planning service");
+    let accepted = planning
+        .current_accepted_plan(&branch_id)
+        .expect("accepted plan query")
+        .expect("accepted plan");
+    let mut decisions =
+        app_services::HumanDecisionService::open(&db).expect("open human decision service");
+    decisions
+        .create(app_services::HumanDecisionCreate {
+            task_id: task_domain::TaskId::new(task).unwrap(),
+            plan_branch_id: branch_id,
+            reason: plan_domain::HumanDecisionReason::PlannerBlocked,
+            risk: plan_domain::RiskClass::Low,
+            affected_scope: plan_domain::ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+            options: vec![plan_domain::HumanContinuation::Takeover],
+            recommendation: None,
+            evidence: vec![plan_domain::EvidenceRef::new(format!("hdq:{task}")).unwrap()],
+            proposal_hash: None,
+            plan_head: accepted.revision().revision_seq,
+            planning_input_snapshot_id: accepted.planning_input_snapshot_id().clone(),
+            planning_input_fingerprint: accepted.planning_input_fingerprint().to_owned(),
+            policy_fingerprint: format!("policy:fixture:{task}"),
+            expires_at_ms: None,
+        })
+        .expect("create takeover decision")
+        .id
+        .as_str()
+        .to_owned()
+}
+
+fn sandbox_db(sandbox: &Sandbox) -> PathBuf {
+    sandbox
+        .root
+        .join("data")
+        .join("ai-engineering-os")
+        .join("state.sqlite3")
+}
 
 fn seed_ready(sandbox: &Sandbox, project: &str, task: &str) {
     let created = sandbox.agentctl(&["project", "create", project, &format!("project {project}")]);
@@ -296,6 +378,7 @@ fn seed_accepted_plan(sandbox: &Sandbox, task: &str) {
         acceptance_criteria_refs: vec![],
         scope_bound: scope.clone(),
         evidence_refs: vec![plan_domain::EvidenceRef::new(format!("fixture-plan:{task}")).unwrap()],
+        resolved_evidence: Vec::new(),
         depth_remaining: plan_domain::MAX_DECOMPOSITION_DEPTH,
         baseline_risk: plan_domain::RiskClass::Low,
         budget_remaining: plan_domain::PlanningBudget {
@@ -872,8 +955,12 @@ fn human_decision_cli_lists_gets_and_decides_over_protocol_v4() {
 }
 
 #[test]
-fn human_decision_cli_refuses_takeover_below_v8() {
-    let sandbox = Sandbox::new("human-decision-takeover-v4", SUCCESS_BODY);
+fn human_decision_cli_takeover_decides_on_v8() {
+    // TASK-0177: shipped agentctl+agentd negotiate v8, so TAKEOVER now
+    // decides. Below-v8 refusal stays pinned by the ipc-control and
+    // agentd dispatch unit suites (a shipped v8 client cannot be forced
+    // down to v4 through the CLI).
+    let sandbox = Sandbox::new("human-decision-takeover-v8", SUCCESS_BODY);
     let _daemon = DaemonGuard::spawn(&sandbox);
     seed_ready(&sandbox, "P-TO", "T-TO");
     let decision_id = seed_human_decision_with_options(
@@ -887,14 +974,321 @@ fn human_decision_cli_refuses_takeover_below_v8() {
     assert!(stdout(&get).contains("TAKEOVER"), "get {:?}", stdout(&get));
 
     let decide = sandbox.agentctl(&["human-decision", "decide", &decision_id, "takeover"]);
-    assert!(!decide.status.success(), "takeover must refuse below v8");
-    assert!(
-        stderr(&decide).contains("UNSUPPORTED_PROTOCOL"),
-        "decide refusal: {}",
-        stderr(&decide)
+    assert!(decide.status.success(), "decide: {}", stderr(&decide));
+    let decided = stdout(&decide);
+    assert!(decided.contains("RESOLVED"), "decided {decided:?}");
+    assert!(decided.contains("selected TAKEOVER"), "decided {decided:?}");
+}
+
+fn task_state(sandbox: &Sandbox, task: &str) -> String {
+    let out = sandbox.agentctl(&["task", "get", task]);
+    assert!(out.status.success(), "task get: {}", stderr(&out));
+    stdout(&out)
+}
+
+fn durable_takeover_status(sandbox: &Sandbox, record_id: &str) -> String {
+    let store = storage_sqlite::SqliteStore::open(sandbox_db(sandbox)).expect("assertion store");
+    let id = app_services::TakeoverRecordId::new(record_id.to_owned()).expect("record id");
+    store
+        .get_takeover(&id)
+        .expect("read takeover")
+        .expect("record exists")
+        .status
+        .as_str()
+        .to_owned()
+}
+
+/// Fixture seeding only: claims a durable ACTIVE planning run for the
+/// branch (mirrors the service-level TAKEOVER_ACTIVE_RUN fixture), so
+/// the shipped `takeover-apply` must refuse typed.
+fn seed_active_planning_run(sandbox: &Sandbox, task: &str, branch: &str) {
+    let mut store = storage_sqlite::SqliteStore::open(sandbox_db(sandbox)).expect("run store");
+    let branch_id = plan_domain::PlanBranchId::new(branch).unwrap();
+    let planning =
+        app_services::PlanningService::open(sandbox_db(sandbox), app_services::SystemClock)
+            .expect("open planning service");
+    let accepted = planning
+        .current_accepted_plan(&branch_id)
+        .expect("accepted plan query")
+        .expect("accepted plan");
+    let evidence = vec![plan_domain::EvidenceRef::new("fixture:active-run").unwrap()];
+    let snapshot = plan_domain::PlanningInputSnapshot::new(
+        branch_id,
+        task.to_owned(),
+        accepted.revision().revision_seq,
+        plan_domain::ScopeBound::new(vec!["repo:src".to_owned()]).unwrap(),
+        plan_domain::RiskClass::Low,
+        vec![],
+        evidence.clone(),
+        vec![],
+        None,
+        "policy:fixture:active-run".to_owned(),
+    )
+    .unwrap();
+    store
+        .start_human_gate_planning_run(
+            &snapshot,
+            &plan_domain::planning_evidence_key(&evidence),
+            now_ms(),
+        )
+        .expect("start active planning run");
+}
+
+/// Fixture seeding only: gives the task a leased execution whose anchor
+/// was not captured at TAKEOVER admission, so the return must refuse
+/// as stale (mirrors the service-level moved-anchor fixture).
+fn seed_leased_execution(sandbox: &Sandbox, task: &str, exec: &str, ws: &str) {
+    use workspace::WorkspaceStore as _;
+    let mut store = storage_sqlite::SqliteStore::open(sandbox_db(sandbox)).expect("lease store");
+    let task_id = task_domain::TaskId::new(task).unwrap();
+    let project = store
+        .get_task(&task_id)
+        .unwrap()
+        .expect("task exists")
+        .project_id()
+        .clone();
+    let execution = agent_runtime::Execution::begin(
+        agent_runtime::ExecutionId::new(exec).unwrap(),
+        task_id.clone(),
     );
-    let still_pending = sandbox.agentctl(&["human-decision", "get", &decision_id]);
-    assert!(stdout(&still_pending).contains("PENDING"));
+    store
+        .create_execution_with_event(
+            &execution,
+            &storage_sqlite::NewJournalEvent {
+                event_type: storage_sqlite::EventType::ExecutionCreated,
+                task_id: Some(task_id),
+                project_id: Some(project),
+                from_state: None,
+                to_state: None,
+                reason: None,
+                correlation_id: format!("op-takeover-stale-{exec}"),
+                causation_id: format!("req-takeover-stale-{exec}"),
+                occurred_at: "2024-01-01T00:00:00Z".to_owned(),
+                provenance: "agentctl-binary-test/fixture".to_owned(),
+                execution_id: Some(execution.id().clone()),
+                attempt_id: None,
+                attempt_outcome: None,
+                workspace_id: None,
+                from_workspace_state: None,
+                to_workspace_state: None,
+                plan_revision: None,
+            },
+        )
+        .expect("create execution");
+    let lease = workspace::WorkspaceLease::allocate(
+        workspace::WorkspaceId::new(ws).unwrap(),
+        workspace::RepositoryRef::new("repo-local:test").unwrap(),
+        execution.id().clone(),
+        workspace::Revision::new("a".repeat(40)).unwrap(),
+        workspace::BranchRef::new(format!("refs/heads/agent/{exec}")).unwrap(),
+        sandbox
+            .root
+            .join(format!("lease-{ws}"))
+            .display()
+            .to_string(),
+    )
+    .expect("allocate lease");
+    let anchor_dir = sandbox.root.join(format!("anchor-{ws}"));
+    std::fs::create_dir_all(&anchor_dir).expect("anchor dir");
+    let canonical = std::fs::canonicalize(&anchor_dir).expect("canonical anchor");
+    let anchor = workspace::TrustedCommonGit::restore(canonical.to_str().expect("anchor path"))
+        .expect("restore anchor");
+    store
+        .insert_allocated_lease_with_anchor(&lease, &anchor, now_ms())
+        .expect("insert lease");
+}
+
+fn decide_takeover(sandbox: &Sandbox, decision_id: &str) {
+    let decide = sandbox.agentctl(&["human-decision", "decide", decision_id, "takeover"]);
+    assert!(decide.status.success(), "decide: {}", stderr(&decide));
+    assert!(stdout(&decide).contains("selected TAKEOVER"));
+}
+
+fn apply_takeover(sandbox: &Sandbox, decision_id: &str, expires_at_ms: u64) -> Output {
+    sandbox.agentctl(&[
+        "human-decision",
+        "takeover-apply",
+        decision_id,
+        &expires_at_ms.to_string(),
+    ])
+}
+
+#[test]
+fn takeover_assume_append_render_return_cycle_through_shipped_binaries() {
+    let sandbox = Sandbox::new("takeover-cycle", PLANNING_BODY);
+    let _daemon = DaemonGuard::spawn(&sandbox);
+    sandbox.wait_ready();
+    setup_running_planned_task(&sandbox, "P-TO-CYCLE", "T-TO-CYCLE", "B-TO-CYCLE");
+    assert!(task_state(&sandbox, "T-TO-CYCLE").contains("RUNNING"));
+    let decision_id = seed_takeover_decision(&sandbox, "T-TO-CYCLE", "B-TO-CYCLE");
+    decide_takeover(&sandbox, &decision_id);
+
+    let applied = apply_takeover(&sandbox, &decision_id, now_ms() + 3_600_000);
+    assert!(applied.status.success(), "apply: {}", stderr(&applied));
+    assert!(
+        stdout(&applied).contains("ACTIVE"),
+        "apply {}",
+        stdout(&applied)
+    );
+    let record_id = takeover_record_id(&applied);
+    assert!(task_state(&sandbox, "T-TO-CYCLE").contains("BLOCKED"));
+
+    // Consumed decision: a second apply of the same HDR refuses typed.
+    let replay = apply_takeover(&sandbox, &decision_id, now_ms() + 3_600_000);
+    assert!(!replay.status.success(), "consumed HDR must refuse");
+    assert!(
+        stderr(&replay).contains("STALE_STATE"),
+        "consumed refusal: {}",
+        stderr(&replay)
+    );
+
+    let appended = sandbox.agentctl(&[
+        "human-decision",
+        "takeover-append",
+        &record_id,
+        "--actions",
+        "restart the workers",
+        "--question",
+        "which queue depth?",
+    ]);
+    assert!(appended.status.success(), "append: {}", stderr(&appended));
+    assert!(stdout(&appended).contains("restart the workers"));
+
+    let rendered = sandbox.agentctl(&["human-decision", "takeover-render", &record_id]);
+    assert!(rendered.status.success(), "render: {}", stderr(&rendered));
+    let packet = stdout(&rendered);
+    assert!(packet.contains("T-TO-CYCLE"), "packet {packet:?}");
+    assert!(packet.contains("restart the workers"), "packet {packet:?}");
+
+    // Return: a fresh planning cycle on the parked scope completes the
+    // takeover (BLOCKED -> RUNNING, record COMPLETED) on Accepted.
+    sandbox.replace_provider_body(RETURN_PLANNING_BODY);
+    let returned = sandbox.agentctl(&[
+        "planning",
+        "trigger",
+        "T-TO-CYCLE",
+        "B-TO-CYCLE",
+        "fixture:takeover-return",
+    ]);
+    assert!(returned.status.success(), "return: {}", stderr(&returned));
+    assert!(
+        stdout(&returned).contains("planning ACCEPTED"),
+        "return output: {}",
+        stdout(&returned)
+    );
+    assert!(task_state(&sandbox, "T-TO-CYCLE").contains("RUNNING"));
+    assert_eq!(durable_takeover_status(&sandbox, &record_id), "COMPLETED");
+}
+
+#[test]
+fn takeover_apply_refuses_active_run_through_shipped_binaries() {
+    let sandbox = Sandbox::new("takeover-active-run", PLANNING_BODY);
+    let _daemon = DaemonGuard::spawn(&sandbox);
+    sandbox.wait_ready();
+    setup_running_planned_task(&sandbox, "P-TO-RUN", "T-TO-RUN", "B-TO-RUN");
+    let decision_id = seed_takeover_decision(&sandbox, "T-TO-RUN", "B-TO-RUN");
+    decide_takeover(&sandbox, &decision_id);
+    seed_active_planning_run(&sandbox, "T-TO-RUN", "B-TO-RUN");
+
+    let applied = apply_takeover(&sandbox, &decision_id, now_ms() + 3_600_000);
+    assert!(!applied.status.success(), "active run must refuse apply");
+    assert!(
+        stderr(&applied).contains("CONFLICT"),
+        "active-run refusal: {}",
+        stderr(&applied)
+    );
+    assert!(task_state(&sandbox, "T-TO-RUN").contains("RUNNING"));
+}
+
+#[test]
+fn takeover_apply_refuses_stale_decision_through_shipped_binaries() {
+    let sandbox = Sandbox::new("takeover-stale-decision", PLANNING_BODY);
+    let _daemon = DaemonGuard::spawn(&sandbox);
+    sandbox.wait_ready();
+    setup_running_planned_task(&sandbox, "P-TO-STALE", "T-TO-STALE", "B-TO-STALE");
+    let decision_id = seed_takeover_decision(&sandbox, "T-TO-STALE", "B-TO-STALE");
+    decide_takeover(&sandbox, &decision_id);
+
+    // Drift the task under the resolved decision through the shipped
+    // lifecycle CLI, then apply must refuse STALE_STATE and park
+    // nothing. (A planning trigger cannot move the head here: the
+    // gate correctly returns the Resolved decision as WAITING.)
+    let blocked = sandbox.agentctl(&["task", "block", "T-TO-STALE", "drift for stale test"]);
+    assert!(blocked.status.success(), "block: {}", stderr(&blocked));
+
+    let applied = apply_takeover(&sandbox, &decision_id, now_ms() + 3_600_000);
+    assert!(!applied.status.success(), "stale decision must refuse");
+    assert!(
+        stderr(&applied).contains("STALE_STATE"),
+        "stale refusal: {}",
+        stderr(&applied)
+    );
+    assert!(task_state(&sandbox, "T-TO-STALE").contains("BLOCKED"));
+}
+
+#[test]
+fn takeover_return_refuses_stale_lease_through_shipped_binaries() {
+    let sandbox = Sandbox::new("takeover-stale-lease", PLANNING_BODY);
+    let _daemon = DaemonGuard::spawn(&sandbox);
+    sandbox.wait_ready();
+    setup_running_planned_task(&sandbox, "P-TO-LEASE", "T-TO-LEASE", "B-TO-LEASE");
+    let decision_id = seed_takeover_decision(&sandbox, "T-TO-LEASE", "B-TO-LEASE");
+    decide_takeover(&sandbox, &decision_id);
+    let applied = apply_takeover(&sandbox, &decision_id, now_ms() + 3_600_000);
+    assert!(applied.status.success(), "apply: {}", stderr(&applied));
+    let record_id = takeover_record_id(&applied);
+    seed_leased_execution(&sandbox, "T-TO-LEASE", "E-TO-LEASE", "WS-TO-LEASE");
+
+    sandbox.replace_provider_body(RETURN_PLANNING_BODY);
+    let returned = sandbox.agentctl(&[
+        "planning",
+        "trigger",
+        "T-TO-LEASE",
+        "B-TO-LEASE",
+        "fixture:takeover-return",
+    ]);
+    assert!(
+        !returned.status.success(),
+        "stale lease must refuse return: {}",
+        stdout(&returned)
+    );
+    assert!(
+        stderr(&returned).contains("gained execution"),
+        "stale-lease refusal: {}",
+        stderr(&returned)
+    );
+    assert!(task_state(&sandbox, "T-TO-LEASE").contains("BLOCKED"));
+    assert_eq!(durable_takeover_status(&sandbox, &record_id), "ACTIVE");
+}
+
+#[test]
+fn takeover_expiry_tick_reconciles_without_a_service_call() {
+    let sandbox = Sandbox::new("takeover-expiry-tick", PLANNING_BODY);
+    let _daemon = DaemonGuard::spawn(&sandbox);
+    sandbox.wait_ready();
+    setup_running_planned_task(&sandbox, "P-TO-TICK", "T-TO-TICK", "B-TO-TICK");
+    let decision_id = seed_takeover_decision(&sandbox, "T-TO-TICK", "B-TO-TICK");
+    decide_takeover(&sandbox, &decision_id);
+    let applied = apply_takeover(&sandbox, &decision_id, now_ms() + 1_500);
+    assert!(applied.status.success(), "apply: {}", stderr(&applied));
+    let record_id = takeover_record_id(&applied);
+    assert!(task_state(&sandbox, "T-TO-TICK").contains("BLOCKED"));
+
+    // No takeover-reconcile call: the daemon tick alone must abandon
+    // the expired record and unpark the task.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if durable_takeover_status(&sandbox, &record_id) == "EXPIRED"
+            && task_state(&sandbox, "T-TO-TICK").contains("RUNNING")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon tick never reconciled expiry"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 #[test]
@@ -1365,4 +1759,98 @@ fn assert_absent_under(root: &Path, needle: &[u8]) {
             );
         }
     }
+}
+
+#[test]
+fn memory_capture_validate_list_cycle_through_shipped_binaries() {
+    let sandbox = Sandbox::new("memory-cycle", SUCCESS_BODY);
+    let mut daemon = DaemonGuard::spawn(&sandbox);
+    sandbox.wait_ready();
+    let fingerprint = format!("sha256:{}", "ab".repeat(32));
+    let anchor = format!("CODE:crates/x/src/lib.rs:{fingerprint}");
+    let captured = sandbox.agentctl(&[
+        "memory",
+        "capture",
+        "--kind",
+        "SEMANTIC",
+        "--content",
+        "run codegen after protobuf changes",
+        "--source",
+        "TASK:TASK-1:rev1",
+        "--confidence",
+        "900",
+        "--sensitivity",
+        "PROJECT",
+        "--anchor",
+        &anchor,
+        "--author",
+        "agent-a",
+    ]);
+    assert!(captured.status.success(), "capture: {}", stderr(&captured));
+    let out = stdout(&captured);
+    assert!(out.contains("PROPOSED"), "capture {out}");
+    let id = out.split_whitespace().next().expect("memory id").to_owned();
+    assert!(id.starts_with("mem_"), "id {id}");
+
+    // Author self-validation refuses through the shipped CLI.
+    let refused = sandbox.agentctl(&["memory", "validate", &id, "--validator", "agent-a"]);
+    assert!(!refused.status.success(), "author validation must refuse");
+    assert!(
+        stderr(&refused).contains("untrusted_promotion"),
+        "refusal: {}",
+        stderr(&refused)
+    );
+
+    // Proposed memory is not eligible; after reviewer validation it is.
+    let listed = sandbox.agentctl(&["memory", "list"]);
+    assert!(
+        stdout(&listed).contains("eligible 0"),
+        "list {}",
+        stdout(&listed)
+    );
+    let validated = sandbox.agentctl(&["memory", "validate", &id, "--validator", "reviewer"]);
+    assert!(
+        validated.status.success(),
+        "validate: {}",
+        stderr(&validated)
+    );
+    assert!(stdout(&validated).contains("CONFIRMED"));
+    let listed = sandbox.agentctl(&["memory", "list"]);
+    assert!(
+        stdout(&listed).contains("eligible 1"),
+        "list {}",
+        stdout(&listed)
+    );
+
+    // Durability: kill and restart the daemon; memory survives.
+    daemon.restart(&sandbox);
+    let got = sandbox.agentctl(&["memory", "get", &id]);
+    assert!(got.status.success(), "get: {}", stderr(&got));
+    assert!(stdout(&got).contains("CONFIRMED"), "get {}", stdout(&got));
+
+    // SECRET capture refuses typed through the shipped binaries.
+    let secret = sandbox.agentctl(&[
+        "memory",
+        "capture",
+        "--kind",
+        "SEMANTIC",
+        "--content",
+        "hidden",
+        "--source",
+        "TASK:TASK-1:rev1",
+        "--confidence",
+        "1",
+        "--sensitivity",
+        "SECRET",
+        "--anchor",
+        &anchor,
+        "--author",
+        "agent-a",
+    ]);
+    assert!(!secret.status.success(), "SECRET capture must refuse");
+    assert!(
+        stderr(&secret).contains("sensitivity_refusal"),
+        "secret refusal: {}",
+        stderr(&secret)
+    );
 }

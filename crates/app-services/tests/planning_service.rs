@@ -389,6 +389,7 @@ fn replan_as_decomposition(input: ReplanRequest) -> DecompositionRequest {
         acceptance_criteria_refs: vec![],
         scope_bound: input.scope_bound,
         evidence_refs: input.triggering_evidence_refs,
+        resolved_evidence: input.resolved_evidence,
         depth_remaining: input.depth_remaining,
         baseline_risk: input.baseline_risk,
         budget_remaining: input.budget_remaining,
@@ -622,6 +623,7 @@ fn request_with(evidence_refs: Vec<EvidenceRef>) -> DecompositionRequest {
         acceptance_criteria_refs: vec![],
         scope_bound: ScopeBound::new(vec!["caller:ignored".to_owned()]).expect("caller scope"),
         evidence_refs,
+        resolved_evidence: Vec::new(),
         depth_remaining: 4,
         baseline_risk: RiskClass::Low,
         budget_remaining: PlanningBudget {
@@ -641,6 +643,7 @@ fn assessment_request(evidence_ref: &str) -> AtomicityRequest {
         acceptance_criteria_refs: vec![],
         scope_bound: ScopeBound::new(vec!["caller:ignored".to_owned()]).expect("caller scope"),
         evidence_refs: vec![evidence(evidence_ref)],
+        resolved_evidence: Vec::new(),
         execution_policy_ref: "policy:test".to_owned(),
     }
 }
@@ -1155,7 +1158,7 @@ fn provider_failure_consumes_conservative_budget_without_fabricating_usage_evide
         stopped,
         PlanningProposalOutcome::WaitingForHuman(ref decision)
             if decision.reason == HumanDecisionReason::PlannerBudget
-                && decision.options == [HumanContinuation::Replan, HumanContinuation::Abort]
+                && decision.options == [HumanContinuation::Replan, HumanContinuation::Abort, HumanContinuation::Takeover]
     ));
     assert_eq!(
         planner.call_count(),
@@ -1791,7 +1794,11 @@ fn planner_call_budget_is_hard_and_prevents_ninth_call() {
             assert_eq!(decision.reason, HumanDecisionReason::PlannerBudget);
             assert_eq!(
                 decision.options,
-                vec![HumanContinuation::Replan, HumanContinuation::Abort]
+                vec![
+                    HumanContinuation::Replan,
+                    HumanContinuation::Abort,
+                    HumanContinuation::Takeover
+                ]
             );
         }
         other => panic!("expected planner-budget human decision, got {other:?}"),
@@ -1866,7 +1873,11 @@ fn l3_no_progress_survives_restart_for_same_evidence() {
             assert_eq!(decision.reason, HumanDecisionReason::NoProgress);
             assert_eq!(
                 decision.options,
-                vec![HumanContinuation::Replan, HumanContinuation::Abort]
+                vec![
+                    HumanContinuation::Replan,
+                    HumanContinuation::Abort,
+                    HumanContinuation::Takeover
+                ]
             );
             decision.id
         }
@@ -4661,4 +4672,208 @@ fn takeover_return_leaves_blocked_when_planner_fails() {
         .expect("read record")
         .expect("record exists");
     assert_eq!(active.status, TakeoverStatus::Active);
+}
+
+// ---------------------------------------------------------------------------
+// TASK-0175 (ADR-0029 option B): trusted evidence resolution
+// ---------------------------------------------------------------------------
+
+/// Planner that records exactly what the trusted service handed it.
+struct CapturingPlanner {
+    inner: TestPlanner,
+    last_decomposition: Arc<Mutex<Option<DecompositionRequest>>>,
+    last_replan: Arc<Mutex<Option<ReplanRequest>>>,
+    last_assessment: Arc<Mutex<Option<AtomicityRequest>>>,
+}
+
+impl CapturingPlanner {
+    fn new() -> Self {
+        Self {
+            inner: TestPlanner::new(ProposalCase::Valid),
+            last_decomposition: Arc::new(Mutex::new(None)),
+            last_replan: Arc::new(Mutex::new(None)),
+            last_assessment: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+impl PlannerPort for CapturingPlanner {
+    fn assess_atomicity(
+        &self,
+        input: AtomicityRequest,
+    ) -> Result<AtomicityAssessment, PlannerFault> {
+        *self.last_assessment.lock().expect("capture lock") = Some(input.clone());
+        self.inner.assess_atomicity(input)
+    }
+
+    fn propose_decomposition(
+        &self,
+        input: DecompositionRequest,
+    ) -> Result<PlanChangeSet, PlannerFault> {
+        *self.last_decomposition.lock().expect("capture lock") = Some(input.clone());
+        Ok(self.inner.proposal(&input))
+    }
+
+    fn propose_replan(&self, input: ReplanRequest) -> Result<PlanChangeSet, PlannerFault> {
+        *self.last_replan.lock().expect("capture lock") = Some(input.clone());
+        Ok(self.inner.proposal(&replan_as_decomposition(input)))
+    }
+}
+
+fn seed_failed_attempt(db: &TestDb, task_id: &str, detail: &str) -> AttemptId {
+    let mut runtime = RuntimeService::open(&db.path, FixedClock(FIXED_MILLIS)).expect("runtime");
+    runtime
+        .create_execution(
+            ExecutionId::new("E-RESOLVED").expect("execution id"),
+            TaskId::new(task_id).expect("task id"),
+        )
+        .expect("create execution");
+    let attempt = AttemptId::new("A-RESOLVED").expect("attempt id");
+    runtime
+        .create_attempt(
+            &ExecutionId::new("E-RESOLVED").expect("execution id"),
+            attempt.clone(),
+            ProviderRef::new("fixture-provider").expect("provider ref"),
+        )
+        .expect("create attempt");
+    runtime
+        .conclude_attempt(
+            &ExecutionId::new("E-RESOLVED").expect("execution id"),
+            &attempt,
+            agent_runtime::AttemptOutcome::Failed,
+            detail,
+        )
+        .expect("conclude attempt");
+    attempt
+}
+
+#[test]
+fn resolved_attempt_content_reaches_the_planner_but_not_the_journal() {
+    let db = TestDb::new("resolved-attempt");
+    let attempt = seed_failed_attempt(&db, "TASK-0078", "verification failed: 3 tests red");
+    let ref_text = format!("attempt:{}", attempt.as_str());
+    let planner = CapturingPlanner::new();
+    let mut service = db.service();
+    let outcome = service
+        .propose_decomposition(&planner, &branch(), request(&ref_text), &policy(false))
+        .expect("planning call");
+    assert!(matches!(outcome, PlanningProposalOutcome::Accepted(_)));
+
+    let captured = planner
+        .last_decomposition
+        .lock()
+        .expect("capture lock")
+        .clone()
+        .expect("planner received a decomposition request");
+    assert_eq!(captured.resolved_evidence.len(), 1);
+    let item = &captured.resolved_evidence[0];
+    assert_eq!(item.evidence_ref.as_str(), ref_text);
+    assert_eq!(
+        item.classification,
+        plan_domain::EvidenceClassification::Project
+    );
+    assert!(item.content.contains("outcome: failed"));
+    assert!(item.content.contains("verification failed: 3 tests red"));
+    assert!(item.content_hash.starts_with("sha256:"));
+    // The estimate is charged against the headroom the planner sees.
+    let estimate = plan_domain::resolved_estimated_input_tokens(&captured.resolved_evidence);
+    assert!(estimate > 0);
+    assert_eq!(
+        captured.budget_remaining.input_tokens_remaining,
+        MAX_PLANNER_CUMULATIVE_INPUT_TOKENS - estimate
+    );
+
+    // Resolved content is model-context only: the journal keeps refs.
+    let journal = format!("{:?}", db.store().list_events_ordered().expect("journal"));
+    assert!(!journal.contains("3 tests red"), "journal: {journal}");
+}
+
+#[test]
+fn unknown_missing_and_secret_shaped_evidence_stays_safe() {
+    let db = TestDb::new("resolved-safety");
+    let attempt = seed_failed_attempt(&db, "TASK-0078", "probe failed password=hunter2 end");
+    let secret_ref = format!("attempt:{}", attempt.as_str());
+    let planner = CapturingPlanner::new();
+    let mut service = db.service();
+    let mut request = request_with(vec![
+        evidence(&secret_ref),
+        evidence("attempt:does-not-exist"),
+        evidence("fixture-plan:anything"),
+    ]);
+    // Caller-attached content must never be forwarded (trusted overwrite).
+    request.resolved_evidence = vec![plan_domain::ResolvedEvidence::new(
+        evidence("fixture-plan:anything"),
+        plan_domain::ResolvedEvidenceKind::Attempt,
+        plan_domain::EvidenceClassification::Project,
+        "caller forged content".to_owned(),
+    )
+    .expect("forged item")];
+    let outcome = service
+        .propose_decomposition(&planner, &branch(), request, &policy(false))
+        .expect("planning call");
+    assert!(matches!(outcome, PlanningProposalOutcome::Accepted(_)));
+
+    let captured = planner
+        .last_decomposition
+        .lock()
+        .expect("capture lock")
+        .clone()
+        .expect("planner received a decomposition request");
+    // Only the durable attempt resolved; the missing record and the
+    // fixture ref stay identity-only, and the forged item is gone.
+    assert_eq!(captured.resolved_evidence.len(), 1);
+    let item = &captured.resolved_evidence[0];
+    assert_eq!(item.evidence_ref.as_str(), secret_ref);
+    assert!(item.content.contains("[redacted]"));
+    assert!(!item.content.contains("hunter2"));
+    assert!(item.content.contains("outcome: failed"));
+}
+
+#[test]
+fn human_decision_ref_resolves_the_decision_outcome_only() {
+    let db = TestDb::new("resolved-decision");
+    seed_head(&db, 1);
+    let pending = create_human_decision(&db, "TASK-0078", vec![HumanContinuation::Replan]);
+    // A pending decision correctly parks the branch (WaitingForHuman);
+    // resolve it first so the replan proceeds with its outcome as evidence.
+    let mut decisions = HumanDecisionService::attach(db.store(), FixedClock(FIXED_MILLIS));
+    let decision = decisions
+        .decide(&pending.id, HumanContinuation::Replan, "fixture-operator")
+        .expect("resolve decision");
+    // The sanctioned production path: the decision service applies the
+    // resolved REPLAN decision and the planning service resolves its
+    // outcome as evidence for the planner call.
+    let ref_text = format!("human-decision:{}", decision.id.as_str());
+    let planner = CapturingPlanner::new();
+    let mut service = db.service();
+    let outcome = decisions
+        .apply_replan(&mut service, &planner, &decision.id, &policy(false))
+        .expect("replan call");
+    // No Debug output of the outcome here: it carries Restricted
+    // resolved evidence, which must never reach logs (CodeQL
+    // rust/cleartext-logging).
+    assert!(
+        matches!(outcome, PlanningProposalOutcome::Accepted(_)),
+        "unexpected replan outcome kind"
+    );
+
+    let captured = planner
+        .last_replan
+        .lock()
+        .expect("capture lock")
+        .clone()
+        .expect("planner received a replan request");
+    assert_eq!(captured.resolved_evidence.len(), 1);
+    let item = &captured.resolved_evidence[0];
+    assert_eq!(item.evidence_ref.as_str(), ref_text);
+    assert_eq!(item.kind, plan_domain::ResolvedEvidenceKind::HumanDecision);
+    assert_eq!(
+        item.classification,
+        plan_domain::EvidenceClassification::Restricted
+    );
+    assert!(item.content.contains("reason: PLANNER_BLOCKED"));
+    assert!(item.content.contains("status: RESOLVED"));
+    assert!(item.content.contains("selected: REPLAN"));
+    assert!(!item.content.contains("decided_by"));
+    assert!(!item.content.contains("fixture-operator"));
 }

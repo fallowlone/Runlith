@@ -8,7 +8,7 @@
 # Near-term work lives in planning/tasks/queue.yaml, not here.
 
 schema_version: 1
-current_gate: G9
+current_gate: G11
 task_queue: planning/tasks/queue.yaml
 
 gates:
@@ -105,7 +105,8 @@ gates:
 
   - id: G9
     name: Context Engine + Continuity
-    status: in_progress
+    status: completed
+    exit_criteria_ref: docs/development/G9_CLOSURE_REAUDIT.md
     objective: Retrieval, token budget, context plans, epochs, checkpoints,
       history search.
     planned_capabilities:
@@ -128,7 +129,8 @@ gates:
 
   - id: G10
     name: Memory Engine
-    status: planned
+    status: completed
+    exit_criteria_ref: docs/development/G10_CLOSURE_AUDIT.md
     objective: Structured memory with provenance and lifecycle.
     scope_ref: docs/architecture/adr/ADR-0012-structured-memory-provenance.md
 

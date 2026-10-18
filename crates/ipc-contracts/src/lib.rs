@@ -48,14 +48,24 @@ pub const IPC_PROTOCOL_VERSION_V6: u32 = 6;
 /// reopens through the `finder_core` envelope.
 pub const IPC_PROTOCOL_VERSION_V7: u32 = 7;
 
+/// G9 TAKEOVER rollout (TASK-0177): preserves every older surface and
+/// enables the TAKEOVER human continuation plus its apply/append/render/
+/// reconcile operations in the `human_decision_core` envelope
+/// (ADR-0027 TASK-0169 amendment, wire assignment v8).
+pub const IPC_PROTOCOL_VERSION_V8: u32 = 8;
+
+/// G10 structured memory (TASK-0184): adds the bounded `memory_core`
+/// envelope (capture, get, validate, supersede, retire, list eligible).
+pub const IPC_PROTOCOL_VERSION_V9: u32 = 9;
+
 /// Current IPC protocol version: the highest version this build speaks.
-pub const IPC_PROTOCOL_VERSION: u32 = IPC_PROTOCOL_VERSION_V7;
+pub const IPC_PROTOCOL_VERSION: u32 = IPC_PROTOCOL_VERSION_V9;
 
 /// Alias making "current" explicit at call sites.
-pub const IPC_PROTOCOL_VERSION_CURRENT: u32 = IPC_PROTOCOL_VERSION_V7;
+pub const IPC_PROTOCOL_VERSION_CURRENT: u32 = IPC_PROTOCOL_VERSION_V9;
 
 /// Every protocol version this build negotiates, oldest first.
-pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 8] = [
+pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 10] = [
     IPC_PROTOCOL_VERSION_V0,
     IPC_PROTOCOL_VERSION_V1,
     IPC_PROTOCOL_VERSION_V2,
@@ -64,6 +74,8 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 8] = [
     IPC_PROTOCOL_VERSION_V5,
     IPC_PROTOCOL_VERSION_V6,
     IPC_PROTOCOL_VERSION_V7,
+    IPC_PROTOCOL_VERSION_V8,
+    IPC_PROTOCOL_VERSION_V9,
 ];
 
 /// Maximum length of a client-supplied human/request `reason` (block
@@ -112,6 +124,8 @@ pub fn supports_business_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V5
             | IPC_PROTOCOL_VERSION_V6
             | IPC_PROTOCOL_VERSION_V7
+            | IPC_PROTOCOL_VERSION_V8
+            | IPC_PROTOCOL_VERSION_V9
     )
 }
 
@@ -128,6 +142,8 @@ pub fn supports_execution_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V5
             | IPC_PROTOCOL_VERSION_V6
             | IPC_PROTOCOL_VERSION_V7
+            | IPC_PROTOCOL_VERSION_V8
+            | IPC_PROTOCOL_VERSION_V9
     )
 }
 
@@ -142,6 +158,8 @@ pub fn supports_policy_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V5
             | IPC_PROTOCOL_VERSION_V6
             | IPC_PROTOCOL_VERSION_V7
+            | IPC_PROTOCOL_VERSION_V8
+            | IPC_PROTOCOL_VERSION_V9
     )
 }
 
@@ -156,6 +174,8 @@ pub fn supports_human_decision_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V5
             | IPC_PROTOCOL_VERSION_V6
             | IPC_PROTOCOL_VERSION_V7
+            | IPC_PROTOCOL_VERSION_V8
+            | IPC_PROTOCOL_VERSION_V9
     )
 }
 
@@ -165,7 +185,11 @@ pub fn supports_human_decision_ipc(negotiated_version: u32) -> bool {
 pub fn supports_planning_ipc(negotiated_version: u32) -> bool {
     matches!(
         negotiated_version,
-        IPC_PROTOCOL_VERSION_V5 | IPC_PROTOCOL_VERSION_V6 | IPC_PROTOCOL_VERSION_V7
+        IPC_PROTOCOL_VERSION_V5
+            | IPC_PROTOCOL_VERSION_V6
+            | IPC_PROTOCOL_VERSION_V7
+            | IPC_PROTOCOL_VERSION_V8
+            | IPC_PROTOCOL_VERSION_V9
     )
 }
 
@@ -176,7 +200,10 @@ pub fn supports_planning_ipc(negotiated_version: u32) -> bool {
 pub fn supports_task_authoring_ipc(negotiated_version: u32) -> bool {
     matches!(
         negotiated_version,
-        IPC_PROTOCOL_VERSION_V6 | IPC_PROTOCOL_VERSION_V7
+        IPC_PROTOCOL_VERSION_V6
+            | IPC_PROTOCOL_VERSION_V7
+            | IPC_PROTOCOL_VERSION_V8
+            | IPC_PROTOCOL_VERSION_V9
     )
 }
 
@@ -184,24 +211,36 @@ pub fn supports_task_authoring_ipc(negotiated_version: u32) -> bool {
 /// never enabled below v7.
 #[must_use]
 pub fn supports_finder_ipc(negotiated_version: u32) -> bool {
-    negotiated_version == IPC_PROTOCOL_VERSION_V7
+    matches!(
+        negotiated_version,
+        IPC_PROTOCOL_VERSION_V7 | IPC_PROTOCOL_VERSION_V8 | IPC_PROTOCOL_VERSION_V9
+    )
 }
 
 /// Reports whether a negotiated session version accepts the TAKEOVER
 /// human continuation (TASK-0169 amendment): version 8 or higher only.
-/// No `IPC_PROTOCOL_VERSION_V8` exists yet — TASK-0172 implements the
-/// value and the refusal but assigns no version, so every negotiable
-/// session today refuses TAKEOVER by construction.
+/// TASK-0177 assigns version 8: only a v8 session accepts TAKEOVER or
+/// its apply/append/render/reconcile operations. Every older negotiable
+/// session refuses TAKEOVER by construction.
 #[must_use]
 pub fn supports_takeover_continuation(negotiated_version: u32) -> bool {
-    negotiated_version >= 8
+    negotiated_version >= IPC_PROTOCOL_VERSION_V8
+}
+
+/// Structured memory is new authority and is never enabled below v9.
+#[must_use]
+pub fn supports_memory_ipc(negotiated_version: u32) -> bool {
+    negotiated_version >= IPC_PROTOCOL_VERSION_V9
 }
 
 /// The operator credential vault is new authority and is never enabled for
 /// v0-v6 (ADR-0039).
 #[must_use]
 pub fn supports_vault_ipc(negotiated_version: u32) -> bool {
-    negotiated_version == IPC_PROTOCOL_VERSION_V7
+    matches!(
+        negotiated_version,
+        IPC_PROTOCOL_VERSION_V7 | IPC_PROTOCOL_VERSION_V8 | IPC_PROTOCOL_VERSION_V9
+    )
 }
 
 /// The one vault entry an operator may store (ADR-0039): the Claude Code
@@ -259,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn historical_versions_remain_supported_and_v7_is_current() {
+    fn historical_versions_remain_supported_and_v9_is_current() {
         assert_eq!(IPC_PROTOCOL_VERSION_V0, 0);
         assert_eq!(IPC_PROTOCOL_VERSION_V1, 1);
         assert_eq!(IPC_PROTOCOL_VERSION_V2, 2);
@@ -267,26 +306,19 @@ mod tests {
         assert_eq!(IPC_PROTOCOL_VERSION_V5, 5);
         assert_eq!(IPC_PROTOCOL_VERSION_V6, 6);
         assert_eq!(IPC_PROTOCOL_VERSION_V7, 7);
-        assert_eq!(IPC_PROTOCOL_VERSION, 7);
-        assert_eq!(IPC_PROTOCOL_VERSION_CURRENT, 7);
-        assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, [0, 1, 2, 3, 4, 5, 6, 7]);
-        assert!(is_supported_version(0));
-        assert!(is_supported_version(1));
-        assert!(is_supported_version(2));
-        assert!(is_supported_version(3));
-        assert!(is_supported_version(4));
-        assert!(is_supported_version(5));
-        assert!(is_supported_version(6));
-        assert!(is_supported_version(7));
-        assert!(!is_supported_version(8));
-        assert!(is_compatible(0));
-        assert!(is_compatible(1));
-        assert!(is_compatible(2));
-        assert!(is_compatible(3));
-        assert!(is_compatible(4));
-        assert!(is_compatible(5));
-        assert!(is_compatible(6));
-        assert!(is_compatible(7));
+        assert_eq!(IPC_PROTOCOL_VERSION_V8, 8);
+        assert_eq!(IPC_PROTOCOL_VERSION_V9, 9);
+        assert_eq!(IPC_PROTOCOL_VERSION, 9);
+        assert_eq!(IPC_PROTOCOL_VERSION_CURRENT, 9);
+        assert_eq!(SUPPORTED_PROTOCOL_VERSIONS, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        for version in 0..=9 {
+            assert!(is_supported_version(version), "v{version} negotiates");
+            assert!(is_compatible(version), "v{version} negotiates");
+        }
+        assert!(!is_supported_version(10));
+        assert!(!is_compatible(10));
+        assert!(!supports_memory_ipc(IPC_PROTOCOL_VERSION_V8));
+        assert!(supports_memory_ipc(IPC_PROTOCOL_VERSION_V9));
     }
 
     #[test]
@@ -438,6 +470,29 @@ mod tests {
         }
         assert!(supports_takeover_continuation(8));
         assert!(supports_takeover_continuation(9));
+    }
+
+    #[test]
+    fn v8_preserves_every_older_surface_and_adds_takeover() {
+        assert!(supports_business_ipc(IPC_PROTOCOL_VERSION_V8));
+        assert!(supports_execution_ipc(IPC_PROTOCOL_VERSION_V8));
+        assert!(supports_policy_ipc(IPC_PROTOCOL_VERSION_V8));
+        assert!(supports_human_decision_ipc(IPC_PROTOCOL_VERSION_V8));
+        assert!(supports_planning_ipc(IPC_PROTOCOL_VERSION_V8));
+        assert!(supports_task_authoring_ipc(IPC_PROTOCOL_VERSION_V8));
+        assert!(supports_finder_ipc(IPC_PROTOCOL_VERSION_V8));
+        assert!(supports_vault_ipc(IPC_PROTOCOL_VERSION_V8));
+        assert!(!supports_business_ipc(99));
+        assert!(!supports_finder_ipc(99));
+        assert!(!supports_vault_ipc(99));
+    }
+
+    #[test]
+    fn v0_through_v7_still_refuse_takeover_after_v8_assignment() {
+        for version in 0..=7u32 {
+            assert!(is_supported_version(version));
+            assert!(!supports_takeover_continuation(version));
+        }
     }
 
     #[test]

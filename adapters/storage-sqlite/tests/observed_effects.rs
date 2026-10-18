@@ -752,7 +752,7 @@ fn cv_2_schema_18_migrates_to_19_with_closed_capture_authority() {
     }
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 33);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 34);
     let connection = rusqlite::Connection::open(&db.path).unwrap();
     let sql: String = connection
         .query_row(
@@ -1870,12 +1870,18 @@ fn upgrade_backfills_fingerprint_for_quarantined_effect() {
     raw(&db.path)
         .execute_batch(
             "ALTER TABLE observed_effects DROP COLUMN record_fingerprint;
+             DROP TABLE IF EXISTS entity_links;
+             DROP TABLE IF EXISTS entities;
+             DROP TABLE IF EXISTS memory_links;
+             DROP TABLE IF EXISTS memory_anchors;
+             DROP TABLE IF EXISTS memory_source_refs;
+             DROP TABLE IF EXISTS memories;
              PRAGMA user_version = 32;",
         )
         .unwrap();
     // Upgrade must succeed (not fail with Corrupt 'observed effect vanished').
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 33);
+    assert_eq!(store.schema_version().unwrap(), 34);
     // Fingerprint backfilled although the row stays quarantined.
     let fingerprint: Option<String> = raw(&db.path)
         .query_row(
@@ -2144,6 +2150,12 @@ fn migration_repairs_pretrigger_operations_shape() {
              DROP TABLE continuity_checkpoints;
              DROP TABLE continuity_epochs;
              DROP TABLE continuity_meta;
+             DROP TABLE IF EXISTS entity_links;
+             DROP TABLE IF EXISTS entities;
+             DROP TABLE IF EXISTS memory_links;
+             DROP TABLE IF EXISTS memory_anchors;
+             DROP TABLE IF EXISTS memory_source_refs;
+             DROP TABLE IF EXISTS memories;
              DROP TABLE takeover_admission_anchors;
              DROP TABLE takeover_admissions;
              DROP TRIGGER IF EXISTS candidate_input_assessments_require_selection;
@@ -2159,7 +2171,7 @@ fn migration_repairs_pretrigger_operations_shape() {
         .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 33);
+    assert_eq!(store.schema_version().unwrap(), 34);
     drop(store);
     let conn = raw(&db.path);
     let tables: i64 = conn

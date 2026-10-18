@@ -17,6 +17,7 @@ use crate::error::{checked_id, PlanDomainError};
 use crate::ids::{
     CriterionId, EvidenceRef, PlanBranchId, PlanNodeId, PlannerAdapterId, PlanningCostReceiptRef,
 };
+use crate::resolved_evidence::ResolvedEvidence;
 use crate::risk::{CriterionDecl, GateRef, RiskClass, RiskDelta};
 use crate::scope::{PlanScope, ScopeBound};
 
@@ -513,6 +514,9 @@ pub struct AtomicityRequest {
     pub scope_bound: ScopeBound,
     /// Evidence refs the planner may read.
     pub evidence_refs: Vec<EvidenceRef>,
+    /// ADR-0029 option B: content the trusted service resolved for a
+    /// subset of `evidence_refs`. Refs without an item stay identity-only.
+    pub resolved_evidence: Vec<ResolvedEvidence>,
     /// Execution-policy ref (opaque; policy content never enters the port).
     pub execution_policy_ref: String,
 }
@@ -531,6 +535,9 @@ pub struct DecompositionRequest {
     pub scope_bound: ScopeBound,
     /// Evidence refs the planner may read.
     pub evidence_refs: Vec<EvidenceRef>,
+    /// ADR-0029 option B: content the trusted service resolved for a
+    /// subset of `evidence_refs`. Refs without an item stay identity-only.
+    pub resolved_evidence: Vec<ResolvedEvidence>,
     /// Remaining decomposition depth headroom.
     pub depth_remaining: u32,
     /// Baseline risk the proposal is judged against (V5). A node above this
@@ -552,6 +559,10 @@ pub struct ReplanRequest {
     pub base_plan_revision: u64,
     /// Triggering evidence refs.
     pub triggering_evidence_refs: Vec<EvidenceRef>,
+    /// ADR-0029 option B: content the trusted service resolved for a
+    /// subset of `triggering_evidence_refs`. Refs without an item stay
+    /// identity-only.
+    pub resolved_evidence: Vec<ResolvedEvidence>,
     /// Authorized scope bound (V4).
     pub scope_bound: ScopeBound,
     /// Remaining decomposition depth headroom.

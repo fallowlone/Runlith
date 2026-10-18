@@ -111,6 +111,7 @@ fn request(evidence: &str) -> DecompositionRequest {
         acceptance_criteria_refs: vec![],
         scope_bound: ScopeBound::new(vec!["caller:ignored".to_owned()]).unwrap(),
         evidence_refs: vec![EvidenceRef::new(evidence).unwrap()],
+        resolved_evidence: Vec::new(),
         depth_remaining: 4,
         baseline_risk: RiskClass::Low,
         budget_remaining: PlanningBudget {
@@ -125,6 +126,7 @@ fn replan_request(evidence: &str) -> ReplanRequest {
         branch_root_ref: "caller-ignored".to_owned(),
         base_plan_revision: 0,
         triggering_evidence_refs: vec![EvidenceRef::new(evidence).unwrap()],
+        resolved_evidence: Vec::new(),
         scope_bound: ScopeBound::new(vec!["caller:ignored".to_owned()]).unwrap(),
         depth_remaining: 4,
         baseline_risk: RiskClass::Low,
@@ -240,6 +242,7 @@ impl PlannerPort for DriftingPlanner {
             acceptance_criteria_refs: vec![plan_domain::CriterionId::new("criterion-root").unwrap()],
             scope_bound: input.scope_bound,
             evidence_refs: input.triggering_evidence_refs,
+            resolved_evidence: input.resolved_evidence,
             depth_remaining: input.depth_remaining,
             baseline_risk: input.baseline_risk,
             budget_remaining: input.budget_remaining,

@@ -404,6 +404,7 @@ impl<C: Clock> HumanDecisionService<C> {
                 branch_root_ref: policy.parent_task_ref.clone(),
                 base_plan_revision: record.precondition.plan_head,
                 triggering_evidence_refs: vec![evidence],
+                resolved_evidence: Vec::new(),
                 scope_bound: policy.scope_bound.clone(),
                 baseline_risk: policy.baseline_risk,
                 depth_remaining: MAX_DECOMPOSITION_DEPTH,

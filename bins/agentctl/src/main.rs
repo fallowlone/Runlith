@@ -24,8 +24,8 @@ use ipc_contracts::proto::{
     HumanDecisionDto, LifecycleRequest, ListDependenciesRequest, ListHumanDecisionsRequest,
     ListProjectsRequest, ListTasksForProjectRequest, PlanningContext, PlanningCoreRequest,
     PolicyCoreRequest, PolicyCoreResponse, ResumeExecutionRequest, RunExecutionRequest,
-    TaskAuthoringCoreRequest, TaskCoreRequest, TaskCoreResponse, TaskLifecycleOp,
-    TriggerPlanningRequest,
+    TakeoverAuthoredField, TakeoverRecordDto, TaskAuthoringCoreRequest, TaskCoreRequest,
+    TaskCoreResponse, TaskLifecycleOp, TriggerPlanningRequest,
 };
 
 mod vault;
@@ -45,8 +45,9 @@ async fn main() -> ExitCode {
         Some("planning") => cmd_planning(args.collect()).await,
         Some("vault") => vault::cmd(args.collect()).await,
         Some("find") => cmd_find(args.collect()).await,
+        Some("memory") => cmd_memory(args.collect()).await,
         _ => {
-            eprintln!("usage: agentctl <start|ping|shutdown|project|task|execution|approval|human-decision|planning|vault|find> ...");
+            eprintln!("usage: agentctl <start|ping|shutdown|project|task|execution|approval|human-decision|planning|vault|find|memory> ...");
             eprintln!("  {}", vault::USAGE);
             eprintln!("  agentctl project create <id> <name>");
             eprintln!("  agentctl project get <id>");
@@ -69,6 +70,10 @@ async fn main() -> ExitCode {
             eprintln!(
                 "  agentctl human-decision decide <request-id> <resume|replan|abort|takeover>"
             );
+            eprintln!("  agentctl human-decision takeover-apply <request-id> <expires-at-ms>");
+            eprintln!("  agentctl human-decision takeover-append <record-id> [--actions <text>] [--uncertainty <text>] [--question <text>] [--resulting-revision <n>] [--sensitivity <label>]");
+            eprintln!("  agentctl human-decision takeover-render <record-id>");
+            eprintln!("  agentctl human-decision takeover-reconcile [<task-id>]");
             eprintln!("  agentctl planning trigger <task-id> <branch-id> <evidence-ref>");
             eprintln!("  agentctl planning apply <human-decision-id>");
             eprintln!("  agentctl find query <repository-path> <text...> [--scope <dir>] [--limit <n>] [--continuation <token>] [--format text|json]");
@@ -626,14 +631,79 @@ fn print_approval_capability(label: &str, capability: ipc_contracts::proto::Appr
 }
 
 fn usage_human_decision() -> ExitCode {
-    eprintln!("usage: agentctl human-decision <list|get|decide> ...");
+    eprintln!(
+        "usage: agentctl human-decision <list|get|decide|takeover-apply|takeover-append|takeover-render|takeover-reconcile> ..."
+    );
     eprintln!("  agentctl human-decision list");
     eprintln!("  agentctl human-decision get <request-id>");
     eprintln!("  agentctl human-decision decide <request-id> <resume|replan|abort|takeover>");
+    eprintln!("  agentctl human-decision takeover-apply <request-id> <expires-at-ms>");
+    eprintln!(
+        "  agentctl human-decision takeover-append <record-id> [--actions <text>] [--uncertainty <text>] [--question <text>] [--resulting-revision <n>] [--sensitivity <label>]"
+    );
+    eprintln!("  agentctl human-decision takeover-render <record-id>");
+    eprintln!("  agentctl human-decision takeover-reconcile [<task-id>]");
     ExitCode::FAILURE
 }
 
+fn takeover_append_request(args: &[String]) -> Result<HumanDecisionCoreRequest, ()> {
+    let [verb, record_id, rest @ ..] = args else {
+        return Err(());
+    };
+    if verb != "takeover-append" || record_id.trim().is_empty() {
+        return Err(());
+    }
+    let mut actions = None;
+    let mut uncertainty = None;
+    let mut question = None;
+    let mut resulting_revision = None;
+    let mut sensitivity = "PROJECT".to_owned();
+    let mut flags = rest;
+    while let [flag, value, remaining @ ..] = flags {
+        match flag.as_str() {
+            "--actions" => actions = Some(value.clone()),
+            "--uncertainty" => uncertainty = Some(value.clone()),
+            "--question" => question = Some(value.clone()),
+            "--resulting-revision" => {
+                resulting_revision = Some(value.parse::<u64>().map_err(|_| ())?)
+            }
+            "--sensitivity" => sensitivity = value.clone(),
+            _ => return Err(()),
+        }
+        flags = remaining;
+    }
+    if !flags.is_empty()
+        || (actions.is_none()
+            && uncertainty.is_none()
+            && question.is_none()
+            && resulting_revision.is_none())
+    {
+        return Err(());
+    }
+    let authored = |text: Option<String>| {
+        text.map(|text| TakeoverAuthoredField {
+            text,
+            sensitivity: sensitivity.clone(),
+            is_ref: false,
+        })
+    };
+    Ok(HumanDecisionCoreRequest {
+        payload: Some(human_decision_core_request::Payload::AppendTakeover(
+            ipc_contracts::proto::AppendTakeoverRequest {
+                record_id: record_id.clone(),
+                actions: authored(actions),
+                uncertainty: authored(uncertainty),
+                question: authored(question),
+                resulting_revision,
+            },
+        )),
+    })
+}
+
 fn human_decision_request(args: &[String]) -> Result<HumanDecisionCoreRequest, ()> {
+    if args.first().map(String::as_str) == Some("takeover-append") {
+        return takeover_append_request(args);
+    }
     match args {
         [verb] if verb == "list" => Ok(HumanDecisionCoreRequest {
             payload: Some(human_decision_core_request::Payload::ListPending(
@@ -664,6 +734,45 @@ fn human_decision_request(args: &[String]) -> Result<HumanDecisionCoreRequest, (
                         continuation: continuation as i32,
                     },
                 )),
+            })
+        }
+        [verb, request_id, expires]
+            if verb == "takeover-apply" && !request_id.trim().is_empty() =>
+        {
+            Ok(HumanDecisionCoreRequest {
+                payload: Some(human_decision_core_request::Payload::ApplyTakeover(
+                    ipc_contracts::proto::ApplyTakeoverRequest {
+                        request_id: request_id.clone(),
+                        expires_at_ms: expires.parse::<u64>().map_err(|_| ())?,
+                    },
+                )),
+            })
+        }
+        [verb, record_id] if verb == "takeover-render" && !record_id.trim().is_empty() => {
+            Ok(HumanDecisionCoreRequest {
+                payload: Some(human_decision_core_request::Payload::RenderHandoffPacket(
+                    ipc_contracts::proto::RenderHandoffPacketRequest {
+                        record_id: record_id.clone(),
+                    },
+                )),
+            })
+        }
+        [verb] if verb == "takeover-reconcile" => Ok(HumanDecisionCoreRequest {
+            payload: Some(
+                human_decision_core_request::Payload::ReconcileTakeoverExpiry(
+                    ipc_contracts::proto::ReconcileTakeoverExpiryRequest { task_id: None },
+                ),
+            ),
+        }),
+        [verb, task_id] if verb == "takeover-reconcile" && !task_id.trim().is_empty() => {
+            Ok(HumanDecisionCoreRequest {
+                payload: Some(
+                    human_decision_core_request::Payload::ReconcileTakeoverExpiry(
+                        ipc_contracts::proto::ReconcileTakeoverExpiryRequest {
+                            task_id: Some(task_id.clone()),
+                        },
+                    ),
+                ),
             })
         }
         _ => Err(()),
@@ -741,6 +850,51 @@ fn print_human_decision_response(response: HumanDecisionCoreResponse) -> ExitCod
             print_human_decision(decision);
             ExitCode::SUCCESS
         }
+        Some(human_decision_core_response::Payload::ApplyTakeover(response)) => {
+            let Some(record) = response.record else {
+                return fail(&ClientError::HumanDecisionAmbiguous(
+                    "daemon omitted the takeover record dto".to_owned(),
+                ));
+            };
+            print_takeover_record(record);
+            ExitCode::SUCCESS
+        }
+        Some(human_decision_core_response::Payload::AppendTakeover(response)) => {
+            let Some(record) = response.record else {
+                return fail(&ClientError::HumanDecisionAmbiguous(
+                    "daemon omitted the takeover record dto".to_owned(),
+                ));
+            };
+            print_takeover_record(record);
+            ExitCode::SUCCESS
+        }
+        Some(human_decision_core_response::Payload::RenderHandoffPacket(response)) => {
+            let Some(packet) = response.packet else {
+                return fail(&ClientError::HumanDecisionAmbiguous(
+                    "daemon omitted the handoff packet dto".to_owned(),
+                ));
+            };
+            println!(
+                "handoff goal={:?} task={} seq={} branch={} head={} lease={}",
+                packet.goal,
+                packet.task_id,
+                packet.task_event_seq,
+                packet.plan_branch_id,
+                packet.plan_head,
+                packet.lease_id.as_deref().unwrap_or("-")
+            );
+            println!("blockers {}", packet.blockers.join(","));
+            print_authored("actions", packet.actions);
+            print_authored("uncertainty", packet.uncertainty);
+            print_authored("question", packet.question);
+            ExitCode::SUCCESS
+        }
+        Some(human_decision_core_response::Payload::ReconcileTakeoverExpiry(response)) => {
+            for record in response.records {
+                print_takeover_record(record);
+            }
+            ExitCode::SUCCESS
+        }
         Some(human_decision_core_response::Payload::Error(error)) => {
             eprintln!(
                 "error {}: {}",
@@ -752,6 +906,36 @@ fn print_human_decision_response(response: HumanDecisionCoreResponse) -> ExitCod
         None => fail(&ClientError::HumanDecisionAmbiguous(
             "daemon sent an empty human-decision response".to_owned(),
         )),
+    }
+}
+
+fn print_authored(label: &str, field: Option<TakeoverAuthoredField>) {
+    if let Some(field) = field {
+        println!(
+            "{label} {} {} {:?}",
+            field.sensitivity,
+            if field.is_ref { "ref" } else { "inline" },
+            field.text
+        );
+    }
+}
+
+fn print_takeover_record(record: TakeoverRecordDto) {
+    println!(
+        "takeover {} {} task={} branch={} hdr={} basis={} expires_at_ms={}",
+        record.record_id,
+        record.status,
+        record.task_id,
+        record.plan_branch_id,
+        record.hdr_id,
+        record.basis_plan_revision,
+        record.expires_at_ms
+    );
+    print_authored("actions", record.actions);
+    print_authored("uncertainty", record.uncertainty);
+    print_authored("question", record.question);
+    if let Some(revision) = record.resulting_revision {
+        println!("resulting_revision {revision}");
     }
 }
 
@@ -917,6 +1101,40 @@ async fn cmd_find(args: Vec<String>) -> ExitCode {
 #[cfg(windows)]
 async fn cmd_find(_args: Vec<String>) -> ExitCode {
     eprintln!("agentctl: finder control is unavailable on this build");
+    ExitCode::FAILURE
+}
+
+#[cfg(unix)]
+async fn cmd_memory(args: Vec<String>) -> ExitCode {
+    let endpoint = match resolve_production_endpoint() {
+        Ok(value) => value,
+        Err(error) => return fail(&error),
+    };
+    let request = match agentctl::parse_memory_args(&args) {
+        Ok(value) => value,
+        Err(usage) => {
+            eprintln!("{usage}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match agentctl::memory_request(&endpoint, spawn_sibling_daemon, request).await {
+        Ok(response) => match agentctl::format_memory_response(&response) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                ExitCode::FAILURE
+            }
+        },
+        Err(error) => fail(&error),
+    }
+}
+
+#[cfg(windows)]
+async fn cmd_memory(_args: Vec<String>) -> ExitCode {
+    eprintln!("agentctl: memory control is unavailable on this build");
     ExitCode::FAILURE
 }
 

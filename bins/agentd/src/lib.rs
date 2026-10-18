@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use app_services::{
-    ApprovalService, FinderService, HumanDecisionService, SystemClock, TaskService,
+    ApprovalService, FinderService, HumanDecisionService, MemoryService, SystemClock, TaskService,
 };
 use bytes::BytesMut;
 #[cfg(unix)]
@@ -42,6 +42,7 @@ pub mod dispatch;
 pub mod execution;
 pub mod finder;
 pub mod human_decision;
+pub mod memory;
 pub mod planning;
 mod provider_credential;
 pub mod vault;
@@ -188,11 +189,11 @@ impl DaemonConfig {
     /// G5 daemon configuration (TASK-0047): protocols `[0, 1, 2]` with
     /// the durable database at `path`, enabling the execution surface
     /// (`run`/`status`/`cancel`) through the real-provider composition.
-    /// Production default from TASK-0047 on; G9 negotiates through v7
-    /// (repository finder) while preserving every older surface.
+    /// Production default from TASK-0047 on; G10 negotiates through v9
+    /// (TASK-0184 memory rollout) while preserving every older surface.
     pub fn with_execution(path: impl Into<PathBuf>) -> Self {
         Self {
-            server_config: ServerConfig::g9_default(),
+            server_config: ServerConfig::g10_default(),
             database_path: Some(path.into()),
             provider_executable: None,
         }
@@ -223,6 +224,9 @@ pub type HumanDecisionHandle = Arc<tokio::sync::Mutex<HumanDecisionService<Syste
 /// and reopens serve from any connection concurrently.
 pub type FinderHandle = Arc<FinderService>;
 
+/// Shared trusted G10 memory service over its own SQLite connection.
+pub type MemoryHandle = Arc<tokio::sync::Mutex<MemoryService<storage_sqlite::SqliteStore>>>;
+
 #[derive(Clone)]
 struct ConnectionServices {
     business: Option<BusinessHandle>,
@@ -231,6 +235,7 @@ struct ConnectionServices {
     human_decision: Option<HumanDecisionHandle>,
     vault: Option<vault::VaultHandle>,
     finder: FinderHandle,
+    memory: Option<MemoryHandle>,
 }
 
 /// Terminal outcome of a daemon run.
@@ -340,6 +345,16 @@ fn open_finder() -> FinderHandle {
         FinderService::new(search, read, revision)
             .with_filter(Arc::new(app_services::RedactingFilter)),
     )
+}
+
+fn open_memory_service(config: &DaemonConfig) -> Result<Option<MemoryHandle>, DaemonError> {
+    let Some(path) = config.database_path.as_ref() else {
+        return Ok(None);
+    };
+    let store = storage_sqlite::SqliteStore::open(path)?;
+    Ok(Some(Arc::new(tokio::sync::Mutex::new(MemoryService::new(
+        store,
+    )))))
 }
 
 fn open_human_decision_service(
@@ -471,15 +486,24 @@ where
                 }
             }
             Ok(ReadyRequest::HumanDecision(request)) => {
+                let negotiated = session.negotiated_version().unwrap_or(0);
                 let response = match &services.human_decision {
-                    Some(handle) => {
-                        let mut service = handle.lock().await;
-                        human_decision::dispatch(
-                            &mut service,
-                            request,
-                            session.negotiated_version().unwrap_or(0),
-                        )
-                    }
+                    Some(handle) => match &services.business {
+                        Some(business) => {
+                            let tasks = business.lock().await;
+                            let mut service = handle.lock().await;
+                            human_decision::dispatch(
+                                &mut service,
+                                Some(&tasks),
+                                request,
+                                negotiated,
+                            )
+                        }
+                        None => {
+                            let mut service = handle.lock().await;
+                            human_decision::dispatch(&mut service, None, request, negotiated)
+                        }
+                    },
                     None => human_decision::unavailable(),
                 };
                 if session.respond_human_decision(response).await.is_err() {
@@ -526,6 +550,18 @@ where
                     return ConnectionOutcome::Ended;
                 }
             }
+            Ok(ReadyRequest::Memory(request)) => {
+                let response = match &services.memory {
+                    Some(handle) => {
+                        let mut service = handle.lock().await;
+                        memory::dispatch(&mut service, request)
+                    }
+                    None => memory::unavailable(),
+                };
+                if session.respond_memory(response).await.is_err() {
+                    return ConnectionOutcome::Ended;
+                }
+            }
             Ok(ReadyRequest::Vault(request)) => {
                 let response = match &services.vault {
                     Some(handle) => vault::dispatch(handle.clone(), request).await,
@@ -536,6 +572,42 @@ where
                 }
             }
             Err(_) => return ConnectionOutcome::Ended,
+        }
+    }
+}
+
+/// Bounded cadence for the daemon TAKEOVER expiry tick (TASK-0177).
+const TAKEOVER_EXPIRY_TICK: Duration = Duration::from_secs(1);
+
+/// Reconciles expired ACTIVE takeovers without any service call.
+/// Shutdown-safe: exits when the shutdown watch flips and is aborted
+/// during wind-down; a reconcile failure is logged, never fatal.
+async fn takeover_expiry_loop(
+    handle: HumanDecisionHandle,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+            _ = tokio::time::sleep(TAKEOVER_EXPIRY_TICK) => {
+                let mut service = handle.lock().await;
+                match service.reconcile_takeover_expiry(None) {
+                    Ok(abandoned) if !abandoned.is_empty() => {
+                        eprintln!(
+                            "agentd: takeover expiry abandoned {} record(s)",
+                            abandoned.len()
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        eprintln!("agentd: takeover expiry reconcile failed: {error}");
+                    }
+                }
+            }
         }
     }
 }
@@ -567,6 +639,10 @@ where
         .vault
         .clone()
         .map(|handle| tokio::spawn(vault::idle_watch(handle)));
+    let takeover_tick = services
+        .human_decision
+        .clone()
+        .map(|handle| tokio::spawn(takeover_expiry_loop(handle, shutdown_rx.clone())));
     let admissions = Arc::new(tokio::sync::Semaphore::new(MAX_CONTROL_CLIENTS));
     let mut joins = tokio::task::JoinSet::new();
     let mut connections_served: u64 = 0;
@@ -614,6 +690,10 @@ where
     joins.abort_all();
     while joins.join_next().await.is_some() {}
     if let Some(task) = vault_idle {
+        task.abort();
+        let _ = task.await;
+    }
+    if let Some(task) = takeover_tick {
         task.abort();
         let _ = task.await;
     }
@@ -819,6 +899,7 @@ mod unix_daemon {
                 human_decision,
                 vault,
                 finder: open_finder(),
+                memory: open_memory_service(&config)?,
             },
         )
         .await;
@@ -925,6 +1006,7 @@ mod windows_daemon {
                 human_decision,
                 vault,
                 finder: super::open_finder(),
+                memory: super::open_memory_service(&config)?,
             },
         )
         .await)
@@ -1245,6 +1327,7 @@ mod tests {
             acceptance_criteria_refs: vec![],
             scope_bound: scope.clone(),
             evidence_refs: vec![evidence],
+            resolved_evidence: Vec::new(),
             depth_remaining: plan_domain::MAX_DECOMPOSITION_DEPTH,
             baseline_risk: plan_domain::RiskClass::Low,
             budget_remaining: plan_domain::PlanningBudget {
