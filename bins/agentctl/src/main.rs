@@ -46,8 +46,10 @@ async fn main() -> ExitCode {
         Some("vault") => vault::cmd(args.collect()).await,
         Some("find") => cmd_find(args.collect()).await,
         Some("memory") => cmd_memory(args.collect()).await,
+        Some("routine") => cmd_routine(args.collect()).await,
+        Some("daemon") => cmd_daemon(args.collect()).await,
         _ => {
-            eprintln!("usage: agentctl <start|ping|shutdown|project|task|execution|approval|human-decision|planning|vault|find|memory> ...");
+            eprintln!("usage: agentctl <start|ping|shutdown|daemon|routine|project|task|execution|approval|human-decision|planning|vault|find|memory> ...");
             eprintln!("  {}", vault::USAGE);
             eprintln!("  agentctl project create <id> <name>");
             eprintln!("  agentctl project get <id>");
@@ -1102,6 +1104,52 @@ async fn cmd_find(args: Vec<String>) -> ExitCode {
 async fn cmd_find(_args: Vec<String>) -> ExitCode {
     eprintln!("agentctl: finder control is unavailable on this build");
     ExitCode::FAILURE
+}
+
+#[cfg(unix)]
+async fn cmd_routine(args: Vec<String>) -> ExitCode {
+    let endpoint = match resolve_production_endpoint() {
+        Ok(value) => value,
+        Err(error) => return fail(&error),
+    };
+    let request = match agentctl::parse_routine_args(&args) {
+        Ok(value) => value,
+        Err(usage) => {
+            eprintln!("{usage}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match agentctl::routine_request(&endpoint, spawn_sibling_daemon, request).await {
+        Ok(response) => match agentctl::format_routine_response(&response) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                ExitCode::FAILURE
+            }
+        },
+        Err(error) => fail(&error),
+    }
+}
+
+#[cfg(windows)]
+async fn cmd_routine(_args: Vec<String>) -> ExitCode {
+    eprintln!("agentctl: routine control is unavailable on this build");
+    ExitCode::FAILURE
+}
+
+async fn cmd_daemon(args: Vec<String>) -> ExitCode {
+    match args.first().map(String::as_str) {
+        Some("start") => cmd_start().await,
+        Some("status") => cmd_ping().await,
+        Some("stop") => cmd_shutdown().await,
+        _ => {
+            eprintln!("usage: agentctl daemon <start|status|stop>");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 #[cfg(unix)]

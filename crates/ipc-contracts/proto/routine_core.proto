@@ -1,0 +1,97 @@
+syntax = "proto3";
+
+package ai_engineering_os.ipc;
+
+// G11 background daemon IPC contract (protocol version 10 only).
+// Carried as ControlRequest.routine_core = 13. Below V10: typed refusal.
+// Authority: server mints ids, owns lifecycle, refuses author
+// self-authorization (ADR-0045 B-2). Only AUTHORIZED routines run.
+
+message RoutineDefineRequest {
+  string name = 1;
+  string objective = 2;
+  uint64 interval_seconds = 3;
+  // READ_ONLY, WORKSPACE_WRITE, or EXECUTION.
+  string capability_scope = 4;
+  uint32 budget_max_runs = 5;
+  string author_ref = 6;
+  uint64 now_millis = 7;
+}
+
+message RoutineAuthorizeRequest {
+  string routine_id = 1;
+  string authorizer_ref = 2;
+  uint64 now_millis = 3;
+}
+
+message RoutineIdRequest {
+  string routine_id = 1;
+}
+
+message RoutineRunRequest {
+  string routine_id = 1;
+  uint64 now_millis = 2;
+  string evidence_ref = 3;
+}
+
+message RoutineTickRequest {
+  uint64 now_millis = 1;
+  string evidence_ref = 2;
+}
+
+message RoutineListRequest {}
+
+message RoutineCoreRequest {
+  oneof payload {
+    RoutineDefineRequest define = 1;
+    RoutineAuthorizeRequest authorize = 2;
+    RoutineIdRequest disable = 3;
+    RoutineIdRequest get = 4;
+    RoutineRunRequest run = 5;
+    RoutineTickRequest tick = 6;
+    RoutineListRequest list = 7;
+  }
+}
+
+message RoutineRecordResponse {
+  string routine_id = 1;
+  string name = 2;
+  string objective = 3;
+  uint64 interval_seconds = 4;
+  string capability_scope = 5;
+  uint32 budget_max_runs = 6;
+  string author_ref = 7;
+  string authorized_by = 8;
+  string state = 9;
+  uint64 created_at = 10;
+  uint64 next_run_at = 11;
+  uint32 runs_completed = 12;
+}
+
+message RoutineRunResponse {
+  string run_id = 1;
+  string routine_id = 2;
+  string status = 3;
+  uint64 started_at = 4;
+  uint64 finished_at = 5;
+  string evidence_ref = 6;
+}
+
+message RoutineListResponse {
+  repeated RoutineRecordResponse routines = 1;
+  repeated RoutineRunResponse runs = 2;
+}
+
+message RoutineErrorResponse {
+  string code = 1;
+  string detail = 2;
+}
+
+message RoutineCoreResponse {
+  oneof payload {
+    RoutineRecordResponse record = 1;
+    RoutineRunResponse run = 2;
+    RoutineListResponse list = 3;
+    RoutineErrorResponse error = 4;
+  }
+}

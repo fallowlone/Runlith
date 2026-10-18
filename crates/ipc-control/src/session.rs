@@ -28,7 +28,8 @@ use crate::negotiation::{
     default_client_build_version, evaluate_handshake, rejection_for, validate_business_allowed,
     validate_execution_allowed, validate_finder_allowed, validate_human_decision_allowed,
     validate_memory_allowed, validate_planning_allowed, validate_policy_allowed,
-    validate_task_authoring_allowed, validate_vault_allowed, ServerConfig,
+    validate_routine_allowed, validate_task_authoring_allowed, validate_vault_allowed,
+    ServerConfig,
 };
 
 /// Deadline for a full client/server handshake exchange.
@@ -87,6 +88,8 @@ pub enum ReadyRequest {
     Vault(ipc_contracts::proto::VaultCoreRequest),
     /// Decoded G10 structured memory request on a version-9 session.
     Memory(ipc_contracts::proto::MemoryCoreRequest),
+    /// Decoded G11 background routine request on a version-10 session.
+    Routine(ipc_contracts::proto::RoutineCoreRequest),
 }
 
 /// Client-side handshake outcome.
@@ -259,6 +262,16 @@ impl ClientConfig {
             .push(ipc_contracts::IPC_PROTOCOL_VERSION_V9);
         config
     }
+
+    /// G11 routine client profile (TASK-0193). Offers every version
+    /// through v10 and requires `routine_allowed` before use.
+    pub fn routine_default(client_kind: impl Into<String>) -> Self {
+        let mut config = Self::memory_default(client_kind);
+        config
+            .supported_versions
+            .push(ipc_contracts::IPC_PROTOCOL_VERSION_V10);
+        config
+    }
 }
 
 /// Client side of the bootstrap control protocol.
@@ -370,6 +383,12 @@ where
     pub fn memory_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_memory_allowed)
+    }
+
+    #[must_use]
+    pub fn routine_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_routine_allowed)
     }
 
     /// Unwraps into the framed transport for lifecycle-owned exchanges
@@ -669,6 +688,23 @@ where
         }
     }
 
+    pub async fn respond_routine(
+        &mut self,
+        response: ipc_contracts::proto::RoutineCoreResponse,
+    ) -> ControlResult<()> {
+        self.require_ready()?;
+        let frame = bytes::Bytes::from(
+            ControlResponse {
+                payload: Some(control_response::Payload::RoutineCore(response)),
+            }
+            .encode_to_vec(),
+        );
+        match self.transport.write_frame(frame).await {
+            Ok(()) => Ok(()),
+            Err(error) => self.fail(error.into()),
+        }
+    }
+
     /// Sends the existing `ShutdownResponse` acknowledgement for a
     /// previously observed [`ReadyRequest::Shutdown`].
     ///
@@ -762,6 +798,12 @@ where
     pub fn memory_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_memory_allowed)
+    }
+
+    #[must_use]
+    pub fn routine_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_routine_allowed)
     }
 
     /// Reads the first request (within [`HANDSHAKE_TIMEOUT`]), requires it
@@ -956,6 +998,15 @@ where
                     .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
                 match validate_memory_allowed(negotiated) {
                     Ok(()) => Ok(ReadyRequest::Memory(request)),
+                    Err(error) => self.fail(error),
+                }
+            }
+            Some(control_request::Payload::RoutineCore(request)) => {
+                let negotiated = self
+                    .negotiated_version
+                    .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
+                match validate_routine_allowed(negotiated) {
+                    Ok(()) => Ok(ReadyRequest::Routine(request)),
                     Err(error) => self.fail(error),
                 }
             }

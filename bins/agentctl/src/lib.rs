@@ -20,9 +20,9 @@ use ipc_contracts::proto::{
     control_request, control_response, ControlRequest, ControlResponse, ExecutionCoreRequest,
     ExecutionCoreResponse, FinderCoreRequest, FinderCoreResponse, HumanDecisionCoreRequest,
     HumanDecisionCoreResponse, MemoryCoreRequest, MemoryCoreResponse, PlanningCoreRequest,
-    PlanningCoreResponse, PolicyCoreRequest, PolicyCoreResponse, ShutdownRequest,
-    TaskAuthoringCoreRequest, TaskAuthoringCoreResponse, TaskCoreRequest, TaskCoreResponse,
-    VaultCoreRequest, VaultCoreResponse,
+    PlanningCoreResponse, PolicyCoreRequest, PolicyCoreResponse, RoutineCoreRequest,
+    RoutineCoreResponse, ShutdownRequest, TaskAuthoringCoreRequest, TaskAuthoringCoreResponse,
+    TaskCoreRequest, TaskCoreResponse, VaultCoreRequest, VaultCoreResponse,
 };
 use ipc_control::{ClientConfig, ClientSession, ControlError, CLIENT_KIND_AGENTCTL};
 use ipc_transport::{FramedTransport, TransportError};
@@ -155,6 +155,7 @@ pub enum ClientError {
     /// reply is unconfirmed. Memory mutations are never replayed
     /// automatically; callers re-probe with `memory get` instead.
     MemoryAmbiguous(String),
+    RoutineAmbiguous(String),
     /// OS/runtime I/O failure.
     Io(io::Error),
 }
@@ -189,6 +190,9 @@ impl fmt::Display for ClientError {
             }
             Self::MemoryAmbiguous(detail) => {
                 write!(f, "ambiguous memory result (not replayed): {detail}")
+            }
+            Self::RoutineAmbiguous(detail) => {
+                write!(f, "ambiguous routine result (not replayed): {detail}")
             }
             Self::HumanDecisionAmbiguous(detail) => {
                 write!(
@@ -1259,6 +1263,89 @@ pub async fn memory_request(
     Err(ClientError::NotRunning)
 }
 
+/// Performs a protocol-v10 handshake for background routines.
+#[cfg(unix)]
+async fn handshake_stream_routine<S>(stream: S) -> Result<ClientSession<S>, ClientError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut session = ClientSession::new(
+        FramedTransport::new(stream),
+        ClientConfig::routine_default(CLIENT_KIND_AGENTCTL),
+    );
+    session
+        .perform_handshake()
+        .await
+        .map_err(classify_control)?;
+    if !session.routine_allowed() {
+        return Err(ClientError::Control(ControlError::UnsupportedProtocol {
+            negotiated: session.negotiated_version().unwrap_or(0),
+            required: ipc_contracts::IPC_PROTOCOL_VERSION_V10,
+        }));
+    }
+    Ok(session)
+}
+
+#[cfg(unix)]
+pub async fn routine_request(
+    endpoint: &UnixEndpoint,
+    spawn: impl FnOnce() -> io::Result<Child>,
+    request: RoutineCoreRequest,
+) -> Result<RoutineCoreResponse, ClientError> {
+    let session = connect_or_start_with(spawn, || async {
+        let stream = transport_connect(endpoint)
+            .await
+            .map_err(classify_transport)?;
+        handshake_stream_routine(stream).await
+    })
+    .await?;
+    let absence = absence_note(endpoint);
+    let mut transport = session.into_inner();
+    let frame = Bytes::from(
+        ControlRequest {
+            payload: Some(control_request::Payload::RoutineCore(request)),
+        }
+        .encode_to_vec(),
+    );
+    transport.write_frame(frame).await.map_err(|error| {
+        ClientError::RoutineAmbiguous(format!(
+            "RoutineCoreRequest send failed ({error}); endpoint {absence}; not replaying"
+        ))
+    })?;
+    let frame = tokio::time::timeout(BUSINESS_RESPONSE_TIMEOUT, transport.read_frame())
+        .await
+        .map_err(|_| {
+            ClientError::RoutineAmbiguous(format!(
+                "routine response timeout; endpoint {absence}; not replaying"
+            ))
+        })?
+        .map_err(|error| {
+            ClientError::RoutineAmbiguous(format!(
+                "routine response lost ({error}); endpoint {absence}; not replaying"
+            ))
+        })?;
+    let response = ControlResponse::decode(&frame[..]).map_err(|error| {
+        ClientError::RoutineAmbiguous(format!(
+            "routine response undecodable ({error}); endpoint {absence}; not replaying"
+        ))
+    })?;
+    match response.payload {
+        Some(control_response::Payload::RoutineCore(response)) => Ok(response),
+        other => Err(ClientError::RoutineAmbiguous(format!(
+            "unexpected routine reply ({other:?}); endpoint {absence}; not replaying"
+        ))),
+    }
+}
+
+#[cfg(not(unix))]
+pub async fn routine_request(
+    _endpoint: &str,
+    _spawn: impl FnOnce() -> io::Result<Child>,
+    _request: RoutineCoreRequest,
+) -> Result<RoutineCoreResponse, ClientError> {
+    Err(ClientError::NotRunning)
+}
+
 #[cfg(windows)]
 pub async fn human_decision_request(
     pipe_name: &str,
@@ -1832,6 +1919,116 @@ pub fn format_memory_response(response: &MemoryCoreResponse) -> Result<String, S
             Err(format!("memory {}: {}", e.code, e.detail))
         }
         None => Err("memory: empty response".to_owned()),
+    }
+}
+
+pub const ROUTINE_USAGE: &str = "usage: agentctl routine <define|authorize|disable|get|run|tick|list> ...\n  define --name <n> --objective <text> --interval <seconds> --scope READ_ONLY --budget <n> --author <ref>\n  authorize <rou_id> --authorizer <ref> | disable <rou_id> | get <rou_id> | run <rou_id> [--evidence <ref>] | tick [--evidence <ref>] | list\n  agentctl daemon <start|status|stop>";
+
+pub fn parse_routine_args(args: &[String]) -> Result<RoutineCoreRequest, String> {
+    use ipc_contracts::proto::{
+        routine_core_request, RoutineAuthorizeRequest, RoutineDefineRequest, RoutineIdRequest,
+        RoutineListRequest, RoutineRunRequest, RoutineTickRequest,
+    };
+    let usage = || ROUTINE_USAGE.to_owned();
+    let verb = args.first().map(String::as_str).ok_or_else(usage)?;
+    let payload = match verb {
+        "define" => routine_core_request::Payload::Define(RoutineDefineRequest {
+            name: flag_value(args, "--name").ok_or_else(usage)?.to_owned(),
+            objective: flag_value(args, "--objective")
+                .ok_or_else(usage)?
+                .to_owned(),
+            interval_seconds: flag_value(args, "--interval")
+                .ok_or_else(usage)?
+                .parse()
+                .map_err(|_| usage())?,
+            capability_scope: flag_value(args, "--scope")
+                .unwrap_or("READ_ONLY")
+                .to_owned(),
+            budget_max_runs: flag_value(args, "--budget")
+                .ok_or_else(usage)?
+                .parse()
+                .map_err(|_| usage())?,
+            author_ref: flag_value(args, "--author").ok_or_else(usage)?.to_owned(),
+            now_millis: now_millis(),
+        }),
+        "authorize" => routine_core_request::Payload::Authorize(RoutineAuthorizeRequest {
+            routine_id: args.get(1).cloned().ok_or_else(usage)?,
+            authorizer_ref: flag_value(args, "--authorizer")
+                .ok_or_else(usage)?
+                .to_owned(),
+            now_millis: now_millis(),
+        }),
+        "disable" => routine_core_request::Payload::Disable(RoutineIdRequest {
+            routine_id: args.get(1).cloned().ok_or_else(usage)?,
+        }),
+        "get" => routine_core_request::Payload::Get(RoutineIdRequest {
+            routine_id: args.get(1).cloned().ok_or_else(usage)?,
+        }),
+        "run" => routine_core_request::Payload::Run(RoutineRunRequest {
+            routine_id: args.get(1).cloned().ok_or_else(usage)?,
+            now_millis: now_millis(),
+            evidence_ref: flag_value(args, "--evidence")
+                .unwrap_or("evidence:cli-run")
+                .to_owned(),
+        }),
+        "tick" => routine_core_request::Payload::Tick(RoutineTickRequest {
+            now_millis: now_millis(),
+            evidence_ref: flag_value(args, "--evidence")
+                .unwrap_or("evidence:cli-tick")
+                .to_owned(),
+        }),
+        "list" => routine_core_request::Payload::List(RoutineListRequest {}),
+        _ => return Err(usage()),
+    };
+    Ok(RoutineCoreRequest {
+        payload: Some(payload),
+    })
+}
+
+pub fn format_routine_response(response: &RoutineCoreResponse) -> Result<String, String> {
+    use ipc_contracts::proto::routine_core_response;
+    fn line(r: &ipc_contracts::proto::RoutineRecordResponse) -> String {
+        format!(
+            "{} {} {} scope={} budget={} runs={} author={} by={} next={}",
+            r.routine_id,
+            r.name,
+            r.state,
+            r.capability_scope,
+            r.budget_max_runs,
+            r.runs_completed,
+            r.author_ref,
+            r.authorized_by,
+            r.next_run_at
+        )
+    }
+    match &response.payload {
+        Some(routine_core_response::Payload::Record(r)) => Ok(line(r)),
+        Some(routine_core_response::Payload::Run(r)) => Ok(format!(
+            "{} {} {} evidence={}",
+            r.run_id, r.routine_id, r.status, r.evidence_ref
+        )),
+        Some(routine_core_response::Payload::List(list)) => {
+            let mut out = format!(
+                "# routines {} runs {}",
+                list.routines.len(),
+                list.runs.len()
+            );
+            for r in &list.routines {
+                out.push('\n');
+                out.push_str(&line(r));
+            }
+            for r in &list.runs {
+                out.push_str(&format!(
+                    "\n{} {} {} evidence={}",
+                    r.run_id, r.routine_id, r.status, r.evidence_ref
+                ));
+            }
+            Ok(out)
+        }
+        Some(routine_core_response::Payload::Error(e)) => {
+            Err(format!("routine {}: {}", e.code, e.detail))
+        }
+        None => Err("routine: empty response".to_owned()),
     }
 }
 

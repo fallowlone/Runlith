@@ -42,5 +42,7 @@ members = [
     "crates/takeover",
     "crates/memory",
     "crates/memory-contract",
+    "crates/background",
+    "crates/background-contract",
 ]
 resolver = "2"

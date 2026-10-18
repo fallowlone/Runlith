@@ -21,6 +21,7 @@ ipc-contracts = { path = "../../crates/ipc-contracts" }
 ipc-control = { path = "../../crates/ipc-control" }
 ipc-transport = { path = "../../crates/ipc-transport" }
 memory = { path = "../../crates/memory" }
+background = { path = "../../crates/background" }
 provider-claude = { path = "../../adapters/provider-claude" }
 policy = { path = "../../crates/policy" }
 plan-domain = { path = "../../crates/plan" }

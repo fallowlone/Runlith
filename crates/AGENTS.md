@@ -27,6 +27,8 @@ integrates the concrete SQLite adapter.
 | Security audit record contract | [security-audit/src/lib.rs](./security-audit/src/lib.rs) | Durable audit values, distinct from execution journal |
 | Structured memory domain and store port | [memory/src/lib.rs](./memory/src/lib.rs) | ADR-0044 records, trust lifecycle, dedup, staleness, eligibility; `MemoryStorePort` |
 | Memory adapter conformance runner | [memory-contract](./memory-contract/src/lib.rs) | Shared contract suite every memory store must pass |
+| Background routine domain and store port | [background/src/lib.rs](./background/src/lib.rs) | ADR-0045 routines, authorization lifecycle, budgets, eligibility; `RoutineStorePort` |
+| Background adapter conformance runner | [background-contract](./background-contract/src/lib.rs) | Shared contract suite every routine store must pass |
 | IPC schemas / version capabilities | [ipc-contracts/src/lib.rs](./ipc-contracts/src/lib.rs) | Seven checked-in [proto files](./ipc-contracts/proto) |
 | Handshake / negotiation / sessions | [ipc-control/src/lib.rs](./ipc-control/src/lib.rs) | Version/capability checks above byte transport |
 | Framing / endpoints / peer identity | [ipc-transport/src/lib.rs](./ipc-transport/src/lib.rs) | Platform modules below control semantics |

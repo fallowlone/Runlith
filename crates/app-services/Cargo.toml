@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 continuity = { path = "../continuity" }
 memory = { path = "../memory" }
+background = { path = "../background" }
 context-engine = { path = "../context-engine" }
 task-domain = { path = "../task" }
 agent-runtime = { path = "../agent-runtime" }
@@ -28,6 +29,7 @@ sha2 = "0.10"
 repo-finder = { path = "../repo-finder" }
 
 [dev-dependencies]
+background-contract = { path = "../background-contract" }
 fake-agent = { path = "../../adapters/fake-agent" }
 fake-planner = { path = "../../adapters/fake-planner" }
 fake-evaluator = { path = "../../adapters/fake-evaluator" }
