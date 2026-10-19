@@ -25,6 +25,7 @@ mod memory_service;
 mod observed_effect_service;
 mod op_id;
 mod orchestration_service;
+pub mod org_service;
 mod plan_graph;
 mod planned_orchestration;
 mod planning_service;

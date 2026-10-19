@@ -124,6 +124,7 @@ dependencies = [
  "fake-planner",
  "git-cli",
  "memory",
+ "org",
  "plan-domain",
  "policy",
  "provider-claude",

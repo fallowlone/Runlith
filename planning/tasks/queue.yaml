@@ -6805,6 +6805,15 @@ items:
     depends_on: [TASK-0209]
     blocked_by: []
     references: [docs/architecture/adr/ADR-0047-g13-cloud-team-contract.md]
+    outcome: >-
+      OrgService in crates/app-services (pub mod org_service, generic over
+      OrgStorePort): register/create org (creator OWNER), team, membership
+      add/role-change/revoke delegating to domain authority, policy
+      write/resolve (weakening refuses), usage recording with ACTIVE
+      membership, pre-dispatch quota, envelope author/accept with org
+      sync-ceiling check. tests/org_service.rs 8 green incl. non-admin,
+      self-escalation, revoked-member, tamper/stale/duplicate refusals
+      and two-store round-trip.
   - id: TASK-0211
     gate: G13
     title: Organization IPC V12 and agentctl org surface
