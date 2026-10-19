@@ -29,7 +29,7 @@ Runlith is the layer above them that remembers, plans, isolates, verifies, and r
 <br>
 
 > [!WARNING]
-> Runlith is **pre-release** (`0.1.0`, currently gate **G9**). There is no public release yet, interfaces
+> Runlith is **pre-release** (`0.1.0`, currently gate **G13**). There is no public release yet, interfaces
 > may change, and only `main` is supported. Great time to read the code and shape the direction — not yet
 > a time to depend on it in production.
 
@@ -277,7 +277,7 @@ flowchart TB
 | **Contracts** | `ipc-contracts`, `execution-contract`, `planner-contract`, `secret-backend-contract`, … | Reusable contract suites any adapter must pass |
 | **Adapters** | `storage-sqlite`, `git-cli`, `provider-claude`, `runner-macos-seatbelt`, `keychain-native`, `secrets-vault`, … | Concrete I/O, one replaceable crate each |
 
-**40 packages** in one Cargo workspace (26 shared crates, 12 adapters, 2 binaries). A second provider must slot in
+**48 packages** in one Cargo workspace (34 shared crates, 12 adapters, 2 binaries). A second provider must slot in
 *without core changes* — that is the test of the design.
 
 ### One run, end to end
@@ -782,7 +782,7 @@ runlith/
 ├── bins/
 │   ├── agentd/            daemon: listener + composition root
 │   └── agentctl/          CLI: semantic lifecycle commands
-├── crates/                domains, services, contracts (26)
+├── crates/                domains, services, contracts (34)
 │   ├── task · plan · scheduler · policy · evaluation · workspace
 │   ├── context-engine · continuity · takeover · repo-finder
 │   ├── runner · secrets · security-audit · agent-runtime
@@ -835,11 +835,11 @@ Gates advance on **exit criteria, never calendar dates**.
 | G6 | Security — policy, approvals, secret broker, audit, runner isolation | ✅ |
 | G7 | Multi-agent DAG + bounded adaptive planning | ✅ |
 | G8 | Verification | ✅ |
-| **G9** | **Context engine + continuity** | 🚧 *in progress* |
-| G10 | Memory engine | ⏳ |
-| G11 | Background daemon | ⏳ |
-| G12 | Remote worker | ⏳ |
-| G13 | Cloud / team | ⏳ |
+| G9 | Context engine + continuity | ✅ |
+| G10 | Memory engine | ✅ |
+| G11 | Background daemon | ✅ |
+| G12 | Remote worker | ✅ |
+| **G13** | **Cloud / team** | 🚧 *in progress* |
 | G14 | Router / usage economics | ⏳ |
 
 The authoritative plan lives in [`planning/roadmap.yaml`](planning/roadmap.yaml).
