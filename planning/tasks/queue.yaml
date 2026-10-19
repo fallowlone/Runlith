@@ -6752,6 +6752,15 @@ items:
     depends_on: [TASK-0206]
     blocked_by: []
     references: [planning/roadmap.yaml, PROJECT_CHARTER.md]
+    outcome: >-
+      ADR-0047 Accepted (docs/architecture/adr/ADR-0047-g13-cloud-team-contract.md):
+      account/org/team/membership identity with role authority, layered
+      org policy (most-restrictive, weakening refuses), server-blind
+      SyncEnvelope with linear revision/conflict refusal, sync data
+      classification (SECRET/private keys never sync), append-only usage
+      ledger with pre-dispatch quota, threat model C-1..C-10 mapped to
+      TASK-0210..0213 tests; payment processor and hosted control plane
+      explicitly deferred to their own ADRs. Docs only; no Rust code.
   - id: TASK-0208
     gate: G13
     title: Pure organization domain and contract crates
