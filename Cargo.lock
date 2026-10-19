@@ -2005,6 +2005,8 @@ dependencies = [
  "evaluation",
  "memory",
  "memory-contract",
+ "org",
+ "org-contract",
  "plan-domain",
  "policy",
  "rusqlite",
