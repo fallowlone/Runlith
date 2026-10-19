@@ -29,6 +29,7 @@ mod journal_store;
 mod memory_store;
 mod migration;
 mod observed_effect_store;
+mod org_store;
 #[cfg(unix)]
 mod path_security;
 #[cfg(not(unix))]

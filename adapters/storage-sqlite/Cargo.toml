@@ -21,6 +21,7 @@ takeover = { path = "../../crates/takeover" }
 memory = { path = "../../crates/memory" }
 background = { path = "../../crates/background" }
 worker = { path = "../../crates/worker" }
+org = { path = "../../crates/org" }
 evaluation = { path = "../../crates/evaluation" }
 policy = { path = "../../crates/policy" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
@@ -31,6 +32,7 @@ continuity-contract = { path = "../../crates/continuity-contract" }
 memory-contract = { path = "../../crates/memory-contract" }
 background-contract = { path = "../../crates/background-contract" }
 worker-contract = { path = "../../crates/worker-contract" }
+org-contract = { path = "../../crates/org-contract" }
 context-engine-contract = { path = "../../crates/context-engine-contract" }
 policy = { path = "../../crates/policy" }
 # Raw-SQL probes for trigger/migration guarantees (TASK-0151): no public

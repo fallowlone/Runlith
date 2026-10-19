@@ -18,7 +18,7 @@ fn fresh_db() -> PathBuf {
 fn sqlite_satisfies_routine_contract() {
     let db = fresh_db();
     let mut store = SqliteStore::open(&db).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 36);
+    assert_eq!(store.schema_version().unwrap(), 37);
     let path = db.clone();
     run_routine_store_contract(&mut store, || SqliteStore::open(&path).unwrap());
     drop(store);

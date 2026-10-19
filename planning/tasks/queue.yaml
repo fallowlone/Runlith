@@ -6788,6 +6788,14 @@ items:
     depends_on: [TASK-0208]
     blocked_by: []
     references: [docs/architecture/adr/ADR-0047-g13-cloud-team-contract.md]
+    outcome: >-
+      Migration 0037 (schema v37): org_accounts plus the six ADR-0047 §9
+      tables; OrgStorePort implemented for SqliteStore with typed
+      revalidating mappers, append-only envelope/usage semantics.
+      run_org_store_contract green against SQLite with real reopen;
+      storage-sqlite 261/261 incl. v12/v13/v21/v22 upgrade fixtures.
+      Schema-version pins and legacy drop-lists in existing tests updated
+      36 to 37 (test-only changes, disclosed here).
   - id: TASK-0210
     gate: G13
     title: OrgService trusted composition
