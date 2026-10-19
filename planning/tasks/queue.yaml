@@ -8,8 +8,8 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-current_gate: G12
-gate_status: IN_PROGRESS  # TASK-0197 activated G12 (G11 closed by TASK-0196)
+current_gate: G13
+gate_status: IN_PROGRESS  # TASK-0206 activated G13 (G12 closed by TASK-0205)
 
 items:
   - id: TASK-0012
@@ -6731,3 +6731,87 @@ items:
       docs/development/G12_CLOSURE_GATE.md GATE_PASS). Inline
       audit by implementing agent. Workspace 1917 passed / 0
       failed; fmt and clippy clean. Roadmap advances to G13.
+
+  - id: TASK-0206
+    gate: G13
+    title: G13 governance reconciliation and sequence registration
+    objective: Reconcile queue/version G12 to G13; register TASK-0206..TASK-0214.
+    scope: Governance only.
+    exit_criteria_summary: Queue, version, roadmap agree on G13 IN_PROGRESS.
+    depends_on: [TASK-0205]
+    blocked_by: []
+    references: [planning/roadmap.yaml]
+    outcome: >-
+      Registered in this task; see TASK-0214 closure for gate verdict.
+  - id: TASK-0207
+    gate: G13
+    title: ADR-0047 G13 cloud/team contract
+    objective: Define account/organization/team/membership identity, role authority, layered org policy (org > project > user, lower cannot weaken org hard policy), E2E-encrypted server-blind sync envelope with revision/conflict semantics, usage/spend ledger with quota, data classification (secrets/private keys never sync), threat model (C-1..C-10); explicitly decide deferred real payment processor and hosted control plane; local operation never requires cloud.
+    scope: Docs only.
+    exit_criteria_summary: ADR-0047 accepted with threat model and non-goals.
+    depends_on: [TASK-0206]
+    blocked_by: []
+    references: [planning/roadmap.yaml, PROJECT_CHARTER.md]
+  - id: TASK-0208
+    gate: G13
+    title: Pure organization domain and contract crates
+    objective: org + org-contract crates; Organization/Team/Membership/Role, OrgPolicy resolution, SyncEnvelope, UsageEntry; signed/encrypted envelope verification seams. No I/O.
+    scope: crates/org, crates/org-contract, workspace.
+    exit_criteria_summary: Domain and in-memory contract green.
+    depends_on: [TASK-0207]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0047-g13-cloud-team-contract.md]
+  - id: TASK-0209
+    gate: G13
+    title: SQLite organization persistence (schema v37)
+    objective: Migration 0037 and org store passing shared contract with reopen.
+    scope: adapters/storage-sqlite.
+    exit_criteria_summary: SQLite contract green incl. reopen.
+    depends_on: [TASK-0208]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0047-g13-cloud-team-contract.md]
+  - id: TASK-0210
+    gate: G13
+    title: OrgService trusted composition
+    objective: Create org/team, membership role changes, org policy resolution, sync envelope accept/reject, quota enforcement; non-admin and revoked-member refusals.
+    scope: crates/app-services.
+    exit_criteria_summary: Service tests green incl. refusal paths.
+    depends_on: [TASK-0209]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0047-g13-cloud-team-contract.md]
+  - id: TASK-0211
+    gate: G13
+    title: Organization IPC V12 and agentctl org surface
+    objective: Additive org_core proto (org_core = 15, below-V12 refusal), agentd dispatch, agentctl org create|team|member|policy|sync|usage surface.
+    scope: ipc-contracts, ipc-control, agentd, agentctl, ipc docs.
+    exit_criteria_summary: Shipped-binary org cycle green.
+    depends_on: [TASK-0210]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0047-g13-cloud-team-contract.md]
+  - id: TASK-0212
+    gate: G13
+    title: Encrypted sync and org policy take effect locally
+    objective: Encrypted sync envelope round-trips between two local stores, org hard policy denies a locally attempted weakening/action, quota blocks over-limit dispatch; no silent cloud fallback, offline local work unaffected.
+    scope: Integration tests.
+    exit_criteria_summary: Integration green across daemon restart.
+    depends_on: [TASK-0211]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0047-g13-cloud-team-contract.md]
+  - id: TASK-0213
+    gate: G13
+    title: G13 failure matrix and two-store dogfood
+    objective: Revoked member, tampered sync envelope, stale-revision conflict, policy-weakening attempt, secret-in-envelope probe, over-quota dispatch; dogfood sync between two shipped agentd stores on loopback.
+    scope: Tests plus evidence.
+    exit_criteria_summary: Matrix green; dogfood recorded.
+    depends_on: [TASK-0212]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0047-g13-cloud-team-contract.md]
+  - id: TASK-0214
+    gate: G13
+    title: G13 closure audit
+    objective: Audit returning G13_CLOSED or G13_REMEDIATION_REQUIRED.
+    scope: Audit docs only.
+    exit_criteria_summary: Audit + gate docs; on G13_CLOSED roadmap advances to G14 (planned, requires owner ratification before any G14 task starts).
+    depends_on: [TASK-0213]
+    blocked_by: []
+    references: [planning/roadmap.yaml]
