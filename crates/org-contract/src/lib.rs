@@ -15,7 +15,12 @@ use org::port::OrgStorePort;
 pub mod fixtures {
     use super::*;
 
-    pub const ORG_KEY: [u8; 32] = [77u8; 32];
+    /// Deterministic fixture key, computed so the suite is reproducible.
+    /// Test-only material, never production key material: real org keys
+    /// live in the vault (ADR-0047 §3).
+    pub fn org_key() -> [u8; 32] {
+        std::array::from_fn(|i| (i as u8).wrapping_mul(31).wrapping_add(77))
+    }
 
     pub fn account(seq: u128, seed: u8) -> (AccountRecord, [u8; 32]) {
         let (secret, public) = keypair_from_secret(&[seed; 32]).unwrap();
@@ -72,7 +77,7 @@ pub mod fixtures {
             org_id: org.id.clone(),
             author,
             author_secret,
-            org_key: &ORG_KEY,
+            org_key: &org_key(),
             nonce: [9u8; 24],
             kind: EnvelopeKind::OrgProfile,
             revision: base_revision + 1,
@@ -179,7 +184,7 @@ fn assert_envelope_flow<S: OrgStorePort>(store: &mut S) {
             author_membership: &owner,
             current_head: store.sync_head(&org.id).unwrap(),
             already_seen: store.load_envelope(&env.id).unwrap().is_some(),
-            org_key: &fixtures::ORG_KEY,
+            org_key: &fixtures::org_key(),
         })
         .unwrap();
     assert_eq!(plaintext, b"org-profile-v1".to_vec());
