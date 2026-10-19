@@ -1,0 +1,13 @@
+[package]
+name = "org"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "org"
+path = "src/lib.rs"
+
+[dependencies]
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
+ed25519-dalek = "3"
+sha2 = "0.10"

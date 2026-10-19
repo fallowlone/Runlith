@@ -6770,6 +6770,15 @@ items:
     depends_on: [TASK-0207]
     blocked_by: []
     references: [docs/architecture/adr/ADR-0047-g13-cloud-team-contract.md]
+    outcome: >-
+      Pure crates org + org-contract: Account/Organization/Team/Membership
+      with role authority (no self change, OWNER-only OWNER role, terminal
+      revocation), OrgPolicy restrictive resolution with PolicyWeakening
+      refusal, SyncEnvelope seal/accept (XChaCha20-Poly1305 + ed25519,
+      classification refused pre-encryption, conflict/duplicate/tamper
+      typed refusals), append-only UsageEntry with idempotency and
+      pre-dispatch quota predicate; OrgStorePort with shared conformance
+      suite green against in-memory store incl. reopen. No I/O.
   - id: TASK-0209
     gate: G13
     title: SQLite organization persistence (schema v37)

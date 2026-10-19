@@ -31,6 +31,8 @@ integrates the concrete SQLite adapter.
 | Background adapter conformance runner | [background-contract](./background-contract/src/lib.rs) | Shared contract suite every routine store must pass |
 | Remote worker domain and store port | [worker/src/lib.rs](./worker/src/lib.rs) | ADR-0046 devices, signed challenges, jobs; `WorkerStorePort` |
 | Worker adapter conformance runner | [worker-contract](./worker-contract/src/lib.rs) | Shared contract suite every worker store must pass |
+| Organization domain and store port | [org/src/lib.rs](./org/src/lib.rs) | ADR-0047 identity, layered org policy, sync envelopes, usage quota; `OrgStorePort` |
+| Organization adapter conformance runner | [org-contract](./org-contract/src/lib.rs) | Shared contract suite every org store must pass |
 | IPC schemas / version capabilities | [ipc-contracts/src/lib.rs](./ipc-contracts/src/lib.rs) | Seven checked-in [proto files](./ipc-contracts/proto) |
 | Handshake / negotiation / sessions | [ipc-control/src/lib.rs](./ipc-control/src/lib.rs) | Version/capability checks above byte transport |
 | Framing / endpoints / peer identity | [ipc-transport/src/lib.rs](./ipc-transport/src/lib.rs) | Platform modules below control semantics |
