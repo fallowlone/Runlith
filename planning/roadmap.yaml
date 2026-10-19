@@ -166,8 +166,23 @@ gates:
 
   - id: G13
     name: Cloud/Team
-    status: planned
+    status: in_progress
     objective: Account, billing, encrypted sync, teams, org policies.
+    planned_capabilities:
+      - Organization identity: local account, organization, team and
+        membership records with explicit role authority; local operation
+        never requires a cloud account (opt-in only, PROJECT_CHARTER).
+      - Encrypted sync: end-to-end encrypted, server-blind sync
+        envelopes with revision/conflict semantics; local agentd stays
+        authoritative for local execution; secrets and private keys
+        never sync.
+      - Org policies: layered organization > project > user policy
+        where a lower layer cannot weaken an organization hard policy;
+        spend/quota controls enforced locally.
+      - Billing/usage ledger: local usage and spend ledger with quota
+        enforcement; a real payment processor and a hosted control
+        plane are deferred and require their own ADR decision
+        (TASK-0207), not G13 v1 scope.
     scope_ref: AI_ENGINEERING_OS_ARCHITECTURE_SOURCE_OF_TRUTH.md
 
   - id: G14

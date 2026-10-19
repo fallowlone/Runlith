@@ -46,5 +46,7 @@ members = [
     "crates/background-contract",
     "crates/worker",
     "crates/worker-contract",
+    "crates/org",
+    "crates/org-contract",
 ]
 resolver = "2"

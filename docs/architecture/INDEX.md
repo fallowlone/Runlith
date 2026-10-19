@@ -97,6 +97,9 @@ Background daemon work
 Remote worker work
 → adr/ADR-0046-g12-remote-worker-contract.md
 
+Cloud / team work
+→ adr/ADR-0047-g13-cloud-team-contract.md
+
 Security / runtime isolation work
 → adr/ADR-0013-policy-engine-os-isolation.md
 → adr/ADR-0026-g6-security-authority-and-capability-contracts.md

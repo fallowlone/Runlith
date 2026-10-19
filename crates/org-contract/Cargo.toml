@@ -1,0 +1,11 @@
+[package]
+name = "org-contract"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "org_contract"
+path = "src/lib.rs"
+
+[dependencies]
+org = { path = "../org" }

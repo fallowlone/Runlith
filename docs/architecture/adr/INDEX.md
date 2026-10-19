@@ -52,3 +52,4 @@
 Coverage register (not an ADR): [COVERAGE.md](./COVERAGE.md).
 | [ADR-0045](./ADR-0045-g11-background-daemon-contract.md) | G11 Background daemon contract (RoutineDefinition/RoutineRun, authorization, eligibility, draining, reconciliation, B-1..B-10) | Accepted | background daemon, routines, authorization, g11 |
 | [ADR-0046](./ADR-0046-g12-remote-worker-contract.md) | G12 Remote Worker contract (device identity, signed challenge auth, job dispatch, revocation, W-1..W-10) | Accepted | remote worker, device identity, ed25519, g12 |
+| [ADR-0047](./ADR-0047-g13-cloud-team-contract.md) | G13 Cloud/Team contract (account/org/team/membership identity, role authority, layered org policy, server-blind sync envelope, usage ledger/quota, C-1..C-10) | Accepted | cloud/team, organization, org policy, encrypted sync, quota, g13 |
