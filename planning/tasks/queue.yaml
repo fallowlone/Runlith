@@ -7035,3 +7035,12 @@ items:
     depends_on: [TASK-0227, TASK-0222, TASK-0221]
     blocked_by: []
     references: [planning/roadmap.yaml]
+  - id: TASK-0229
+    gate: G5
+    title: Cross-daemon resume race — atomic attempt-reservation consumption before workspace reconcile
+    objective: Make concurrent resume safe across ExecutionComposition/process boundaries on one database. Today eight independent compositions over one DB race WorkspaceService reconciliation before any attempt exists; under load the would-be winner can die on stale side-effect transitions (Reconcile + MarkAmbiguous/Confirm, worktree collision) leaving a RUNNING strand with zero attempts. Consume the attempt reservation atomically at the durable-store boundary before workspace reconcile (or serialize same-execution cycles equivalently), so exactly one cycle proceeds and losers refuse typed with zero mutation. Standalone G5 remediation recorded as residual at G13 closure (TASK-0214); starts on owner scheduling, not part of the G15 sequence.
+    scope: crates/app-services (workspace/orchestration), adapters/storage-sqlite, agentd execution dispatch; tests in bins/agentd/tests/execution_recovery.rs.
+    exit_criteria_summary: Cross-composition race keeper (8 independent compositions, one DB) green under parallel load with exactly one SUCCEEDED attempt and one attempt.created fact; losers typed-refused with no journal mutation; existing execution_recovery target and workspace suite green.
+    depends_on: []
+    blocked_by: []
+    references: [docs/development/G13_CLOSURE_AUDIT.md, planning/roadmap.yaml]
