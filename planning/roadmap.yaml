@@ -8,7 +8,7 @@
 # Near-term work lives in planning/tasks/queue.yaml, not here.
 
 schema_version: 1
-current_gate: G13
+current_gate: G14
 task_queue: planning/tasks/queue.yaml
 
 gates:
@@ -166,7 +166,8 @@ gates:
 
   - id: G13
     name: Cloud/Team
-    status: in_progress
+    status: completed
+    exit_criteria_ref: docs/development/G13_CLOSURE_AUDIT.md
     objective: Account, billing, encrypted sync, teams, org policies.
     planned_capabilities:
       - Organization identity: local account, organization, team and

@@ -8,8 +8,8 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-current_gate: G13
-gate_status: IN_PROGRESS  # TASK-0206 activated G13 (G12 closed by TASK-0205)
+current_gate: G14
+gate_status: PLANNED  # G13 closed by TASK-0214; G14 requires owner ratification before any G14 task starts
 
 items:
   - id: TASK-0012
@@ -6884,6 +6884,13 @@ items:
     depends_on: [TASK-0213]
     blocked_by: []
     references: [planning/roadmap.yaml]
+    outcome: >-
+      G13_CLOSED (docs/development/G13_CLOSURE_AUDIT.md, gate
+      docs/development/G13_CLOSURE_GATE.md GATE_PASS). Inline
+      audit by implementing agent. Workspace 1946 passed / 0
+      failed / 4 ignored; fmt and clippy clean. One pre-existing
+      G5 load flake observed and recorded as residual. Roadmap
+      advances to G14 (planned, owner ratification required).
   - id: TASK-0215
     gate: G15
     title: G15 governance registration (Git Graph & Operations)
