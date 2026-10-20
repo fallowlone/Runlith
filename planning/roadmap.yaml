@@ -200,6 +200,26 @@ gates:
       shadow-mode evidence (TASK-0138) is reviewed.
     scope_ref: docs/development/AGENT_ROUTER_CAPABILITY_MIGRATION_AUDIT.md
 
+  - id: G15
+    name: Git Graph & Operations
+    status: planned
+    objective: >-
+      A built-in, professional-grade Git GUI view of repository history with full
+      local Git operations parity, from one canonical graph contract:
+      a human diagram (future Tauri, render contract only until a
+      desktop UI gate exists) and an AI projection (versioned JSON
+      plus a deterministic compact text rendering, benchmarked
+      against a git log baseline), joined with Task/Attempt/worktree
+      and verification overlay no external Git client can show.
+      Mutations are proposals executed only after Policy Engine
+      allowance and human approval bound to the proposal hash;
+      interrupted operations are typed, surfaced states. Parity is
+      the floor: differentiation is the agent-work overlay and
+      policy-governed operations. Registered by TASK-0215, contract
+      in ADR-0048 (TASK-0216); requires owner ratification before
+      any G15 implementation task starts.
+    scope_ref: docs/architecture/adr/ADR-0048-g15-git-graph-operations-contract.md
+
 future_product_engineering_spikes:
   - id: UI-TECHNOLOGY-SPIKE
     status: deferred

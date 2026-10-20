@@ -6840,6 +6840,21 @@ items:
     scope: Integration tests.
     exit_criteria_summary: Integration green across daemon restart.
     depends_on: [TASK-0211]
+    outcome: >-
+      Shipped-binary two-daemon integration
+      (execution_binaries::org_sync_policy_quota_take_effect_between_two_daemon_stores):
+      envelope sealed by a MEMBER on daemon A accepted on independently
+      provisioned daemon B (plaintext exact, head 0->1 on B only, sender
+      head unchanged), carrier view holds no plaintext/org-key/secret,
+      tamper refuses bad_signature applying nothing, replay refuses
+      duplicate_envelope, stale second seal refuses conflict; receiver-store
+      OrgService resolution narrows and refuses PolicyWeakening with policy
+      v1 unchanged, MEMBER policy write on B refuses forbidden_role; usage
+      900/1000 then estimate 200 refuses over_quota and 100 admits, all
+      durable across restart of both daemons; fixture execution run on B
+      SUCCEEDED with conflicted sync state (C-1). Tests only, no
+      production code. execution_binaries 22/22, org_service 8/8,
+      workspace test, fmt and clippy green.
     blocked_by: []
     references: [docs/architecture/adr/ADR-0047-g13-cloud-team-contract.md]
   - id: TASK-0213
@@ -6858,5 +6873,149 @@ items:
     scope: Audit docs only.
     exit_criteria_summary: Audit + gate docs; on G13_CLOSED roadmap advances to G14 (planned, requires owner ratification before any G14 task starts).
     depends_on: [TASK-0213]
+    blocked_by: []
+    references: [planning/roadmap.yaml]
+  - id: TASK-0215
+    gate: G15
+    title: G15 governance registration (Git Graph & Operations)
+    objective: Register gate G15 in roadmap (planned) and the TASK-0215..0228 sequence in queue; queue, roadmap and ADR references agree.
+    scope: Docs only.
+    exit_criteria_summary: Queue, roadmap agree on G15 PLANNED; no G15 implementation task starts before owner ratification.
+    depends_on: [TASK-0214]
+    blocked_by: []
+    references: [planning/roadmap.yaml]
+    outcome: >-
+      Registered in this design package: G15 planned in
+      planning/roadmap.yaml with TASK-0215..0228 sequenced here;
+      contract task is TASK-0216 (ADR-0048). Implementation tasks
+      TASK-0217+ start only on owner ratification of G15.
+  - id: TASK-0216
+    gate: G15
+    title: ADR-0048 G15 git graph and operations contract
+    objective: Define canonical graph JSON contract (window/truncation, refs, deterministic lanes), AI text projection with measured benchmark, future-Tauri render contract, overlay joins, proposal-bound mutation model with typed interrupted states, threat model GR-1..GR-10, per-slice acceptance criteria; explicitly defer visual design and non-v1 external Git GUI menu items.
+    scope: Docs only.
+    exit_criteria_summary: ADR-0048 accepted with threat model, acceptance criteria and non-goals.
+    depends_on: [TASK-0215]
+    blocked_by: []
+    references: [planning/roadmap.yaml, AGENT.md]
+    outcome: >-
+      ADR-0048 Proposed (docs/architecture/adr/ADR-0048-g15-git-graph-operations-contract.md):
+      canonical graph contract with explicit window/truncated and
+      byte bounds, producer-computed deterministic lanes, JSON plus
+      derived text projection with accuracy/token benchmark against
+      git log baseline, render contract for future Tauri, Task/
+      Attempt/worktree/verification overlay with provenance, mutation
+      model (immutable proposal, Policy Engine, human approval bound
+      to proposal hash, typed interrupted states, INV-145
+      reconciliation), threat model GR-1..GR-10 mapped to
+      TASK-0217..0227 verification; visual design, interactive
+      rebase, hunk staging, blame and hosted repo management
+      explicitly deferred or non-goals. Docs only; no Rust code.
+  - id: TASK-0217
+    gate: G15
+    title: Pure git-graph domain, lanes and contract crates
+    objective: git-graph + git-graph-contract crates; graph model, explicit window/cursor semantics, deterministic lane assignment with stability under window extension, text projection derived from canonical JSON with enumerated lossy fields; contracts/json-schema/git-graph.schema.json validation projection. No I/O. Starts only on owner ratification of G15.
+    scope: crates/git-graph, crates/git-graph-contract, contracts/json-schema, workspace.
+    exit_criteria_summary: Domain and in-memory contract green incl. lane property tests and JSON/text consistency.
+    depends_on: [TASK-0216]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0048-g15-git-graph-operations-contract.md]
+  - id: TASK-0218
+    gate: G15
+    title: git-cli history adapter and fixture topology suite
+    objective: History port implementation over bounded argv runner; fixture repositories (linear, branch/merge, octopus, criss-cross, detached HEAD, shallow, bare, empty, 100k commits) checked against rev-list ground truth incl. explicit truncation and adversarial ref/path inputs.
+    scope: adapters/git-cli, crates/workspace.
+    exit_criteria_summary: Adapter contract green on all fixture topologies; no shell, argv-safety preserved.
+    depends_on: [TASK-0217]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0048-g15-git-graph-operations-contract.md]
+  - id: TASK-0219
+    gate: G15
+    title: GitGraphService overlay composition
+    objective: Compose history port with Task/workspace stores into overlay (task, attempt state, verification verdict, worktree) with observed_at provenance and stale marking; graph byte-identical with overlay absent.
+    scope: crates/app-services.
+    exit_criteria_summary: Service tests green incl. stale-overlay and wrong-join refusal cases.
+    depends_on: [TASK-0218]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0048-g15-git-graph-operations-contract.md]
+  - id: TASK-0220
+    gate: G15
+    title: Git graph IPC and agentctl git graph surface
+    objective: Additive IPC envelope with below-version typed refusal; agentctl git graph --format json|text through shipped agentd; windows and byte bounds enforced at the seam.
+    scope: ipc-contracts, ipc-control, agentd, agentctl, ipc docs.
+    exit_criteria_summary: Shipped-binary graph round-trip green on fixture repo.
+    depends_on: [TASK-0219]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0048-g15-git-graph-operations-contract.md]
+  - id: TASK-0221
+    gate: G15
+    title: AI projection benchmark and dogfood
+    objective: Fixed history question set over fixture repositories answered from text projection vs git log --graph --oneline baseline; pass at accuracy >= baseline with <=50% tokens; dogfood on the Runlith repository and one large external OSS repository (concepts/measurement only, no code adopted).
+    scope: Tests plus evidence.
+    exit_criteria_summary: Benchmark report recorded with accuracy/token results; kill criterion evaluated per ADR-0048.
+    depends_on: [TASK-0220]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0048-g15-git-graph-operations-contract.md]
+  - id: TASK-0222
+    gate: G15
+    title: Tauri render contract and diagram specification
+    objective: Specify human diagram rendering of canonical JSON/lanes for the future Tauri surface (paging, overlay encoding without color-only meaning, accessibility/keyboard) and the timed human-comprehension benchmark method vs git log and a leading external Git GUI client; implementation lands with the first desktop UI gate.
+    scope: Docs only.
+    exit_criteria_summary: Render contract + benchmark method accepted; no UI code in this task.
+    depends_on: [TASK-0220]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0048-g15-git-graph-operations-contract.md]
+  - id: TASK-0223
+    gate: G15
+    title: Ops I — refs, checkout and worktree mutations
+    objective: Branch/tag create+delete, switch/checkout, worktree create/remove as immutable proposals behind Policy Engine allowance and human approval bound to proposal hash; reconcile ActionProposal vocabulary with HumanDecisionRequest first; refusals for unapproved, mismatched-hash and dirty-state cases.
+    scope: crates/workspace, adapters/git-cli, crates/app-services, agentd, agentctl.
+    exit_criteria_summary: Proposal-bound ops green incl. refusal matrix; journal intent/outcome reconciles per INV-145.
+    depends_on: [TASK-0220]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0048-g15-git-graph-operations-contract.md]
+  - id: TASK-0224
+    gate: G15
+    title: Ops II — stage, commit, stash and reset
+    objective: Stage/unstage, commit, stash push/apply/pop and reset modes as distinct proposals with dirty-state acknowledgement for destructive modes; post-state verified against repository after every execution.
+    scope: crates/workspace, adapters/git-cli, crates/app-services, agentd, agentctl.
+    exit_criteria_summary: Ops green incl. destructive-mode acknowledgement refusals.
+    depends_on: [TASK-0223]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0048-g15-git-graph-operations-contract.md]
+  - id: TASK-0225
+    gate: G15
+    title: Ops III — merge, cherry-pick, revert, rebase and conflict states
+    objective: Merge, cherry-pick, revert and non-interactive rebase as proposals; typed in-progress/conflict states surfaced in graph contract with explicit abort/continue proposals; no silent auto-resolution.
+    scope: crates/workspace, adapters/git-cli, crates/app-services, agentd, agentctl.
+    exit_criteria_summary: Integration green incl. mid-operation interruption leaving only declared states.
+    depends_on: [TASK-0224]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0048-g15-git-graph-operations-contract.md]
+  - id: TASK-0226
+    gate: G15
+    title: Ops IV — remote fetch, pull and push
+    objective: Fetch/pull/push as proposals; force-with-lease only as explicitly approved flag; credentials only via Secret Broker scoped bindings; remote URL credential redaction in all outputs; network under existing SSRF/policy boundary.
+    scope: adapters/git-cli, crates/app-services, agentd, agentctl, secrets.
+    exit_criteria_summary: Loopback-remote integration green incl. rejected-push and credential-redaction probes.
+    depends_on: [TASK-0225]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0048-g15-git-graph-operations-contract.md]
+  - id: TASK-0227
+    gate: G15
+    title: G15 failure matrix and adversarial dogfood
+    objective: Interrupted merge/rebase/cherry-pick, stale cursor, crafted refs, oversized history, revoked approval mid-flight; dogfood graph and ops between two shipped agentd instances on the Runlith repository.
+    scope: Tests plus evidence.
+    exit_criteria_summary: Matrix green; dogfood recorded; every interrupted case ends in a declared state.
+    depends_on: [TASK-0226]
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0048-g15-git-graph-operations-contract.md]
+  - id: TASK-0228
+    gate: G15
+    title: G15 closure audit
+    objective: Audit returning G15_CLOSED or G15_REMEDIATION_REQUIRED, incl. ADR-0048 kill-criterion evidence from TASK-0221.
+    scope: Audit docs only.
+    exit_criteria_summary: Audit + gate docs; G15_CLOSED only with benchmark and failure-matrix evidence green.
+    depends_on: [TASK-0227, TASK-0222, TASK-0221]
     blocked_by: []
     references: [planning/roadmap.yaml]
