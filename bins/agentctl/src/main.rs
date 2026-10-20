@@ -48,6 +48,7 @@ async fn main() -> ExitCode {
         Some("memory") => cmd_memory(args.collect()).await,
         Some("routine") => cmd_routine(args.collect()).await,
         Some("worker") => cmd_worker(args.collect()).await,
+        Some("org") => cmd_org(args.collect()).await,
         Some("daemon") => cmd_daemon(args.collect()).await,
         _ => {
             eprintln!("usage: agentctl <start|ping|shutdown|daemon|routine|project|task|execution|approval|human-decision|planning|vault|find|memory> ...");
@@ -1197,6 +1198,187 @@ async fn cmd_worker(args: Vec<String>) -> ExitCode {
 #[cfg(windows)]
 async fn cmd_worker(_args: Vec<String>) -> ExitCode {
     eprintln!("agentctl: worker control is unavailable on this build");
+    ExitCode::FAILURE
+}
+
+#[cfg(unix)]
+async fn cmd_org(args: Vec<String>) -> ExitCode {
+    // Local key generation never touches the daemon.
+    if args.first().map(String::as_str) == Some("keygen") {
+        let out = args
+            .windows(2)
+            .find(|p| p[0] == "--secret-out")
+            .map(|p| p[1].clone());
+        return match out {
+            Some(path) => match agentctl::org_keygen_to_file(std::path::Path::new(&path)) {
+                Ok(public) => {
+                    println!("public={public}");
+                    println!("secret written to {path} (mode 0600); keep it in your vault");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    ExitCode::FAILURE
+                }
+            },
+            None => {
+                eprintln!("keygen requires --secret-out <path>: the secret is never printed");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    let endpoint = match resolve_production_endpoint() {
+        Ok(value) => value,
+        Err(error) => return fail(&error),
+    };
+    // Local sealing: fetch account + stream head, seal in the CLI, and
+    // print the envelope fields for `org sync accept`. Secrets (account
+    // secret, org key) never go to the daemon for sealing.
+    if args.first().map(String::as_str) == Some("sync")
+        && args.get(1).map(String::as_str) == Some("seal")
+    {
+        return cmd_org_seal(&endpoint, &args).await;
+    }
+    let request = match agentctl::parse_org_args(&args) {
+        Ok(value) => value,
+        Err(usage) => {
+            eprintln!("{usage}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match agentctl::org_request(&endpoint, spawn_sibling_daemon, request).await {
+        Ok(response) => match agentctl::format_org_response(&response) {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                ExitCode::FAILURE
+            }
+        },
+        Err(error) => fail(&error),
+    }
+}
+
+#[cfg(unix)]
+async fn cmd_org_seal(
+    endpoint: &ipc_transport::platform::unix::UnixEndpoint,
+    args: &[String],
+) -> ExitCode {
+    use ipc_contracts::proto::{
+        org_core_request, OrgAccountIdRequest, OrgCoreRequest, OrgIdRequest,
+    };
+    let flag = |name: &str| args.windows(2).find(|p| p[0] == name).map(|p| p[1].clone());
+    let (
+        Some(account_id),
+        Some(secret),
+        Some(org_id),
+        Some(org_key),
+        Some(nonce),
+        Some(kind),
+        Some(sensitivity),
+        Some(text),
+    ) = (
+        flag("--account"),
+        flag("--secret"),
+        flag("--org"),
+        flag("--org-key"),
+        flag("--nonce"),
+        flag("--kind"),
+        flag("--sensitivity"),
+        flag("--text"),
+    )
+    else {
+        eprintln!("{}", agentctl::ORG_USAGE);
+        return ExitCode::FAILURE;
+    };
+    let account = match agentctl::org_request(
+        endpoint,
+        spawn_sibling_daemon,
+        OrgCoreRequest {
+            payload: Some(org_core_request::Payload::GetAccount(OrgAccountIdRequest {
+                account_id: account_id.clone(),
+            })),
+        },
+    )
+    .await
+    {
+        Ok(response) => match response.payload {
+            Some(ipc_contracts::proto::org_core_response::Payload::Account(a)) => a,
+            other => {
+                eprintln!("org seal: unexpected account reply ({other:?})");
+                return ExitCode::FAILURE;
+            }
+        },
+        Err(error) => return fail(&error),
+    };
+    let head = match agentctl::org_request(
+        endpoint,
+        spawn_sibling_daemon,
+        OrgCoreRequest {
+            payload: Some(org_core_request::Payload::SyncHead(OrgIdRequest {
+                org_id: org_id.clone(),
+            })),
+        },
+    )
+    .await
+    {
+        Ok(response) => match response.payload {
+            Some(ipc_contracts::proto::org_core_response::Payload::Head(h)) => h.head,
+            other => {
+                eprintln!("org seal: unexpected head reply ({other:?})");
+                return ExitCode::FAILURE;
+            }
+        },
+        Err(error) => return fail(&error),
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    match agentctl::org_seal_local(
+        &account.account_id,
+        &account.display_name,
+        &account.public_key_hex,
+        account.created_at,
+        &secret,
+        &org_id,
+        &org_key,
+        &nonce,
+        &kind,
+        &sensitivity,
+        text.as_bytes(),
+        head,
+        now,
+    ) {
+        Ok(env) => {
+            println!(
+                "{} org={} author={} kind={} revision={} base={} sensitivity={} nonce={} ciphertext={} signature={} created={}",
+                env.envelope_id,
+                env.org_id,
+                env.author_account_id,
+                env.kind,
+                env.revision,
+                env.base_revision,
+                env.max_sensitivity,
+                env.nonce_hex,
+                env.ciphertext_hex,
+                env.signature_hex,
+                env.created_at
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("org seal: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn cmd_org(_args: Vec<String>) -> ExitCode {
+    eprintln!("agentctl: org control is unavailable on this build");
     ExitCode::FAILURE
 }
 

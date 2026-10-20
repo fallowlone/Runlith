@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Блокирует коммит staged-файлов крупнее MAX_TOKENS (1 токен = 4 байта).
+# Включение: git config core.hooksPath .githooks
+set -euo pipefail
+
+MAX_TOKENS=5000
+BYTES_PER_TOKEN=4
+MAX_BYTES=$((MAX_TOKENS * BYTES_PER_TOKEN))
+
+# Не написано агентами: lock-файлы, сгенерированный код, снапшоты, минифицированные ассеты.
+# Grandfathered: большие файлы, существовавшие до введения гейта; гейт
+# применяется к новым файлам, а не к аддитивным правкам в этих.
+IGNORE_RE='(^|/)(Cargo\.lock|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|poetry\.lock|uv\.lock|go\.sum)$|\.lock$|\.snap$|^planning/tasks/queue\.yaml$|^bins/agentd/src/execution\.rs$|^bins/agentd/src/lib\.rs$|^bins/agentctl/src/(lib|main)\.rs$|^bins/agentctl/tests/execution_binaries\.rs$|^crates/ipc-contracts/src/lib\.rs$|^crates/ipc-control/src/(negotiation|session)\.rs$|\.(md|mdx)$|\.min\.(js|css)$|\.pb\.(go|rs)$|\.pb\.h$|_pb2(_grpc)?\.pyi?$|(^|/)(generated|gen|vendor|target|node_modules)/|\.generated\.[a-z]+$|\.(png|jpe?g|gif|webp|ico|pdf|woff2?|zip|gz)$'
+
+fail=0
+while IFS= read -r -d '' f; do
+  [[ "$f" =~ $IGNORE_RE ]] && continue
+  bytes=$(git cat-file -s ":$f")   # размер staged-версии, не рабочей копии
+  if (( bytes > MAX_BYTES )); then
+    tokens=$((bytes / BYTES_PER_TOKEN))
+    parts=$(( (tokens + MAX_TOKENS - 1) / MAX_TOKENS ))
+    {
+      echo "ERROR: $f — ~${tokens} токенов (${bytes} байт), лимит ${MAX_TOKENS} (${MAX_BYTES} байт)."
+      echo "  Как исправить: разбейте файл минимум на ${parts} части по ~${MAX_TOKENS} токенов:"
+      echo "    1. Найдите границы по смыслу (модули, типы, группы функций, разделы документа)."
+      echo "    2. Вынесите каждую часть в отдельный файл рядом, имя по содержимому."
+      echo "       Rust: mod foo; в исходном файле + foo.rs (или каталог foo/ с mod.rs)."
+      echo "       Тесты: tests/<тема>.rs. Markdown/YAML: файл-индекс со ссылками на части."
+      echo "    3. В исходном файле оставьте только реэкспорты/ссылки на части."
+      echo "    4. Проверьте сборку/тесты, затем: git add <новые файлы> $f"
+      echo "  Если файл не пишется агентом (генерация, данные) — добавьте его в IGNORE_RE в .githooks/pre-commit."
+    } >&2
+    fail=1
+  fi
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+
+exit $fail

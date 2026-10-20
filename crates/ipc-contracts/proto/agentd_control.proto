@@ -22,6 +22,7 @@ import "finder_core.proto";
 import "memory_core.proto";
 import "routine_core.proto";
 import "worker_core.proto";
+import "org_core.proto";
 
 // A single inbound control message from a local client to agentd.
 message ControlRequest {
@@ -54,6 +55,8 @@ message ControlRequest {
     RoutineCoreRequest routine_core = 13;
     // G12 remote worker. Valid only on protocol-v11 sessions.
     WorkerCoreRequest worker_core = 14;
+    // G13 cloud/team. Valid only on protocol-v12 sessions.
+    OrgCoreRequest org_core = 15;
   }
 }
 
@@ -85,6 +88,8 @@ message ControlResponse {
     RoutineCoreResponse routine_core = 13;
     // G12 remote worker response. Protocol v11 only.
     WorkerCoreResponse worker_core = 14;
+    // G13 cloud/team response. Protocol v12 only.
+    OrgCoreResponse org_core = 15;
   }
 }
 

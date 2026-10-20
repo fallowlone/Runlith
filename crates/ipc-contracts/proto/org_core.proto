@@ -1,0 +1,215 @@
+syntax = "proto3";
+
+package ai_engineering_os.ipc;
+
+// G13 cloud/team IPC (protocol version 12 only), org_core = 15.
+// Authority: OrgService in agentd is the only mutation authority
+// (ADR-0047); role authority and revocation are checked there against
+// durable memberships. Account private keys never appear on the wire:
+// envelope sealing happens locally in agentctl (`org sync seal`), and
+// the org AEAD key is presented per accept call over the authenticated
+// local IPC only and is never stored or logged by the daemon.
+
+message OrgRegisterAccountRequest {
+  string display_name = 1;
+  string public_key_hex = 2;
+  uint64 now_millis = 3;
+}
+
+message OrgAccountIdRequest { string account_id = 1; }
+
+message OrgCreateRequest {
+  string creator_account_id = 1;
+  string name = 2;
+  uint64 now_millis = 3;
+}
+
+message OrgIdRequest { string org_id = 1; }
+
+message OrgCreateTeamRequest {
+  string actor_membership_id = 1;
+  string org_id = 2;
+  string name = 3;
+  uint64 now_millis = 4;
+}
+
+message OrgAddMemberRequest {
+  string actor_membership_id = 1;
+  string org_id = 2;
+  string account_id = 3;
+  string team_id = 4;
+  string role = 5;
+  uint64 now_millis = 6;
+}
+
+message OrgChangeRoleRequest {
+  string actor_membership_id = 1;
+  string membership_id = 2;
+  string role = 3;
+}
+
+message OrgRevokeMemberRequest {
+  string actor_membership_id = 1;
+  string membership_id = 2;
+}
+
+message OrgWritePolicyRequest {
+  string actor_membership_id = 1;
+  string org_id = 2;
+  string hard_capability_ceiling = 3;
+  string sync_max_sensitivity = 4;
+  optional uint64 quota_max_cost_microusd = 5;
+  uint64 quota_window_seconds = 6;
+  uint64 now_millis = 7;
+}
+
+message OrgRecordUsageRequest {
+  string org_id = 1;
+  string account_id = 2;
+  string project_ref = 3;
+  string kind = 4;
+  uint64 units = 5;
+  uint64 cost_microusd = 6;
+  string idempotency_key = 7;
+  uint64 now_millis = 8;
+}
+
+message OrgCheckQuotaRequest {
+  string org_id = 1;
+  uint64 requested_estimate = 2;
+  uint64 now_millis = 3;
+}
+
+message OrgEnvelopeMessage {
+  string envelope_id = 1;
+  string org_id = 2;
+  string author_account_id = 3;
+  string kind = 4;
+  uint64 revision = 5;
+  uint64 base_revision = 6;
+  string max_sensitivity = 7;
+  string nonce_hex = 8;
+  string ciphertext_hex = 9;
+  string signature_hex = 10;
+  uint64 created_at = 11;
+}
+
+message OrgAcceptEnvelopeRequest {
+  OrgEnvelopeMessage envelope = 1;
+  string org_key_hex = 2;
+}
+
+message OrgCoreRequest {
+  oneof payload {
+    OrgRegisterAccountRequest register_account = 1;
+    OrgAccountIdRequest get_account = 2;
+    OrgCreateRequest create_org = 3;
+    OrgIdRequest get_org = 4;
+    OrgCreateTeamRequest create_team = 5;
+    OrgIdRequest list_teams = 6;
+    OrgAddMemberRequest add_member = 7;
+    OrgChangeRoleRequest change_role = 8;
+    OrgRevokeMemberRequest revoke_member = 9;
+    OrgIdRequest list_memberships = 10;
+    OrgWritePolicyRequest write_policy = 11;
+    OrgIdRequest get_policy = 12;
+    OrgRecordUsageRequest record_usage = 13;
+    OrgIdRequest list_usage = 14;
+    OrgCheckQuotaRequest check_quota = 15;
+    OrgIdRequest sync_head = 16;
+    OrgAcceptEnvelopeRequest accept_envelope = 17;
+  }
+}
+
+message OrgAccountResponse {
+  string account_id = 1;
+  string display_name = 2;
+  string public_key_hex = 3;
+  string fingerprint = 4;
+  uint64 created_at = 5;
+}
+
+message OrgOrganizationResponse {
+  string org_id = 1;
+  string name = 2;
+  string state = 3;
+  string owner_membership_id = 4;
+}
+
+message OrgTeamResponse {
+  string team_id = 1;
+  string org_id = 2;
+  string name = 3;
+}
+
+message OrgMembershipResponse {
+  string membership_id = 1;
+  string org_id = 2;
+  string account_id = 3;
+  string team_id = 4;
+  string role = 5;
+  string state = 6;
+}
+
+message OrgPolicyResponse {
+  string policy_id = 1;
+  string org_id = 2;
+  uint64 version = 3;
+  string hard_capability_ceiling = 4;
+  string sync_max_sensitivity = 5;
+  optional uint64 quota_max_cost_microusd = 6;
+  uint64 quota_window_seconds = 7;
+  string updated_by = 8;
+}
+
+message OrgUsageResponse {
+  string usage_id = 1;
+  string org_id = 2;
+  string account_id = 3;
+  string kind = 4;
+  uint64 units = 5;
+  uint64 cost_microusd = 6;
+  string idempotency_key = 7;
+}
+
+message OrgListResponse {
+  repeated OrgTeamResponse teams = 1;
+  repeated OrgMembershipResponse memberships = 2;
+  repeated OrgUsageResponse usage = 3;
+}
+
+message OrgHeadResponse {
+  string org_id = 1;
+  uint64 head = 2;
+}
+
+message OrgQuotaResponse {
+  string org_id = 1;
+  uint64 requested_estimate = 2;
+}
+
+message OrgPlaintextResponse {
+  string plaintext_hex = 1;
+  uint64 revision = 2;
+}
+
+message OrgErrorResponse {
+  string code = 1;
+  string detail = 2;
+}
+
+message OrgCoreResponse {
+  oneof payload {
+    OrgAccountResponse account = 1;
+    OrgOrganizationResponse organization = 2;
+    OrgTeamResponse team = 3;
+    OrgMembershipResponse membership = 4;
+    OrgPolicyResponse policy = 5;
+    OrgUsageResponse usage = 6;
+    OrgListResponse list = 7;
+    OrgHeadResponse head = 8;
+    OrgPlaintextResponse plaintext = 9;
+    OrgErrorResponse error = 10;
+    OrgQuotaResponse quota = 11;
+  }
+}

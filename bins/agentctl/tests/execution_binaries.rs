@@ -2114,3 +2114,309 @@ fn worker_enroll_claim_complete_cycle_through_shipped_binaries() {
         stdout(&jobs)
     );
 }
+
+#[test]
+fn org_create_team_member_policy_sync_usage_cycle_through_shipped_binaries() {
+    let sandbox = Sandbox::new("org-cycle", SUCCESS_BODY);
+    let mut daemon = DaemonGuard::spawn(&sandbox);
+    sandbox.wait_ready();
+
+    // Account key generation is local; the secret is never printed.
+    let secret_path = sandbox.root.join("org.secret");
+    let secret_arg = secret_path.to_string_lossy().into_owned();
+    let keygen = sandbox.agentctl(&["org", "keygen", "--secret-out", &secret_arg]);
+    assert!(keygen.status.success(), "keygen: {}", stderr(&keygen));
+    let out = stdout(&keygen);
+    assert!(!out.contains("secret="), "secret must not print: {out}");
+    let secret = std::fs::read_to_string(&secret_path)
+        .expect("secret file")
+        .trim()
+        .to_owned();
+    let public = out
+        .lines()
+        .find_map(|l| l.strip_prefix("public="))
+        .expect("public")
+        .to_owned();
+
+    let account = sandbox.agentctl(&[
+        "org",
+        "account",
+        "--name",
+        "operator",
+        "--public-key",
+        &public,
+    ]);
+    assert!(account.status.success(), "account: {}", stderr(&account));
+    let account_id = stdout(&account)
+        .split_whitespace()
+        .next()
+        .expect("account id")
+        .to_owned();
+    assert!(account_id.starts_with("acc_"), "id {account_id}");
+
+    let created = sandbox.agentctl(&["org", "create", "--name", "acme", "--creator", &account_id]);
+    assert!(created.status.success(), "create: {}", stderr(&created));
+    let out = stdout(&created);
+    assert!(out.contains("ACTIVE"), "create {out}");
+    let org_id = out.split_whitespace().next().expect("org id").to_owned();
+    let owner_membership = out
+        .split_whitespace()
+        .find_map(|t| t.strip_prefix("owner_membership="))
+        .expect("owner membership")
+        .to_owned();
+    assert!(org_id.starts_with("org_"), "id {org_id}");
+
+    let team = sandbox.agentctl(&[
+        "org",
+        "team",
+        "--org",
+        &org_id,
+        "--actor",
+        &owner_membership,
+        "--name",
+        "core",
+    ]);
+    assert!(team.status.success(), "team: {}", stderr(&team));
+    assert!(stdout(&team).contains("core"), "team {}", stdout(&team));
+
+    // Second account becomes a MEMBER; a MEMBER cannot create teams.
+    let keygen2 = sandbox.agentctl(&[
+        "org",
+        "keygen",
+        "--secret-out",
+        &sandbox.root.join("org2.secret").to_string_lossy(),
+    ]);
+    assert!(keygen2.status.success(), "keygen2: {}", stderr(&keygen2));
+    let public2 = stdout(&keygen2)
+        .lines()
+        .find_map(|l| l.strip_prefix("public="))
+        .expect("public2")
+        .to_owned();
+    let account2 = sandbox.agentctl(&[
+        "org",
+        "account",
+        "--name",
+        "member-one",
+        "--public-key",
+        &public2,
+    ]);
+    let account2_id = stdout(&account2)
+        .split_whitespace()
+        .next()
+        .expect("account2 id")
+        .to_owned();
+    let member = sandbox.agentctl(&[
+        "org",
+        "member",
+        "add",
+        "--org",
+        &org_id,
+        "--actor",
+        &owner_membership,
+        "--account",
+        &account2_id,
+        "--role",
+        "MEMBER",
+    ]);
+    assert!(member.status.success(), "member add: {}", stderr(&member));
+    let member_id = stdout(&member)
+        .split_whitespace()
+        .next()
+        .expect("membership id")
+        .to_owned();
+    let refused = sandbox.agentctl(&[
+        "org", "team", "--org", &org_id, "--actor", &member_id, "--name", "nope",
+    ]);
+    assert!(!refused.status.success(), "MEMBER team create must refuse");
+    assert!(
+        stderr(&refused).contains("forbidden_role"),
+        "refusal: {}",
+        stderr(&refused)
+    );
+
+    // Policy + quota: 900 spent of 1000 refuses a 200 estimate.
+    let policy = sandbox.agentctl(&[
+        "org",
+        "policy",
+        "set",
+        "--org",
+        &org_id,
+        "--actor",
+        &owner_membership,
+        "--ceiling",
+        "WORKSPACE_WRITE",
+        "--sync-max",
+        "PRIVATE",
+        "--quota",
+        "1000",
+        "--window",
+        "86400",
+    ]);
+    assert!(policy.status.success(), "policy: {}", stderr(&policy));
+    assert!(stdout(&policy).contains("v1"), "policy {}", stdout(&policy));
+    let usage = sandbox.agentctl(&[
+        "org",
+        "usage",
+        "record",
+        "--org",
+        &org_id,
+        "--account",
+        &account2_id,
+        "--kind",
+        "EXECUTION",
+        "--units",
+        "10",
+        "--cost",
+        "900",
+        "--key",
+        "k1",
+    ]);
+    assert!(usage.status.success(), "usage: {}", stderr(&usage));
+    let over = sandbox.agentctl(&[
+        "org",
+        "usage",
+        "check",
+        "--org",
+        &org_id,
+        "--estimate",
+        "200",
+    ]);
+    assert!(!over.status.success(), "over-quota must refuse");
+    assert!(
+        stderr(&over).contains("over_quota"),
+        "refusal: {}",
+        stderr(&over)
+    );
+    let within = sandbox.agentctl(&[
+        "org",
+        "usage",
+        "check",
+        "--org",
+        &org_id,
+        "--estimate",
+        "100",
+    ]);
+    assert!(within.status.success(), "within: {}", stderr(&within));
+
+    // Encrypted sync: the owner seals locally, the daemon accepts.
+    // NOTE: the author here is the OWNER account (secret from keygen).
+    let org_key = "ab".repeat(32);
+    let nonce = "01".repeat(24);
+    let sealed = sandbox.agentctl(&[
+        "org",
+        "sync",
+        "seal",
+        "--account",
+        &account_id,
+        "--secret",
+        &secret,
+        "--org",
+        &org_id,
+        "--org-key",
+        &org_key,
+        "--nonce",
+        &nonce,
+        "--kind",
+        "ORG_PROFILE",
+        "--sensitivity",
+        "PROJECT",
+        "--text",
+        "org-profile-v1",
+    ]);
+    assert!(sealed.status.success(), "seal: {}", stderr(&sealed));
+    let out = stdout(&sealed);
+    let field = |name: &str| {
+        out.split_whitespace()
+            .find_map(|t| t.strip_prefix(name))
+            .unwrap_or_else(|| panic!("field {name} in {out}"))
+            .to_owned()
+    };
+    let env_id = out
+        .split_whitespace()
+        .next()
+        .expect("envelope id")
+        .to_owned();
+    assert!(env_id.starts_with("env_"), "id {env_id}");
+    let accepted = sandbox.agentctl(&[
+        "org",
+        "sync",
+        "accept",
+        "--id",
+        &env_id,
+        "--org",
+        &org_id,
+        "--author",
+        &account_id,
+        "--kind",
+        "ORG_PROFILE",
+        "--revision",
+        &field("revision="),
+        "--base",
+        &field("base="),
+        "--sensitivity",
+        "PROJECT",
+        "--nonce",
+        &field("nonce="),
+        "--ciphertext",
+        &field("ciphertext="),
+        "--signature",
+        &field("signature="),
+        "--created",
+        &field("created="),
+        "--org-key",
+        &org_key,
+    ]);
+    assert!(accepted.status.success(), "accept: {}", stderr(&accepted));
+    assert!(
+        stdout(&accepted).contains("org-profile-v1"),
+        "accept {}",
+        stdout(&accepted)
+    );
+    // Replay refuses.
+    let replay = sandbox.agentctl(&[
+        "org",
+        "sync",
+        "accept",
+        "--id",
+        &env_id,
+        "--org",
+        &org_id,
+        "--author",
+        &account_id,
+        "--kind",
+        "ORG_PROFILE",
+        "--revision",
+        &field("revision="),
+        "--base",
+        &field("base="),
+        "--sensitivity",
+        "PROJECT",
+        "--nonce",
+        &field("nonce="),
+        "--ciphertext",
+        &field("ciphertext="),
+        "--signature",
+        &field("signature="),
+        "--created",
+        &field("created="),
+        "--org-key",
+        &org_key,
+    ]);
+    assert!(!replay.status.success(), "replay must refuse");
+    assert!(
+        stderr(&replay).contains("duplicate_envelope"),
+        "refusal: {}",
+        stderr(&replay)
+    );
+
+    // Durability across daemon restart.
+    daemon.restart(&sandbox);
+    let head = sandbox.agentctl(&["org", "sync", "head", "--org", &org_id]);
+    assert!(stdout(&head).contains("head=1"), "head {}", stdout(&head));
+    let members = sandbox.agentctl(&["org", "member", "list", "--org", &org_id]);
+    assert!(
+        stdout(&members).contains("MEMBER"),
+        "members {}",
+        stdout(&members)
+    );
+}

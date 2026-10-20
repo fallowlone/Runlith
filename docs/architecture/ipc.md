@@ -589,3 +589,18 @@ Protocol version 11 adds the bounded `worker_core` envelope
 single-use ed25519-signed challenge bound to device and job; private
 keys never cross the wire (`agentctl worker keygen|sign` are local).
 Revoked devices receive no challenges and their results refuse.
+
+## 20. G13 protocol v12: cloud/team organization IPC (implemented)
+
+Protocol version 12 adds the bounded `org_core` envelope
+(`org_core = 15`, ADR-0047). Verbs: `register_account`, `get_account`,
+`create_org`, `get_org`, `create_team`, `list_teams`, `add_member`,
+`change_role`, `revoke_member`, `list_memberships`, `write_policy`,
+`get_policy`, `record_usage`, `list_usage`, `check_quota`, `sync_head`,
+`accept_envelope`. Sessions below V12 receive a typed
+`UnsupportedProtocol` refusal. `OrgService` in `agentd` is the only
+mutation authority; role authority, revocation, policy weakening, and
+quota are enforced there, never in the CLI. Account private keys never
+cross the wire: envelope sealing is local (`agentctl org sync seal`,
+`org keygen`), and the org AEAD key is presented per accept call over
+the authenticated local IPC only — never stored or logged.

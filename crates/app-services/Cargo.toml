@@ -13,6 +13,7 @@ continuity = { path = "../continuity" }
 memory = { path = "../memory" }
 background = { path = "../background" }
 worker = { path = "../worker" }
+org = { path = "../org" }
 context-engine = { path = "../context-engine" }
 task-domain = { path = "../task" }
 agent-runtime = { path = "../agent-runtime" }
