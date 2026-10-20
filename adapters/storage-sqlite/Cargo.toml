@@ -27,6 +27,9 @@ policy = { path = "../../crates/policy" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha2 = "0.10"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 continuity-contract = { path = "../../crates/continuity-contract" }
 memory-contract = { path = "../../crates/memory-contract" }

@@ -487,6 +487,29 @@ impl<C: Clock> OrchestrationService<C> {
                 ),
             )));
         }
+        // TASK-0229: one active workspace cycle per execution across
+        // compositions and processes. The in-daemon cancel registry
+        // cannot see independent compositions over one database, and
+        // concurrent cycles poison each other's side-effect
+        // reconstruction before any attempt exists. A contender refuses
+        // here, before any mutation; the guard releases on return (and
+        // on process death, via the OS).
+        let _cycle_guard = match self
+            .tasks
+            .store()
+            .try_acquire_execution_cycle(&work.execution_id)?
+        {
+            Some(guard) => guard,
+            None => {
+                return Err(ServiceError::Storage(StorageError::ConstraintViolation(
+                    format!(
+                        "execution {} already has an active workspace cycle; \
+                         concurrent cycles are refused",
+                        work.execution_id.as_str()
+                    ),
+                )));
+            }
+        };
         let task = self.tasks.get_task(&work.task_id)?.ok_or_else(|| {
             ServiceError::Storage(StorageError::NotFound(format!(
                 "task {} vanished after entry",

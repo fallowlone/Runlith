@@ -2006,6 +2006,7 @@ dependencies = [
  "continuity",
  "continuity-contract",
  "evaluation",
+ "libc",
  "memory",
  "memory-contract",
  "org",

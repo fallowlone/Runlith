@@ -1165,6 +1165,83 @@ fn concurrent_resumes_converge_on_exactly_one_attempt() {
     );
 }
 
+/// TASK-0229: the same race as
+/// `concurrent_resumes_converge_on_exactly_one_attempt`, but every racer
+/// owns an independent composition (independent cancel registries), so
+/// only the durable store can serialize the cycles. Repeated rounds:
+/// the winner must never be poisoned by a loser's reconciliation.
+#[test]
+fn cross_composition_resumes_converge_on_exactly_one_attempt() {
+    for round in 0..12 {
+        let sandbox = Sandbox::new("resume-race-xcomp");
+        sandbox.seed_ready("P-1", "T-1");
+        let composition = sandbox.composition();
+        let crashed = run_accepted(
+            &composition,
+            run_request(
+                &sandbox,
+                "T-1",
+                "E-1",
+                "A-1",
+                &sandbox.repo.to_string_lossy(),
+                "HEAD",
+            ),
+        );
+        drop(crashed);
+        drop(composition);
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let barrier = barrier.clone();
+            let db = sandbox.db.clone();
+            let fixture = sandbox.fixture.clone();
+            let repo = sandbox.repo.to_string_lossy().into_owned();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                let composition = ExecutionComposition::new(db, Some(fixture));
+                let (response, job) = resume(
+                    &composition,
+                    resume_request_full("E-1", &repo, "repo-local:T-1", "HEAD"),
+                );
+                match &response.payload {
+                    Some(execution_core_response::Payload::Resume(_)) => {
+                        run_background(job.expect("accepted resume yields a job"));
+                        "resumed"
+                    }
+                    Some(execution_core_response::Payload::Error(_)) => "refused",
+                    other => panic!("unexpected resume reply: {other:?}"),
+                }
+            }));
+        }
+        let mut resumed = 0;
+        for handle in handles {
+            if handle.join().expect("racer joins") == "resumed" {
+                resumed += 1;
+            }
+        }
+        assert!(
+            resumed >= 1,
+            "round {round}: at least one racer must drive recovery"
+        );
+        wait_until_terminal(&sandbox, "E-1", "T-1");
+        assert_eq!(
+            attempt_outcomes(&sandbox, "E-1"),
+            vec!["SUCCEEDED"],
+            "round {round}: exactly one attempt despite {resumed} resumed racers"
+        );
+        let journal = journal_types_for(&sandbox, "T-1");
+        assert_eq!(
+            journal
+                .iter()
+                .filter(|kind| kind.as_str() == "attempt.created")
+                .count(),
+            1,
+            "round {round}: exactly one attempt.created, got {journal:?}"
+        );
+    }
+}
+
 #[test]
 fn resume_is_idempotent_after_recovery() {
     let sandbox = Sandbox::new("resume-idempotent");
