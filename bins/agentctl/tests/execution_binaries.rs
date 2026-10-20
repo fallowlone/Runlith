@@ -2420,3 +2420,554 @@ fn org_create_team_member_policy_sync_usage_cycle_through_shipped_binaries() {
         stdout(&members)
     );
 }
+
+/// TASK-0212 sender-side org fixture: owner + MEMBER, hard policy with a
+/// 1000-microusd quota, created through the shipped CLI on one daemon.
+struct OrgSender {
+    org_id: String,
+    member_membership: String,
+    member_account: String,
+    member_secret: String,
+}
+
+fn org_account(sandbox: &Sandbox, name: &str, secret_file: &str) -> (String, String) {
+    let secret_path = sandbox.root.join(secret_file);
+    let keygen = sandbox.agentctl(&[
+        "org",
+        "keygen",
+        "--secret-out",
+        &secret_path.to_string_lossy(),
+    ]);
+    assert!(keygen.status.success(), "keygen: {}", stderr(&keygen));
+    let out = stdout(&keygen);
+    assert!(!out.contains("secret="), "secret must not print: {out}");
+    let public = out
+        .lines()
+        .find_map(|l| l.strip_prefix("public="))
+        .expect("public")
+        .to_owned();
+    let secret = std::fs::read_to_string(&secret_path)
+        .expect("secret file")
+        .trim()
+        .to_owned();
+    let account = sandbox.agentctl(&["org", "account", "--name", name, "--public-key", &public]);
+    assert!(account.status.success(), "account: {}", stderr(&account));
+    let account_id = stdout(&account)
+        .split_whitespace()
+        .next()
+        .expect("account id")
+        .to_owned();
+    (account_id, secret)
+}
+
+fn setup_org_sender(sandbox: &Sandbox) -> OrgSender {
+    let (owner_account, _owner_secret) = org_account(sandbox, "operator", "org-owner.secret");
+    let (member_account, member_secret) = org_account(sandbox, "member-one", "org-member.secret");
+
+    let created = sandbox.agentctl(&[
+        "org",
+        "create",
+        "--name",
+        "acme",
+        "--creator",
+        &owner_account,
+    ]);
+    assert!(created.status.success(), "create: {}", stderr(&created));
+    let out = stdout(&created);
+    let org_id = out.split_whitespace().next().expect("org id").to_owned();
+    let owner_membership = out
+        .split_whitespace()
+        .find_map(|t| t.strip_prefix("owner_membership="))
+        .expect("owner membership")
+        .to_owned();
+
+    let member = sandbox.agentctl(&[
+        "org",
+        "member",
+        "add",
+        "--org",
+        &org_id,
+        "--actor",
+        &owner_membership,
+        "--account",
+        &member_account,
+        "--role",
+        "MEMBER",
+    ]);
+    assert!(member.status.success(), "member add: {}", stderr(&member));
+    let member_membership = stdout(&member)
+        .split_whitespace()
+        .next()
+        .expect("membership id")
+        .to_owned();
+
+    let policy = sandbox.agentctl(&[
+        "org",
+        "policy",
+        "set",
+        "--org",
+        &org_id,
+        "--actor",
+        &owner_membership,
+        "--ceiling",
+        "WORKSPACE_WRITE",
+        "--sync-max",
+        "PRIVATE",
+        "--quota",
+        "1000",
+        "--window",
+        "86400",
+    ]);
+    assert!(policy.status.success(), "policy: {}", stderr(&policy));
+
+    OrgSender {
+        org_id,
+        member_membership,
+        member_account,
+        member_secret,
+    }
+}
+
+/// Provisions a second store with the sender's org facts (accounts,
+/// organization, memberships, current policy) through the store port —
+/// the shipped equivalent of the out-of-band provisioning ADR-0047 §3
+/// assumes for v1; no envelope has been applied to the receiver yet.
+fn provision_org_receiver(sender: &Sandbox, receiver: &Sandbox, org_id: &str) {
+    use app_services::org_service::OrgService;
+    use org::port::OrgStorePort as _;
+
+    let org_id = org::model::OrganizationId::new(org_id.to_owned()).expect("org id");
+    let source = OrgService::new(
+        storage_sqlite::SqliteStore::open(sandbox_db(sender)).expect("open sender store"),
+    );
+    let organization = source.organization(&org_id).expect("sender org");
+    let memberships = source
+        .list_memberships(&org_id)
+        .expect("sender memberships");
+    let policy = source.current_policy(&org_id).expect("sender policy");
+    assert_eq!(source.sync_head(&org_id).expect("sender head"), 0);
+
+    let receiver_db = sandbox_db(receiver);
+    let receiver_dir = receiver_db.parent().expect("receiver db parent");
+    std::fs::create_dir_all(receiver_dir).expect("receiver db parent");
+    // The daemon admits its data directory only at exactly mode 0700
+    // and never repairs it (data_dir.rs), so provisioning must match.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(receiver_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("receiver db parent mode");
+    }
+    let mut target = storage_sqlite::SqliteStore::open(&receiver_db).expect("open receiver store");
+    for membership in &memberships {
+        let account = source
+            .get_account(&membership.account_id)
+            .expect("sender account");
+        target.put_account(&account).expect("seed account");
+    }
+    target.put_organization(&organization).expect("seed org");
+    for membership in &memberships {
+        target.put_membership(membership).expect("seed membership");
+    }
+    target.put_policy(&policy).expect("seed policy");
+}
+
+/// TASK-0212 (G13): encrypted sync and org policy take effect locally —
+/// an envelope sealed on one shipped daemon is accepted by a second,
+/// independently provisioned daemon store; org hard policy and quota
+/// bind on the receiver; local execution is unaffected by sync state.
+#[test]
+fn org_sync_policy_quota_take_effect_between_two_daemon_stores() {
+    let sender = Sandbox::new("org-sync-sender", SUCCESS_BODY);
+    let mut sender_daemon = DaemonGuard::spawn(&sender);
+    sender.wait_ready();
+    let fixture = setup_org_sender(&sender);
+
+    // Provision the receiver store before its daemon starts.
+    let receiver = Sandbox::new("org-sync-receiver", SUCCESS_BODY);
+    provision_org_receiver(&sender, &receiver, &fixture.org_id);
+    let org_id = org::model::OrganizationId::new(fixture.org_id.clone()).expect("org id");
+
+    // Org hard policy on the receiver store: a lower layer may narrow
+    // but never weaken (C-8); weakening refuses and changes nothing.
+    {
+        use org::model::{CapabilityCeiling, LayeredPolicy, OrgError};
+        let service = app_services::org_service::OrgService::new(
+            storage_sqlite::SqliteStore::open(sandbox_db(&receiver)).expect("receiver store"),
+        );
+        let narrowed = service
+            .resolve_policy(
+                &org_id,
+                &[LayeredPolicy {
+                    capability_ceiling: Some(CapabilityCeiling::ReadOnly),
+                    sync_max_sensitivity: None,
+                    quota_max_cost_microusd: Some(250),
+                }],
+            )
+            .expect("narrowing resolves");
+        assert_eq!(narrowed.capability_ceiling, CapabilityCeiling::ReadOnly);
+        assert_eq!(narrowed.quota_max_cost_microusd, Some(250));
+        assert!(matches!(
+            service.resolve_policy(
+                &org_id,
+                &[LayeredPolicy {
+                    capability_ceiling: Some(CapabilityCeiling::Execution),
+                    sync_max_sensitivity: None,
+                    quota_max_cost_microusd: None,
+                }],
+            ),
+            Err(OrgError::PolicyWeakening(_))
+        ));
+        assert_eq!(
+            service.current_policy(&org_id).expect("policy").version,
+            1,
+            "weakening attempt must leave the policy unchanged"
+        );
+    }
+
+    let mut receiver_daemon = DaemonGuard::spawn(&receiver);
+    receiver.wait_ready();
+    let head = receiver.agentctl(&["org", "sync", "head", "--org", &fixture.org_id]);
+    assert!(stdout(&head).contains("head=0"), "head {}", stdout(&head));
+
+    // A MEMBER cannot write org policy on the receiver (C-4/C-8), and
+    // the refused write leaves the shipped policy view unchanged.
+    let refused = receiver.agentctl(&[
+        "org",
+        "policy",
+        "set",
+        "--org",
+        &fixture.org_id,
+        "--actor",
+        &fixture.member_membership,
+        "--ceiling",
+        "EXECUTION",
+        "--sync-max",
+        "PRIVATE",
+        "--window",
+        "86400",
+    ]);
+    assert!(!refused.status.success(), "MEMBER policy set must refuse");
+    assert!(
+        stderr(&refused).contains("forbidden_role"),
+        "refusal: {}",
+        stderr(&refused)
+    );
+    let shown = receiver.agentctl(&["org", "policy", "show", "--org", &fixture.org_id]);
+    assert!(stdout(&shown).contains("v1"), "policy {}", stdout(&shown));
+    assert!(
+        stdout(&shown).contains("ceiling=WORKSPACE_WRITE"),
+        "policy {}",
+        stdout(&shown)
+    );
+    // The MEMBER seals locally on the sender side; only ciphertext and
+    // bounded metadata cross to the receiver (C-2).
+    let org_key = "cd".repeat(32);
+    let plaintext = "org-profile-two-store-v1";
+    let seal = |nonce: &str| {
+        let sealed = sender.agentctl(&[
+            "org",
+            "sync",
+            "seal",
+            "--account",
+            &fixture.member_account,
+            "--secret",
+            &fixture.member_secret,
+            "--org",
+            &fixture.org_id,
+            "--org-key",
+            &org_key,
+            "--nonce",
+            nonce,
+            "--kind",
+            "ORG_PROFILE",
+            "--sensitivity",
+            "PROJECT",
+            "--text",
+            plaintext,
+        ]);
+        assert!(sealed.status.success(), "seal: {}", stderr(&sealed));
+        stdout(&sealed)
+    };
+    let sealed_out = seal(&"01".repeat(24));
+    assert!(
+        !sealed_out.contains(plaintext),
+        "carrier view must not contain plaintext: {sealed_out}"
+    );
+    assert!(
+        !sealed_out.contains(&org_key) && !sealed_out.contains(&fixture.member_secret),
+        "carrier view must not contain key material: {sealed_out}"
+    );
+    let field = |name: &str| {
+        sealed_out
+            .split_whitespace()
+            .find_map(|t| t.strip_prefix(name))
+            .unwrap_or_else(|| panic!("field {name} in {sealed_out}"))
+            .to_owned()
+    };
+    let ciphertext = field("ciphertext=");
+    let plaintext_hex: String = plaintext.bytes().map(|b| format!("{b:02x}")).collect();
+    assert!(
+        !ciphertext.contains(&plaintext_hex),
+        "ciphertext must not embed plaintext"
+    );
+    let accept_args = |id: &str, ciphertext: &str, signature: &str, created: &str| {
+        vec![
+            "org".to_owned(),
+            "sync".to_owned(),
+            "accept".to_owned(),
+            "--id".to_owned(),
+            id.to_owned(),
+            "--org".to_owned(),
+            fixture.org_id.clone(),
+            "--author".to_owned(),
+            fixture.member_account.clone(),
+            "--kind".to_owned(),
+            "ORG_PROFILE".to_owned(),
+            "--revision".to_owned(),
+            field("revision="),
+            "--base".to_owned(),
+            field("base="),
+            "--sensitivity".to_owned(),
+            "PROJECT".to_owned(),
+            "--nonce".to_owned(),
+            field("nonce="),
+            "--ciphertext".to_owned(),
+            ciphertext.to_owned(),
+            "--signature".to_owned(),
+            signature.to_owned(),
+            "--created".to_owned(),
+            created.to_owned(),
+            "--org-key".to_owned(),
+            org_key.clone(),
+        ]
+    };
+    let env_id = sealed_out
+        .split_whitespace()
+        .next()
+        .expect("envelope id")
+        .to_owned();
+
+    // Tampered ciphertext refuses and applies nothing (C-6).
+    let mut tampered = ciphertext.clone().into_bytes();
+    tampered[0] = if tampered[0] == b'0' { b'1' } else { b'0' };
+    let tampered = String::from_utf8(tampered).expect("tampered hex");
+    let args = accept_args(&env_id, &tampered, &field("signature="), &field("created="));
+    let refused = receiver.agentctl(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    assert!(!refused.status.success(), "tampered accept must refuse");
+    assert!(
+        stderr(&refused).contains("bad_signature"),
+        "refusal: {}",
+        stderr(&refused)
+    );
+    let head = receiver.agentctl(&["org", "sync", "head", "--org", &fixture.org_id]);
+    assert!(stdout(&head).contains("head=0"), "head {}", stdout(&head));
+
+    // The genuine envelope round-trips between the two stores.
+    let args = accept_args(
+        &env_id,
+        &ciphertext,
+        &field("signature="),
+        &field("created="),
+    );
+    let accepted = receiver.agentctl(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    assert!(accepted.status.success(), "accept: {}", stderr(&accepted));
+    assert!(
+        stdout(&accepted).contains(&format!("plaintext={plaintext}")),
+        "accept {}",
+        stdout(&accepted)
+    );
+    let head = receiver.agentctl(&["org", "sync", "head", "--org", &fixture.org_id]);
+    assert!(stdout(&head).contains("head=1"), "head {}", stdout(&head));
+    // Local sealing recorded nothing on the sender daemon (C-1 shape):
+    // the accept applied only to the receiver store.
+    let head = sender.agentctl(&["org", "sync", "head", "--org", &fixture.org_id]);
+    assert!(stdout(&head).contains("head=0"), "head {}", stdout(&head));
+
+    // Replay refuses (C-10); a second seal against the sender's stale
+    // head conflicts on the receiver (C-7). Neither moves the head.
+    let args = accept_args(
+        &env_id,
+        &ciphertext,
+        &field("signature="),
+        &field("created="),
+    );
+    let replay = receiver.agentctl(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    assert!(!replay.status.success(), "replay must refuse");
+    assert!(
+        stderr(&replay).contains("duplicate_envelope"),
+        "refusal: {}",
+        stderr(&replay)
+    );
+    let stale_out = seal(&"02".repeat(24));
+    let stale_field = |name: &str| {
+        stale_out
+            .split_whitespace()
+            .find_map(|t| t.strip_prefix(name))
+            .unwrap_or_else(|| panic!("field {name} in {stale_out}"))
+            .to_owned()
+    };
+    let stale_id = stale_out
+        .split_whitespace()
+        .next()
+        .expect("stale envelope id")
+        .to_owned();
+    let stale_revision = stale_field("revision=");
+    let stale_base = stale_field("base=");
+    let stale_nonce = stale_field("nonce=");
+    let stale_ciphertext = stale_field("ciphertext=");
+    let stale_signature = stale_field("signature=");
+    let stale_created = stale_field("created=");
+    let stale_args = vec![
+        "org",
+        "sync",
+        "accept",
+        "--id",
+        &stale_id,
+        "--org",
+        &fixture.org_id,
+        "--author",
+        &fixture.member_account,
+        "--kind",
+        "ORG_PROFILE",
+        "--revision",
+        &stale_revision,
+        "--base",
+        &stale_base,
+        "--sensitivity",
+        "PROJECT",
+        "--nonce",
+        &stale_nonce,
+        "--ciphertext",
+        &stale_ciphertext,
+        "--signature",
+        &stale_signature,
+        "--created",
+        &stale_created,
+        "--org-key",
+        &org_key,
+    ];
+    let conflict = receiver.agentctl(&stale_args);
+    assert!(!conflict.status.success(), "stale accept must refuse");
+    assert!(
+        stderr(&conflict).contains("conflict"),
+        "refusal: {}",
+        stderr(&conflict)
+    );
+    let head = receiver.agentctl(&["org", "sync", "head", "--org", &fixture.org_id]);
+    assert!(stdout(&head).contains("head=1"), "head {}", stdout(&head));
+
+    // Quota binds locally on the receiver (C-9): 900 of 1000 spent
+    // refuses a 200 estimate before dispatch and admits 100.
+    let usage = receiver.agentctl(&[
+        "org",
+        "usage",
+        "record",
+        "--org",
+        &fixture.org_id,
+        "--account",
+        &fixture.member_account,
+        "--kind",
+        "EXECUTION",
+        "--units",
+        "10",
+        "--cost",
+        "900",
+        "--key",
+        "k1",
+    ]);
+    assert!(usage.status.success(), "usage: {}", stderr(&usage));
+    let over = receiver.agentctl(&[
+        "org",
+        "usage",
+        "check",
+        "--org",
+        &fixture.org_id,
+        "--estimate",
+        "200",
+    ]);
+    assert!(!over.status.success(), "over-quota must refuse");
+    assert!(
+        stderr(&over).contains("over_quota"),
+        "refusal: {}",
+        stderr(&over)
+    );
+    let within = receiver.agentctl(&[
+        "org",
+        "usage",
+        "check",
+        "--org",
+        &fixture.org_id,
+        "--estimate",
+        "100",
+    ]);
+    assert!(within.status.success(), "within: {}", stderr(&within));
+
+    // Local execution is unaffected by the conflicted sync state (C-1):
+    // a fixture-provider run on the receiver completes normally.
+    seed_ready(&receiver, "P-ORG", "T-ORG");
+    let run = receiver.agentctl(&[
+        "execution",
+        "run",
+        "T-ORG",
+        &receiver.repo.to_string_lossy(),
+        "--execution",
+        "E-ORG",
+        "--attempt",
+        "A-ORG",
+    ]);
+    assert!(
+        run.status.success(),
+        "offline local run: stdout={} stderr={}",
+        stdout(&run),
+        stderr(&run)
+    );
+    assert!(stdout(&run).contains("SUCCEEDED"), "run {}", stdout(&run));
+
+    // Durability across restart of both daemons: applied envelope,
+    // policy, usage ledger and quota verdict survive; replay still
+    // refuses on the restarted receiver.
+    sender_daemon.restart(&sender);
+    receiver_daemon.restart(&receiver);
+    let head = receiver.agentctl(&["org", "sync", "head", "--org", &fixture.org_id]);
+    assert!(stdout(&head).contains("head=1"), "head {}", stdout(&head));
+    let shown = receiver.agentctl(&["org", "policy", "show", "--org", &fixture.org_id]);
+    assert!(stdout(&shown).contains("v1"), "policy {}", stdout(&shown));
+    let usage = receiver.agentctl(&["org", "usage", "list", "--org", &fixture.org_id]);
+    assert!(
+        stdout(&usage).contains("cost=900"),
+        "usage {}",
+        stdout(&usage)
+    );
+    let over = receiver.agentctl(&[
+        "org",
+        "usage",
+        "check",
+        "--org",
+        &fixture.org_id,
+        "--estimate",
+        "200",
+    ]);
+    assert!(
+        !over.status.success(),
+        "over-quota must refuse after restart"
+    );
+    assert!(
+        stderr(&over).contains("over_quota"),
+        "refusal: {}",
+        stderr(&over)
+    );
+    let args = accept_args(
+        &env_id,
+        &ciphertext,
+        &field("signature="),
+        &field("created="),
+    );
+    let replay = receiver.agentctl(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    assert!(!replay.status.success(), "replay after restart must refuse");
+    assert!(
+        stderr(&replay).contains("duplicate_envelope"),
+        "refusal: {}",
+        stderr(&replay)
+    );
+}

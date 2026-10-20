@@ -6840,6 +6840,21 @@ items:
     scope: Integration tests.
     exit_criteria_summary: Integration green across daemon restart.
     depends_on: [TASK-0211]
+    outcome: >-
+      Shipped-binary two-daemon integration
+      (execution_binaries::org_sync_policy_quota_take_effect_between_two_daemon_stores):
+      envelope sealed by a MEMBER on daemon A accepted on independently
+      provisioned daemon B (plaintext exact, head 0->1 on B only, sender
+      head unchanged), carrier view holds no plaintext/org-key/secret,
+      tamper refuses bad_signature applying nothing, replay refuses
+      duplicate_envelope, stale second seal refuses conflict; receiver-store
+      OrgService resolution narrows and refuses PolicyWeakening with policy
+      v1 unchanged, MEMBER policy write on B refuses forbidden_role; usage
+      900/1000 then estimate 200 refuses over_quota and 100 admits, all
+      durable across restart of both daemons; fixture execution run on B
+      SUCCEEDED with conflicted sync state (C-1). Tests only, no
+      production code. execution_binaries 22/22, org_service 8/8,
+      workspace test, fmt and clippy green.
     blocked_by: []
     references: [docs/architecture/adr/ADR-0047-g13-cloud-team-contract.md]
   - id: TASK-0213
