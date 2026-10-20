@@ -24,6 +24,7 @@ mod continuity_store;
 mod entry_store;
 mod error;
 mod event;
+mod execution_cycle_lock;
 mod human_decision_store;
 mod journal_store;
 mod memory_store;
@@ -65,6 +66,7 @@ pub use event::{
     AttemptOutcome, EventId, EventType, JournalEvent, NewJournalEvent, PlanRevisionJournalPayload,
     EVENT_SCHEMA_VERSION,
 };
+pub use execution_cycle_lock::ExecutionCycleGuard;
 pub use human_decision_store::{ApprovedPlanProposal, NewHumanDecisionRequest};
 pub use migration::SUPPORTED_SCHEMA_VERSION;
 pub use plan_guardrail_store::{PlanGuardrailEvent, PlannerCallSettlement};

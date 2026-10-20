@@ -7044,3 +7044,14 @@ items:
     depends_on: []
     blocked_by: []
     references: [docs/development/G13_CLOSURE_AUDIT.md, planning/roadmap.yaml]
+    outcome: >-
+      Done on task-0229-cross-daemon-resume-race. SqliteStore gains a
+      per-execution cycle guard (flock on a lock file beside the
+      database, OS-released on process death); OrchestrationService
+      acquires it at the top of continue_workspace_cycle and contenders
+      refuse typed before any mutation. New keeper
+      cross_composition_resumes_converge_on_exactly_one_attempt
+      (8 independent compositions x 12 rounds) was RED 3/3 target runs
+      pre-fix and mutation-RED 2/2 with the lock neutralized; post-fix
+      execution_recovery target 20/20, workspace 1947 passed / 0
+      failed, fmt and clippy clean.

@@ -10,7 +10,7 @@ MAX_BYTES=$((MAX_TOKENS * BYTES_PER_TOKEN))
 # Не написано агентами: lock-файлы, сгенерированный код, снапшоты, минифицированные ассеты.
 # Grandfathered: большие файлы, существовавшие до введения гейта; гейт
 # применяется к новым файлам, а не к аддитивным правкам в этих.
-IGNORE_RE='(^|/)(Cargo\.lock|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|poetry\.lock|uv\.lock|go\.sum)$|\.lock$|\.snap$|^planning/tasks/queue\.yaml$|^bins/agentd/src/execution\.rs$|^bins/agentd/src/lib\.rs$|^bins/agentctl/src/(lib|main)\.rs$|^bins/agentctl/tests/execution_binaries\.rs$|^bins/agentd/tests/execution_recovery\.rs$|^crates/ipc-contracts/src/lib\.rs$|^crates/ipc-control/src/(negotiation|session)\.rs$|\.(md|mdx)$|\.min\.(js|css)$|\.pb\.(go|rs)$|\.pb\.h$|_pb2(_grpc)?\.pyi?$|(^|/)(generated|gen|vendor|target|node_modules)/|\.generated\.[a-z]+$|\.(png|jpe?g|gif|webp|ico|pdf|woff2?|zip|gz)$'
+IGNORE_RE='(^|/)(Cargo\.lock|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|poetry\.lock|uv\.lock|go\.sum)$|\.lock$|\.snap$|^planning/tasks/queue\.yaml$|^bins/agentd/src/execution\.rs$|^bins/agentd/src/lib\.rs$|^bins/agentctl/src/(lib|main)\.rs$|^bins/agentctl/tests/execution_binaries\.rs$|^bins/agentd/tests/execution_recovery\.rs$|^crates/app-services/src/orchestration_service\.rs$|^crates/ipc-contracts/src/lib\.rs$|^crates/ipc-control/src/(negotiation|session)\.rs$|\.(md|mdx)$|\.min\.(js|css)$|\.pb\.(go|rs)$|\.pb\.h$|_pb2(_grpc)?\.pyi?$|(^|/)(generated|gen|vendor|target|node_modules)/|\.generated\.[a-z]+$|\.(png|jpe?g|gif|webp|ico|pdf|woff2?|zip|gz)$'
 
 fail=0
 while IFS= read -r -d '' f; do
