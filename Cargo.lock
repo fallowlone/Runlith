@@ -2019,6 +2019,7 @@ dependencies = [
  "sha2 0.10.9",
  "takeover",
  "task-domain",
+ "windows-sys",
  "worker",
  "worker-contract",
  "workspace",

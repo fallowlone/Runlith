@@ -73,3 +73,31 @@ jobs:
       # an authenticated Claude CLI, neither of which exists on a runner.
       - name: Test
         run: cargo test --workspace --locked --no-fail-fast
+
+  verify-windows:
+    # TASK-0229 adds a real Windows code path (LockFileEx execution-cycle
+    # guard in storage-sqlite). This job proves that path compiles and
+    # its lock semantics hold on a real Windows runner. Scoped
+    # deliberately: the full workspace carries unix-only fixtures
+    # (shell provider doubles, Seatbelt), so a green run here claims
+    # storage/app-services compile plus the cycle-guard test — nothing
+    # about the whole product on Windows.
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Pin toolchain
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.95.0
+          rustc -vV
+
+      - name: Check affected crates (windows)
+        run: cargo check -p storage-sqlite -p app-services --all-targets --locked
+
+      - name: Cycle-guard lock semantics (windows)
+        run: cargo test -p storage-sqlite --locked cycle_guard
