@@ -23,7 +23,6 @@ use crate::error::{StorageError, StorageResult};
 /// a contender that already opened it).
 #[derive(Debug)]
 pub struct ExecutionCycleGuard {
-    #[cfg(any(unix, windows))]
     _file: Option<std::fs::File>,
 }
 
@@ -111,95 +110,96 @@ impl crate::task_store::SqliteStore {
         Ok(Some(directory.join(format!("{sanitized}.lock"))))
     }
 
-    #[cfg(unix)]
     fn acquire_cycle_lock(&self, lock_path: PathBuf) -> StorageResult<Option<ExecutionCycleGuard>> {
-        use std::os::unix::io::AsRawFd;
-
         if let Some(directory) = lock_path.parent() {
             std::fs::create_dir_all(directory).map_err(|error| {
                 StorageError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
             })?;
         }
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)
-            .map_err(|error| {
-                StorageError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
-            })?;
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if result != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
-                return Ok(None);
-            }
-            return Err(StorageError::Sqlite(
-                rusqlite::Error::ToSqlConversionFailure(Box::new(error)),
-            ));
-        }
-        Ok(Some(ExecutionCycleGuard { _file: Some(file) }))
+        let file = lock_cycle_file(&lock_path)?;
+        Ok(file.map(|file| ExecutionCycleGuard { _file: Some(file) }))
     }
+}
 
-    #[cfg(windows)]
-    fn acquire_cycle_lock(&self, lock_path: PathBuf) -> StorageResult<Option<ExecutionCycleGuard>> {
-        use std::os::windows::io::AsRawHandle;
+/// Opens `lock_path` and takes the OS advisory lock without blocking.
+/// `Ok(None)` means another holder owns it. Split from the store method
+/// so lock semantics are testable on platforms where opening the
+/// database itself is not yet implemented (Windows `path_security`).
+#[cfg(unix)]
+fn lock_cycle_file(lock_path: &std::path::Path) -> StorageResult<Option<std::fs::File>> {
+    use std::os::unix::io::AsRawFd;
 
-        use windows_sys::Win32::Foundation::{GetLastError, ERROR_LOCK_VIOLATION};
-        use windows_sys::Win32::Storage::FileSystem::{
-            LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
-        };
-
-        if let Some(directory) = lock_path.parent() {
-            std::fs::create_dir_all(directory).map_err(|error| {
-                StorageError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
-            })?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|error| {
+            StorageError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+        })?;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            return Ok(None);
         }
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)
-            .map_err(|error| {
-                StorageError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
-            })?;
-        let locked = unsafe {
-            LockFileEx(
-                file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
-                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                0,
-                u32::MAX,
-                u32::MAX,
-                std::ptr::null_mut(),
-            )
-        };
-        if locked == 0 {
-            let code = unsafe { GetLastError() };
-            if code == ERROR_LOCK_VIOLATION {
-                return Ok(None);
-            }
-            return Err(StorageError::Sqlite(
-                rusqlite::Error::ToSqlConversionFailure(Box::new(
-                    std::io::Error::from_raw_os_error(code as i32),
-                )),
-            ));
-        }
-        Ok(Some(ExecutionCycleGuard { _file: Some(file) }))
+        return Err(StorageError::Sqlite(
+            rusqlite::Error::ToSqlConversionFailure(Box::new(error)),
+        ));
     }
+    Ok(Some(file))
+}
 
-    #[cfg(not(any(unix, windows)))]
-    fn acquire_cycle_lock(
-        &self,
-        _lock_path: PathBuf,
-    ) -> StorageResult<Option<ExecutionCycleGuard>> {
-        // No advisory-lock primitive is wired on this platform; fail
-        // closed rather than pretend cycles are serialized.
-        Err(StorageError::Corrupt(
-            "execution cycle serialization is unavailable on this platform".to_owned(),
-        ))
+#[cfg(windows)]
+fn lock_cycle_file(lock_path: &std::path::Path) -> StorageResult<Option<std::fs::File>> {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_LOCK_VIOLATION};
+    use windows_sys::Win32::Storage::FileSystem::{
+        LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+    };
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|error| {
+            StorageError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+        })?;
+    let locked = unsafe {
+        LockFileEx(
+            file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            u32::MAX,
+            u32::MAX,
+            std::ptr::null_mut(),
+        )
+    };
+    if locked == 0 {
+        let code = unsafe { GetLastError() };
+        if code == ERROR_LOCK_VIOLATION {
+            return Ok(None);
+        }
+        return Err(StorageError::Sqlite(
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::from_raw_os_error(
+                code as i32,
+            ))),
+        ));
     }
+    Ok(Some(file))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn lock_cycle_file(_lock_path: &std::path::Path) -> StorageResult<Option<std::fs::File>> {
+    // No advisory-lock primitive is wired on this platform; fail
+    // closed rather than pretend cycles are serialized.
+    Err(StorageError::Corrupt(
+        "execution cycle serialization is unavailable on this platform".to_owned(),
+    ))
 }
 
 #[cfg(test)]
@@ -217,19 +217,19 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).expect("temp root");
-        let db = root.join("state.sqlite3");
-        let execution = ExecutionId::new("E-LOCK").expect("execution id");
+        // Directly at the lock primitive: opening the database itself
+        // is not implemented on Windows yet (path_security), which must
+        // not mask whether LockFileEx semantics hold there.
+        let lock_path = root.join("E-LOCK.lock");
 
-        let first_store = crate::task_store::SqliteStore::open(&db).expect("open first");
-        let first = first_store
-            .try_acquire_execution_cycle(&execution)
-            .expect("first acquire")
-            .expect("first holder wins");
-
-        let second_store = crate::task_store::SqliteStore::open(&db).expect("open second");
+        let first = ExecutionCycleGuard {
+            _file: lock_cycle_file(&lock_path)
+                .expect("first acquire")
+                .expect("first holder wins")
+                .into(),
+        };
         assert!(
-            second_store
-                .try_acquire_execution_cycle(&execution)
+            lock_cycle_file(&lock_path)
                 .expect("second acquire")
                 .is_none(),
             "second holder must be refused while the first guard lives"
@@ -237,15 +237,10 @@ mod tests {
 
         drop(first);
         assert!(
-            second_store
-                .try_acquire_execution_cycle(&execution)
-                .expect("reacquire")
-                .is_some(),
+            lock_cycle_file(&lock_path).expect("reacquire").is_some(),
             "guard must be acquirable after release"
         );
 
-        drop(second_store);
-        drop(first_store);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
