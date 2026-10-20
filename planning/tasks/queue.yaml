@@ -6821,6 +6821,16 @@ items:
     scope: ipc-contracts, ipc-control, agentd, agentctl, ipc docs.
     exit_criteria_summary: Shipped-binary org cycle green.
     depends_on: [TASK-0210]
+    outcome: >-
+      Additive org_core proto (org_core = 15, protocol V12,
+      supports_org_ipc, below-V12 typed refusal test), agentd OrgService
+      dispatch (org.rs), agentctl org
+      create|get|account|team|member|policy|usage|sync|keygen surface
+      with local keygen/seal (secrets never cross IPC; org key presented
+      per accept call only). Shipped-binary cycle green in
+      execution_binaries (create/team/member/policy/quota/seal/accept/
+      replay-refusal/restart durability). Version pins updated 11 to 12
+      in ipc-contracts/ipc-control tests (test-only, disclosed here).
     blocked_by: []
     references: [docs/architecture/adr/ADR-0047-g13-cloud-team-contract.md]
   - id: TASK-0212

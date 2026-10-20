@@ -27,9 +27,9 @@ use crate::error::{ControlError, ControlResult};
 use crate::negotiation::{
     default_client_build_version, evaluate_handshake, rejection_for, validate_business_allowed,
     validate_execution_allowed, validate_finder_allowed, validate_human_decision_allowed,
-    validate_memory_allowed, validate_planning_allowed, validate_policy_allowed,
-    validate_routine_allowed, validate_task_authoring_allowed, validate_vault_allowed,
-    validate_worker_allowed, ServerConfig,
+    validate_memory_allowed, validate_org_allowed, validate_planning_allowed,
+    validate_policy_allowed, validate_routine_allowed, validate_task_authoring_allowed,
+    validate_vault_allowed, validate_worker_allowed, ServerConfig,
 };
 
 /// Deadline for a full client/server handshake exchange.
@@ -92,6 +92,8 @@ pub enum ReadyRequest {
     Routine(ipc_contracts::proto::RoutineCoreRequest),
     /// Decoded G12 remote worker request on a version-11 session.
     Worker(ipc_contracts::proto::WorkerCoreRequest),
+    /// Decoded G13 cloud/team request on a version-12 session.
+    Org(ipc_contracts::proto::OrgCoreRequest),
 }
 
 /// Client-side handshake outcome.
@@ -283,6 +285,15 @@ impl ClientConfig {
             .push(ipc_contracts::IPC_PROTOCOL_VERSION_V11);
         config
     }
+
+    /// G13 org client profile (TASK-0211).
+    pub fn org_default(client_kind: impl Into<String>) -> Self {
+        let mut config = Self::worker_default(client_kind);
+        config
+            .supported_versions
+            .push(ipc_contracts::IPC_PROTOCOL_VERSION_V12);
+        config
+    }
 }
 
 /// Client side of the bootstrap control protocol.
@@ -406,6 +417,12 @@ where
     pub fn worker_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_worker_allowed)
+    }
+
+    #[must_use]
+    pub fn org_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_org_allowed)
     }
 
     /// Unwraps into the framed transport for lifecycle-owned exchanges
@@ -722,6 +739,23 @@ where
         }
     }
 
+    pub async fn respond_org(
+        &mut self,
+        response: ipc_contracts::proto::OrgCoreResponse,
+    ) -> ControlResult<()> {
+        self.require_ready()?;
+        let frame = bytes::Bytes::from(
+            ControlResponse {
+                payload: Some(control_response::Payload::OrgCore(response)),
+            }
+            .encode_to_vec(),
+        );
+        match self.transport.write_frame(frame).await {
+            Ok(()) => Ok(()),
+            Err(error) => self.fail(error.into()),
+        }
+    }
+
     pub async fn respond_routine(
         &mut self,
         response: ipc_contracts::proto::RoutineCoreResponse,
@@ -844,6 +878,12 @@ where
     pub fn worker_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_worker_allowed)
+    }
+
+    #[must_use]
+    pub fn org_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_org_allowed)
     }
 
     /// Reads the first request (within [`HANDSHAKE_TIMEOUT`]), requires it
@@ -1056,6 +1096,15 @@ where
                     .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
                 match validate_worker_allowed(negotiated) {
                     Ok(()) => Ok(ReadyRequest::Worker(request)),
+                    Err(error) => self.fail(error),
+                }
+            }
+            Some(control_request::Payload::OrgCore(request)) => {
+                let negotiated = self
+                    .negotiated_version
+                    .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
+                match validate_org_allowed(negotiated) {
+                    Ok(()) => Ok(ReadyRequest::Org(request)),
                     Err(error) => self.fail(error),
                 }
             }
@@ -2054,6 +2103,49 @@ mod tests {
         assert_eq!(config.supported_versions, vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
         let historical = ClientConfig::finder_default(CLIENT_KIND_AGENTCTL);
         assert_eq!(historical.supported_versions, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[tokio::test]
+    async fn v11_session_rejects_org_as_unsupported() {
+        // G12 daemon profile negotiates 11: org authority is v12-only,
+        // the request never executes (TASK-0211 below-V12 refusal).
+        let (mut raw_client, raw_server) = raw_pair();
+        let mut server = ServerSession::new(raw_server, ServerConfig::g12_default());
+        raw_client
+            .write_frame(handshake_request_frame(HandshakeRequest {
+                supported_protocol_versions: vec![0, 11],
+                client_kind: CLIENT_KIND_AGENTCTL.to_owned(),
+                client_build_version: "test".to_owned(),
+                requested_capabilities: Vec::new(),
+            }))
+            .await
+            .expect("write");
+        let info = server.run_handshake().await.expect("ready");
+        assert_eq!(info.selected_version, 11);
+        assert!(server.worker_allowed());
+        assert!(!server.org_allowed());
+        use ipc_contracts::proto::{org_core_request, OrgCoreRequest, OrgIdRequest};
+        let frame = Bytes::from(
+            ControlRequest {
+                payload: Some(control_request::Payload::OrgCore(OrgCoreRequest {
+                    payload: Some(org_core_request::Payload::SyncHead(OrgIdRequest {
+                        org_id: "org_00000000000000000000000000".to_owned(),
+                    })),
+                })),
+            }
+            .encode_to_vec(),
+        );
+        raw_client.write_frame(frame).await.expect("write");
+        match server.next_request().await {
+            Err(ControlError::UnsupportedProtocol {
+                negotiated,
+                required,
+            }) => {
+                assert_eq!(negotiated, 11);
+                assert_eq!(required, 12);
+            }
+            other => panic!("expected UnsupportedProtocol, got {other:?}"),
+        }
     }
 
     #[tokio::test]

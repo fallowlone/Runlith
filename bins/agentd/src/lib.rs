@@ -23,8 +23,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use app_services::{
-    background_service::BackgroundService, worker_service::WorkerService, ApprovalService,
-    FinderService, HumanDecisionService, MemoryService, SystemClock, TaskService,
+    background_service::BackgroundService, org_service::OrgService, worker_service::WorkerService,
+    ApprovalService, FinderService, HumanDecisionService, MemoryService, SystemClock, TaskService,
 };
 use bytes::BytesMut;
 #[cfg(unix)]
@@ -44,6 +44,7 @@ pub mod execution;
 pub mod finder;
 pub mod human_decision;
 pub mod memory;
+pub mod org;
 pub mod planning;
 mod provider_credential;
 pub mod routine;
@@ -196,7 +197,7 @@ impl DaemonConfig {
     /// (TASK-0193 routine rollout) while preserving every older surface.
     pub fn with_execution(path: impl Into<PathBuf>) -> Self {
         Self {
-            server_config: ServerConfig::g12_default(),
+            server_config: ServerConfig::g13_default(),
             database_path: Some(path.into()),
             provider_executable: None,
         }
@@ -236,6 +237,9 @@ pub type RoutineHandle = Arc<tokio::sync::Mutex<BackgroundService<storage_sqlite
 /// Shared trusted G12 worker service over its own SQLite connection.
 pub type WorkerHandle = Arc<tokio::sync::Mutex<WorkerService<storage_sqlite::SqliteStore>>>;
 
+/// Shared trusted G13 org service over its own SQLite connection.
+pub type OrgHandle = Arc<tokio::sync::Mutex<OrgService<storage_sqlite::SqliteStore>>>;
+
 #[derive(Clone)]
 struct ConnectionServices {
     business: Option<BusinessHandle>,
@@ -247,6 +251,7 @@ struct ConnectionServices {
     memory: Option<MemoryHandle>,
     routine: Option<RoutineHandle>,
     worker: Option<WorkerHandle>,
+    org: Option<OrgHandle>,
 }
 
 /// Terminal outcome of a daemon run.
@@ -380,6 +385,16 @@ fn open_worker_service(config: &DaemonConfig) -> Result<Option<WorkerHandle>, Da
     };
     let store = storage_sqlite::SqliteStore::open(path)?;
     Ok(Some(Arc::new(tokio::sync::Mutex::new(WorkerService::new(
+        store,
+    )))))
+}
+
+fn open_org_service(config: &DaemonConfig) -> Result<Option<OrgHandle>, DaemonError> {
+    let Some(path) = config.database_path.as_ref() else {
+        return Ok(None);
+    };
+    let store = storage_sqlite::SqliteStore::open(path)?;
+    Ok(Some(Arc::new(tokio::sync::Mutex::new(OrgService::new(
         store,
     )))))
 }
@@ -620,6 +635,18 @@ where
                     None => worker::unavailable(),
                 };
                 if session.respond_worker(response).await.is_err() {
+                    return ConnectionOutcome::Ended;
+                }
+            }
+            Ok(ReadyRequest::Org(request)) => {
+                let response = match &services.org {
+                    Some(handle) => {
+                        let mut service = handle.lock().await;
+                        org::dispatch(&mut service, request)
+                    }
+                    None => org::unavailable(),
+                };
+                if session.respond_org(response).await.is_err() {
                     return ConnectionOutcome::Ended;
                 }
             }
@@ -1000,6 +1027,7 @@ mod unix_daemon {
                 memory: open_memory_service(&config)?,
                 routine: open_routine_service(&config)?,
                 worker: open_worker_service(&config)?,
+                org: open_org_service(&config)?,
             },
         )
         .await;
@@ -1109,6 +1137,7 @@ mod windows_daemon {
                 memory: super::open_memory_service(&config)?,
                 routine: super::open_routine_service(&config)?,
                 worker: super::open_worker_service(&config)?,
+                org: super::open_org_service(&config)?,
             },
         )
         .await)

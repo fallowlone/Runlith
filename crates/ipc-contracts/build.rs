@@ -7,7 +7,7 @@
 
 /// Kept in sync with the redacting `Debug` impls in `src/lib.rs`; a missing
 /// impl fails the build, an extra one conflicts with the generated derive.
-const SECRET_BEARING_MESSAGES: [&str; 7] = [
+const SECRET_BEARING_MESSAGES: [&str; 8] = [
     "VaultCreateRequest",
     "VaultUnlockRequest",
     "VaultStoreRequest",
@@ -15,6 +15,9 @@ const SECRET_BEARING_MESSAGES: [&str; 7] = [
     "VaultRecoverRequest",
     "VaultRotateRequest",
     "VaultPhraseResponse",
+    // Carries the org AEAD key for one accept call (ADR-0047 §3):
+    // secret material, never rendered in logs (INV-008).
+    "OrgAcceptEnvelopeRequest",
 ];
 
 fn main() {
@@ -37,6 +40,7 @@ fn main() {
     println!("cargo:rerun-if-changed=proto/memory_core.proto");
     println!("cargo:rerun-if-changed=proto/routine_core.proto");
     println!("cargo:rerun-if-changed=proto/worker_core.proto");
+    println!("cargo:rerun-if-changed=proto/org_core.proto");
     // Messages carrying vault secrets get a hand-written redacting `Debug`
     // in `src/lib.rs` instead of the generated one (ADR-0039).
     prost_build::Config::new()
@@ -59,6 +63,7 @@ fn main() {
                 "proto/memory_core.proto",
                 "proto/routine_core.proto",
                 "proto/worker_core.proto",
+                "proto/org_core.proto",
             ],
             &["proto/"],
         )
