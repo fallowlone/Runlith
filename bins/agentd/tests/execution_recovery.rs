@@ -1119,15 +1119,14 @@ fn concurrent_resumes_converge_on_exactly_one_attempt() {
     // racer (reads only), then exactly one background may consume the
     // reservation and run the provider.
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let shared = std::sync::Arc::new(sandbox.composition());
     let mut handles = Vec::new();
     for _ in 0..8 {
         let barrier = barrier.clone();
-        let db = sandbox.db.clone();
-        let fixture = sandbox.fixture.clone();
+        let composition = shared.clone();
         let repo = sandbox.repo.to_string_lossy().into_owned();
         handles.push(std::thread::spawn(move || {
             barrier.wait();
-            let composition = ExecutionComposition::new(db, Some(fixture));
             let (response, job) = resume(
                 &composition,
                 resume_request_full("E-1", &repo, "repo-local:T-1", "HEAD"),
