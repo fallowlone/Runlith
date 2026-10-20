@@ -6866,6 +6866,15 @@ items:
     depends_on: [TASK-0212]
     blocked_by: []
     references: [docs/architecture/adr/ADR-0047-g13-cloud-team-contract.md]
+    outcome: >-
+      Failure matrix green (crates/app-services/tests/org_failure_matrix.rs
+      8/8): revoked member refuses after reopen, tamper variants apply
+      nothing, stale revision conflicts, per-knob policy weakening leaves
+      policy v1 unchanged, secret probe refuses pre-encryption for every
+      kind, over-quota plus same-key retry evasion refuse, replay and
+      impersonation refuse; two-store dogfood round-trip survives
+      receiver reopen. Evidence: docs/development/G13_FAILURE_MATRIX.md.
+      Tests only, no production code.
   - id: TASK-0214
     gate: G13
     title: G13 closure audit
