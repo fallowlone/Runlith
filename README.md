@@ -29,7 +29,7 @@ Runlith is the layer above them that remembers, plans, isolates, verifies, and r
 <br>
 
 > [!WARNING]
-> Runlith is **pre-release** (`0.1.0`, currently gate **G13**). There is no public release yet, interfaces
+> Runlith is **pre-release** (`0.1.0`, gate **G13** closed; **G14** planned, awaiting owner ratification). There is no public release yet, interfaces
 > may change, and only `main` is supported. Great time to read the code and shape the direction — not yet
 > a time to depend on it in production.
 
@@ -127,7 +127,9 @@ messages you hope someone sees.
 
 ## ✦ Quick start
 
-**Requirements:** Rust `1.95` (the version CI pins), Git, macOS for the sandboxed runner.
+**Requirements:** Rust `1.95` (the version CI pins), Git, macOS for the sandboxed runner. Windows is not a
+supported runtime platform yet: CI compiles the storage layer there and tests its file-lock semantics, but
+the daemon's durable-storage admission is currently implemented on Unix only.
 
 ```sh
 git clone https://github.com/fallowlone/Runlith.git
@@ -839,7 +841,7 @@ Gates advance on **exit criteria, never calendar dates**.
 | G10 | Memory engine | ✅ |
 | G11 | Background daemon | ✅ |
 | G12 | Remote worker | ✅ |
-| **G13** | **Cloud / team** | 🚧 *in progress* |
+| **G13** | **Cloud / team** | ✅ |
 | G14 | Router / usage economics | ⏳ |
 
 The authoritative plan lives in [`planning/roadmap.yaml`](planning/roadmap.yaml).
@@ -856,7 +858,9 @@ Build `agentd` and `agentctl` **before** running binary-level tests — they loc
 stale `target/debug/agentd` gives stale results.
 
 CI runs the same three checks on macOS with a pinned Rust `1.95.0`
-([workflow](.github/workflows/verification.yml)).
+([workflow](.github/workflows/verification.yml)). A scoped `verify-windows` job additionally compiles the
+storage and application-service crates on `windows-latest` and runs the execution-cycle lock test there;
+it does not claim the full product works on Windows.
 
 ## ✦ Contributing
 
