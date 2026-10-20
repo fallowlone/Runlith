@@ -43,13 +43,15 @@ impl Drop for ExecutionCycleGuard {
             {
                 use std::os::windows::io::AsRawHandle;
                 use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+                use windows_sys::Win32::System::IO::OVERLAPPED;
                 unsafe {
+                    let mut overlapped: OVERLAPPED = std::mem::zeroed();
                     UnlockFileEx(
                         file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
                         0,
                         u32::MAX,
                         u32::MAX,
-                        std::ptr::null_mut(),
+                        &mut overlapped,
                     );
                 }
             }
@@ -169,14 +171,17 @@ fn lock_cycle_file(lock_path: &std::path::Path) -> StorageResult<Option<std::fs:
         .map_err(|error| {
             StorageError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
         })?;
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+
     let locked = unsafe {
+        let mut overlapped: OVERLAPPED = std::mem::zeroed();
         LockFileEx(
             file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE,
             LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
             0,
             u32::MAX,
             u32::MAX,
-            std::ptr::null_mut(),
+            &mut overlapped,
         )
     };
     if locked == 0 {
