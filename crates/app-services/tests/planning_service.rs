@@ -3145,7 +3145,7 @@ fn exact_child_materialization_retry_reuses_the_existing_task() {
         connection
             .execute(
                 "INSERT INTO tasks (id, project_id, objective, parent_id, state, risk)
-                 VALUES ('node-1', ?1, 'planned child task node-1', 'TASK-0078', 'READY', 'low')",
+                 VALUES ('node-1', ?1, 'planning root [planned step node-1]', 'TASK-0078', 'READY', 'low')",
                 rusqlite::params![db.project_id.as_str()],
             )
             .unwrap();
