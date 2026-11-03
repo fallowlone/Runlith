@@ -82,7 +82,7 @@ case "$LAST" in
   *SLOW*) while :; do :; done ;;
   *BADJSON*) printf 'this is not json{{{'; exit 0 ;;
   *EXIT3*) echo 'provider exploded' >&2; exit 3 ;;
-  *) printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture completed the work","session_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}'; exit 0 ;;
+  *) echo changed > fixture-output.txt; printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture completed the work","session_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}'; exit 0 ;;
 esac
 "#,
         )

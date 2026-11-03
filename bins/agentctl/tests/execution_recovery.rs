@@ -369,7 +369,7 @@ fn seed_accepted_plan(sandbox: &Sandbox, task: &str) {
     ));
 }
 
-const SUCCESS_BODY: &str = r#"printf '{"type":"result","subtype":"success","is_error":false,"result":"binary recovery fixture finished","session_id":"dddddddd-dddd-dddd-dddd-dddddddddddd"}'; exit 0
+const SUCCESS_BODY: &str = r#"echo changed > fixture-output.txt; printf '{"type":"result","subtype":"success","is_error":false,"result":"binary recovery fixture finished","session_id":"dddddddd-dddd-dddd-dddd-dddddddddddd"}'; exit 0
 "#;
 
 /// Stranded status shape: RUNNING, nothing live, zero attempt lines.
