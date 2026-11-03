@@ -33,7 +33,13 @@ Gate: G8
 > exposed until revocation is confirmed, not as already revoked), and the
 > round-4/6/7 hardening that exposure and two independent review cycles
 > triggered — carried into the hardening rules below (D15-D27). This
-> revision remediates a second independent review cycle
+> revision also remediates the independent reviews of `3924bb7` (AS-02–07,
+> A1–A6 and N1). On 2026-09-30 the owner selected **B — bounded remote
+> delegation** for AS-01, separately from the credential-mechanism Option B.
+> The contract below is submitted for independent re-review; no remote
+> operation currently has sufficient enforcement evidence for v1 admission.
+> The ADR remains Proposed, including its other pending decisions. Earlier
+> revisions remediated a second independent review cycle
 > (architecture/security: PASS_WITH_NONBLOCKING_FINDINGS; adversarial:
 > FAIL) on top of the first (B1-B3 blocking, N1-N10 non-blocking; see each
 > D-rule and the Security impact section for the finding it fixes). No
@@ -392,8 +398,9 @@ loopback listener, and a Seatbelt network scope permitting outbound
 connections to nothing but that one port on any local address the rule
 admits (D11). This confines the *transport*: it does not, by itself, limit
 what the real Anthropic API is asked to do with a forwarded request's JSON
-body — see D24 and "Security impact" for the owner-accepted residual risk
-this leaves open (server-side tools, the MCP connector). The gateway holds
+body — D24 and the AS-01 contract require separate canonical admission of
+its semantics. Historical server-tool/MCP risk acceptance grants no
+forwarding authority outside the new bounded contract. The gateway holds
 the real credential — released from the Secrets Broker under
 policy-authorized `SecretAccess` — validates the placeholder on every
 request, rewrites the credential header before forwarding to the pinned
@@ -513,7 +520,7 @@ by R6/R7 (hand-modified profile) and, more precisely, by round-6's
 credential-free "L1 loopback admission" measurement, which shows the
 underlying Seatbelt primitive a future scope would compile to admits
 every local address the host has configured, not only `127.0.0.1`
-(`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:284-333`). This
+(`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md`). This
 ADR's Decision (rule D11) proposes the missing capability, with that true
 destination set stated explicitly rather than assumed narrower; until it
 ships, Option B is not reachable through the current codebase, exactly as
@@ -526,10 +533,11 @@ below.
 
 The owner selected **Option B** on 2026-09-25, in a structured decision
 prompt, as a proposed decision pending ratification. The following
-normative rules define the gateway's required shape. They formalize the
-design already probed by `docs/development/task0152-probes/owner_proxy_probe.py`
-and now run end-to-end with a real credential for both modes (see "Owner
-real-credential receipts") rather than inventing a new, unprobed design.
+normative rules define the gateway's required shape. The credential transport
+was probed by
+`docs/development/task0152-probes/owner_proxy_probe.py` and historically run
+with real credentials for both modes (see "Owner real-credential receipts").
+The new AS-01 authorization contract is not implemented or proven by that probe.
 
 **Process boundary (orchestrator decision, flagged for owner ratification
 — N7).** The gateway is a component *inside* the existing `agentd`
@@ -577,20 +585,22 @@ review reaches a different conclusion.
   (unauthenticated — see N4 in "Security impact": this reveals only that a
   Runlith gateway is listening, never a credential or attempt detail); and
   `POST /v1/messages` whose query string is exactly empty or exactly
-  `beta=true`, forwarded only on a placeholder match per D3. Every query
+  `beta=true`, forwarded only after D3, D24 and AS-01 admission all pass.
+  Placeholder possession authenticates this gateway access, not the
+  requested operation's authorization. Every query
   string R6/R7/R8 actually **observed** the real CLI send was `beta=true`
   — never bare/empty in any measured row
-  (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:196,206,236`);
+  (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md`, “R6/R7 request detail” and “R8”);
   the empty-string branch is allowed defensively, by design, not because it
   was itself observed (reference implementation: `ALLOWED_QUERY_STRINGS =
-  ("", "beta=true")`, `docs/development/task0152-probes/owner_proxy_probe.py:336`).
+  ("", "beta=true")`, `docs/development/task0152-probes/owner_proxy_probe.py`).
   Any other query string, method, or path is rejected locally with `403`
   and recorded to Security Audit as a fixed category plus a truncated,
   non-reversible digest of the raw value — **never the raw child-supplied
   path, query, or header value itself** (round-6 finding T2d: recording a
   child-controlled string verbatim turns the audit trail into an
   attacker-steered logging channel;
-  `docs/development/task0152-probes/owner_proxy_probe.py:593-602`,
+  `docs/development/task0152-probes/owner_proxy_probe.py`,
   `_hash_path_for_logging`). This resolves the tension a raw-path audit
   record would otherwise create against D21's stricter "never in any form"
   posture for the placeholder: nothing child-controlled or secret is ever
@@ -599,7 +609,8 @@ review reaches a different conclusion.
   leaving the gateway: API-key mode sets `x-api-key` to the real key and
   drops any `authorization` header; OAuth mode sets `authorization: Bearer
   <real>` and drops any `x-api-key`. `anthropic-beta` and
-  `anthropic-version` are forwarded exactly as the child sent them — R8
+  `anthropic-version` are forwarded exactly as the child sent them **only
+  after their complete version/feature combination passes AS-01** — R8
   already proved the CLI itself decides the correct per-mode flag set, so
   the gateway never adds or guesses one.
 - **D6.** The upstream host is pinned (the real Anthropic API host); the
@@ -634,7 +645,7 @@ review reaches a different conclusion.
   is broader than "loopback" and must be named accurately, not assumed.**
 
   **Measured provenance, stated precisely, not "plausibly":**
-  `docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:284-333`
+  `docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md`
   ("Round 6: L1 loopback admission") measured, credential-free, that
   `(remote tcp "localhost:P")` admits `127.0.0.1:P`, `[::1]:P`, a second
   distinct `127.0.0.0/8` alias configured on the host, and the host's own
@@ -663,8 +674,8 @@ review reaches a different conclusion.
   a partial bind set. **The owner-run probe is not a reference
   implementation for this full rule**: it binds only `127.0.0.1` and
   `[::1]` (probe reference: dual-stack bind and peer filter,
-  `docs/development/task0152-probes/owner_proxy_probe.py:1478-1489`,
-  `_is_loopback_peer` at `:652-659`) — a deliberately narrower scope than
+  `docs/development/task0152-probes/owner_proxy_probe.py`,
+  `_is_loopback_peer` in that source) — a deliberately narrower scope than
   what this normative rule requires of production, adequate for probing
   the mechanism's shape but not for closing the exfiltration-sink residual
   below.
@@ -735,8 +746,8 @@ review reaches a different conclusion.
   entirely outside the adapter. See "Proposed amendments" for the exact
   §9a superseding text and "Implementation task list" for the matching
   code change.
-- **D24 (corrected — G3: enforceable and fail-closed body-scoped
-  enforcement, B2 owner-accepted residual risk).** Before forwarding a
+- **D24 (corrected — G3, AS-01: body validation plus canonical bounded
+  admission).** Before forwarding a
   `POST /v1/messages` request, the gateway validates its body under a
   strict parse, then forwards the **original, unmodified bytes** only
   after that validation passes — the parse is a gate, never a
@@ -773,7 +784,16 @@ review reaches a different conclusion.
   general request-count bound); and (b) a cap on the **sum of the
   `max_tokens` values of every forwarded request** in the attempt — once
   either bound is reached, every further request in that attempt is
-  rejected locally, forwarding none.
+  rejected locally, forwarding none. Admission **atomically reserves both one
+  request and its declared `max_tokens` before dispatch**, in shared state
+  across all handlers/listeners. In-flight requests consume both budgets.
+  Completion never charges a second time; failure, timeout, cancellation or
+  an ambiguous dispatch never refunds either reservation. Reject before
+  reservation when validation/admission fails. These conservative counts are
+  not actual usage/spend accounting. Boundary tests must overlap attempts at
+  both caps and prove admitted request count/declared-token sum never exceeds
+  either configured bound. The reference probe reserves request count only;
+  strict model/declared-token enforcement remains a production obligation.
 
   **What this does NOT bound, stated explicitly rather than implied by
   omission:** input-token volume beyond whatever D9's request body-size
@@ -785,17 +805,20 @@ review reaches a different conclusion.
   bound and this rule does not constrain it); and any per-use charge
   Anthropic bills for a server-side tool or MCP connector use the
   forwarded body invokes — that is part of the Anthropic-server-mediated
-  egress risk "Security impact" records as owner-accepted, not something
+  egress risk "Security impact" records historically, not something
   D24's model/token-count enforcement reaches. **The claim that this rule
   alone bounds attempt spend is false and is not made:** D24 bounds
   request count and the declared `max_tokens` sum; it does not bound
   actual spend, which also depends on input tokens, context mode, and any
-  billed tool/connector use. D24 does not inspect, filter, or reject
-  `tools`, `mcp_servers`, or any other body field beyond `model` and
-  `max_tokens` — see "Security impact" for the residual risk this leaves
-  open, which the owner has reviewed and accepted, and "Implementation
-  task list" for an optional, not-yet-decided future hardening follow-up
-  that would go further.
+  billed tool/connector use. **Mandatory AS-01 gate:** validate the entire
+  request's protocol semantics, including nested dispatch features and
+  version/beta combinations, against the bounded contract below. Reject
+  unknown or unsupported shapes before credential attachment/forwarding;
+  do not strip features and silently change the requested operation.
+  Client-side tool declarations are eligible when proven to request only
+  returned calls; the presence of `tools` alone is not a rejection reason.
+  The diagnostic probe's unfiltered body forwarding is not this production
+  authorization boundary.
 
 ### Additional hardening rules (D15-D22, D25-D27)
 
@@ -815,65 +838,74 @@ production Rust gateway as normative rules, not optional polish.
 - **D15.** Only an explicit header-**name** allowlist is forwarded
   upstream: `content-type`, `accept`, `anthropic-version`, `anthropic-beta`,
   `user-agent`, the R8-observed non-identifying Stainless SDK metadata
-  names, and `x-app` (`FORWARD_HEADER_ALLOWLIST`, `owner_proxy_probe.py:417-431`).
+  names, and `x-app` (`FORWARD_HEADER_ALLOWLIST`, `owner_proxy_probe.py`).
   Everything else the child sends — including `x-claude-code-session-id`
   and `anthropic-dangerous-direct-browser-access` — is dropped; only the
-  dropped header **name** may be audited, never a value.
-- **D16 (corrected — G1).** Request-smuggling/parser hardening, checked
-  before any body is read: reject `Transfer-Encoding` from the child, more
-  than one `Content-Length` header or a non-numeric one, and a declared
-  body over a fixed size limit (`owner_proxy_probe.py:339`,
-  `MAX_BODY_BYTES`); enforce a bounded header count/size; run with no
-  address reuse, bound to every address D11 requires. **A bounded total
-  concurrent-connection limit and a per-connection deadline, enforced in
-  the connection's own handling context — never process-wide signals:**
-  the round-6 reference design used `signal.alarm` for a whole-request
-  deadline; two independent reviews found, and the round-7 evidence
-  confirms by direct reproduction, that this was **ineffective**: Python
-  only ever invokes a signal handler on the main thread regardless of
-  which thread calls `signal.alarm` or is blocked, and the reference
-  implementation already ran one listener thread per address family, so
-  the alarm fired wherever the main thread happened to be — in production
-  terms, this could abort unrelated work (e.g. the child-process wait)
-  instead of bounding the stalled connection, while leaving the actual
-  stalled connection unbounded. **The round-6 dry-self-check was a false
-  pass**: with no concurrent main-thread work in dry mode, the alarm
-  interrupted the test's *own* slow-client `recv()` instead, which looked
-  like enforcement without the server ever having bounded its own
-  connection thread
-  (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:593-717`,
-  "Round 7 hardening (K1-K3, review remediation 2)", K1). Production must
-  instead: (a) run one short-lived handling context per accepted
-  connection (reference: `socketserver.ThreadingMixIn`, one thread per
-  connection, `class ProxyServer`, `owner_proxy_probe.py:663-682`), never
-  one context shared across a whole listener; (b) admit at most a small,
-  fixed total number of concurrent connections across every address D11
-  binds, checked atomically before a handling context is created for a
-  new connection, with any excess accepted at the transport level and
-  immediately closed, never processed (reference: `MAX_CONCURRENT_CONNECTIONS
-  = 4`, `:382`; admission check, `verify_request`, `:684-701`); and (c)
-  enforce the 10s deadline with a mechanism scoped to that one connection's
-  own handling context — a watchdog started inside the connection's own
-  thread that force-closes only that connection's own socket at the
-  deadline, touching no other connection and never a process-wide signal
-  (reference: `threading.Timer` watchdog, `handle_one_request`,
-  `owner_proxy_probe.py:736-758`; `REQUEST_DEADLINE_SECONDS = 10`, `:373`).
-  The corrected reference verification observes server-side hold time
-  directly from a worker thread that drives a slow client while a separate
-  simulated main-thread task runs concurrently, asserting the main-thread
-  task completes its full, uninterrupted duration regardless of the
-  connection deadline firing — the exact property `signal.alarm` could not
-  provide, reproduced outside the repo as a standalone scratch script (not
-  part of this task's committed tooling) that ran a real
-  `subprocess.run(["/bin/sleep", "13"])` on the simulated main thread
-  concurrently with a stalled connection whose 10s deadline fired, and
-  observed the sleep complete uninterrupted at `~13.1s`
-  (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:593-717`, K1
-  scratch verification). **Every "single-threaded" / "exactly one
-  connection in flight" statement in this ADR is corrected by this rule**:
-  the reference design is one thread per accepted connection, capped at a
-  total of `MAX_CONCURRENT_CONNECTIONS` across every address D11 binds,
-  never "single-threaded" or "exactly one."
+  number of dropped headers may be audited. Unknown names are child-controlled
+  data and are never stored/emitted raw (a placeholder can itself be a legal
+  header name). Use fixed product categories/counts, never arbitrary names or
+  values, in stdout, stderr, errors and Security Audit, consistent with D21.
+- **D16 (AS-02/A1, AS-04/A3, N1).** Reject `Transfer-Encoding`,
+  duplicate/non-numeric `Content-Length`, premature EOF before the exact
+  declared length, and oversized bodies before forwarding. Production also
+  requires exactly one finite `Content-Length`, exactly one `Content-Type`
+  (D24) and exactly one credential header (D3); unsupported body encodings
+  and unknown-length requests fail closed. Enforce bounded header count/size,
+  no address reuse, and all D11 binds. One admitted connection owns exactly
+  one slot in the aggregate cap across **all** listeners; rejected
+  connections own none. Release only owned slots, once, on every close/error
+  path; repeated close must neither decrement another owner's count nor hide
+  a negative count. Admission is atomic before handler creation.
+
+  **Finite phase and lifetime contract:** before production launch, attempt
+  configuration must supply positive finite ingress, forward/relay, aggregate
+  connection and attempt time budgets, plus request/response byte limits and
+  a finite cleanup budget. Missing/unrepresentable bounds fail closed; this
+  ADR chooses no new product-policy numeric defaults. Ingress starts at
+  transport admission and ends only after complete headers/body. Forwarding
+  (including resolution/connect/TLS, response headers/body and slow-consumer
+  writes) has a single absolute deadline, never reset by progress or per-read
+  socket timeouts. Its end is the earliest of the forward phase end, the
+  aggregate connection end measured from admission, and the attempt hard
+  deadline. Local responses retain an ingress/aggregate deadline through
+  their writes. Both streaming and buffered responses consume the response
+  byte cap; over-limit streams are terminated without relaying excess bytes.
+
+  On any deadline, attempt end/cancellation, peer disconnect or forwarding
+  error: stop work for the terminated connection; at attempt end also stop
+  admission and invalidate the placeholder. Cancel/close downstream **and
+  upstream** I/O, unwind response/credential
+  references, terminate/join handling contexts, and release each owned slot
+  once. Cleanup must complete within the configured terminal cleanup budget;
+  inability to guarantee that restriction is a backend/admission failure,
+  never a surviving background handler that continues using the credential.
+  No process-wide signals; unrelated main-thread work remains unaffected.
+
+  **Reference probe scope:** `REQUEST_DEADLINE_SECONDS=10` bounds ingress;
+  `FORWARD_DEADLINE_SECONDS=60` (the former upstream timeout) now bounds the
+  whole forward/relay phase; `CONNECTION_DEADLINE_SECONDS=70` bounds both
+  phases from admission. `CLIENT_SOCKET_TIMEOUT=30` is an additional idle
+  guard, **not** the aggregate deadline. `MAX_RESPONSE_BYTES=MAX_BODY_BYTES`
+  reuses the probe's existing 8 MiB byte bound, and the existing 120s child
+  wait is named `CHILD_TIMEOUT_SECONDS`. These are probe constants/test knobs,
+  not selected production policy. A per-connection timer shuts down both
+  registered sockets; direct `http.client` uses one pre-resolved address,
+  pinned-host TLS, no ambient proxy and no redirect/reconnect. DNS resolution
+  is performed before credential read/child launch, outside handler lifetime;
+  this probe does **not** bound libc startup DNS, all host setup or OS
+  scheduling/cleanup latency. Production must bound startup and cleanup too.
+  Server close joins non-daemon handlers after cancellation before dropping
+  shared credential references. Python reference dropping is not zeroization.
+
+  `remediation_self_check.py` exercises the actual methods with synthetic
+  socket/TLS/HTTP doubles: saturated/repeated rejects across two listeners,
+  exact EOF, stalled connect/TLS/send/response/relay/SSE, trickled SSE, slow consumers,
+  and mid-forward cancellation; it checks terminated worker/handler, closed
+  I/O and slot release. This is model evidence, not live Darwin/TLS/provider
+  certification. Historical round-6 `signal.alarm` false passes and round-7
+  scratch observations remain in the evidence document. The earlier scratch
+  sleep receipt proves only its reported main-thread result; an ingress/client
+  elapsed-time observation alone is not total handler-lifetime proof.
 - **D17.** Upstream TLS uses an explicit, code-configured trust
   configuration — **production must explicitly load/pin its own root
   store**, never whatever the ambient process environment happens to
@@ -885,7 +917,7 @@ production Rust gateway as normative rules, not optional polish.
   loads the platform's default verify paths; only the TLS minimum version
   and the environment-override refusal are pinned in the probe (round-7,
   K3:
-  `docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:593-717`). The
+  `docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md`). The
   explicit-root-store requirement is a normative rule for the production
   Rust gateway, not something this rule cites the probe as already
   satisfying. **`OPENSSL_CONF` is checked and refused before any
@@ -895,11 +927,11 @@ production Rust gateway as normative rules, not optional polish.
   environment *after* that point is already too late — the reference
   implementation's check runs as the very first code in the process
   (`_c3_refuse_if_dangerous_tls_env`,
-  `docs/development/task0152-probes/owner_proxy_probe.py:274-296`), and
+  `docs/development/task0152-probes/owner_proxy_probe.py`), and
   refuses outright rather than stripping-and-continuing. TLS is pinned to
   a minimum of 1.2 in the reference implementation, with full certificate
   and hostname verification (platform default) and a pinned upstream host
-  (reference: `_build_opener`, `:462-471`). **This reconciles with D6:**
+  (reference: `_build_opener`). **This reconciles with D6:**
   D6's "default TLS certificate verification" means the verification
   *algorithm* is the platform TLS library's own default (full chain +
   hostname checks, nothing loosened) — it does not mean "whatever root
@@ -920,7 +952,7 @@ production Rust gateway as normative rules, not optional polish.
   recorded the CLI child issuing exactly 9 forwarded requests and receiving
   9 real `401` responses before the harness's own 120s timeout cut it off
   without the child ever exiting
-  (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:924-1049`,
+  (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md`,
   "Agent-run end-to-end invalid-credential test (round 4)" — the two
   implementer-agent runs are recorded there in full; the orchestrator's
   additional confirmation reproduced the same shape). **Why the CLI
@@ -930,7 +962,7 @@ production Rust gateway as normative rules, not optional polish.
   claimed mechanism; what is observed is only the count and outcome. The
   gateway must not wait out whatever the child's own retry budget turns
   out to be. Total forwards per attempt remain bounded regardless (D9;
-  `MAX_FORWARDED_REQUESTS = 32`, `owner_proxy_probe.py:340`).
+  `MAX_FORWARDED_REQUESTS = 32`, `owner_proxy_probe.py`).
 - **D19.** No credential value ever appears in an error, log line, panic/
   crash message, `Debug`/`Display` output, crash report, or Security Audit
   record — only classified failure reasons and counts, matching the
@@ -941,7 +973,7 @@ production Rust gateway as normative rules, not optional polish.
   (see "Process boundary" above, N7), core-dump disabling is a property of
   the `agentd` process itself** — reference:
   `_c9_disable_core_dumps`/`RLIMIT_CORE`,
-  `owner_proxy_probe.py:573-579`, which this rule generalizes from a
+  `owner_proxy_probe.py`, which this rule generalizes from a
   standalone probe process to `agentd` as a whole. Stated as a trade-off,
   not glossed over: this disables core dumps for all of `agentd`'s other
   responsibilities too, for as long as any credential may be resident in
@@ -951,21 +983,25 @@ production Rust gateway as normative rules, not optional polish.
 - **D20.** Credential shape is strictly validated per class — mode-specific
   prefix and charset — at both provisioning and release; a mismatch fails
   closed without logging the rejected value
-  (`_validate_credential_shape`, `owner_proxy_probe.py:582-590`; same
+  (`_validate_credential_shape`, `owner_proxy_probe.py`; same
   pattern in `provision_keychain_item.py`'s `TOKEN_PREFIX` check).
 - **D21.** The per-attempt placeholder is at least 256 bits from the OS
-  CSPRNG (`secrets.token_urlsafe(32)` = 32 bytes, `owner_proxy_probe.py:1472`),
+  CSPRNG (`secrets.token_urlsafe(32)` = 32 bytes, `owner_proxy_probe.py`),
   compared only with a constant-time comparison (D3;
-  `hmac.compare_digest`, `:800-807`), and is never written to a log, Event
+  `hmac.compare_digest`), and is never written to a log, Event
   Journal payload, or Security Audit record in any form.
 - **D22 (provisioning UX, implementation follow-up).** The owner-facing
   provisioning tool never accepts a credential as a command argument,
   environment variable, or clipboard-persisted value — only a masked,
-  hidden prompt entered twice and compared, matching
-  `provision_keychain_item.py`'s `getpass.getpass` pattern (`:150-152`)
+  hidden prompt entered twice and compared. If hidden terminal input cannot
+  be guaranteed, refuse **before** ordinary stdin fallback reading; convert
+  `getpass.GetPassWarning` to an error before its fallback executes. The
+  explicit temporary-keychain synthetic `--stdin-for-test` path remains
+  separate and gated. This matches
+  `provision_keychain_item.py`'s `getpass.getpass` pattern
   and its refusal to run on any credential-shaped argv element. Service
   names are fixed by credential class, never typed by the owner
-  (`SERVICE_NAME`, `:40-43`). **Round-6 additions (N8):** the tool refuses
+  (`SERVICE_NAME`). **Round-6 additions (N8):** the tool refuses
   to provision when an item for the service/account already exists — it
   never re-adds over one (no `-U`), because re-adding does not reset an
   existing item's ACL, so an item created some other, looser way would
@@ -973,15 +1009,15 @@ production Rust gateway as normative rules, not optional polish.
   existence check first (`find-generic-password` without `-w`, never
   touching the confidential data) and instructs the owner to delete the
   old item explicitly before re-provisioning
-  (`_item_exists`, `provision_keychain_item.py:193-210`; refusal logic,
-  `:358-373`). The account name comes from the OS user database
-  (`pwd.getpwuid(os.getuid()).pw_name`, `:354-356`), never an ambient
+  (`_item_exists`, `provision_keychain_item.py`; refusal logic in
+  `main`). The account name comes from the OS user database
+  (`pwd.getpwuid(os.getuid()).pw_name`), never an ambient
   `$USER`/`$LOGNAME` an unusual environment could set to something else.
   Any value destined for the `security -i` command line is rejected if it
   contains a control character, quote, or backslash — a raw newline could
   otherwise terminate one intended command and start a second,
   attacker-chosen one, since `security -i` reads one command per line
-  (`_reject_unsafe_for_security_line`, `:119-133`). **When macOS prompts
+  (`_reject_unsafe_for_security_line`). **When macOS prompts
   for approval to use the item, the owner clicks "Allow," never "Always
   Allow"** — "Always Allow" permanently adds the requesting application to
   the item's trusted-application list, silently widening exactly what
@@ -992,21 +1028,21 @@ production Rust gateway as normative rules, not optional polish.
   `authorizations` list includes `decrypt`/`export_clear`) shows
   `applications (0):` — zero trusted applications, so every read prompts
   the owner, exactly as designed
-  (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:802-851`,
+  (`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md`,
   "ACL excerpt (T1c)").
 
   **ACL trade-off, stated explicitly rather than as a simple "stricter."**
-  `provision_keychain_item.py` stores the owner's real item with `-T ""`
-  (`:213-222`) — no application is trusted, so *every* read, including
+  `provision_keychain_item.py` stores the owner's real item with `-T ""` —
+  no application is trusted, so *every* read, including
   `agentd`'s own, prompts the owner for approval. Production instead names
   exactly one trusted application: the code-signed `agentd` binary. That
-  is **looser** than `-T ""` by precisely that one binary — `agentd` reads
-  silently where the probe's item would still prompt — and **tighter**
-  than the ACL Keychain assigns by default when no `-T` is given at all
-  (which trusts whichever tool created the item, not necessarily the one
-  that should read it later). D22 is therefore a deliberate three-way
-  choice (default-trusts-creator ⊃ agentd-only ⊃ `-T ""`), not a strictly
-  tighter version of the probe's own posture.
+  permits exactly one silent reader relative to `-T ""` (empty
+  trusted-app set). Default creator trust and agentd-only trust substitute
+  **different identities** when the creator is not agentd; neither singleton
+  is a superset of the other. They coincide only when their designated
+  requirements identify the same application. Agentd-only provisioning is a
+  deliberate reader-identity choice plus a silent-read trade-off, not an
+  unconditional narrowing of creator trust. No new ACL experiment is claimed.
 
   **Code-signing identity caveat.** macOS binds a named-application trust
   entry to the binary's code-signing identity/designated requirement, not
@@ -1023,7 +1059,7 @@ production Rust gateway as normative rules, not optional polish.
   isolated runtime root and grants **no** host `~/.claude` or
   `~/.claude.json` support-read — the same pattern R5 and the owner's own
   probe already use (`launch_confined_child`,
-  `docs/development/task0152-probes/owner_proxy_probe.py:1210-1281`;
+  `docs/development/task0152-probes/owner_proxy_probe.py`;
   current production support-read roots that this rule *excludes* for a
   gateway-backed launch:
   `adapters/provider-claude/src/environment.rs:219-230`). A gateway-backed
@@ -1096,6 +1132,313 @@ production Rust gateway as normative rules, not optional polish.
     placeholder, which such a process has no way to know. See "Security
     impact" for this risk restated in context, and "Proposed amendments"
     for the exact ADR-0020 superseding text.
+
+## AS-01 contract — owner choice B; submitted for independent re-review
+
+### Decision and authority boundary
+
+On 2026-09-30, the TASK-0152 contract/remediation envelope records the owner's
+choice **B — bounded remote delegation**. This is the selected remote-operation
+semantics, distinct from credential-mechanism Options A/B/C above. The gateway
+may admit only remote operations/destinations for which the required canonical
+capability is defined, effective authority belongs to the current execution,
+scope/destination is known before privileged forwarding, and every mandatory
+restriction is mechanically enforceable. Malformed, unknown or unprovable
+mandatory restrictions fail closed. Residual-risk acceptance alone grants no
+authority. This choice permits neither broad passthrough nor gateway-created
+capabilities; provider/model output cannot authorize anything, and hard denial
+remains final. It does not ratify any other Proposed ADR-0037 decision.
+
+B may expand only through a separately accepted operation contract. No broader
+mode, toggle, wildcard grant or speculative extension infrastructure is proposed.
+The previous inference-only recommendation is not selected. An empty evidenced
+remote-operation set today is a prerequisite limitation of B, not a replacement
+architecture decision.
+
+The architecture/security AS-01 finding identified missing canonical authority;
+the adversarial B2/F1 disposition recognized authentic residual-risk acceptance.
+Both concern valid, different claims. Historical provenance is preserved: parent
+session `4a4b6711-1bb0-4f8a-b706-a991787996f0.jsonl:877/:884`, 2026-09-26,
+recorded “Принять как риск” with “Тело не фильтруется ... Только лимиты модели и
+токенов.” That choice cannot authorize forwarding outside this newer B contract.
+Accepted authority remains [ADR-0013](ADR-0013-policy-engine-os-isolation.md),
+[ADR-0026](ADR-0026-g6-security-authority-and-capability-contracts.md),
+[Policy](../../security/POLICY_CONTRACT.md) and
+[INV-097/146–153](../INVARIANTS.md). Contract-finding closure still requires
+independent review of the exact new commit; this section is not a review PASS.
+
+### Classification inputs and rules
+
+The trusted provider adapter must supply a reviewed, version-pinned protocol
+profile covering method/path/query, API version, the entire beta combination,
+body fields, nested content/tool schemas and their interactions. Its trusted
+version/schema selection must agree with the actual headers/body; child claims
+about protocol identity alone are insufficient. It is a
+mechanism description, not an authorization source. It must enumerate accepted
+forms and reject unknown fields/versions or ambiguous combinations at semantic
+positions. Free-form prompt/tool-description/schema data remains untrusted data;
+a string mentioning a tool, URL or field name is not itself protocol dispatch.
+The actual D16-framed/D24-parsed bytes are facts about what was requested, not
+proof it is permitted. Trusted core supplies current Task/Execution/Attempt,
+parent authority, policy state, operation binding and budgets. Child-supplied
+IDs, tool names, `allowed_domains`, model text, remote responses and placeholder
+possession cannot supply or widen those facts.
+
+Classification examines **all** execution-enabling features together, including
+continuation state, container references, tool callers/discovery and betas:
+
+- **Inference:** the profile proves this request causes only inference at the
+  pinned provider and has no enabled server execution. Absence of `tools`
+  alone is insufficient proof; a remote continuation or beta may change it.
+- **Client-side tools:** a reviewed custom definition (`name`, `input_schema`
+  and permitted metadata), or an explicitly versioned client-tool schema,
+  causes the API to return a `tool_use` proposal for local handling, with a
+  subsequent correlated `tool_result`. No remote executor/caller or server
+  feature may be enabled by the enclosing request. Names such as `Bash`,
+  `WebSearch` or `web_fetch` do not classify a tool; `input_schema` alone is
+  also insufficient when other features enable server execution. A returned
+  call is untrusted requested work: actual local execution must still route
+  through the accepted Runlith operation boundary with current effective
+  authority, including the enforced Runner plan for already-authorized
+  confined local work. A declaration grants no new tool/process/filesystem
+  permission. No interception of every CLI built-in tool call is claimed.
+  Correlated results/history do not confer authority.
+- **Server-mediated execution:** any feature that can execute on the provider
+  or a downstream server, even conditionally or during continuation, requires
+  separate remote admission. Disabling tool choice for one turn, a prompt
+  saying “do not use tools,” or a response with no call is not an enforcement
+  proof. A mixed client/server request requires admission for every possible
+  privileged operation; client calls in it cannot hide server execution.
+- **Unknown/unsupported:** if the profile cannot prove the distinction or
+  mandatory enforcement, reject the entire shape before forwarding. No
+  guessed classification, sanitizing fallback or broad passthrough.
+
+Primary protocol evidence (read-only official documentation, retrieved
+2026-09-30; mutable pages, not CLI runtime evidence or Runlith authority):
+[Tool use overview](https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview)
+distinguishes application-executed calls/results from provider-executed tools,
+including client bash/editor schemas. This supports the mechanism distinction,
+not a complete admissible CLI profile.
+[MCP connector](https://platform.claude.com/docs/en/agents-and-tools/mcp-connector)
+documents `mcp_servers` plus `mcp_toolset`, beta `mcp-client-2025-11-20` and
+deprecated `mcp-client-2025-04-04`; a declared server URL identifies an entry
+point, not all actions or downstream destinations.
+[Web fetch](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-fetch-tool)
+documents server fetching, domain/use controls, and versions `web_fetch_20250910`
+and `web_fetch_20260209` (and later). Dynamic filtering in the latter also enables
+code execution without a separate code-execution entry. A client-result
+continuation can resume server fetching. Thus a `tools` name/type allowlist alone
+cannot prove the complete action set. Per-hop enforcement and exact CLI body
+compatibility are not established by these pages. Dated summaries and
+provenance are also recorded in the probe evidence document.
+
+### Canonical capability mapping and forwarding gate
+
+For each recognized shape, a trusted, accepted operation mapping must define
+its complete required capability set and resolve exact resources before
+forwarding. Inference requires the gateway's exact pinned upstream
+`NetworkAccess`; credential release separately requires exact
+`SecretAccess(SecretRef)` and the existing execution delivery binding. Child
+D11 network scope authorizes only its gateway transport. Neither scope grants
+remote `ToolInvoke`, `ExternalAction` or third-party `NetworkAccess`.
+For a future remote tool the mapping must specify exact `ToolInvoke` identity,
+exact destinations for each network access/hop and any exact `ExternalAction`
+identity required by its effects. No new capability enum or string-pattern
+policy language is defined here. A raw URL/tool name must first resolve to a
+trusted exact-resource mapping; passing arbitrary strings through `ScopeId::new`
+only validates identifiers and is not that mapping. Missing mapping rejects.
+
+`agentd`'s operation owner constructs `PolicyRequest` from the immutable request
+and trusted origin, narrows against the current execution's parent
+`EffectiveCapabilities`, and asks canonical Policy to evaluate. Gateway code
+consumes the trusted result in-process; it accepts no child HTTP authorization
+object, stored approval row or self-created capability set. Its attempt context
+must include nonempty existing Execution/Attempt IDs (Task alone is insufficient),
+current parent authority and the exact credential execution binding. The broker's
+execution-level binding does not itself attest the attempt: `agentd` owns that
+association and must revoke access at attempt end. No new durable identity is
+needed. `EffectiveCapabilities` by itself has no origin, policy revision, expiry
+or request binding and must not be cached as a reusable forwarding grant.
+
+Immediately before credential attachment and each dispatch, the trusted owner
+and gateway must, in this order:
+
+1. Finish D16/D24 framing, strict parsing and complete profile classification;
+   resolve the exact operation, all scopes and enforcement proof. Hold the
+   original body plus semantic headers/path/query immutable through dispatch.
+2. Revalidate live Execution/Attempt, secret target and current parent authority;
+   recompute canonical Policy using current policy fingerprint and the exact
+   request/origin. Requested and delegated effective authority must each be
+   subsets of the current parent, with no capability-kind or resource widening.
+   The existing launch composition grants filesystem/process/`tcp:443`, not
+   remote tools/actions (`build_provider_launch_security_for_context`). It is
+   not sufficient authority for new remote features.
+3. Refuse `DENY` without approval conversion. `REQUIRE_APPROVAL` withholds the
+   whole atomic request until the existing trusted `ApprovalService::authorize`
+   consumes an exact, current, unexpired matching grant once. A durable Approved
+   row is not bearer authorization. `ALLOW` needs no fabricated approval. A
+   policy/parent/request change requires re-evaluation and, where required, a
+   new exact approval; prior consumption cannot authorize retry or another call.
+4. Verify current request binding and every mandatory enforcement constraint,
+   including destination/hops, finite D16 time/byte/cleanup bounds and D18 latch.
+   Couple authority validity to dispatch so revocation/end or mutation cannot
+   race a stale preflight. If that coupling cannot be proven, do not forward.
+5. Atomically reserve D24 count and declared tokens across all listeners,
+   including in-flight work; then attach only D5's credential rewrite and
+   forward the validated original bytes to D6/D17's pinned transport. No body,
+   version/beta, path or destination mutation is allowed after authorization.
+   Errors/cancellation/ambiguous dispatch never refund reservations or reuse
+   consumed authorization. Retry is a new operation with current checks.
+
+These are operation-owner enforcement obligations, not a second Policy Engine
+or gateway approval authority. A provider that hides destinations/actions,
+redirect hops or execution restrictions cannot satisfy them merely by returning
+an audit-like response. Monotonic delegation applies throughout continuations:
+a later request/action must remain within current parent authority and receive
+its own admission; it cannot inherit a broader grant from the first request.
+
+### Exact proposed contract gaps and ratification dependencies
+
+The accepted types supply `PolicyRequest` operation/requester/origin/capabilities,
+`PolicyDecision`/policy fingerprint, exact-resource `ScopeId`, parent narrowing,
+and single-use `ApprovalBinding`. They do **not** supply a typed HTTP request
+integrity binding, gateway dispatch validity coupling, or an accepted mapping
+from a remote provider operation to its complete destinations/actions. These
+are production admission blockers, explicitly resolved here as proposed
+requirements rather than invented existing production ports:
+
+- **P1 — request binding amendment:** proposed addition to ADR-0026/Policy's
+  exact-request/approval contract: “For delegated provider dispatch, the exact
+  request binding includes a versioned integrity fingerprint of the immutable
+  method, path/query, semantic headers (API version and complete beta set),
+  original body bytes, protocol/operation mapping revision, resolved exact
+  resources and mandatory limits. Authentication header values are excluded;
+  the original body is bound as opaque bytes, never logged or persisted raw.
+  The integrity digest is internal binding data, never an audit/log payload.
+  It is covered by the canonical decision and approval
+  binding. Changed content or mapping invalidates prior authorization.” This
+  needs an accepted typed representation and fingerprint inclusion; existing
+  arbitrary `operation_id` strings are not claimed to implement it. Reuse
+  Task/Execution/Attempt/operation/approval identities; introduce no new durable
+  grant identity. No raw request or integrity digest may enter audit.
+- **P2 — dispatch validity amendment:** proposed addition to Policy's enforcement
+  contract: “The operation owner couples current parent/policy/attempt validity,
+  exact request binding and one dispatch under the same trusted enforcement
+  boundary. End/cancellation or authority change prevents further dispatch and
+  cancels outstanding access; stale preflight or replay cannot authorize it.”
+  Accepted TOCTOU rules require this property but do not specify a gateway
+  mechanism. Its implementation must prove the race boundary; this ADR freezes
+  no API/lock/lease or fake authorization object.
+- **P3 — first remote-operation prerequisite:** before enabling one shape, a
+  separately accepted mapping must define its exact typed resources, all
+  possible actions/destinations/hops, provider/API/beta versions, enforceable
+  finite restrictions and trusted enforcement mechanism, with independent
+  negative tests for widening, hidden actions, mutation and replay. Exact
+  `ScopeId` equality can be reused only after resource semantics are defined.
+  Current MCP URLs/domain filters do not establish such a mapping. If a
+  required scope cannot fit the accepted vocabulary, specify and ratify the
+  exact amendment before admission; do not silently weaken INV-097/149/153.
+
+P1/P2 require explicit ratification with ADR-0037 and its accepted-contract
+amendment package before production wiring; no accepted file is edited here.
+P3 requires a separately accepted operation contract before expanding the
+empty remote set. Independent re-review can judge this Proposed contract now;
+none of these dependencies is claimed implemented or accepted.
+
+### Supported v1 scope and failure behavior
+
+“Eligible” below describes the Proposed contract, not a working production
+gateway. **No server-mediated remote operation is currently evidenced as
+admissible.** B is the selected direction; its first remote operation is blocked
+on P3, not on another owner choice between architectures.
+
+| Operation/request shape | Required authority | Destination source | Enforcement | Evidence | v1 status |
+| --- | --- | --- | --- | --- | --- |
+| D4 `HEAD`/`GET /api/hello` | No privileged forwarding authority | Local gateway only | Fixed empty local reply, D11 peer filter, D16 bounds | R6/R8 observed HEAD; GET is design allowance | Local diagnostic shape; no remote action |
+| Proven inference-only Messages profile | Exact upstream NetworkAccess; separate SecretAccess/execution binding | Trusted pinned upstream config | Full profile gate, P1/P2, D3–D24 | R6/R8 marker transport, historical owner success; complete body/beta profile not proven | Eligible after profile proof, ratification and production integration |
+| Proven client declaration / returned `tool_use` / correlated `tool_result` | Inference transport for declaration; current local capabilities before actual local execution | Pinned provider for inference; local tool owner resolves later action scope | Reviewed client-only schema/feature combination plus accepted local Policy/Runner boundary | Official protocol distinction; no CLI coding-tool round-trip fixture here | Eligible without blanket `tools` ban; exact CLI shape remains unverified |
+| Provider web search/fetch, including continuation or dynamic filtering | Exact remote tool + each destination/hop and any required external action | Selected during provider execution; filters are declarations | No proven operation-adjacent per-hop control here | Official tool overview/web-fetch versions above | Unsupported; reject before forwarding |
+| MCP connector/toolset (both documented beta versions) | Exact tool/action and complete destination scopes | Declared entry URL; downstream actions/discovery hidden | URL/toolset alone cannot bound all effects | Official MCP connector | Unsupported; reject before forwarding |
+| Server code/container/programmatic caller or remote continuation | Exact execution/tool/action/network resources per accepted mapping | Runtime-selected/hidden | No complete enforceable mapping here | Protocol overview and implicit fetch code-execution evidence | Unsupported; reject before forwarding |
+| Unknown type/field/beta/combination, dynamic or unbounded destination | None may be inferred | Unknown/unprovable | Whole-shape local rejection | INV-149/153; no guessed provider semantics | Unsupported; fail closed |
+
+Missing/malformed trusted authorization, origin mismatch, missing scope mapping,
+unknown/dynamic destination, unsupported provider behavior or enforcement proof
+all reject before forwarding. Mutation/scope widening requires a new canonical
+request, never a modified grant. Stale/replayed evidence, consumed approval,
+expiry, terminated attempt or changed policy/parent state cannot authorize a
+forward. Internal/transport failures remain distinct from policy denial; all
+failures emit only fixed product-owned reason categories and bounded counts.
+
+Audit retains existing Task/Execution/Attempt/operation correlation, typed
+capability/resource references, policy fingerprint/rule/reason, approval
+reference/outcome, fixed classification/profile revision, admission/dispatch
+outcome and reserved budgets. Gateway lifecycle and D16 terminal facts may be
+recorded as typed product facts. Never record secret/placeholder bytes (including
+hashes), arbitrary child names/URLs/headers, raw request/response/model text or
+unvalidated claimed identities. Profile/resource references must come from the
+trusted mapping. The proposed new gateway fact vocabulary needs the existing
+Security Audit extension; no generic payload column or audit-as-authority.
+
+### Claude CLI compatibility and diagnostic boundary
+
+CLI `2.1.281` R6/R8 observed unauthenticated HEAD, Messages `beta=true`, API
+version `2023-06-01`, mode-specific beta sets and short marker inference/SSE.
+They did not capture a complete coding-tool admission fixture or prove every
+beta's dispatch semantics. Even the marker prompt's “do not use tools” cannot
+prove that its request declares no tools. Unknown semantics in those observed
+beta sets therefore remain a concrete **profile-compatibility blocker** until
+reviewed; observed headers alone are not an approved profile.
+
+Custom client coding-tool declarations/calls/results are not automatically
+remote grants or prohibited because `tools` exists. A CLI workflow requiring
+server WebSearch, fetch, MCP connector, remote code or an unclassifiable mixed
+continuation is blocked under current B. A name alone cannot establish that a
+particular CLI WebSearch shape is server-mediated. Full coding/interactive,
+count-tokens/other endpoints, long-session OAuth and production confinement
+compatibility are unproven; no switch to broad delegation is authorized.
+Before ratification, at least one complete actual CLI sequence must pass its
+reviewed strict B profile (CR-01). The fresh
+[2.1.283 proposal-only candidate](../../development/task0152-probes/claude-2.1.283-proposal-api-key-v1/PROFILE.md)
+now supplies a complete sanitized actual sequence, exact executable/argv,
+provenance and offline negatives. It is **not admissible**: its required
+`claude-code-20250219`, `prompt-caching-scope-2026-01-05`,
+`mid-conversation-system-2026-04-07` and `per-turn-control-2026-07-01`
+beta combination lacks sufficient reviewed exact upstream semantics. The
+offline acceptance command exits 1, refusing Messages even though the bounded
+dummy-credential/local-synthetic run exits 0. CR-01 therefore remains blocked;
+transport success is not semantic admission. No beta/field is stripped to
+manufacture a positive. Proposal-only is already supported by the adapter's
+argv builder, but does not establish coding/client-tool compatibility or OAuth
+compatibility. P1/P2 and a separate production canonical-admission run remain
+post-ratification implementation obligations; remote admission remains empty
+until P3. No such production run occurs here.
+
+The [bounded CR-01 feasibility checkpoint](../../development/task0152-probes/cr01-bounded-pass-20260930/EVIDENCE.md)
+evaluates exact versioned vendor evidence and exactly one existing-contract
+system-prompt alternative. Vendor material partially establishes the legacy
+per-turn effort alias, but not the complete captured combination. The actual
+alternative retains every unresolved beta and the system-role/effort features;
+its hypothesis is refuted. CR-01 stays OPEN. The checkpoint supplies the exact
+missing external contract and owner options, not acceptance or ratification.
+
+`owner_proxy_probe.py` remains owner-operated diagnostic tooling: placeholder,
+transport/count/deadline checks, not canonical Policy admission. It forwards
+bodies without this production semantic/authorization gate; its synthetic
+checks and old positive receipts cannot prove P1–P3 or production admission.
+No fake production authorization object or probe redesign is introduced.
+Existing connection-slot ownership, aggregate deadlines/cleanup, atomic request
+and declared-token obligations, redaction, hidden-input fail-closed, exact
+Content-Length and honest address/evidence limits remain required. D11,
+in-process delivery/ACL/core-dump and OAuth decisions remain pending their
+separate owner ratification; the B choice accepts none of them by implication.
+
+The local nonblocking RR-N1 diagnostic correction overrides inherited HTTP
+parser errors with fixed JSON refusal responses: unknown methods receive 403,
+other parser errors preserve their refusal status without reflecting supplied
+tokens. A focused actual-parser synthetic check proves zero forwarding and
+handler/slot cleanup; the original 16 remediation checks remain unchanged.
+This is a probe correction, not a production gateway implementation.
 
 ## Provider neutrality
 
@@ -1185,29 +1528,18 @@ default and is the *only* class available in any distributed or
 multi-user Runlith configuration; the `setup-token` class is never enabled
 by default and never exposed as a general product feature.
 
-**Anthropic-server-mediated egress risk, owner-accepted (2026-09-26).**
-The gateway forwards the `/v1/messages` body and `anthropic-beta`
-unchanged (D5). Two Anthropic-side features let the confined child cause
-Anthropic's own servers — not the confined child directly — to contact
-arbitrary third-party hosts: the MCP connector accepts an `mcp_servers`
-array naming any publicly-exposed HTTP(S) server URL, which Anthropic's
-servers then connect to on the caller's behalf
-(<https://platform.claude.com/docs/en/agents-and-tools/mcp-connector>,
-retrieved 2026-09-26); and the web fetch server tool has Anthropic's API
-retrieve the content of a URL the model selects, inserted server-side into
-the conversation (<https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-fetch-tool>,
-retrieved 2026-09-26; that page's own warning names this an exfiltration
-risk and documents `allowed_domains`/`max_uses`/disabling the tool
-entirely as mitigations available at the API-request level, not something
-this gateway currently sets). On 2026-09-26, in a structured decision
-prompt, the owner chose "accept as risk": D24's body parsing enforces
-only a model allowlist and token/request budget (see above); the body is
-**not** filtered to strip or block `tools`, `mcp_servers`, or any other
-field. This channel — Anthropic-server-mediated egress via server-side
-tools and the MCP connector — is recorded here explicitly as an
-owner-accepted residual risk, not silently narrowed by D24's wording (see
-"Security impact" for the full statement, and "Implementation task list"
-for an optional, not-yet-decided future hardening follow-up).
+**Historical Anthropic-server-mediated egress risk acceptance (2026-09-26).**
+The owner previously accepted the proposal to forward body/betas without
+remote semantic admission, subject only to model/token/request limits.
+Primary provenance is the structured question/answer recorded in AS-01.
+That historical choice concerns the real egress exposure from provider-side
+tools and the MCP connector; it never amended canonical Policy authority.
+The 2026-09-30 B decision now requires bounded authorization and enforceable
+scope before forwarding. Unknown/unprovable remote shapes are refused;
+filtering/classification is mandatory admission, not optional future hardening.
+The diagnostic probe still forwards bodies without that production gate.
+Historical compliance and credential-class choices above remain separate
+from this B choice and from the other pending ratification decisions.
 
 ## Owner real-credential receipts
 
@@ -1215,7 +1547,7 @@ Measured by the **owner** (not this ADR's drafter, per its no-credential-
 read constraint) on 2026-09-25, CLI `2.1.281`, running
 `owner_proxy_probe.py` at commit `9787690` — the pre-round-4 script; C1-C10
 had not yet landed at the time these two runs were made
-(`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md:874-923`, "Owner
+(`docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md`, "Owner
 real-credential receipts"). Both modes (api-key, OAuth)
 produced this identical result shape:
 
@@ -1272,6 +1604,14 @@ This ADR does not edit the files below; editing them is a listed
 implementation follow-up (see "Implementation task list", "Doc
 amendments"). It states the exact superseding text now so the follow-up
 has no interpretive latitude.
+
+**ADR-0026 / `docs/security/POLICY_CONTRACT.md` request/approval and
+enforcement sections** — append the exact normative sentences in AS-01
+P1 and P2, respectively. Their typed binding/fingerprint and dispatch-coupling
+implementation is not supplied by existing contracts. Both amendments must be
+ratified with this Proposed ADR before gateway production admission; P3's
+separate exact operation contract is required before any remote shape is enabled.
+This does not amend an invariant or add an approval authority.
 
 **`docs/architecture/providers.md` §7 ("Authentication boundary")** — append
 after the existing paragraph (`providers.md:162-171`, text unchanged above
@@ -1425,28 +1765,18 @@ Residual risks, not resolved by this ADR and not glossed over:
 - **Data sent to Anthropic via prompts is inherent to using the provider
   at all**, unaffected by which of these options is chosen — out of this
   ADR's scope.
-- **Anthropic-server-mediated egress via server-side tools and the MCP
-  connector — owner-accepted residual risk (B2).** D24 enforces only a
-  model allowlist and a token/request budget on the forwarded body; it
-  does **not** filter, strip, or block `tools`, `mcp_servers`, or any other
-  body field. If the CLI's request includes Anthropic's web-fetch/
-  web-search/code-execution server tools or an `mcp_servers` entry naming
-  an arbitrary HTTP(S) server, **Anthropic's own servers** — not the
-  confined child — will contact that third-party host or service on the
-  API caller's behalf
-  (<https://platform.claude.com/docs/en/agents-and-tools/mcp-connector>,
-  <https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-fetch-tool>,
-  both retrieved 2026-09-26). This is a real egress channel this design
-  does not close: it exists because the gateway forwards the body
-  unchanged (D5), not because of any gap in the loopback network
-  confinement (D11) — the confined child's own network access is still
-  exactly the gateway's port, nothing more. The owner reviewed this and
-  chose, on 2026-09-26 in a structured decision prompt, to accept it as
-  risk (see "Compliance"); it is not silently narrowed by D24's more
-  limited scope. A stricter, optional body policy (rejecting `mcp_servers`/
-  server tools/`container` entirely, or an `anthropic-beta` allowlist) is
-  listed in "Implementation task list" as a not-yet-decided future
-  hardening follow-up.
+- **Provider-mediated actions (B2 / AS-01).** Historical unfiltered
+  delegation exposed an additional remote egress/action channel despite
+  confining the child's direct network access. The owner accepted that risk
+  on 2026-09-26; the newer B choice requires canonical scope admission and
+  mechanically enforceable mandatory restrictions before dispatch. Current
+  remote tool/MCP/container shapes are unsupported. Domain filters, pinned
+  provider TLS and risk acceptance do not prove hidden downstream actions
+  or redirect scopes. The first permitted remote shape requires the accepted
+  P3 operation contract; no broad-delegation fallback is available. Input/
+  context spend exposure remains within otherwise authorized inference,
+  and D24 still does not bound actual spend. Diagnostic passthrough and old
+  receipts are not production admission evidence.
 - **`/api/hello`, `/v1/messages` beyond D24's own scope, and any CLI
   feature needing a different outbound destination than the pinned
   upstream** — D4's allowlist is deliberately narrow; anything else is
@@ -1538,7 +1868,7 @@ separately after ratification. Each depends on this ADR's ratification
   it. Depends on: gateway component, doc
   amendments (ADR-0020 exception text is fixed by this ADR).
 - **Credential gateway component.** Implement D1-D10 and the D15-D21,
-  D24-D26 hardening/scope rules as a new component *inside* `agentd`
+  D24-D26 and AS-01 hardening/admission rules as a new component *inside* `agentd`
   (N7 — not a separate process) with its own targeted test suite:
   self-check, method/path/query allowlist (D4, with audit digest not raw
   values, N3), header-name allowlist (D15), request-smuggling/size limits
@@ -1558,7 +1888,10 @@ separately after ratification. Each depends on this ADR's ratification
   comparison (D21), the fresh config anchor with no host `~/.claude` read
   (D25), the D26 plan-scoped typed environment admission, and D24's
   strict-parse/model-allowlist/token-budget body enforcement (G3 —
-  adversarial tests must include a duplicate-key body, a non-object JSON
+  adversarial tests must include overlapping request/declared-token
+  reservations, stalled upstream/trickled SSE/slow consumer/cancellation
+  with terminal cleanup and slot release, and a duplicate-key body,
+  a non-object JSON
   body, a non-`application/json` Content-Type, a `max_tokens` sent as a
   float/exponent/bool, and an over-cap or unlisted `model`, each proving
   local rejection with nothing forwarded) — each rule gets its own
@@ -1587,12 +1920,13 @@ separately after ratification. Each depends on this ADR's ratification
 - **Security Audit facts (N3).** Extend `crates/security-audit`'s typed
   vocabulary to cover gateway bind/lifetime and locally-rejected requests
   as a fixed category plus a truncated digest — never a raw child-supplied
-  path/query/header value. Depends on: gateway component.
+  path/query/header name or value. Depends on: gateway component.
 - **Doc amendments.** Apply the exact superseding text in "Proposed
   amendments" to `providers.md` §7, §9a, the H7 closure record,
-  `PRIVACY_ARCHITECTURE.md` §5, and ADR-0020 §7. Depends on: this ADR's
-  ratification (text is already fixed by this ADR; the follow-up is
-  mechanical).
+  `PRIVACY_ARCHITECTURE.md` §5, ADR-0020 §7 and the P1/P2 ADR-0026/Policy
+  binding/enforcement amendments. Depends on: this ADR's
+  ratification (text is fixed here; typed implementation requires its
+  separate verification).
 - **Real-provider production G6 smoke, both credential classes.** A
   production-shaped smoke test exercising the gateway with a real
   (owner-provisioned, non-committed) credential for each class, verifying
@@ -1605,13 +1939,17 @@ separately after ratification. Each depends on this ADR's ratification
   only once the smoke task above is green; the `Unsupported` path (and its
   TASK-0112 reasoning) remains unchanged for any launch that is not
   gateway-backed. Depends on: real-provider production smoke.
-- **Optional, not-yet-decided future hardening follow-up (B2).** A
-  stricter body policy that rejects `mcp_servers`, Anthropic server-side
-  tools (web fetch/web search/code execution), and `container` entirely,
-  or pins an explicit `anthropic-beta` allowlist, closing the
-  Anthropic-server-mediated egress channel "Security impact" records as
-  owner-accepted residual risk. Not authorized or scoped by this ADR;
-  listed so the option is not lost, not committed to.
+- **AS-01 canonical admission (B2).** Implement the owner-selected B
+  contract only after independent re-review and ratification of P1/P2 with
+  the amendment package. Add complete protocol-profile admission and current
+  execution/attempt-bound canonical authorization adjacent to dispatch,
+  preserving D24 reservations. Tests must cover client-only declarations
+  versus mixed/server continuations, implicit server features, nested unknowns,
+  unsupported betas, missing/malformed/widened authority, policy changes,
+  mutated requests, terminated attempts and replay/expiry. No remote shape
+  may be enabled until P3's separate accepted mapping/enforcement evidence
+  exists. These are dependencies of the existing gateway follow-up, not new
+  queue entries or an optional passthrough filter.
 
 ## Open questions
 
@@ -1642,34 +1980,27 @@ separately after ratification. Each depends on this ADR's ratification
   capability ablation, rejected remediation (Option C).
 - `docs/development/G8_TASK_0152_PROVIDER_AUTH_PROBES.md` — R0-R8, Option B
   probe design, round-4/6/7 hardening (C1-C10, T1-T2, K1-K3), "Round 7
-  hardening (K1-K3, review remediation 2)" (lines 593-717), "Owner
-  commands", "Owner real-credential receipts" (lines 874-923), "Agent-run
-  end-to-end invalid-credential test (round 4)" (lines 924-1049),
-  "Owner-run positive probe (Option A) — WITHDRAWN, never run" (lines
-  1164-1182), "What this does NOT prove".
-- `docs/development/task0152-probes/owner_proxy_probe.py` — probed
-  mechanics D1-D21, D25 formalize; `:274` (`_DANGEROUS_ENV_EXACT`), `:277`
-  (`_c3_refuse_if_dangerous_tls_env`), `:336` (`ALLOWED_QUERY_STRINGS`),
-  `:339-341` (body/count/timeout limits), `:373`
-  (`REQUEST_DEADLINE_SECONDS`), `:382` (`MAX_CONCURRENT_CONNECTIONS`),
-  `:417-431` (`FORWARD_HEADER_ALLOWLIST`), `:462-471` (`_build_opener`,
-  TLS pinning), `:663-682` (`class ProxyServer`, `ThreadingMixIn`, one
-  thread per connection), `:684-701` (`verify_request`, concurrent-
-  connection admission), `:736-758` (`handle_one_request`,
-  `threading.Timer` watchdog), `:573-579` (`_c9_disable_core_dumps`),
-  `:582-590` (`_validate_credential_shape`), `:593-602`
-  (`_hash_path_for_logging`), `:652-659` (`_is_loopback_peer`), `:800-807`
-  (`hmac.compare_digest`), `:1472` (`secrets.token_urlsafe(32)`),
-  `:1478-1489` (dual-stack `127.0.0.1`/`[::1]` bind), `:1210-1281`
-  (`launch_confined_child`, fresh HOME/`CLAUDE_CONFIG_DIR` anchor).
-- `docs/development/task0152-probes/provision_keychain_item.py` — D22
-  provisioning UX; `:40-43` (`SERVICE_NAME`), `:119-133`
-  (`_reject_unsafe_for_security_line`), `:150-152`
-  (`_read_secret_getpass`), `:193-210` (`_item_exists`), `:213-222`
-  (`_store_via_security_interactive`, `-T ""` Keychain-trust precedent),
-  `:354-373` (OS-user-database account, existence-refusal logic, round-7
-  actual-account-name fix). `owner_positive_probe.sh` (Option A's probe)
-  was deleted in round 4, withdrawn unrun — not cited as a live source.
+  hardening (K1-K3, review remediation 2)", "Owner
+  commands", "Owner real-credential receipts", "Agent-run
+  end-to-end invalid-credential test (round 4)",
+  "Owner-run positive probe (Option A) — WITHDRAWN, never run", "What this does NOT prove".
+- `docs/development/task0152-probes/owner_proxy_probe.py` — current probe
+  mechanics: `ProxyServer.verify_request`/`close_request`,
+  `SharedState.cancel_connections`, `ProxyHandler.handle_one_request`/
+  `_start_deadline`/`_deadline_watchdog`/`_set_upstream_socket`, `_dispatch`,
+  `_forward`, `_relay_response`; limits `MAX_BODY_BYTES`, `MAX_RESPONSE_BYTES`,
+  `MAX_FORWARDED_REQUESTS`, `REQUEST_DEADLINE_SECONDS`,
+  `FORWARD_DEADLINE_SECONDS`, `CONNECTION_DEADLINE_SECONDS`,
+  `CHILD_TIMEOUT_SECONDS`; `_build_opener`, `_c3_refuse_if_dangerous_tls_env`,
+  `_c9_disable_core_dumps`, `_validate_credential_shape`,
+  `_hash_path_for_logging`, `_is_loopback_peer`, `launch_confined_child`.
+- `docs/development/task0152-probes/provision_keychain_item.py` —
+  `SERVICE_NAME`, `_reject_unsafe_for_security_line`, `_read_secret_getpass`,
+  `_read_secret_stdin_for_test`, `_item_exists`, `_store_via_security_interactive`,
+  `main` (OS-derived account, existing-item and synthetic-input gates).
+- `docs/development/task0152-probes/remediation_self_check.py` — durable
+  synthetic actual-source regressions, fail nonzero. Historical Option A
+  `owner_positive_probe.sh` was deleted/withdrawn unrun, not a live source.
 - `docs/development/G6_SECRETS_BROKER.md` — Secrets Broker authority/trust
   boundary (`SecretRef`, `SecretBinding`, `SecretDelivery`).
 - `docs/development/G6_PROVIDER_ENVIRONMENT_ISOLATION_H7_CLOSURE.md` —

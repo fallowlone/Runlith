@@ -1,0 +1,66 @@
+{
+  "profile_id": "claude-2.1.283-proposal-api-key-v1",
+  "version": "2.1.283 (Claude Code)",
+  "executable_sha256": "d8cb1e5c79684cc12a8bfc813e3a2073406921b6245744b3009be3ab5651d21e",
+  "started_utc": "2026-09-30T14:01:58.687601+00:00",
+  "executable_identity": "claude/versions/2.1.283",
+  "argv": [
+    "-p",
+    "--safe-mode",
+    "--tools",
+    "",
+    "--disallowedTools",
+    "mcp__*",
+    "--output-format",
+    "json",
+    "Reply with exactly TASK0152_PROFILE_OK and nothing else."
+  ],
+  "environment_names": [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_TMPDIR",
+    "CLAUDE_CONFIG_DIR",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "PATH",
+    "PWD",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "USER",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME"
+  ],
+  "credential_class": "dummy-api-key",
+  "limits": {
+    "seconds": 45,
+    "requests": 8,
+    "request_bytes": 2097152,
+    "total_bytes": 8388608,
+    "output_bytes": 65536
+  },
+  "exit": 0,
+  "timed_out": false,
+  "marker_present": true,
+  "requests": 2,
+  "failures": [],
+  "seconds": 0.768,
+  "isolation": "(version 1)\n(deny default)\n(import \"system.sb\")\n(allow process-fork)\n(allow process-exec\n  (literal \"<CLI_EXECUTABLE>\"))\n(allow file-read* file-test-existence file-map-executable\n  (literal \"<CLI_EXECUTABLE>\"))\n(allow file-read* file-test-existence\n  (subpath \"<CAPTURE_ROOT>/runtime\")\n  (subpath \"<CAPTURE_ROOT>/workspace\")\n)\n(allow file-write*\n  (subpath \"<CAPTURE_ROOT>/runtime\")\n  (subpath \"<CAPTURE_ROOT>/workspace\")\n)\n(allow network-outbound\n  (remote tcp \"localhost:62882\"))\n",
+  "harness_sha256": "c51fc46af7ed65f1e6a744f6174bfa3743ad5fc4f87838ed2a0f484c909f82b7",
+  "generator_sha256": "7b829d4a42db5a7d4c2d7df84a0b690bbd7762bd5c387381f976422a369be3cd",
+  "sanitization": [
+    "credential header values replaced before persistence",
+    "temporary root replaced before persistence",
+    "fresh CLI UUIDs replaced by correlated categories",
+    "device identifier replaced by fixed category",
+    "Host replaced by local endpoint category",
+    "body text retained; no fields removed; wire length kept separately"
+  ],
+  "artifacts": {
+    "sanitized-capture.jsonl": "25cadfd501cd8379c01e2688bfe45c6478c786545086538fe2d8cd65bc2af43d",
+    "synthetic-responses.jsonl": "41e7283a6c87192f33a893aa1babea6e87a4298dfd84c28df0df4fef804b27e1"
+  }
+}
