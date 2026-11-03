@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>D05 — Task Workspace prototypes A/B/C</title>
+<link rel="stylesheet" href="shared.css">
+<style>
+  body { overflow: auto; padding: 32px; }
+  .card { max-width: 720px; margin: 0 auto; }
+  .card a { color: var(--accent); }
+  ul { margin: 12px 0 12px 20px; }
+  li { margin: 4px 0; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>D05 — Task Workspace A/B/C prototypes</h1>
+  <p class="meta">Design fixtures only — not an approved design, not a frontend ADR, not production code.
+  Source: docs/ui/research/2026-09-17-runlith-ui-ux-research.md §11–§14, §18 (D05).</p>
+  <ul>
+    <li><a href="a.html">A — persistent three-pane control workspace</a> (conversation/decision always visible; center narrows)</li>
+    <li><a href="b.html">B — IDE layout</a> (central tabs + bottom execution/evidence panel; diagnostics-first)</li>
+    <li><a href="c.html">C — adaptive inspector</a> (recommended starting point; inspector opens/pins explicitly; chat can disappear entirely)</li>
+  </ul>
+  <p><strong>Identical data and styling across all three.</strong> Fixture: TASK-0342 VERIFYING,
+  Attempt 1 TIMED_OUT, Attempt 2 SUCCEEDED (§12.3 worked example), pending HDR-0092 (NO_PROGRESS →
+  RESUME/REPLAN/ABORT from the request only), stale expired approval APR-0041 (read-only, no approve).</p>
+  <p><strong>Fixtures to check:</strong> 1440×1000 (default density, both review modes),
+  1280×800 (collapsed width; inspector as separate detail), increased text (Text → 150%),
+  density compact/default/comfortable. Sizes are design fixtures, not supported resolutions.</p>
+  <p class="meta">Open via a static server or file:// — no build step, no network, no dependencies.</p>
+</div>
+</body>
+</html>

@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en" data-density="default" data-text="normal">
+<head>
+<meta charset="utf-8">
+<title>D05 · Variant A — persistent three-pane control workspace</title>
+<meta name="viewport" content="width=1440">
+<link rel="stylesheet" href="shared.css">
+</head>
+<body data-variant="a">
+<div class="shell">
+  <aside id="nav" class="nav" aria-label="Project navigation"></aside>
+
+  <main class="pane" aria-label="Task Workspace">
+    <div class="workspace-header">
+      <div class="row-2">
+        <h1 id="ws-title"></h1>
+        <span class="badge state-VERIFYING">VERIFYING</span>
+        <span class="meta" id="ws-reason"></span>
+      </div>
+      <p class="meta">TASK-0342 · scope-bound workspace · attempt identity persists across provider sessions</p>
+    </div>
+    <div class="tabs" id="tabs" role="tablist" aria-label="Task sections">
+      <button class="tab" role="tab" aria-selected="true" data-panel="overview">Overview</button>
+      <button class="tab" role="tab" aria-selected="false" data-panel="plan">Plan</button>
+      <button class="tab" role="tab" aria-selected="false" data-panel="changes">Changes</button>
+      <button class="tab" role="tab" aria-selected="false" data-panel="evidence">Evidence</button>
+    </div>
+    <div class="pane-scroll" id="panels">
+      <section data-panel="overview" data-active="true" aria-label="Overview"></section>
+      <section data-panel="plan" aria-label="Plan"></section>
+      <section data-panel="changes" aria-label="Changes"></section>
+      <section data-panel="evidence" aria-label="Evidence"></section>
+      <!-- History is reachable via the left nav Events route in A; C carries it as a tab. -->
+      <p class="meta" style="padding:8px 0">History: see Event timeline in the right inspector column or variant C’s History tab.</p>
+    </div>
+  </main>
+
+  <div style="display:flex;flex-direction:column;gap:12px;min-height:0">
+    <section class="pane" style="flex:1" aria-label="Conversation">
+      <div class="drawer-header"><strong>Conversation</strong>
+        <span class="meta grow">To: TASK-0342 · attempt 2 context · claude</span></div>
+      <div class="pane-scroll" id="agent-panel"></div>
+    </section>
+    <section class="pane" style="flex:2" aria-label="Decisions">
+      <div class="drawer-header"><strong>Decision</strong>
+        <span class="meta grow">HDR-0092 · TASK-0344</span></div>
+      <div class="pane-scroll" id="decision-panel"></div>
+    </section>
+  </div>
+</div>
+
+<script src="fixture.js"></script>
+<script src="proto.js"></script>
+<script>
+(function () {
+  var F = window.FIXTURE, P = window.PROTO;
+  document.title = "D05 · A — " + F.task.id;
+  P.renderNav();
+  P.fill("ws-title", P.esc(F.task.objective));
+  P.fill("ws-reason", P.esc(F.task.headlineReason) + " · " + P.esc(F.task.nextCommand));
+  P.mountPanels({ "panels": null });
+  // mount into the four sections
+  var root = document.getElementById("panels");
+  var secs = root.querySelectorAll("section[data-panel]");
+  var content = { overview: P.renderOverview(), plan: P.renderPlan(), changes: P.renderChanges(), evidence: P.renderEvidence() };
+  secs.forEach(function (s) { s.innerHTML = content[s.getAttribute("data-panel")] || ""; });
+  P.wireTabs(document.getElementById("tabs"), root);
+  P.fill("agent-panel",
+    '<p class="meta" style="margin-bottom:8px">Task-level conversation — distinct from the provider transcript ' +
+    '(continuity across attempts/providers is an unresolved product question, §13.3).</p>' +
+    '<p><strong>You:</strong> Retry stability is the goal; do not touch planner code.</p>' +
+    '<p><strong>Agent (reported claim):</strong> “Retries now use jitter; concurrent refresh is guarded.” ' +
+    '<span class="meta">Agent-reported claim — not completion evidence until verified (C1–C3).</span></p>' +
+    '<div class="btn-row" style="margin-top:8px"><button class="btn meta">Attach to attempt 2</button>' +
+    '<button class="btn meta">Open provider transcript</button></div>' +
+    '<div class="btn-row" style="margin-top:12px"><input class="btn" style="flex:1;text-align:left" value="Message TASK-0342…" readonly>' +
+    '<button class="btn primary">Send</button></div>');
+  P.fill("decision-panel", P.renderAttentionItem(F.attention[0]) + P.renderAttentionItem(F.attention[1]));
+})();
+</script>
+</body>
+</html>
