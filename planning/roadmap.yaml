@@ -8,7 +8,7 @@
 # Near-term work lives in planning/tasks/queue.yaml, not here.
 
 schema_version: 1
-current_gate: G14
+current_gate: G16
 task_queue: planning/tasks/queue.yaml
 
 gates:

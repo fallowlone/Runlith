@@ -8,8 +8,8 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-current_gate: G14
-gate_status: PLANNED  # G13 closed by TASK-0214; G14 requires owner ratification before any G14 task starts
+current_gate: G16
+gate_status: IN_PROGRESS  # G16 Desktop UI ratified by owner 2026-11-01; G13 closed by TASK-0214; G14/G15 remain planned
 
 items:
   - id: TASK-0012
