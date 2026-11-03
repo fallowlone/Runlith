@@ -27,7 +27,7 @@ use ipc_contracts::proto::{
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-const SUCCESS_BODY: &str = r#"printf '{"type":"result","subtype":"success","is_error":false,"result":"recovery fixture finished","session_id":"ffffffff-ffff-ffff-ffff-ffffffffffff"}'; exit 0
+const SUCCESS_BODY: &str = r#"echo changed > fixture-output.txt; printf '{"type":"result","subtype":"success","is_error":false,"result":"recovery fixture finished","session_id":"ffffffff-ffff-ffff-ffff-ffffffffffff"}'; exit 0
 "#;
 
 struct Sandbox {

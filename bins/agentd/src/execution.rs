@@ -5682,7 +5682,7 @@ mod tests {
     /// Fixture vaults only. A vault holding a real credential (the P6a
     /// measurement) uses a random per-run password instead.
     const BROKERED_VAULT_PASSWORD: &str = "p5d-brokered-vault-password";
-    const BROKERED_EXECUTION_SUCCESS: &str = r#"printf '{"type":"result","subtype":"success","is_error":false,"result":"brokered run finished","session_id":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"}'; exit 0"#;
+    const BROKERED_EXECUTION_SUCCESS: &str = r#"echo changed > brokered-output.txt; printf '{"type":"result","subtype":"success","is_error":false,"result":"brokered run finished","session_id":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"}'; exit 0"#;
     const BROKERED_PLANNER_SUCCESS: &str = r#"printf '%s' '{"type":"result","subtype":"success","is_error":false,"result":"{\"verdict\":\"ATOMIC\",\"rationale\":\"brokered fixture\",\"evidence_refs\":[\"evidence-brokered\"]}","session_id":"brokered-planner-session","usage":{"input_tokens":10,"output_tokens":10}}'; exit 0"#;
 
     /// Real-like Claude CLI: detection sees a compatible version; a host
@@ -6232,6 +6232,7 @@ mod tests {
                  RUNLITH_EOF\n\
                  if [ \"$HOME\" = '{host_home}' ]; then home=1; else home=0; fi\n\
                  report=\"env=$names;home_is_host=$home;control=$(opens .git);targets={probes};\"\n\
+                 echo changed > adversarial-output.txt\n\
                  printf '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"%s\",\"session_id\":\"dddddddd-0000-0000-0000-dddddddddddd\"}}' \"$report\"\n\
                  exit 0\n"
             ),
