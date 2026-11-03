@@ -101,3 +101,40 @@ jobs:
 
       - name: Cycle-guard lock semantics (windows)
         run: cargo test -p storage-sqlite --locked cycle_guard
+
+  verify-desktop:
+    # apps/desktop is the Tauri client's web layer (G16). Playwright runs the
+    # production build in WebKit with labelled demo data (no Tauri runtime),
+    # plus axe accessibility checks. macOS because the shipped target is macOS.
+    runs-on: macos-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/desktop
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      # `build` runs tsc --noEmit before vite build, so this is also the typecheck.
+      - name: Typecheck and build
+        run: npm run build
+
+      - name: Data tests
+        run: npm run test:data
+
+      - name: Install WebKit
+        run: npx playwright install webkit
+
+      - name: E2E and accessibility
+        run: npm run test:e2e
