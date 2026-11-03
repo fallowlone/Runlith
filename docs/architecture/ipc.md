@@ -604,3 +604,33 @@ quota are enforced there, never in the CLI. Account private keys never
 cross the wire: envelope sealing is local (`agentctl org sync seal`,
 `org keygen`), and the org AEAD key is presented per accept call over
 the authenticated local IPC only — never stored or logged.
+
+## 21. G16 protocol v13: widget authoring IPC (implemented)
+
+Protocol version 13 adds the bounded `widget_core` envelope
+(`widget_core = 16`, TASK-0230). Verbs: `start`, `status`, `cancel`.
+Sessions below V13 receive a typed `UnsupportedProtocol` refusal.
+
+A control channel handles one request at a time and the desktop host waits
+5 s for a response, while a provider call can take a minute. Drafting is
+therefore a job: `start` returns at once with a `job_id`, the provider runs
+on its own thread, and the client polls `status`. Other connections are
+served meanwhile, so `connection_status` stays responsive during a draft
+(`bins/agentctl/tests/widget_control.rs`). At most one draft runs at a time;
+jobs live in memory only and do not survive a daemon restart. `cancel` reaches
+the running call through its `CancelFlag`.
+
+Terminal states are `PROPOSED`, `REFUSED`, `FAILED` and `CANCELLED`. `FAILED`
+carries one `failure_code`: `provider_missing`, `provider_incompatible`,
+`provider_unavailable`, `not_authenticated`, `timed_out`, `bad_output` or
+`failed`.
+
+The provider receives only the person's text and the list of sources, with
+no tools, no files, an empty working directory, and output limited by
+`--json-schema`. Its answer is untrusted (INV-093): `crates/widget-spec`
+parses it, and only a `source` from the closed list and a valid `repo` cross
+the wire. Provider prose never does. `failure_detail` is a bounded diagnostic
+for `agentctl`; the desktop UI shows fixed wording per code instead.
+
+agentd does not call GitHub and does not store layouts. Both belong to the
+desktop host (`apps/desktop/src-tauri`), which validates a layout again on save.

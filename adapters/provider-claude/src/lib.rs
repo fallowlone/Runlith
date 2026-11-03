@@ -41,13 +41,14 @@ mod output;
 mod planner;
 mod process;
 mod prompt;
+mod structured;
 mod tracker;
 mod usage;
 
 pub use argv::build_argv;
 pub use authentication::{probe_authentication, Authentication, AuthenticationState};
 pub use capabilities::{probe_capabilities, ClaudeCapabilities};
-pub use config::ClaudeConfig;
+pub use config::{bounded_detail, ClaudeConfig};
 pub use detect::{detect, find_on_path, CliVersion, Detection, ProviderAvailability};
 pub use environment::ProviderEnvironment;
 pub use executor::ClaudeExecutor;
@@ -55,6 +56,8 @@ pub use failure::{is_credential_rejected, ClaudeFailure};
 pub use output::{parse_provider_output, ParsedOutput};
 pub use planner::ClaudePlanner;
 pub use process::CancelFlag;
+pub use structured::ClaudeStructuredCall;
+
 pub use prompt::build_task_prompt;
 pub use tracker::LiveProcessTracker;
 pub use usage::{UsageProvenance, UsageSample};

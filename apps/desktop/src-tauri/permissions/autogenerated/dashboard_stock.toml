@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-dashboard-stock"
+description = "Enables the dashboard_stock command without any pre-configured scope."
+commands.allow = ["dashboard_stock"]
+
+[[permission]]
+identifier = "deny-dashboard-stock"
+description = "Denies the dashboard_stock command without any pre-configured scope."
+commands.deny = ["dashboard_stock"]

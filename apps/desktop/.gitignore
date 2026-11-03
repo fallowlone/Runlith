@@ -2,3 +2,5 @@ node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/
+e2e/.results/
+e2e/screenshots/

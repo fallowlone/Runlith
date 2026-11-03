@@ -7055,3 +7055,12 @@ items:
       pre-fix and mutation-RED 2/2 with the lock neutralized; post-fix
       execution_recovery target 20/20, workspace 1947 passed / 0
       failed, fmt and clippy clean.
+  - id: TASK-0230
+    gate: G16
+    title: Live overview widgets authored from a plain-language description
+    objective: A person describes a widget in words; agentd asks the provider for a versioned widget proposal, a closed validator admits it, the overview shows it with live values and keeps it across restarts.
+    scope: crates/widget-spec (types and validator, no I/O); protocol v13 widget_core; adapters/provider-claude structured call; agentd service; agentctl widget; apps/desktop host and overview.
+    exit_criteria_summary: Live eval on the real provider, validator rejection suite, values equal to gh, generation does not stall other requests, layout survives restart and corruption, every failure state reproduced, layout audit clean.
+    depends_on: []
+    blocked_by: []
+    references: [docs/ui/proposals/TASK-PROPOSED-G16-LIVE-WIDGETS.md, docs/architecture/adr/ADR-0007-no-direct-frontend-shell.md, docs/architecture/adr/ADR-0014-local-first-privacy.md, docs/architecture/adr/ADR-0016-agentctl-before-complex-ui.md]

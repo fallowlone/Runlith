@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    runlith_desktop::run()
+    runlith_desktop_lib::run();
 }

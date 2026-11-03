@@ -23,7 +23,8 @@ use ipc_contracts::proto::{
     OrgCoreResponse, PlanningCoreRequest, PlanningCoreResponse, PolicyCoreRequest,
     PolicyCoreResponse, RoutineCoreRequest, RoutineCoreResponse, ShutdownRequest,
     TaskAuthoringCoreRequest, TaskAuthoringCoreResponse, TaskCoreRequest, TaskCoreResponse,
-    VaultCoreRequest, VaultCoreResponse, WorkerCoreRequest, WorkerCoreResponse,
+    VaultCoreRequest, VaultCoreResponse, WidgetCoreRequest, WidgetCoreResponse, WorkerCoreRequest,
+    WorkerCoreResponse,
 };
 use ipc_control::{ClientConfig, ClientSession, ControlError, CLIENT_KIND_AGENTCTL};
 use ipc_transport::{FramedTransport, TransportError};
@@ -159,6 +160,8 @@ pub enum ClientError {
     RoutineAmbiguous(String),
     WorkerAmbiguous(String),
     OrgAmbiguous(String),
+    /// A widget request whose reply was lost; a draft may still be running.
+    WidgetAmbiguous(String),
     /// OS/runtime I/O failure.
     Io(io::Error),
 }
@@ -201,6 +204,9 @@ impl fmt::Display for ClientError {
                 write!(f, "ambiguous worker result (not replayed): {detail}")
             }
             Self::OrgAmbiguous(detail) => {
+                write!(f, "ambiguous org result (not replayed): {detail}")
+            }
+            Self::WidgetAmbiguous(detail) => {
                 write!(f, "ambiguous org result (not replayed): {detail}")
             }
             Self::HumanDecisionAmbiguous(detail) => {
@@ -1521,6 +1527,88 @@ pub async fn org_request(
     Err(ClientError::NotRunning)
 }
 
+#[cfg(unix)]
+async fn handshake_stream_widget<S>(stream: S) -> Result<ClientSession<S>, ClientError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut session = ClientSession::new(
+        FramedTransport::new(stream),
+        ClientConfig::widget_default(CLIENT_KIND_AGENTCTL),
+    );
+    session
+        .perform_handshake()
+        .await
+        .map_err(classify_control)?;
+    if !session.widget_allowed() {
+        return Err(ClientError::Control(ControlError::UnsupportedProtocol {
+            negotiated: session.negotiated_version().unwrap_or(0),
+            required: ipc_contracts::IPC_PROTOCOL_VERSION_V13,
+        }));
+    }
+    Ok(session)
+}
+
+#[cfg(unix)]
+pub async fn widget_request(
+    endpoint: &UnixEndpoint,
+    spawn: impl FnOnce() -> io::Result<Child>,
+    request: WidgetCoreRequest,
+) -> Result<WidgetCoreResponse, ClientError> {
+    let session = connect_or_start_with(spawn, || async {
+        let stream = transport_connect(endpoint)
+            .await
+            .map_err(classify_transport)?;
+        handshake_stream_widget(stream).await
+    })
+    .await?;
+    let absence = absence_note(endpoint);
+    let mut transport = session.into_inner();
+    let frame = Bytes::from(
+        ControlRequest {
+            payload: Some(control_request::Payload::WidgetCore(request)),
+        }
+        .encode_to_vec(),
+    );
+    transport.write_frame(frame).await.map_err(|error| {
+        ClientError::WidgetAmbiguous(format!(
+            "WidgetCoreRequest send failed ({error}); endpoint {absence}; not replaying"
+        ))
+    })?;
+    let frame = tokio::time::timeout(BUSINESS_RESPONSE_TIMEOUT, transport.read_frame())
+        .await
+        .map_err(|_| {
+            ClientError::WidgetAmbiguous(format!(
+                "widget response timeout; endpoint {absence}; not replaying"
+            ))
+        })?
+        .map_err(|error| {
+            ClientError::WidgetAmbiguous(format!(
+                "widget response lost ({error}); endpoint {absence}; not replaying"
+            ))
+        })?;
+    let response = ControlResponse::decode(&frame[..]).map_err(|error| {
+        ClientError::WidgetAmbiguous(format!(
+            "widget response undecodable ({error}); endpoint {absence}; not replaying"
+        ))
+    })?;
+    match response.payload {
+        Some(control_response::Payload::WidgetCore(response)) => Ok(response),
+        other => Err(ClientError::WidgetAmbiguous(format!(
+            "unexpected widget reply ({other:?}); endpoint {absence}; not replaying"
+        ))),
+    }
+}
+
+#[cfg(not(unix))]
+pub async fn widget_request(
+    _endpoint: &str,
+    _spawn: impl FnOnce() -> io::Result<Child>,
+    _request: WidgetCoreRequest,
+) -> Result<WidgetCoreResponse, ClientError> {
+    Err(ClientError::NotRunning)
+}
+
 /// Writes a fresh device secret to `path` (0600, worker-side local)
 /// and returns the public key hex. The secret is never printed or
 /// sent to a daemon (CodeQL rust/cleartext-logging).
@@ -2444,6 +2532,108 @@ pub fn parse_worker_args(args: &[String]) -> Result<WorkerCoreRequest, String> {
 }
 
 pub const ORG_USAGE: &str = "usage: agentctl org <create|get|account|account-show|team|teams|member|policy|usage|sync|keygen> ...\n  create --name <n> --creator <acc_id> | get <org_id> | account --name <n> --public-key <hex64> | account-show <acc_id>\n  team --org <id> --actor <mem_id> --name <n> | teams --org <id>\n  member add --org <id> --actor <mem_id> --account <acc_id> --role <OWNER|ADMIN|MEMBER|VIEWER> [--team <team_id>] | member role --actor <mem_id> --membership <mem_id> --role <R> | member revoke --actor <mem_id> --membership <mem_id> | member list --org <id>\n  policy set --org <id> --actor <mem_id> --ceiling <READ_ONLY|WORKSPACE_WRITE|EXECUTION> --sync-max <PUBLIC|PROJECT|PRIVATE> [--quota <microusd>] --window <seconds> | policy show --org <id>\n  usage record --org <id> --account <acc_id> --kind <EXECUTION|PLANNING|EVALUATION> --units <n> --cost <microusd> --key <k> [--project <ref>] | usage list --org <id> | usage check --org <id> --estimate <microusd>\n  sync head --org <id> | sync seal --account <acc_id> --secret <hex64> --org <id> --org-key <hex64> --nonce <hex48> --kind <KIND> --sensitivity <S> --text <plaintext> | sync accept --id <env_id> --org <id> --author <acc_id> --kind <KIND> --revision <n> --base <n> --sensitivity <S> --nonce <hex48> --ciphertext <hex> --signature <hex128> --created <millis> --org-key <hex64>\n  keygen --secret-out <path> (local, secret never printed)";
+
+pub const WIDGET_USAGE: &str =
+    "usage: agentctl widget <draft <text>|start <text>|status <job>|cancel <job>>";
+
+/// Parses `widget ...`; the flag says whether to wait for the provider.
+pub fn parse_widget_args(args: &[String]) -> Result<(WidgetCoreRequest, bool), String> {
+    use ipc_contracts::proto::{
+        widget_core_request::Payload, WidgetDraftCancelRequest, WidgetDraftStartRequest,
+        WidgetDraftStatusRequest,
+    };
+    let rest = args.get(1..).unwrap_or_default();
+    let (payload, wait) = match (args.first().map(String::as_str), rest) {
+        (Some("draft"), [_, ..]) => (
+            Payload::Start(WidgetDraftStartRequest {
+                description: rest.join(" "),
+            }),
+            true,
+        ),
+        (Some("start"), [_, ..]) => (
+            Payload::Start(WidgetDraftStartRequest {
+                description: rest.join(" "),
+            }),
+            false,
+        ),
+        (Some("status"), [job_id]) => (
+            Payload::Status(WidgetDraftStatusRequest {
+                job_id: job_id.clone(),
+            }),
+            false,
+        ),
+        (Some("cancel"), [job_id]) => (
+            Payload::Cancel(WidgetDraftCancelRequest {
+                job_id: job_id.clone(),
+            }),
+            false,
+        ),
+        _ => return Err(WIDGET_USAGE.to_owned()),
+    };
+    Ok((
+        WidgetCoreRequest {
+            payload: Some(payload),
+        },
+        wait,
+    ))
+}
+
+#[must_use]
+pub fn widget_is_running(response: &WidgetCoreResponse) -> bool {
+    use ipc_contracts::proto::{widget_core_response::Payload, WidgetDraftState};
+    matches!(&response.payload, Some(Payload::Status(status))
+        if status.state == WidgetDraftState::WidgetDraftRunning as i32)
+}
+
+/// The status request for the job this response is about.
+#[must_use]
+pub fn widget_status_request(response: &WidgetCoreResponse) -> WidgetCoreRequest {
+    use ipc_contracts::proto::{
+        widget_core_request, widget_core_response::Payload, WidgetDraftStatusRequest,
+    };
+    let job_id = match &response.payload {
+        Some(Payload::Status(status)) => status.job_id.clone(),
+        _ => String::new(),
+    };
+    WidgetCoreRequest {
+        payload: Some(widget_core_request::Payload::Status(
+            WidgetDraftStatusRequest { job_id },
+        )),
+    }
+}
+
+/// One `key=value` line, stable enough for scripts and the live eval.
+pub fn format_widget_response(response: &WidgetCoreResponse) -> Result<String, String> {
+    use ipc_contracts::proto::{widget_core_response::Payload, WidgetDraftState};
+    match &response.payload {
+        Some(Payload::Status(status)) => {
+            let job = &status.job_id;
+            let state =
+                WidgetDraftState::try_from(status.state).unwrap_or(WidgetDraftState::Unspecified);
+            Ok(match state {
+                WidgetDraftState::WidgetDraftRunning => format!("job={job} state=running"),
+                WidgetDraftState::WidgetDraftProposed => format!(
+                    "job={job} state=proposed source={} repo={}",
+                    status.source_type,
+                    if status.repo.is_empty() {
+                        "-"
+                    } else {
+                        &status.repo
+                    }
+                ),
+                WidgetDraftState::WidgetDraftRefused => format!("job={job} state=refused"),
+                WidgetDraftState::WidgetDraftCancelled => format!("job={job} state=cancelled"),
+                WidgetDraftState::WidgetDraftFailed => format!(
+                    "job={job} state=failed code={} detail={}",
+                    status.failure_code, status.failure_detail
+                ),
+                WidgetDraftState::Unspecified => format!("job={job} state=unknown"),
+            })
+        }
+        Some(Payload::Error(error)) => Err(format!("widget request refused: {}", error.message)),
+        None => Err("empty widget reply".to_owned()),
+    }
+}
 
 pub fn parse_org_args(args: &[String]) -> Result<OrgCoreRequest, String> {
     use ipc_contracts::proto::{

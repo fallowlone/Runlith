@@ -18,6 +18,7 @@ import "human_decision_core.proto";
 import "planning_core.proto";
 import "task_authoring_core.proto";
 import "vault_core.proto";
+import "widget_core.proto";
 import "finder_core.proto";
 import "memory_core.proto";
 import "routine_core.proto";
@@ -57,6 +58,8 @@ message ControlRequest {
     WorkerCoreRequest worker_core = 14;
     // G13 cloud/team. Valid only on protocol-v12 sessions.
     OrgCoreRequest org_core = 15;
+    // G16 widget authoring. Valid only on protocol-v13 sessions.
+    WidgetCoreRequest widget_core = 16;
   }
 }
 
@@ -90,6 +93,8 @@ message ControlResponse {
     WorkerCoreResponse worker_core = 14;
     // G13 cloud/team response. Protocol v12 only.
     OrgCoreResponse org_core = 15;
+    // G16 widget authoring response. Protocol v13 only.
+    WidgetCoreResponse widget_core = 16;
   }
 }
 

@@ -70,14 +70,17 @@ pub const IPC_PROTOCOL_VERSION_V11: u32 = 11;
 /// envelope (account, org, team, member, policy, usage, sync).
 pub const IPC_PROTOCOL_VERSION_V12: u32 = 12;
 
+/// G16 widget authoring (TASK-0230): adds the bounded `widget_core` envelope.
+pub const IPC_PROTOCOL_VERSION_V13: u32 = 13;
+
 /// Current IPC protocol version: the highest version this build speaks.
-pub const IPC_PROTOCOL_VERSION: u32 = IPC_PROTOCOL_VERSION_V12;
+pub const IPC_PROTOCOL_VERSION: u32 = IPC_PROTOCOL_VERSION_V13;
 
 /// Alias making "current" explicit at call sites.
-pub const IPC_PROTOCOL_VERSION_CURRENT: u32 = IPC_PROTOCOL_VERSION_V12;
+pub const IPC_PROTOCOL_VERSION_CURRENT: u32 = IPC_PROTOCOL_VERSION_V13;
 
 /// Every protocol version this build negotiates, oldest first.
-pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 13] = [
+pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 14] = [
     IPC_PROTOCOL_VERSION_V0,
     IPC_PROTOCOL_VERSION_V1,
     IPC_PROTOCOL_VERSION_V2,
@@ -91,6 +94,7 @@ pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 13] = [
     IPC_PROTOCOL_VERSION_V10,
     IPC_PROTOCOL_VERSION_V11,
     IPC_PROTOCOL_VERSION_V12,
+    IPC_PROTOCOL_VERSION_V13,
 ];
 
 /// Maximum length of a client-supplied human/request `reason` (block
@@ -144,6 +148,7 @@ pub fn supports_business_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V10
             | IPC_PROTOCOL_VERSION_V11
             | IPC_PROTOCOL_VERSION_V12
+            | IPC_PROTOCOL_VERSION_V13
     )
 }
 
@@ -165,6 +170,7 @@ pub fn supports_execution_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V10
             | IPC_PROTOCOL_VERSION_V11
             | IPC_PROTOCOL_VERSION_V12
+            | IPC_PROTOCOL_VERSION_V13
     )
 }
 
@@ -184,6 +190,7 @@ pub fn supports_policy_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V10
             | IPC_PROTOCOL_VERSION_V11
             | IPC_PROTOCOL_VERSION_V12
+            | IPC_PROTOCOL_VERSION_V13
     )
 }
 
@@ -203,6 +210,7 @@ pub fn supports_human_decision_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V10
             | IPC_PROTOCOL_VERSION_V11
             | IPC_PROTOCOL_VERSION_V12
+            | IPC_PROTOCOL_VERSION_V13
     )
 }
 
@@ -220,6 +228,7 @@ pub fn supports_planning_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V10
             | IPC_PROTOCOL_VERSION_V11
             | IPC_PROTOCOL_VERSION_V12
+            | IPC_PROTOCOL_VERSION_V13
     )
 }
 
@@ -237,6 +246,7 @@ pub fn supports_task_authoring_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V10
             | IPC_PROTOCOL_VERSION_V11
             | IPC_PROTOCOL_VERSION_V12
+            | IPC_PROTOCOL_VERSION_V13
     )
 }
 
@@ -252,6 +262,7 @@ pub fn supports_finder_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V10
             | IPC_PROTOCOL_VERSION_V11
             | IPC_PROTOCOL_VERSION_V12
+            | IPC_PROTOCOL_VERSION_V13
     )
 }
 
@@ -289,6 +300,12 @@ pub fn supports_org_ipc(negotiated_version: u32) -> bool {
     negotiated_version >= IPC_PROTOCOL_VERSION_V12
 }
 
+/// Widget authoring starts provider calls and is never enabled below v13.
+#[must_use]
+pub fn supports_widget_ipc(negotiated_version: u32) -> bool {
+    negotiated_version >= IPC_PROTOCOL_VERSION_V13
+}
+
 /// The operator credential vault is new authority and is never enabled for
 /// v0-v6 (ADR-0039).
 #[must_use]
@@ -301,6 +318,7 @@ pub fn supports_vault_ipc(negotiated_version: u32) -> bool {
             | IPC_PROTOCOL_VERSION_V10
             | IPC_PROTOCOL_VERSION_V11
             | IPC_PROTOCOL_VERSION_V12
+            | IPC_PROTOCOL_VERSION_V13
     )
 }
 
@@ -360,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn historical_versions_remain_supported_and_v12_is_current() {
+    fn historical_versions_remain_supported_and_v13_is_current() {
         assert_eq!(IPC_PROTOCOL_VERSION_V0, 0);
         assert_eq!(IPC_PROTOCOL_VERSION_V1, 1);
         assert_eq!(IPC_PROTOCOL_VERSION_V2, 2);
@@ -373,20 +391,23 @@ mod tests {
         assert_eq!(IPC_PROTOCOL_VERSION_V10, 10);
         assert_eq!(IPC_PROTOCOL_VERSION_V11, 11);
         assert_eq!(IPC_PROTOCOL_VERSION_V12, 12);
-        assert_eq!(IPC_PROTOCOL_VERSION, 12);
-        assert_eq!(IPC_PROTOCOL_VERSION_CURRENT, 12);
+        assert_eq!(IPC_PROTOCOL_VERSION_V13, 13);
+        assert_eq!(IPC_PROTOCOL_VERSION, 13);
+        assert_eq!(IPC_PROTOCOL_VERSION_CURRENT, 13);
         assert_eq!(
             SUPPORTED_PROTOCOL_VERSIONS,
-            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
         );
-        for version in 0..=12 {
+        for version in 0..=13 {
             assert!(is_supported_version(version), "v{version} negotiates");
             assert!(is_compatible(version), "v{version} negotiates");
         }
-        assert!(!is_supported_version(13));
-        assert!(!is_compatible(13));
+        assert!(!is_supported_version(14));
+        assert!(!is_compatible(14));
         assert!(!supports_org_ipc(IPC_PROTOCOL_VERSION_V11));
         assert!(supports_org_ipc(IPC_PROTOCOL_VERSION_V12));
+        assert!(!supports_widget_ipc(IPC_PROTOCOL_VERSION_V12));
+        assert!(supports_widget_ipc(IPC_PROTOCOL_VERSION_V13));
         assert!(!supports_routine_ipc(IPC_PROTOCOL_VERSION_V9));
         assert!(supports_routine_ipc(IPC_PROTOCOL_VERSION_V10));
         assert!(!supports_worker_ipc(IPC_PROTOCOL_VERSION_V10));

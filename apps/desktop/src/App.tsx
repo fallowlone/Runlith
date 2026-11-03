@@ -1,136 +1,191 @@
-/* Runlith desktop — Task Workspace, Variant C on the light Cursor/Warp
-   direction (user preference 2026-09-21): sidebar on canvas, top command
-   bar, white cards. Inspector rules unchanged (§11-C): explicit open/pin/
-   close, no self-opening, no focus stealing. Fixture data only. */
-import { useCallback, useEffect, useState } from "react";
-import { FIXTURE, type PanelId } from "./fixture";
-import { Badge, Button, cn, Tabs } from "./components/ui";
-import { ChangesPanel, EvidencePanel, OverviewPanel, PlanPanel } from "./components/panels";
-import { AttemptsList, HistoryPanel, LogsView } from "./components/diagnostics";
-import { OverviewHero } from "./components/overview";
-import { Nav } from "./components/nav";
-import { Inspector } from "./components/inspector";
-import { TopBar } from "./components/topbar";
-import { ExecutionExplorer } from "./components/plan-graph";
+import { useEffect, useRef, useState } from "react";
+import type { ConnectionDto } from "./lib/bindings/ConnectionDto";
+import type { TaskDto } from "./lib/bindings/TaskDto";
+import { api, inTauri, type Loaded } from "./lib/api";
+import { useRouter, type Route } from "./lib/router";
+import { useSettings } from "./lib/settings";
+import { useResource } from "./lib/useResource";
+import { AgentPanel } from "./components/AgentPanel";
+import { Sidebar } from "./components/Sidebar";
+import { Attention } from "./views/Attention";
+import { Connection } from "./views/Connection";
+import { MapView } from "./views/MapView";
+import { Overview } from "./views/Overview";
+import { Settings } from "./views/Settings";
+import { TaskWorkspace } from "./views/TaskWorkspace";
+import { Tasks } from "./views/Tasks";
 
-const TASK = FIXTURE.task;
+const POLL_MS = 5000;
 
-const TABS: { id: PanelId; label: string }[] = [
-  { id: "overview", label: "Overview" },
-  { id: "plan", label: "Plan" },
-  { id: "changes", label: "Changes" },
-  { id: "evidence", label: "Evidence" },
-  { id: "history", label: "History" },
-];
-
-const DIAG_TABS = [
-  { id: "attempts", label: "Attempts" },
-  { id: "events", label: "Events" },
-  { id: "logs", label: "Logs" },
-] as const;
-
-export default function App() {
-  const [tab, setTab] = useState<PanelId>("overview");
-  const [diagTab, setDiagTab] = useState<(typeof DIAG_TABS)[number]["id"]>("attempts");
-  const [inspectorOpen, setInspectorOpen] = useState(false);
-  const [pinned, setPinned] = useState(false);
-  const [diagOpen, setDiagOpen] = useState(false);
-  const [density, setDensity] = useState("default");
-  const [textSize, setTextSize] = useState("normal");
-  const [explorerOpen, setExplorerOpen] = useState(false);
-  const openExplorer = useCallback(() => setExplorerOpen(true), []);
-  const closeExplorer = useCallback(() => setExplorerOpen(false), []);
+/** Polls agentd's handshake so a lost or restarted daemon shows up within seconds. */
+function useConnection(): [ConnectionDto | null, Date | null, () => void] {
+  const [connection, setConnection] = useState<ConnectionDto | null>(null);
+  const [observedAt, setObservedAt] = useState<Date | null>(null);
+  const [tick, setTick] = useState(0);
 
   useEffect(() => {
-    document.documentElement.dataset.density = density;
-    document.documentElement.dataset.text = textSize;
-  }, [density, textSize]);
+    let alive = true;
+    const probe = (): void => {
+      api.connection().then(
+        ({ data }) => {
+          if (!alive) return;
+          setConnection(data);
+          setObservedAt(new Date());
+        },
+        (error: unknown) => {
+          if (!alive) return;
+          const message = error instanceof Error ? error.message : String((error as { message?: string }).message ?? error);
+          setConnection({ state: "unavailable", protocol: null, daemonBuild: null, clientBuild: "0.1.0", detail: message });
+          setObservedAt(new Date());
+        },
+      );
+    };
+    probe();
+    const id = window.setInterval(probe, POLL_MS);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+    };
+  }, [tick]);
 
-  const toggleInspector = useCallback(() => setInspectorOpen((o) => !o), []);
-  const closeInspector = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
-    setInspectorOpen(false);
-    document.getElementById("btn-inspector")?.focus();
-    e.preventDefault();
-  }, []);
-  const openDecision = useCallback(() => {
-    setInspectorOpen(true);
-    setPinned(true);
-  }, []);
-  const openDiagnostics = useCallback(() => setDiagOpen(true), []);
+  return [connection, observedAt, () => setTick((value) => value + 1)];
+}
+
+function agentContext(route: Route): string {
+  switch (route.name) {
+    case "task": return route.id;
+    case "tasks": return "задачи";
+    case "attention": return "решения";
+    default: return "весь проект";
+  }
+}
+
+export function App() {
+  const [settings, update, theme] = useSettings();
+  const [route, navigate] = useRouter();
+  const [connection, observedAt, recheck] = useConnection();
+  const [query, setQuery] = useState("");
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const [askFiles, setAskFiles] = useState<string[]>([]);
+  const isConnected = connection?.state === "connected";
+
+  const [projects, reloadProjects] = useResource(api.projects, `projects:${isConnected}`);
+  const projectList = projects.status === "ok" ? projects.data : [];
+  const activeProject = projectList.find((item) => item.id === projectId) ?? projectList[0] ?? null;
+
+  const loadTasks = (): Promise<Loaded<TaskDto[]>> => {
+    if (projects.status === "loading") return new Promise<Loaded<TaskDto[]>>(() => undefined);
+    if (!activeProject) return Promise.resolve({ data: [], source: projects.status === "ok" ? projects.source : "live" });
+    return api.tasks(activeProject.id);
+  };
+  const [tasks, reloadTasks] = useResource(loadTasks, `tasks:${activeProject?.id ?? "none"}:${isConnected}:${projects.status}`);
+  const [decisions, reloadDecisions] = useResource(api.decisions, `decisions:${isConnected}`);
+  const tasksForProject = projects.status === "error" ? projects : tasks;
+
+  // Keyboard: ⌘K search, ⌘[ back to tasks, ⌘⌥B toggles the agent panel.
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if (!event.metaKey) return;
+      if (event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        const input = document.getElementById("global-search");
+        if (input) input.focus();
+        else navigate({ name: "tasks" });
+      } else if (event.key === "[") {
+        event.preventDefault();
+        navigate({ name: "tasks" });
+      } else if (event.altKey && event.code === "KeyB") {
+        event.preventDefault();
+        update({ agentOpen: !settingsRef.current.agentOpen });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [navigate, update]);
+
+  // After each screen change, move focus to the new heading for screen readers.
+  const firstRender = useRef(true);
+  useEffect(() => {
+    if (firstRender.current) {
+      firstRender.current = false;
+      return;
+    }
+    document.querySelector<HTMLElement>("main h1")?.focus({ preventScroll: true });
+  }, [route]);
+
+  // Attachments belong to the task being discussed, not to the whole session.
+  const discussedTask = route.name === "task" ? route.id : null;
+  useEffect(() => setAskFiles([]), [discussedTask]);
+  const askAboutFile = (path: string): void => {
+    setAskFiles((current) => (current.includes(path) ? current : [...current, path]));
+    update({ agentOpen: true });
+  };
+
+  const reloadAll = (): void => {
+    reloadProjects();
+    reloadTasks();
+    reloadDecisions();
+  };
+
+  const showAgent = settings.agentOpen && !["map", "settings", "connection"].includes(route.name);
+  const taskList = tasks.status === "ok" ? tasks.data : [];
+  const decisionCount = decisions.status === "ok" ? decisions.data.length : null;
+
+  let screen;
+  switch (route.name) {
+    case "overview":
+      screen = <Overview projectName={activeProject?.name ?? null} tasks={tasksForProject} decisions={decisions} reload={reloadAll} navigate={navigate} query={query} onQuery={setQuery} />;
+      break;
+    case "tasks":
+      screen = <Tasks tasks={tasksForProject} reload={reloadAll} navigate={navigate} query={query} onQuery={setQuery} hasProject={activeProject !== null} />;
+      break;
+    case "task":
+      screen = <TaskWorkspace key={route.id} taskId={route.id} task={taskList.find((task) => task.id === route.id)} tab={route.tab} navigate={navigate} onAskFile={askAboutFile} />;
+      break;
+    case "attention":
+      screen = <Attention decisions={decisions} reload={reloadDecisions} navigate={navigate} query={query} onQuery={setQuery} />;
+      break;
+    case "map":
+      screen = <MapView />;
+      break;
+    case "settings":
+      screen = <Settings settings={settings} update={update} />;
+      break;
+    case "connection":
+      screen = <Connection connection={connection} observedAt={observedAt} onCheck={() => { recheck(); reloadAll(); }} />;
+      break;
+  }
 
   return (
-    <div className="relative flex h-full p-3">
-      <Nav density={density} textSize={textSize} onDensity={setDensity} onTextSize={setTextSize} onOpenExplorer={openExplorer} />
-
-      <div className="flex min-w-0 flex-1 flex-col">
-        <TopBar />
-
-        <main className="flex min-h-0 flex-1 flex-col px-6 pb-3">
-          {tab === "overview" && <OverviewHero onNeedsAttention={openDecision} />}
-
-          <header className={cn(tab === "overview" && "border-t border-edge pt-4")}>
-            <div className="flex flex-wrap items-baseline gap-3">
-              <h2 className="text-lg font-semibold leading-6">{TASK.objective}</h2>
-              <Badge state={TASK.lifecycle}>{TASK.lifecycle}</Badge>
-              <span className="text-xs text-ink2">
-                {TASK.headlineReason} · {TASK.nextCommand}
-              </span>
-            </div>
-            <p className="mt-0.5 text-xs text-ink2">
-              {TASK.id} · scope-bound workspace · attempt identity persists across provider sessions
-            </p>
-          </header>
-
-          <Tabs tabs={TABS} active={tab} onChange={(id) => setTab(id as PanelId)} label="Task sections" className="!px-0" />
-
-          <div className="min-h-0 flex-1 overflow-y-auto py-4 pr-1" role="tabpanel" aria-label={tab}>
-            {tab === "overview" && <OverviewPanel onOpenDiagnostics={openDiagnostics} onOpenDecision={openDecision} />}
-            {tab === "plan" && <PlanPanel />}
-            {tab === "changes" && <ChangesPanel />}
-            {tab === "evidence" && <EvidencePanel />}
-            {tab === "history" && <HistoryPanel />}
-          </div>
-
-          {/* Inspector & diagnostics: explicit controls with text labels (§11-C). */}
-          <div className="flex items-center gap-2 border-t border-edge py-2">
-            <Button id="btn-inspector" aria-expanded={inspectorOpen} aria-controls="inspector" onClick={toggleInspector}>
-              {inspectorOpen ? "Close agent" : "Open agent"}
-            </Button>
-            <Button aria-pressed={pinned} onClick={() => setPinned((p) => !p)} className={cn(pinned && "border-accent text-accent")}>
-              Pin agent
-            </Button>
-            <Button aria-expanded={diagOpen} aria-controls="diagnostics" onClick={() => setDiagOpen((d) => !d)}>
-              {diagOpen ? "Close diagnostics" : "Open diagnostics"}
-            </Button>
-            <span className="flex-1" />
-            <span className="hidden text-xs text-ink2 xl:block">
-              The agent panel never opens itself and never takes keyboard focus.
-            </span>
-          </div>
-
-          {diagOpen && (
-            <section id="diagnostics" aria-label="Diagnostics" className="card mb-1 flex h-[220px] flex-col overflow-hidden">
-              <Tabs
-                tabs={DIAG_TABS.map((d) => ({ ...d }))}
-                active={diagTab}
-                onChange={(id) => setDiagTab(id as typeof diagTab)}
-                label="Diagnostics sections"
-              />
-              <div className="min-h-0 flex-1 overflow-y-auto">
-                {diagTab === "attempts" && <AttemptsList />}
-                {diagTab === "events" && <HistoryPanel />}
-                {diagTab === "logs" && <LogsView />}
-              </div>
-            </section>
-          )}
-        </main>
+    <div
+      className={`rl app${inTauri ? " in-tauri" : ""}`}
+      data-theme={theme}
+      data-density={settings.density}
+      data-motion={settings.reduceMotion ? "reduce" : undefined}
+    >
+      <div className={`win${showAgent ? "" : " no-agent"}`}>
+        <Sidebar
+          route={route}
+          navigate={navigate}
+          taskCount={tasks.status === "ok" ? taskList.length : null}
+          attentionCount={decisionCount}
+          connection={connection}
+          projects={projectList}
+          projectId={activeProject?.id ?? null}
+          onProject={setProjectId}
+        />
+        {screen}
+        {showAgent && (
+          <AgentPanel
+            context={agentContext(route)}
+            onClose={() => update({ agentOpen: false })}
+            files={askFiles}
+            onRemoveFile={(path) => setAskFiles((current) => current.filter((item) => item !== path))}
+          />
+        )}
       </div>
-
-      {/* ---------- agent panel (explicit open/pin/close only) ---------- */}
-      {inspectorOpen && <Inspector onClose={closeInspector} />}
-
-      {/* ---------- §9.1: Execution Explorer (secondary diagnostic route) ---------- */}
-      {explorerOpen && <ExecutionExplorer onClose={closeExplorer} />}
     </div>
   );
 }
