@@ -1,0 +1,23 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Main window: agentd views, widget authoring through agentd, window dragging and theme sync. The webview gets no shell, fs or http access.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-theme",
+    "allow-connection-status",
+    "allow-list-projects",
+    "allow-list-tasks",
+    "allow-list-dependencies",
+    "allow-list-human-decisions",
+    "allow-widget-draft-start",
+    "allow-widget-draft-status",
+    "allow-widget-draft-cancel",
+    "allow-dashboard-load",
+    "allow-dashboard-save",
+    "allow-dashboard-stock",
+    "allow-metric-read"
+  ]
+}

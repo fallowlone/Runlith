@@ -17,8 +17,8 @@ use crate::config::ClaudeConfig;
 /// Builds the full argument vector for one provider execution.
 ///
 /// Layout: `-p --safe-mode [--tools "" --disallowedTools "mcp__*"]
-/// --output-format json [--system-prompt T] [--permission-mode M]
-/// [--resume S] <prompt>`.
+/// --output-format json [--system-prompt T] [--json-schema J]
+/// [--permission-mode M] [--resume S] <prompt>`.
 ///
 /// The tool flags are variadic (`<tools...>`) and consume every following
 /// value until the next option, so they are emitted *before* the
@@ -46,6 +46,10 @@ pub fn build_argv(config: &ClaudeConfig, prompt: &str) -> Vec<OsString> {
     if let Some(prompt) = config.system_prompt() {
         argv.push(OsString::from("--system-prompt"));
         argv.push(OsString::from(prompt));
+    }
+    if let Some(schema) = config.json_schema() {
+        argv.push(OsString::from("--json-schema"));
+        argv.push(OsString::from(schema));
     }
     if let Some(mode) = config.permission_mode() {
         argv.push(OsString::from("--permission-mode"));

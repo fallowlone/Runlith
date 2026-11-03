@@ -49,6 +49,7 @@ pub mod planning;
 mod provider_credential;
 pub mod routine;
 pub mod vault;
+pub mod widget;
 pub mod worker;
 
 pub use data_dir::{resolve_data_dir, resolve_database_path};
@@ -197,7 +198,7 @@ impl DaemonConfig {
     /// (TASK-0193 routine rollout) while preserving every older surface.
     pub fn with_execution(path: impl Into<PathBuf>) -> Self {
         Self {
-            server_config: ServerConfig::g13_default(),
+            server_config: ServerConfig::g16_default(),
             database_path: Some(path.into()),
             provider_executable: None,
         }
@@ -252,6 +253,7 @@ struct ConnectionServices {
     routine: Option<RoutineHandle>,
     worker: Option<WorkerHandle>,
     org: Option<OrgHandle>,
+    widget: Option<widget::WidgetHandle>,
 }
 
 /// Terminal outcome of a daemon run.
@@ -650,6 +652,16 @@ where
                     return ConnectionOutcome::Ended;
                 }
             }
+            Ok(ReadyRequest::Widget(request)) => {
+                // Never blocks: the provider call runs on its own thread.
+                let response = match &services.widget {
+                    Some(handle) => widget::dispatch(handle, request),
+                    None => widget::unavailable(),
+                };
+                if session.respond_widget(response).await.is_err() {
+                    return ConnectionOutcome::Ended;
+                }
+            }
             Ok(ReadyRequest::Vault(request)) => {
                 let response = match &services.vault {
                     Some(handle) => vault::dispatch(handle.clone(), request).await,
@@ -1013,13 +1025,18 @@ mod unix_daemon {
         let approval = open_approval_service(&config)?;
         let human_decision = open_human_decision_service(&config)?;
         let vault = open_vault(&config);
+        let execution = open_execution(&config, vault.as_ref());
+        let widget = execution
+            .clone()
+            .map(crate::widget::WidgetAuthoring::production);
         let outcome = serve_streams(
             accepted_rx,
             acceptor,
             &config,
             ConnectionServices {
                 business,
-                execution: open_execution(&config, vault.as_ref()),
+                execution,
+                widget,
                 approval,
                 human_decision,
                 vault,
@@ -1123,13 +1140,18 @@ mod windows_daemon {
         let approval = super::open_approval_service(&config)?;
         let human_decision = super::open_human_decision_service(&config)?;
         let vault = super::open_vault(&config);
+        let execution = open_execution(&config, vault.as_ref());
+        let widget = execution
+            .clone()
+            .map(crate::widget::WidgetAuthoring::production);
         Ok(serve_streams(
             accepted_rx,
             acceptor,
             &config,
             ConnectionServices {
                 business,
-                execution: open_execution(&config, vault.as_ref()),
+                execution,
+                widget,
                 approval,
                 human_decision,
                 vault,

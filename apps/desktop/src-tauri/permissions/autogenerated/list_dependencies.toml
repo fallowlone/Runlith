@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-dependencies"
+description = "Enables the list_dependencies command without any pre-configured scope."
+commands.allow = ["list_dependencies"]
+
+[[permission]]
+identifier = "deny-list-dependencies"
+description = "Denies the list_dependencies command without any pre-configured scope."
+commands.deny = ["list_dependencies"]

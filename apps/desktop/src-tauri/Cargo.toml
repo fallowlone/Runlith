@@ -1,0 +1,43 @@
+[package]
+name = "runlith-desktop"
+version = "0.1.0"
+description = "Runlith desktop shell: a Tauri host over agentd's local IPC"
+license = "Apache-2.0"
+edition = "2021"
+publish = false
+
+# Standalone workspace: keeps Tauri's dependency tree out of the core
+# workspace and its Cargo.lock (ADR-PROPOSED frontend stack: replaceable shell).
+[workspace]
+
+[lib]
+name = "runlith_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7.4", features = [] }
+
+[dependencies]
+tauri = { version = "2.12.5", features = ["macos-private-api"] }
+serde = { version = "1", features = ["derive"] }
+ts-rs = "12.0.1"
+bytes = "1"
+prost = "0.14.4"
+tokio = { version = "~1.51", features = ["time", "sync"] }
+serde_json = "1"
+# Only for live widgets: one host, HTTPS only. Already in the tree through Tauri,
+# this adds TLS through the OS (Security.framework on macOS).
+reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }
+widget-spec = { path = "../../../crates/widget-spec", features = ["ts"] }
+ipc-contracts = { path = "../../../crates/ipc-contracts" }
+ipc-control = { path = "../../../crates/ipc-control" }
+ipc-transport = { path = "../../../crates/ipc-transport" }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "~1.51", features = ["macros", "rt", "net"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true

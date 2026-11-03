@@ -24,6 +24,7 @@ memory = { path = "../../crates/memory" }
 background = { path = "../../crates/background" }
 worker = { path = "../../crates/worker" }
 org = { path = "../../crates/org" }
+widget-spec = { path = "../../crates/widget-spec" }
 provider-claude = { path = "../../adapters/provider-claude" }
 policy = { path = "../../crates/policy" }
 plan-domain = { path = "../../crates/plan" }

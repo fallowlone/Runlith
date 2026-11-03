@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-widget-draft-status"
+description = "Enables the widget_draft_status command without any pre-configured scope."
+commands.allow = ["widget_draft_status"]
+
+[[permission]]
+identifier = "deny-widget-draft-status"
+description = "Denies the widget_draft_status command without any pre-configured scope."
+commands.deny = ["widget_draft_status"]

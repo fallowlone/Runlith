@@ -49,10 +49,12 @@ async fn main() -> ExitCode {
         Some("routine") => cmd_routine(args.collect()).await,
         Some("worker") => cmd_worker(args.collect()).await,
         Some("org") => cmd_org(args.collect()).await,
+        Some("widget") => cmd_widget(args.collect()).await,
         Some("daemon") => cmd_daemon(args.collect()).await,
         _ => {
-            eprintln!("usage: agentctl <start|ping|shutdown|daemon|routine|project|task|execution|approval|human-decision|planning|vault|find|memory> ...");
+            eprintln!("usage: agentctl <start|ping|shutdown|daemon|routine|project|task|execution|approval|human-decision|planning|vault|find|memory|widget> ...");
             eprintln!("  {}", vault::USAGE);
+            eprintln!("  {}", agentctl::WIDGET_USAGE);
             eprintln!("  agentctl project create <id> <name>");
             eprintln!("  agentctl project get <id>");
             eprintln!("  agentctl project list");
@@ -1374,6 +1376,59 @@ async fn cmd_org_seal(
             ExitCode::FAILURE
         }
     }
+}
+
+/// `widget draft <text>` waits for the provider; `start`, `status` and `cancel`
+/// expose the job itself.
+#[cfg(unix)]
+async fn cmd_widget(args: Vec<String>) -> ExitCode {
+    const POLL: std::time::Duration = std::time::Duration::from_millis(500);
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+    let endpoint = match resolve_production_endpoint() {
+        Ok(value) => value,
+        Err(error) => return fail(&error),
+    };
+    let (request, wait) = match agentctl::parse_widget_args(&args) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut response =
+        match agentctl::widget_request(&endpoint, spawn_sibling_daemon, request).await {
+            Ok(response) => response,
+            Err(error) => return fail(&error),
+        };
+    let deadline = std::time::Instant::now() + WAIT;
+    while wait && agentctl::widget_is_running(&response) {
+        if std::time::Instant::now() > deadline {
+            eprintln!("agentctl: the widget draft did not finish in time");
+            return ExitCode::FAILURE;
+        }
+        tokio::time::sleep(POLL).await;
+        let status = agentctl::widget_status_request(&response);
+        response = match agentctl::widget_request(&endpoint, spawn_sibling_daemon, status).await {
+            Ok(response) => response,
+            Err(error) => return fail(&error),
+        };
+    }
+    match agentctl::format_widget_response(&response) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("{message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn cmd_widget(_args: Vec<String>) -> ExitCode {
+    eprintln!("agentctl: widget control is unavailable on this build");
+    ExitCode::FAILURE
 }
 
 #[cfg(windows)]

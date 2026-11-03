@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-metric-read"
+description = "Enables the metric_read command without any pre-configured scope."
+commands.allow = ["metric_read"]
+
+[[permission]]
+identifier = "deny-metric-read"
+description = "Denies the metric_read command without any pre-configured scope."
+commands.deny = ["metric_read"]

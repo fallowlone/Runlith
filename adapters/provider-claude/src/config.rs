@@ -91,6 +91,9 @@ pub struct ClaudeConfig {
     /// session is, so the role stops competing with the provider's own
     /// prompt from inside the message body (TASK-0106 D5).
     system_prompt: Option<String>,
+    /// JSON Schema passed as `--json-schema`. Adapter-authored only. The CLI
+    /// retries until the answer fits; callers still validate it (INV-093).
+    json_schema: Option<String>,
     /// Structural proposal-only mode. Emits `--tools ""` plus
     /// `--disallowedTools "mcp__*"`, so the child has no tool to call at
     /// all. Stronger than a permission mode, which only asks the model to
@@ -112,6 +115,7 @@ impl Default for ClaudeConfig {
             permission_mode: None,
             resume_session: None,
             system_prompt: None,
+            json_schema: None,
             proposal_only: false,
             capture_grace: DEFAULT_CAPTURE_GRACE,
         }
@@ -156,6 +160,25 @@ impl ClaudeConfig {
         }
         self.system_prompt = Some(prompt);
         Ok(self)
+    }
+
+    /// Holds the answer to a JSON Schema for this session.
+    pub fn with_json_schema(mut self, schema: impl Into<String>) -> Result<Self, String> {
+        let schema = schema.into();
+        if schema.trim().is_empty() {
+            return Err("json schema must not be blank".to_owned());
+        }
+        if schema.chars().count() > MAX_PROMPT_CHARS {
+            return Err("json schema exceeds the provider prompt bound".to_owned());
+        }
+        self.json_schema = Some(schema);
+        Ok(self)
+    }
+
+    /// JSON Schema the answer is held to, when one is set.
+    #[must_use]
+    pub fn json_schema(&self) -> Option<&str> {
+        self.json_schema.as_deref()
     }
 
     /// Removes every built-in and MCP tool from the child process.

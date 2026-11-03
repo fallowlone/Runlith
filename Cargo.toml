@@ -48,5 +48,6 @@ members = [
     "crates/worker-contract",
     "crates/org",
     "crates/org-contract",
+    "crates/widget-spec",
 ]
 resolver = "2"

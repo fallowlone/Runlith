@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-widget-draft-cancel"
+description = "Enables the widget_draft_cancel command without any pre-configured scope."
+commands.allow = ["widget_draft_cancel"]
+
+[[permission]]
+identifier = "deny-widget-draft-cancel"
+description = "Denies the widget_draft_cancel command without any pre-configured scope."
+commands.deny = ["widget_draft_cancel"]

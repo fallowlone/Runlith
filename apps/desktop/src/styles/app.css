@@ -1,0 +1,36 @@
+/* App-only glue around the shared design system (runlith.css). */
+html, body, #root { height: 100%; margin: 0; }
+body { overflow: hidden; background: #000000; }
+.rl.app { height: 100%; }
+
+/* Inside Tauri the window is transparent: native macOS vibrancy shows between tiles. */
+html:has(.in-tauri) body { background: transparent; }
+.in-tauri .win { background-color: transparent; }
+
+/* Row density setting. */
+.rl[data-density="32"] .tbl .tr:not(.th) { min-height: 32px; }
+.rl[data-density="40"] .tbl .tr:not(.th) { min-height: 40px; }
+.rl[data-density="48"] .tbl .tr:not(.th) { min-height: 48px; }
+
+/* Headings receive programmatic focus after navigation so screen readers announce
+   the new screen. They are not controls, so no ring (WCAG 2.4.7 covers controls). */
+.rl h1[tabindex="-1"]:focus { outline: none; }
+
+.btn[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+select { color: inherit; }
+
+/* Narrow window: the sidebar folds to an icon rail so the content keeps its columns. */
+.nav-label { min-width: 0; }
+@media (max-width: 1240px) {
+  .win { grid-template-columns: 72px minmax(0, 1fr) 340px; }
+  .win.no-agent { grid-template-columns: 72px minmax(0, 1fr); }
+  .side { padding: var(--s-100) var(--s-75); }
+  .lights { justify-content: center; gap: var(--s-50); padding: 0; }
+  .lights i { width: 10px; height: 10px; }
+  .proj { justify-content: center; padding: 0; }
+  .proj-name, .proj > .i { display: none; }
+  .nav a, .navlink, .conn { justify-content: center; padding: 0; }
+  .nav-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .nav .count { display: none; }
+  .nav .badge { position: absolute; top: var(--s-25); right: var(--s-25); min-width: 18px; height: 18px; padding: 0 var(--s-50); }
+}
