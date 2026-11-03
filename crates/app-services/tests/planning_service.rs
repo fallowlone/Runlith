@@ -2710,6 +2710,30 @@ fn accepted_hash(outcome: &PlanningProposalOutcome) -> String {
 }
 
 #[test]
+fn materialized_child_objective_carries_the_parent_objective() {
+    let db = TestDb::new("child-objective");
+    db.service()
+        .propose_decomposition(
+            &TestPlanner::new(ProposalCase::Valid),
+            &branch(),
+            request("child-objective"),
+            &policy(false),
+        )
+        .unwrap();
+    let child = db
+        .store()
+        .get_task(&TaskId::new("node-1").unwrap())
+        .unwrap()
+        .expect("child");
+    assert!(
+        child.objective().contains("planning root"),
+        "child objective must carry the parent objective, got {:?}",
+        child.objective()
+    );
+    assert!(child.objective().contains("node-1"));
+}
+
+#[test]
 fn accepted_decomposition_materializes_planner_child_ready_under_the_parent() {
     let db = TestDb::new("child-materialized-ready");
     let outcome = db
