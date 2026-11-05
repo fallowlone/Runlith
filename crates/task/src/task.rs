@@ -735,7 +735,7 @@ fn validate_acceptance_statements(
         }
         if text.trim().is_empty()
             || text.len() > MAX_ACCEPTANCE_STATEMENT_BYTES
-            || text.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'))
+            || text.chars().any(is_unsafe_text_char)
         {
             return Err(DomainError::input(format!(
                 "acceptance statement for {criterion:?} must be nonblank, at most {MAX_ACCEPTANCE_STATEMENT_BYTES} bytes, single-line, without control or text-direction characters"
@@ -770,9 +770,16 @@ fn bounded_metadata_list(
     Ok(out)
 }
 
+/// Control, line-separator and bidirectional-control characters: never allowed
+/// in text that reaches a provider prompt line.
+fn is_unsafe_text_char(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{2028}' | '\u{2029}' | '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
 fn bounded_metadata_item(field: &str, value: String) -> DomainResult<String> {
     let value = value.trim();
-    if value.is_empty() || value.chars().any(char::is_control) {
+    if value.is_empty() || value.chars().any(is_unsafe_text_char) {
         return Err(DomainError::input(format!(
             "{field} must be non-blank with no control characters"
         )));
