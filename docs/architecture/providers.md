@@ -328,6 +328,19 @@ into the plan environment. A confinement verdict of `Unsupported` refuses
 without probing. The host probe remains for platforms without mandatory
 confinement and for the feature-gated `trusted-host` binding.
 
+Credential exposure in Phase 1: the released OAuth token remains in the
+child's environment for the run. The runner zeroizes its owned secret
+buffer, but Rust's `Command` and the OS environment retain copies that it
+cannot erase. A same-user process may inspect the environment, and code
+inside the provider can read it. A private `CLAUDE_CONFIG_DIR` protects
+against other users; it does not hide a credential file from that same
+provider or its tools. The documented [`CLAUDE_CODE_OAUTH_TOKEN`
+interface](https://code.claude.com/docs/en/env-vars) does not establish a
+file-based handoff for a setup-token. No unmeasured credential-file format
+is written by Runlith. ADR-0039 explicitly accepts this Phase 1 residual;
+removing it requires the separately decided credential-injecting proxy.
+Use a dedicated credential and revoke/replace it after suspected exposure.
+
 Rationale and external corroboration: the surveyed orchestrators and the
 Agent Client Protocol all separate an interactive login phase from the
 working launch, and all represent an unauthenticated provider as a typed
@@ -479,13 +492,27 @@ composition derives that root beside application state and keys the provider
 environment by the existing managed worktree identity, so restart/recovery does
 not invent a second workspace identity.
 
-Provider-native authentication remains provider-owned. For the current Claude
-CLI, the real `HOME`/profile and the POSIX login principal `USER` are together
-the explicit authentication anchor: the CLI resolves its stored credentials
-through the login principal, so a child given `HOME` without `USER` reports
-`Not logged in` and exits with no diagnostic (TASK-0101). Credentials are
-neither copied nor scraped; `USER` carries no credential material and is
-already implied by `HOME`'s path. Ambient API-key/cloud/Git/SSH/provider/plugin
+The runtime namespace is `worktree-v2-sha256-<digest>`, hashing the complete
+absolute managed-worktree path rather than its last component. Distinct
+worktrees named alike therefore get different private HOME/config/XDG/temp
+directories; repeated preparation for the same recorded path reuses them.
+The exact recorded path is retained for identity, without a new canonicalization
+that could change after workspace creation or re-point an historical lease.
+The daemon places this namespace under `provider-environments-v2`, a sibling
+of the legacy base. This prevents a specially named legacy leaf from aliasing
+a new hashed directory. Callers upgrading an independently supplied adapter
+base must likewise select a fresh base. Legacy runtime directories are preserved
+and are not imported: their workspace ownership cannot be proven. Canonical Task,
+Execution, lease and vault state is unchanged. Provider-native sessions kept in
+those legacy directories are not automatically resumed or migrated.
+
+Provider-native authentication remains provider-owned. Governed launches use
+the private HOME/config directories and the brokered credential described in
+[ADR-0039](./adr/ADR-0039-brokered-provider-credential-for-confined-execution.md),
+with the POSIX login principal `USER`. The feature-gated trusted-host fixture
+path can retain the host HOME and USER authentication anchors (TASK-0101).
+Credentials are neither copied nor scraped from host login state; `USER`
+carries no credential material. Ambient API-key/cloud/Git/SSH/provider/plugin
 environment variables are not inherited. `--safe-mode` disables user/project
 customizations as defense in depth. These mechanics grant no authority:
 Policy/approval/Runner remain canonical and unsupported mandatory isolation

@@ -36,7 +36,7 @@ use crate::dto::{
 /// Same budget agentctl uses for business replies.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Upper bound for ids accepted from the webview (trust boundary).
-const MAX_ID_LEN: usize = 128;
+const MAX_ID_LEN: usize = 256;
 
 #[tauri::command]
 pub async fn connection_status() -> ConnectionDto {
@@ -61,28 +61,65 @@ pub async fn connection_status() -> ConnectionDto {
 
 #[tauri::command]
 pub async fn list_projects() -> Result<Vec<ProjectDto>, UiError> {
-    match task_core(task_core_request::Payload::ListProjects(
-        ListProjectsRequest {},
-    ))
-    .await?
-    {
-        task_core_response::Payload::ListProjects(reply) => {
-            Ok(reply.projects.into_iter().map(ProjectDto::from).collect())
+    let mut after_id = String::new();
+    let mut projects = Vec::new();
+    loop {
+        let request = ListProjectsRequest {
+            after_id: after_id.clone(),
+            page_size: ipc_contracts::MAX_LIST_PAGE_ITEMS,
+        };
+        let task_core_response::Payload::ListProjects(reply) =
+            task_core(task_core_request::Payload::ListProjects(request)).await?
+        else {
+            return Err(unexpected_reply("ListProjects"));
+        };
+        if !reply.next_after_id.is_empty()
+            && (reply.next_after_id <= after_id
+                || reply
+                    .projects
+                    .last()
+                    .is_none_or(|last| last.id != reply.next_after_id))
+        {
+            return Err(unexpected_reply("ListProjects cursor"));
         }
-        _ => Err(unexpected_reply("ListProjects")),
+        projects.extend(reply.projects.into_iter().map(ProjectDto::from));
+        if reply.next_after_id.is_empty() {
+            return Ok(projects);
+        }
+        after_id = reply.next_after_id;
     }
 }
 
 #[tauri::command]
 pub async fn list_tasks(project_id: String) -> Result<Vec<TaskDto>, UiError> {
     let project_id = validate_id("project_id", &project_id)?;
-    let request =
-        task_core_request::Payload::ListTasksForProject(ListTasksForProjectRequest { project_id });
-    match task_core(request).await? {
-        task_core_response::Payload::ListTasks(reply) => {
-            Ok(reply.tasks.into_iter().map(TaskDto::from).collect())
+    let mut after_id = String::new();
+    let mut tasks = Vec::new();
+    loop {
+        let request = ListTasksForProjectRequest {
+            project_id: project_id.clone(),
+            after_id: after_id.clone(),
+            page_size: ipc_contracts::MAX_LIST_PAGE_ITEMS,
+        };
+        let task_core_response::Payload::ListTasks(reply) =
+            task_core(task_core_request::Payload::ListTasksForProject(request)).await?
+        else {
+            return Err(unexpected_reply("ListTasksForProject"));
+        };
+        if !reply.next_after_id.is_empty()
+            && (reply.next_after_id <= after_id
+                || reply
+                    .tasks
+                    .last()
+                    .is_none_or(|last| last.id != reply.next_after_id))
+        {
+            return Err(unexpected_reply("ListTasks cursor"));
         }
-        _ => Err(unexpected_reply("ListTasksForProject")),
+        tasks.extend(reply.tasks.into_iter().map(TaskDto::from));
+        if reply.next_after_id.is_empty() {
+            return Ok(tasks);
+        }
+        after_id = reply.next_after_id;
     }
 }
 
@@ -186,10 +223,11 @@ async fn open_session() -> Result<OpenSession<impl AsyncRead + AsyncWrite + Unpi
     let stream = connect(&endpoint)
         .await
         .map_err(|error| transport_error(&error))?;
-    let mut inner = ClientSession::new(
-        ipc_transport::FramedTransport::new(stream),
-        ClientConfig::widget_default(CLIENT_KIND_TAURI_HOST),
-    );
+    let mut config = ClientConfig::widget_default(CLIENT_KIND_TAURI_HOST);
+    config
+        .requested_capabilities
+        .push(ipc_contracts::TASK_LIST_PAGES_V1.to_owned());
+    let mut inner = ClientSession::new(ipc_transport::FramedTransport::new(stream), config);
     let info = inner
         .perform_handshake()
         .await
@@ -211,6 +249,15 @@ async fn task_core(
     let request = TaskCoreRequest {
         payload: Some(payload),
     };
+    if ipc_contracts::is_paged_list_request(&request)
+        && !session
+            .inner
+            .has_capability(ipc_contracts::TASK_LIST_PAGES_V1)
+    {
+        return Err(control_error(&ControlError::UnsupportedCapability(
+            ipc_contracts::TASK_LIST_PAGES_V1.to_owned(),
+        )));
+    }
     let reply = exchange(session.inner, control_request::Payload::TaskCore(request)).await?;
     let control_response::Payload::TaskCore(reply) = reply else {
         return Err(unexpected_reply("TaskCore"));
@@ -264,7 +311,7 @@ fn validate_id(label: &str, value: &str) -> Result<String, UiError> {
     if trimmed.is_empty() || trimmed.len() > MAX_ID_LEN || trimmed.chars().any(char::is_control) {
         return Err(UiError::new(
             UiErrorKind::Invalid,
-            format!("{label} must be 1 to {MAX_ID_LEN} printable characters"),
+            format!("{label} must be 1 to {MAX_ID_LEN} UTF-8 bytes without control characters"),
         ));
     }
     Ok(trimmed.to_owned())
@@ -302,6 +349,7 @@ fn control_error(error: &ControlError) -> UiError {
         ControlError::IncompatibleProtocol { .. }
         | ControlError::HandshakeRejected { .. }
         | ControlError::UnsupportedProtocol { .. }
+        | ControlError::UnsupportedCapability(_)
         | ControlError::UnknownClientKind(_) => {
             UiError::new(UiErrorKind::Incompatible, error.to_string())
         }
@@ -340,6 +388,11 @@ mod tests {
     #[test]
     fn validate_id_trims_and_rejects_empty_long_or_control_input() {
         assert_eq!(validate_id("task_id", "  TASK-0229 ").unwrap(), "TASK-0229");
+        for length in [128, 129, 256] {
+            let id = "x".repeat(length);
+            assert_eq!(validate_id("task_id", &id).unwrap(), id);
+            assert_eq!(validate_id("project_id", &id).unwrap(), id);
+        }
         for bad in ["", "   ", "a\nb", &"x".repeat(MAX_ID_LEN + 1)] {
             let error = validate_id("task_id", bad).unwrap_err();
             assert_eq!(error.kind, UiErrorKind::Invalid, "accepted {bad:?}");

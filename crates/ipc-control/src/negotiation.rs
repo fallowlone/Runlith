@@ -409,7 +409,7 @@ impl ServerConfig {
         Self {
             supported_versions: vec![IPC_PROTOCOL_VERSION_V0, IPC_PROTOCOL_VERSION_V1],
             daemon_build_version: default_daemon_build_version(),
-            supported_capabilities: Vec::new(),
+            supported_capabilities: vec![ipc_contracts::TASK_LIST_PAGES_V1.to_owned()],
         }
     }
 
@@ -598,7 +598,7 @@ impl ServerConfig {
                 ipc_contracts::IPC_PROTOCOL_VERSION_V13,
             ],
             daemon_build_version: default_daemon_build_version(),
-            supported_capabilities: Vec::new(),
+            supported_capabilities: vec![ipc_contracts::TASK_LIST_PAGES_V1.to_owned()],
         }
     }
 
@@ -624,7 +624,7 @@ impl ServerConfig {
                 ipc_contracts::IPC_PROTOCOL_VERSION_V14,
             ],
             daemon_build_version: default_daemon_build_version(),
-            supported_capabilities: Vec::new(),
+            supported_capabilities: vec![ipc_contracts::TASK_LIST_PAGES_V1.to_owned()],
         }
     }
 

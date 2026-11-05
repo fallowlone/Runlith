@@ -78,16 +78,16 @@ fn unauthorized_and_disabled_never_run() {
 }
 
 #[test]
-fn budget_exhaustion_is_terminal() {
+fn run_now_without_executor_is_blocked_and_keeps_budget() {
     let (mut svc, db) = fresh();
     let def = define(&mut svc, 1);
     svc.authorize(&def.id, "operator", 1_000).unwrap();
-    svc.run_now(&def.id, 2_000, "e").unwrap();
-    assert_eq!(svc.get(&def.id).unwrap().state, RoutineState::Exhausted);
-    assert!(matches!(
-        svc.run_now(&def.id, 3_000, "e"),
-        Err(BackgroundError::BudgetExhausted(_)) | Err(BackgroundError::Unauthorized(_))
-    ));
+    let run = svc.run_now(&def.id, 2_000, "e").unwrap();
+    assert_eq!(run.status, RunStatus::Blocked);
+    assert_eq!(run.evidence_ref.as_deref(), Some("no_executor_configured"));
+    let after = svc.get(&def.id).unwrap();
+    assert_eq!(after.state, RoutineState::Authorized);
+    assert_eq!(after.runs_completed, 0);
     std::fs::remove_file(db).ok();
 }
 

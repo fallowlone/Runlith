@@ -137,11 +137,9 @@ pub fn daemon_identity() -> TransportResult<PeerIdentity> {
 
 /// Narrow RAII guard for pipe-client impersonation.
 ///
-/// The normal path calls [`ImpersonationGuard::revert`] explicitly so a
-/// revert failure is observed and fails the connection closed; [`Drop`]
-/// reverts best-effort as a backstop so no exit path — including panics —
-/// leaks an impersonating thread context. No `.await` and no application
-/// work may run while a guard is armed.
+/// Explicit revert and [`Drop`] both terminate the process on failure:
+/// execution cannot continue in an uncertain client context. No `.await`
+/// or application work may run while a guard is armed.
 #[cfg(windows)]
 pub struct ImpersonationGuard {
     armed: bool,
@@ -170,23 +168,15 @@ impl ImpersonationGuard {
         Ok(Self { armed: true })
     }
 
-    /// Reverts to self, checking the result. A revert failure is a severe
-    /// local security failure: the caller must fail the connection closed
-    /// and run no further request processing on this context.
-    pub fn revert(mut self) -> TransportResult<()> {
+    /// Reverts to self or terminates the process, as required by WinAPI.
+    pub fn revert(mut self) {
         use windows_sys::Win32::Security::RevertToSelf;
 
         // Safety: paired with a successful `impersonate` on this thread;
         // disarmed below so `Drop` cannot revert twice.
         let ok = unsafe { RevertToSelf() };
+        require_reverted(ok != 0);
         self.armed = false;
-        if ok == 0 {
-            return Err(TransportError::PeerAuth(format!(
-                "RevertToSelf failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        Ok(())
     }
 }
 
@@ -195,9 +185,8 @@ impl Drop for ImpersonationGuard {
     fn drop(&mut self) {
         if self.armed {
             // Safety: backstop only; normal paths revert explicitly above.
-            unsafe {
-                windows_sys::Win32::Security::RevertToSelf();
-            }
+            let ok = unsafe { windows_sys::Win32::Security::RevertToSelf() };
+            require_reverted(ok != 0);
         }
     }
 }
@@ -214,15 +203,17 @@ pub fn pipe_client_identity(
 ) -> TransportResult<PeerIdentity> {
     let guard = ImpersonationGuard::impersonate(server)?;
     let sid = client_token_sid_bytes();
-    let reverted = guard.revert();
-    // A revert failure dominates: an uncertain thread context must never
-    // continue as though authentication succeeded.
-    let sid = match (sid, reverted) {
-        (Ok(sid), Ok(())) => sid,
-        (Err(error), _) => return Err(error),
-        (Ok(_), Err(error)) => return Err(error),
-    };
+    guard.revert();
+    let sid = sid?;
     Ok(from_sid(sid))
+}
+
+#[cfg(any(windows, test))]
+fn require_reverted(reverted: bool) {
+    if !reverted {
+        eprintln!("runlith: fatal: cannot restore process identity after pipe impersonation");
+        std::process::abort();
+    }
 }
 
 #[cfg(windows)]
@@ -342,5 +333,29 @@ mod tests {
         assert!(same_local_principal(&daemon, &from_sid(test_sid(1))));
         assert!(!same_local_principal(&daemon, &from_sid(test_sid(2))));
         assert!(!same_local_principal(&daemon, &from_sid(vec![1, 1])));
+    }
+
+    #[test]
+    fn revert_failure_stops_the_process() {
+        const CHILD: &str = "RUNLITH_TEST_PIPE_REVERT_FAILURE";
+        if std::env::var_os(CHILD).as_deref() == Some(std::ffi::OsStr::new("1")) {
+            require_reverted(false);
+            return;
+        }
+        require_reverted(true);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "platform::peer::tests::revert_failure_stops_the_process",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "processing continued after a failed revert"
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("cannot restore process identity"));
     }
 }

@@ -91,6 +91,42 @@ fn full_lifecycle_over_sqlite() {
 }
 
 #[test]
+fn failed_supersession_link_rolls_back_state_and_can_be_retried() {
+    let db = fresh_db();
+    let mut svc = MemoryService::new(SqliteStore::open(&db).unwrap());
+    let old = svc
+        .capture(request("old fact", "author"), 1_000)
+        .unwrap()
+        .record;
+    svc.validate(&old.id, "reviewer", 2_000).unwrap();
+    let mut next = request("new fact", "author");
+    next.supersedes = Some(old.id.clone());
+    let next = svc.capture(next, 3_000).unwrap().record;
+    svc.validate(&next.id, "reviewer", 4_000).unwrap();
+    let raw = rusqlite::Connection::open(&db).unwrap();
+    raw.execute_batch(
+        "CREATE TRIGGER reject_supersession BEFORE INSERT ON memory_links
+        BEGIN SELECT RAISE(ABORT, 'link failure'); END;",
+    )
+    .unwrap();
+    assert!(svc.supersede(&old.id, &next.id).is_err());
+    drop(svc);
+    let mut svc = MemoryService::new(SqliteStore::open(&db).unwrap());
+    assert_eq!(svc.get(&old.id).unwrap().trust_state, TrustState::Confirmed);
+    assert!(svc.store().links_from(&next.id).unwrap().is_empty());
+    raw.execute_batch("DROP TRIGGER reject_supersession")
+        .unwrap();
+    assert_eq!(
+        svc.supersede(&old.id, &next.id).unwrap().trust_state,
+        TrustState::Superseded
+    );
+    assert_eq!(svc.store().links_from(&next.id).unwrap().len(), 1);
+    drop(raw);
+    drop(svc);
+    std::fs::remove_file(db).unwrap();
+}
+
+#[test]
 fn secret_capture_and_unknown_id_refuse() {
     let db = fresh_db();
     let mut svc = MemoryService::new(SqliteStore::open(&db).unwrap());

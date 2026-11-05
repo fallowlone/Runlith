@@ -6,6 +6,13 @@
 - Extends: source-of-truth G11 (authorized work continues with UI closed),
   routine/watchdog guidance (§G11 Routine/Pulse Engine + Watchdogs)
 
+Amended 2026-11-04 by
+[ADR-0050](./ADR-0050-os-user-presence-for-local-control.md): explicit
+routine authorization/run requires fresh OS confirmation. Unattended ticks
+record BLOCKED without consuming budget or prompting. Existing in-flight
+work may finish with the UI closed; a prior routine authorization does not
+grant a later unattended execution.
+
 ## Problem
 
 `agentd` is a foreground control server. Nothing defines what may keep

@@ -75,6 +75,34 @@ impl MemoryStorePort for MemStore {
         Ok(())
     }
 
+    fn supersede(
+        &mut self,
+        old_id: &MemoryId,
+        successor_id: &MemoryId,
+    ) -> Result<MemoryRecord, MemoryError> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut old = inner
+            .records
+            .get(old_id)
+            .cloned()
+            .ok_or_else(|| MemoryError::NotFound(old_id.to_string()))?;
+        let successor = inner
+            .records
+            .get(successor_id)
+            .ok_or_else(|| MemoryError::NotFound(successor_id.to_string()))?;
+        old.supersede_by(successor)?;
+        let link = MemoryLink {
+            from: successor_id.clone(),
+            to: old_id.clone(),
+            kind: memory::model::LinkKind::Supersedes,
+        };
+        if !inner.links.contains(&link) {
+            inner.links.push(link);
+        }
+        inner.records.insert(old_id.clone(), old.clone());
+        Ok(old)
+    }
+
     fn link(&mut self, link: &MemoryLink) -> Result<(), MemoryError> {
         let mut inner = self.inner.lock().unwrap();
         if !inner.records.contains_key(&link.from) || !inner.records.contains_key(&link.to) {

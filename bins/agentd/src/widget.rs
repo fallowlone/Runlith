@@ -54,6 +54,8 @@ struct Jobs {
     next_id: u64,
     running: Option<(String, CancelFlag)>,
     finished: VecDeque<(String, DraftResult)>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    draining: bool,
 }
 
 /// Shared by every connection: a draft outlives the request that started it.
@@ -87,6 +89,9 @@ impl WidgetAuthoring {
         let Ok(mut jobs) = self.jobs.lock() else {
             return poisoned();
         };
+        if jobs.draining {
+            return failure(BusinessErrorCode::Conflict, "daemon is draining".to_owned());
+        }
         if jobs.running.is_some() {
             return failure(
                 BusinessErrorCode::Conflict,
@@ -97,7 +102,9 @@ impl WidgetAuthoring {
         let job_id = format!("draft-{}", jobs.next_id);
         let cancel = CancelFlag::fresh();
         jobs.running = Some((job_id.clone(), cancel.clone()));
-        drop(jobs);
+        if let Some(finished) = jobs.worker.take() {
+            let _ = finished.join();
+        }
 
         let shared = Arc::clone(&self.jobs);
         let run = Arc::clone(&self.run);
@@ -116,16 +123,31 @@ impl WidgetAuthoring {
                     }
                 }
             });
-        if spawned.is_err() {
-            if let Ok(mut jobs) = self.jobs.lock() {
+        match spawned {
+            Ok(worker) => jobs.worker = Some(worker),
+            Err(_) => {
                 jobs.running = None;
+                return failure(
+                    BusinessErrorCode::Internal,
+                    "could not start the widget draft".to_owned(),
+                );
             }
-            return failure(
-                BusinessErrorCode::Internal,
-                "could not start the widget draft".to_owned(),
-            );
         }
         status_response(job_id, None)
+    }
+
+    pub(crate) fn shutdown(&self) {
+        let worker = {
+            let mut jobs = self.jobs.lock().unwrap_or_else(|error| error.into_inner());
+            jobs.draining = true;
+            if let Some((_, cancel)) = &jobs.running {
+                cancel.cancel();
+            }
+            jobs.worker.take()
+        };
+        if let Some(worker) = worker {
+            let _ = worker.join();
+        }
     }
 
     fn status(&self, job_id: &str) -> WidgetCoreResponse {
@@ -170,6 +192,10 @@ pub fn dispatch(service: &WidgetAuthoring, request: WidgetCoreRequest) -> Widget
             "empty widget request".to_owned(),
         ),
     }
+}
+
+pub(crate) fn presence_refusal(cause: &'static str) -> WidgetCoreResponse {
+    failure(BusinessErrorCode::UserPresenceRequired, cause.to_owned())
 }
 
 #[must_use]
@@ -487,6 +513,33 @@ mod tests {
         );
         wait_done(&service, &first.job_id);
         job_of(&dispatch(&service, start_request("три")));
+    }
+
+    #[test]
+    fn shutdown_cancels_and_joins_the_worker_and_refuses_new_drafts() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let exited = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&exited);
+        let service = WidgetAuthoring::with_runner(Arc::new(move |_, cancel| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !cancel.is_cancelled() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(cancel.is_cancelled());
+            observed.store(true, Ordering::SeqCst);
+            DraftResult::Cancelled
+        }));
+        let job = job_of(&dispatch(&service, start_request("weather")));
+        service.shutdown();
+        assert!(exited.load(Ordering::SeqCst));
+        assert_eq!(
+            job_of(&status_of(&service, &job.job_id)).state,
+            WidgetDraftState::WidgetDraftCancelled as i32
+        );
+        assert_eq!(
+            error_code(&dispatch(&service, start_request("weather"))),
+            BusinessErrorCode::Conflict as i32
+        );
     }
 
     #[test]

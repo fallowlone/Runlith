@@ -14,6 +14,21 @@ pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/ai_engineering_os.ipc.rs"));
 }
 
+pub const TASK_LIST_PAGES_V1: &str = "task-list-pages-v1";
+pub const MAX_LIST_PAGE_ITEMS: u32 = 256;
+
+pub fn is_paged_list_request(request: &proto::TaskCoreRequest) -> bool {
+    match request.payload.as_ref() {
+        Some(proto::task_core_request::Payload::ListProjects(request)) => {
+            request.page_size > 0 || !request.after_id.is_empty()
+        }
+        Some(proto::task_core_request::Payload::ListTasksForProject(request)) => {
+            request.page_size > 0 || !request.after_id.is_empty()
+        }
+        _ => false,
+    }
+}
+
 /// G1 bootstrap protocol version: handshake, ping, shutdown only.
 /// Frozen history — never removed, never repurposed (ADR-0021).
 pub const IPC_PROTOCOL_VERSION_V0: u32 = 0;

@@ -76,14 +76,7 @@ pub fn dispatch<C: app_services::Clock>(
                 Err(error) => error_response(error),
             }
         }
-        Some(task_core_request::Payload::ListProjects(_)) => match service.list_projects() {
-            Ok(projects) => success(task_core_response::Payload::ListProjects(
-                ListProjectsResponse {
-                    projects: projects.iter().map(project_dto).collect(),
-                },
-            )),
-            Err(error) => error_response(error),
-        },
+        Some(task_core_request::Payload::ListProjects(req)) => list_pages::projects(service, req),
         Some(task_core_request::Payload::CreateTask(req)) => {
             let task = match domain_task(&req.id, &req.project_id, &req.objective) {
                 Ok(task) => task,
@@ -112,16 +105,7 @@ pub fn dispatch<C: app_services::Clock>(
             }
         }
         Some(task_core_request::Payload::ListTasksForProject(req)) => {
-            let id = match ProjectId::new(req.project_id) {
-                Ok(id) => id,
-                Err(error) => return error_response(ServiceError::Domain(error)),
-            };
-            match service.list_tasks_for_project(&id) {
-                Ok(tasks) => success(task_core_response::Payload::ListTasks(ListTasksResponse {
-                    tasks: tasks.iter().map(task_dto).collect(),
-                })),
-                Err(error) => error_response(error),
-            }
+            list_pages::tasks(service, req)
         }
         Some(task_core_request::Payload::AddDependency(req)) => {
             let (task_id, depends_on_id) =
@@ -333,6 +317,8 @@ fn domain_task(id: &str, project_id: &str, objective: &str) -> Result<Task, Serv
     )?)
 }
 
+mod list_pages;
+
 fn project_dto(project: &Project) -> ProjectDto {
     ProjectDto {
         id: project.id().to_string(),
@@ -388,9 +374,27 @@ pub fn vault_unavailable() -> VaultCoreResponse {
 }
 
 fn success(payload: task_core_response::Payload) -> TaskCoreResponse {
-    TaskCoreResponse {
+    use prost::Message;
+    let response = TaskCoreResponse {
         payload: Some(payload),
+    };
+    let envelope = ipc_contracts::proto::ControlResponse {
+        payload: Some(ipc_contracts::proto::control_response::Payload::TaskCore(
+            response,
+        )),
+    };
+    if envelope.encoded_len() > ipc_transport::MAX_FRAME_BYTES {
+        return TaskCoreResponse { payload: Some(task_core_response::Payload::Error(BusinessError {
+            code: BusinessErrorCode::Internal as i32,
+            message: "reply exceeds the IPC frame limit; a mutation may have committed, so inspect its identity before retrying".to_owned(),
+        })) };
     }
+    let Some(ipc_contracts::proto::control_response::Payload::TaskCore(response)) =
+        envelope.payload
+    else {
+        unreachable!()
+    };
+    response
 }
 
 fn error_response(error: ServiceError) -> TaskCoreResponse {

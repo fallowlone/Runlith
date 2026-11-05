@@ -164,9 +164,10 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"h7 isola
         !workdir.join("data/sessions.db").exists(),
         "provider-native ambient state must not dirty the managed worktree"
     );
-    let runtime_state = environment_base
-        .join(workdir.file_name().unwrap())
-        .join("data/sessions.db");
+    let runtime_state = provider_claude::ProviderEnvironment::prepare(&workdir, &environment_base)
+        .expect("provider environment for the recorded worktree")
+        .xdg_data_home()
+        .join("sessions.db");
     assert!(
         runtime_state.is_file(),
         "provider writable state must land in the isolated provider environment"

@@ -13,6 +13,7 @@ use org::model::{
     Sensitivity, SyncEnvelope, TeamId, TeamRecord, UsageEntry, UsageKind,
 };
 use org::port::OrgStorePort;
+use zeroize::Zeroizing;
 
 fn error_response(code: &str, detail: &str) -> OrgCoreResponse {
     OrgCoreResponse {
@@ -59,24 +60,26 @@ fn hex_decode<const N: usize>(raw: &str, what: &str) -> Result<[u8; N], OrgError
             N * 2
         )));
     }
-    let bytes: Vec<u8> = (0..N)
-        .map(|i| {
-            u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16)
-                .map_err(|_| OrgError::InvalidInput(format!("{what} is not hex")))
-        })
-        .collect::<Result<Vec<u8>, OrgError>>()?;
-    bytes
-        .try_into()
-        .map_err(|_| OrgError::InvalidInput(format!("{what} has wrong length")))
+    let mut bytes = Zeroizing::new([0; N]);
+    for (byte, pair) in bytes.iter_mut().zip(raw.as_bytes().chunks_exact(2)) {
+        let pair = std::str::from_utf8(pair)
+            .map_err(|_| OrgError::InvalidInput(format!("{what} is not hex")))?;
+        *byte = u8::from_str_radix(pair, 16)
+            .map_err(|_| OrgError::InvalidInput(format!("{what} is not hex")))?;
+    }
+    Ok(*bytes)
 }
 
 fn hex_decode_vec(raw: &str, what: &str) -> Result<Vec<u8>, OrgError> {
     if !raw.len().is_multiple_of(2) {
         return Err(OrgError::InvalidInput(format!("{what} is not hex")));
     }
-    (0..raw.len() / 2)
-        .map(|i| {
-            u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16)
+    raw.as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair)
+                .map_err(|_| OrgError::InvalidInput(format!("{what} is not hex")))?;
+            u8::from_str_radix(pair, 16)
                 .map_err(|_| OrgError::InvalidInput(format!("{what} is not hex")))
         })
         .collect()
@@ -399,6 +402,7 @@ pub fn dispatch<S: OrgStorePort>(
             }
         }
         Some(org_core_request::Payload::AcceptEnvelope(req)) => {
+            let encoded_key = Zeroizing::new(req.org_key_hex);
             let Some(msg) = req.envelope else {
                 return error_response("invalid_input", "missing envelope");
             };
@@ -406,8 +410,8 @@ pub fn dispatch<S: OrgStorePort>(
                 Ok(v) => v,
                 Err(e) => return map_error(&e),
             };
-            let org_key = match hex_decode::<32>(&req.org_key_hex, "org_key") {
-                Ok(v) => v,
+            let org_key = match hex_decode::<32>(&encoded_key, "org_key") {
+                Ok(v) => Zeroizing::new(v),
                 Err(e) => return map_error(&e),
             };
             match service.accept_envelope(&envelope, &org_key) {
@@ -443,4 +447,35 @@ fn build_envelope(
         signature: hex_decode::<64>(&msg.signature_hex, "signature")?,
         created_at: msg.created_at,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_ascii_wire_hex_is_an_error_without_panicking() {
+        for input in [
+            "\u{1f4a5}".repeat(16),
+            "a\u{3042}".repeat(16),
+            "\u{e9}".repeat(32),
+        ] {
+            assert!(hex_decode::<32>(&input, "org_key").is_err());
+            assert!(hex_decode_vec(&input, "ciphertext").is_err());
+        }
+    }
+
+    #[test]
+    fn wire_hex_preserves_binary_and_refuses_invalid_digits() {
+        assert_eq!(hex_decode::<3>("00Ff80", "key").unwrap(), [0, 255, 128]);
+        assert_eq!(
+            hex_decode_vec("00Ff80", "ciphertext").unwrap(),
+            [0, 255, 128]
+        );
+        for input in ["0", "xx", "00zz"] {
+            assert!(hex_decode_vec(input, "ciphertext").is_err());
+        }
+        assert!(hex_decode::<3>("00ff", "key").is_err());
+        assert!(hex_decode::<3>("00ffzz", "key").is_err());
+    }
 }

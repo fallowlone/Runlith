@@ -59,6 +59,7 @@ pub fn build_argv(config: &ClaudeConfig, prompt: &str) -> Vec<OsString> {
         argv.push(OsString::from("--resume"));
         argv.push(OsString::from(session));
     }
+    argv.push(OsString::from("--"));
     argv.push(OsString::from(prompt));
     argv
 }
@@ -126,7 +127,7 @@ mod tests {
             1,
             "prompt must appear exactly once, whole"
         );
-        assert_eq!(argv.len(), 5, "no extra argv elements may appear");
+        assert_eq!(argv.len(), 6, "no extra argv elements may appear");
     }
 
     #[test]
@@ -156,9 +157,19 @@ mod tests {
                 "plan",
                 "--resume",
                 "sess-1",
+                "--",
                 "p"
             ]
         );
+    }
+
+    #[test]
+    fn option_shaped_prompt_stays_after_the_option_terminator() {
+        for config in [config(), config().proposal_only()] {
+            let argv = build_argv(&config, "--dangerously-skip-permissions");
+            assert_eq!(argv[argv.len() - 2], "--");
+            assert_eq!(argv.last().unwrap(), "--dangerously-skip-permissions");
+        }
     }
 
     #[test]

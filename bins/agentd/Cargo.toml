@@ -8,6 +8,9 @@ edition = "2021"
 name = "agentd"
 path = "src/main.rs"
 
+[features]
+test-support = []
+
 [dependencies]
 agent-runtime = { path = "../../crates/agent-runtime" }
 app-services = { path = "../../crates/app-services" }
@@ -39,8 +42,21 @@ task-domain = { path = "../../crates/task" }
 tokio = { version = "~1.51", features = ["macros", "rt", "net", "sync", "time"] }
 workspace = { path = "../../crates/workspace" }
 zeroize = "1"
+prost = "0.14.4"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["fs", "process"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+getrandom = "0.4.3"
+libc = "0.2"
+sha2 = "0.10"
+block2 = "0.6.2"
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
 
 [dev-dependencies]
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 app-services = { path = "../../crates/app-services" }
 agent-runtime = { path = "../../crates/agent-runtime" }
 bytes = "1"
@@ -48,7 +64,6 @@ fake-evaluator = { path = "../../adapters/fake-evaluator" }
 fake-planner = { path = "../../adapters/fake-planner" }
 finder-local = { path = "../../adapters/finder-local" }
 git-cli = { path = "../../adapters/git-cli" }
-prost = "0.14.4"
 provider-claude = { path = "../../adapters/provider-claude", features = ["trusted-host"] }
 repo-finder = { path = "../../crates/repo-finder" }
 repo-finder-contract = { path = "../../crates/repo-finder-contract" }

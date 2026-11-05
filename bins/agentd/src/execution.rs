@@ -154,6 +154,9 @@ mod production_platform {
             // `RunnerLaunchPurpose` value this module's own call sites
             // pass — never a caller/IPC string.
             RunnerLaunchPurpose::CandidateInput => backend.with_candidate_ancestor_metadata_grant(),
+            RunnerLaunchPurpose::CandidateHelper => backend
+                .with_candidate_ancestor_metadata_grant()
+                .with_parent_signature_queries(),
             RunnerLaunchPurpose::Provider => backend,
         };
         Ok(Arc::new(backend))
@@ -202,6 +205,7 @@ pub(crate) enum RunnerLaunchPurpose {
     /// Candidate-input Git-read, snapshot-write, or evaluator-read-only
     /// launches: the narrow ancestor metadata/existence grant applies.
     CandidateInput,
+    CandidateHelper,
 }
 
 pub(crate) fn production_runner_backend(
@@ -552,13 +556,6 @@ impl ExecutionComposition {
         )
     }
 
-    /// Test-only builder: overrides the binary the candidate-input
-    /// evaluator re-execs. Production never calls this — the field stays
-    /// `None` and resolves `current_exe()`, the real running `agentd`
-    /// binary. Under `cargo test`, `current_exe()` is the test-harness
-    /// binary (no `__candidate-*` dispatch), so a test exercising the real
-    /// snapshot-write/evaluate re-exec must supply the actual built
-    /// `agentd` binary here.
     #[cfg(test)]
     #[must_use]
     fn with_candidate_evaluator_executable_override(mut self, path: PathBuf) -> Self {
@@ -1049,7 +1046,11 @@ fn prepare_candidate_process(
     let backend = production_runner_backend(
         request.support_read.clone(),
         request.support_write.clone(),
-        RunnerLaunchPurpose::CandidateInput,
+        if request.operation == CandidateG6Operation::GitRead {
+            RunnerLaunchPurpose::CandidateInput
+        } else {
+            RunnerLaunchPurpose::CandidateHelper
+        },
     )?;
     let spec = ProcessSecuritySpec::new(
         workspace.clone(),
@@ -2730,6 +2731,34 @@ fn run_candidate_process(
                 | (u8::from(axes.requires(runner::IsolationAxis::Process)) << 2),
             environment_isolated: launch.environment_isolated(),
         };
+        let helper = operation != CandidateG6Operation::GitRead;
+        #[cfg(not(target_os = "macos"))]
+        if helper {
+            return Err(CheckError::infra("candidate helper authorization unavailable"));
+        }
+        #[cfg(target_os = "macos")]
+        let mut permit = if helper {
+            Some(crate::candidate_authorization::Permit::issue(&args, &input)
+                .map_err(|_| CheckError::infra("candidate permit creation failed"))?)
+        } else {
+            None
+        };
+        #[cfg(target_os = "macos")]
+        let (prefix, stderr) = match permit.as_mut() {
+            Some(permit) => (permit.prefix.clone(), permit.take_stdio()
+                .map_err(|_| CheckError::infra("candidate permit channel unavailable"))?),
+            None => (Vec::new(), std::process::Stdio::piped()),
+        };
+        #[cfg(not(target_os = "macos"))]
+        let (prefix, stderr) = (Vec::<u8>::new(), std::process::Stdio::piped());
+        #[cfg(all(test, target_os = "macos"))]
+        let fixture = helper && Path::new(&program) == std::env::current_exe()
+            .map_err(|_| CheckError::infra("test executable unavailable"))?;
+        #[cfg(all(test, target_os = "macos"))]
+        let args = if fixture {
+            vec!["--exact".into(), "candidate_helper::tests::subprocess".into(),
+                "--ignored".into(), "--nocapture".into()]
+        } else { args };
         let command = launch
             .bind(runner::CommandSpec::new(program, args))
             .map_err(|error| CheckError::infra(format!("Runner refused candidate command: {error}")))?;
@@ -2738,7 +2767,9 @@ fn run_candidate_process(
                 wire.current_dir(&workspace)
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped());
+                    .stderr(stderr);
+                #[cfg(unix)]
+                wire.process_group(0);
             })
             .map_err(|_| CheckError::infra("candidate process spawn failed"))?;
         let mut child_stdin = child
@@ -2749,37 +2780,59 @@ fn run_candidate_process(
             .stdout
             .take()
             .ok_or_else(|| CheckError::infra("candidate process stdout unavailable"))?;
-        let child_stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| CheckError::infra("candidate process stderr unavailable"))?;
-        let stdin_writer = std::thread::spawn(move || {
+        let child_stderr = child.stderr.take();
+        let (stdin_tx, stdin_rx) = std::sync::mpsc::channel();
+        let (stdout_tx, stdout_rx) = std::sync::mpsc::channel();
+        let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+        let capture_limit = max_stdout;
+        #[cfg(all(test, target_os = "macos"))]
+        let capture_limit = capture_limit + if fixture { 1024 } else { 0 };
+        std::thread::spawn(move || {
             use std::io::Write;
-            child_stdin.write_all(&input)
+            let result = child_stdin.write_all(&prefix).and_then(|()| child_stdin.write_all(&input));
+            let _ = stdin_tx.send(result);
         });
-        let stdout_reader = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             use std::io::Read;
             let mut bytes = Vec::new();
-            child_stdout.take(max_stdout + 1).read_to_end(&mut bytes)?;
-            Ok::<_, std::io::Error>(bytes)
+            let result = child_stdout.take(capture_limit + 1).read_to_end(&mut bytes).map(|_| bytes);
+            let _ = stdout_tx.send(result);
         });
-        let stderr_reader = std::thread::spawn(move || {
-            use std::io::Read;
-            let mut bytes = Vec::new();
-            child_stderr.take(MAX_STDERR + 1).read_to_end(&mut bytes)?;
-            Ok::<_, std::io::Error>(bytes)
-        });
+        if let Some(child_stderr) = child_stderr {
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                let result = child_stderr.take(MAX_STDERR + 1).read_to_end(&mut bytes).map(|_| bytes);
+                let _ = stderr_tx.send(result);
+            });
+        } else {
+            #[cfg(target_os = "macos")]
+            if let Some(permit) = permit {
+                std::thread::spawn(move || {
+                    let _ = stderr_tx.send(permit.serve().map(|()| Vec::new()));
+                });
+            } else {
+                runner::kill_process_tree(&mut child);
+                return Err(CheckError::infra("candidate permit missing"));
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                runner::kill_process_tree(&mut child);
+                return Err(CheckError::infra("candidate stderr unavailable"));
+            }
+        }
         let deadline = std::time::Instant::now() + TIMEOUT;
         let status = loop {
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|_| CheckError::infra("candidate process wait failed"))?
-            {
-                break status;
+            match runner::try_wait_process_tree(&mut child) {
+                Ok(Some(status)) => break status,
+                Ok(None) => {}
+                Err(_) => {
+                    runner::kill_process_tree(&mut child);
+                    return Err(CheckError::infra("candidate process wait failed"));
+                }
             }
             if std::time::Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
+                runner::kill_process_tree(&mut child);
                 return Err(CheckError::Content("candidate process timed out".to_owned()));
             }
             // F18: sleep only until the deadline instead of a fixed 10ms,
@@ -2787,18 +2840,30 @@ fn run_candidate_process(
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             std::thread::sleep(remaining.min(Duration::from_millis(10)));
         };
-        stdin_writer
-            .join()
+        runner::kill_process_tree(&mut child);
+        let capture_deadline = std::time::Instant::now() + Duration::from_millis(500);
+        stdin_rx
+            .recv_timeout(capture_deadline.saturating_duration_since(std::time::Instant::now()))
             .map_err(|_| CheckError::infra("candidate process stdin task failed"))?
             .map_err(|_| CheckError::Content("candidate process input write failed".to_owned()))?;
-        let stdout = stdout_reader
-            .join()
+        let stdout = stdout_rx
+            .recv_timeout(capture_deadline.saturating_duration_since(std::time::Instant::now()))
             .map_err(|_| CheckError::infra("candidate process stdout task failed"))?
             .map_err(|_| CheckError::infra("candidate process stdout read failed"))?;
-        let stderr = stderr_reader
-            .join()
+        let stderr = stderr_rx
+            .recv_timeout(capture_deadline.saturating_duration_since(std::time::Instant::now()))
             .map_err(|_| CheckError::infra("candidate process stderr task failed"))?
-            .map_err(|_| CheckError::infra("candidate process stderr read failed"))?;
+            .map_err(|error| CheckError::infra(format!(
+                "candidate process stderr/channel failed ({:?}, os={:?})",
+                error.kind(), error.raw_os_error()
+            )))?;
+        #[cfg(all(test, target_os = "macos"))]
+        let stdout = if fixture {
+            let marker = crate::candidate_authorization::OUTPUT_MARKER;
+            let offset = stdout.windows(marker.len()).position(|window| window == marker)
+                .ok_or_else(|| CheckError::infra("candidate fixture did not authenticate"))?;
+            stdout[offset + marker.len()..].to_vec()
+        } else { stdout };
         if !status.success() || stdout.len() as u64 > max_stdout || stderr.len() as u64 > MAX_STDERR
         {
             let exit_info = if let Some(code) = status.code() {
@@ -4732,7 +4797,7 @@ fn ensure_managed_root(db_path: &Path) -> Result<ManagedWorkspaceRoot, String> {
 
 /// Provider-writable runtime state lives beside other application-owned
 /// execution state, never under the managed Git worktree. The Claude adapter
-/// adds the durable worktree leaf below this base so restart/resume reuses the
+/// hashes the full durable worktree path below this base so restart/resume reuses the
 /// same environment without re-deriving historical workspace identity.
 fn provider_environment_base(db_path: &Path) -> Result<PathBuf, String> {
     let parent = db_path.parent().ok_or_else(|| {
@@ -4742,7 +4807,7 @@ fn provider_environment_base(db_path: &Path) -> Result<PathBuf, String> {
         )
     })?;
     Ok(parent
-        .join("provider-environments")
+        .join("provider-environments-v2")
         .join(provider_claude::CLAUDE_PROVIDER_REF))
 }
 
@@ -5058,7 +5123,10 @@ fn handle_cancel_no_attempt(
     }
 }
 
-fn exec_error(code: BusinessErrorCode, message: impl Into<String>) -> ExecutionCoreResponse {
+pub(crate) fn exec_error(
+    code: BusinessErrorCode,
+    message: impl Into<String>,
+) -> ExecutionCoreResponse {
     ExecutionCoreResponse {
         payload: Some(execution_core_response::Payload::Error(BusinessError {
             code: code as i32,
@@ -5138,7 +5206,14 @@ mod tests {
                 "runlith-agentd-exec-{suite}-{id}-{}",
                 std::process::id()
             ));
-            std::fs::create_dir_all(dir.join("db")).expect("sandbox db dir");
+            let mut builder = std::fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder.create(dir.join("db")).expect("sandbox db dir");
             let db = dir.join("db").join("state.sqlite3");
             let repo = dir.join("repo");
             std::fs::create_dir_all(&repo).expect("sandbox repo dir");
@@ -7202,6 +7277,79 @@ mod tests {
     }
 
     #[test]
+    fn provider_runtime_namespace_does_not_adopt_legacy_state() {
+        let sandbox = Sandbox::named("provider-runtime-migration");
+        let base = provider_environment_base(&sandbox.db).unwrap();
+        let environment =
+            provider_claude::ProviderEnvironment::prepare(&sandbox.repo, &base).unwrap();
+        let legacy = sandbox
+            .db
+            .parent()
+            .unwrap()
+            .join("provider-environments")
+            .join(provider_claude::CLAUDE_PROVIDER_REF)
+            .join(environment.runtime_root().file_name().unwrap());
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(legacy.join("home")).unwrap();
+        std::fs::write(legacy.join("home/legacy-session"), b"unbound old session").unwrap();
+        let reopened = provider_claude::ProviderEnvironment::prepare(&sandbox.repo, &base).unwrap();
+        assert!(!reopened.runtime_root().join("home/legacy-session").exists());
+        assert_eq!(environment.runtime_root(), reopened.runtime_root());
+        assert_eq!(
+            std::fs::read(legacy.join("home/legacy-session")).unwrap(),
+            b"unbound old session"
+        );
+    }
+
+    #[test]
+    fn governed_candidate_helper_consumes_private_launch_permit() {
+        let sandbox = Sandbox::named("candidate-helper-permit");
+        seed_ready(&sandbox.db, "P-CANDIDATE-PERMIT", "T-CANDIDATE-PERMIT");
+        let parent = sandbox.dir.join("snapshots");
+        std::fs::create_dir(&parent).unwrap();
+        let input = encode_snapshot_files(&[evaluation::CandidateFile {
+            path: b"proof.txt".to_vec(),
+            mode: 0o100644,
+            git_oid: None,
+            bytes: b"governed".to_vec(),
+        }])
+        .unwrap();
+        run_candidate_process(
+            &sandbox.db,
+            CandidateProcessRequest {
+                operation: CandidateG6Operation::SnapshotWrite,
+                task_id: "T-CANDIDATE-PERMIT".to_owned(),
+                execution_id: "E-CANDIDATE-PERMIT".to_owned(),
+                attempt_id: "A-CANDIDATE-PERMIT".to_owned(),
+                invocation_id: "candidate-helper-permit-test".to_owned(),
+                workspace: parent.clone(),
+                filesystem_roots: vec![parent.clone()],
+                executable: candidate_test_evaluator_executable(),
+                args: vec![
+                    "__candidate-snapshot-write".into(),
+                    parent.as_os_str().into(),
+                    "candidate-governed".into(),
+                ],
+                input,
+                support_read: vec![parent.clone()],
+                support_write: vec![parent.clone()],
+                max_stdout: 0,
+            },
+        )
+        .expect("G6 and Runner governed helper");
+        assert_eq!(
+            std::fs::read(parent.join("candidate-snapshots/candidate-governed/proof.txt")).unwrap(),
+            b"governed"
+        );
+    }
+
+    #[test]
     fn candidate_object_source_modes_are_checked_through_g6_and_runner() {
         let sandbox = Sandbox::named("candidate-object-sources");
         seed_ready(&sandbox.db, "P-CANDIDATE-SOURCES", "T-CANDIDATE-SOURCES");
@@ -7280,33 +7428,8 @@ mod tests {
         selected
     }
 
-    /// Locates the real `agentd` binary next to this test binary
-    /// (`target/<profile>/deps/agentd-<hash>` -> `target/<profile>/agentd`).
-    /// Production candidate evaluation re-execs the running `agentd`
-    /// binary itself (with hidden `__candidate-*` arguments) to
-    /// materialize and evaluate the sealed snapshot; under `cargo test
-    /// --lib`, `std::env::current_exe()` resolves to the test-harness
-    /// binary instead, which has no such dispatch. Tests exercising that
-    /// real re-exec path must run `cargo build --bin agentd` first and
-    /// pass this path as `CandidateInputEvaluator::evaluator_executable_override`.
     fn candidate_test_evaluator_executable() -> PathBuf {
-        let mut path = std::env::current_exe().expect("test binary path is resolvable");
-        path.pop();
-        if path.ends_with("deps") {
-            path.pop();
-        }
-        let bin_name = if cfg!(windows) {
-            "agentd.exe"
-        } else {
-            "agentd"
-        };
-        let bin = path.join(bin_name);
-        assert!(
-            bin.is_file(),
-            "expected the real agentd binary at {bin:?}; run `cargo build --bin agentd` first"
-        );
-        bin.canonicalize()
-            .expect("agentd binary path canonicalizes")
+        std::env::current_exe().expect("test binary path is resolvable")
     }
 
     /// Builds the trusted exact-param candidate-input requirement through

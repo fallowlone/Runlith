@@ -687,6 +687,22 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture 
             TaskState::Completed,
             "verified path completes via evaluation"
         );
+        drop(orchestration);
+        let reopened = env.orchestration();
+        let history = reopened.tasks().list_events_for_task(&task_id).unwrap();
+        let submitted = history
+            .iter()
+            .find(|event| event.fact.event_type == storage_sqlite::EventType::Submitted)
+            .unwrap();
+        assert_eq!(
+            submitted.fact.reason.as_deref(),
+            Some("fixture worked\nNPM_AUTH=[redacted]")
+        );
+        assert!(history.iter().all(|event| event
+            .fact
+            .reason
+            .as_deref()
+            .is_none_or(|text| !text.contains("fixture-sensitive-value"))));
     }
 
     #[test]
@@ -751,9 +767,11 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture 
             status.stdout.is_empty(),
             "provider runtime state must not dirty the managed worktree"
         );
-        let provider_state = environment_base
-            .join(worktree.file_name().expect("managed worktree leaf"))
-            .join("data/sessions.db");
+        let provider_state =
+            provider_claude::ProviderEnvironment::prepare(worktree, &environment_base)
+                .expect("provider environment for the durable worktree")
+                .xdg_data_home()
+                .join("sessions.db");
         assert!(
             provider_state.is_file(),
             "provider state must remain outside Git"

@@ -246,6 +246,17 @@ impl<C: Clock> TaskService<C> {
         Ok(self.store.list_projects()?)
     }
 
+    pub fn list_projects_page(
+        &self,
+        after_id: &str,
+        limit: u32,
+        byte_budget: usize,
+    ) -> ServiceResult<Vec<Project>> {
+        Ok(self
+            .store
+            .list_projects_page(after_id, limit, byte_budget)?)
+    }
+
     /// Reads one task by id. Read-only.
     pub fn get_task(&self, id: &TaskId) -> ServiceResult<Option<Task>> {
         Ok(self.store.get_task(id)?)
@@ -254,6 +265,18 @@ impl<C: Clock> TaskService<C> {
     /// Lists every task of one project in id order. Read-only.
     pub fn list_tasks_for_project(&self, project_id: &ProjectId) -> ServiceResult<Vec<Task>> {
         Ok(self.store.list_tasks_for_project(project_id)?)
+    }
+
+    pub fn list_task_summaries_page(
+        &self,
+        project_id: &ProjectId,
+        after_id: &str,
+        limit: u32,
+        byte_budget: usize,
+    ) -> ServiceResult<Vec<storage_sqlite::TaskListEntry>> {
+        Ok(self
+            .store
+            .list_task_summaries_page(project_id, after_id, limit, byte_budget)?)
     }
 
     /// Lists the direct dependencies of one task in id order. Read-only.
@@ -768,7 +791,7 @@ impl<C: Clock> TaskService<C> {
             project_id: Some(next.project_id().clone()),
             from_state: Some(from),
             to_state: Some(to),
-            reason,
+            reason: reason.map(|text| crate::secret_redaction::redact_text(&text)),
             // One trusted request mints both ids: the chain it belongs to
             // (correlation) and the request itself as the direct cause
             // (causation). Distinct values, real references — never derived

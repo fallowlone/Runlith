@@ -149,4 +149,6 @@ message ShutdownRequest {}
 
 // Acknowledgement of a shutdown request. Not a guarantee about
 // shutdown timing or process teardown semantics.
-message ShutdownResponse {}
+message ShutdownResponse {
+  optional string denial_reason = 1;
+}

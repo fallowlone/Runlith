@@ -40,18 +40,10 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      # The job runs repository-authored code (build scripts, ~1100 tests), so
-      # it keeps no git credential afterwards. The @v4 tag is mutable; it is
-      # not pinned to a SHA because this change was authored without network
-      # access to resolve one. Blast radius is a read-only token on an
-      # ephemeral runner with no secrets.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
 
-      # The workspace declares neither a rust-toolchain file nor an MSRV, so
-      # the CI contract is pinned here. Local development is unpinned; bump
-      # this deliberately rather than letting the runner's default drift.
       - name: Pin toolchain
         run: |
           rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
@@ -71,6 +63,12 @@ jobs:
       # run should report the whole failure set, not abort at the first binary.
       # Real-provider smokes stay ignored — they need RUNLITH_CLAUDE_SMOKE=1 and
       # an authenticated Claude CLI, neither of which exists on a runner.
+      - name: Build command-line binaries
+        run: cargo build --locked --bin agentd --bin agentctl
+
+      - name: Build process-test daemon with explicit test confirmation
+        run: cargo build --locked -p agentctl --example confirmed-daemon-fixture
+
       - name: Test
         run: cargo test --workspace --locked --no-fail-fast
 
@@ -86,7 +84,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
 
@@ -102,22 +100,25 @@ jobs:
       - name: Cycle-guard lock semantics (windows)
         run: cargo test -p storage-sqlite --locked cycle_guard
 
+      - name: Native IPC transport and SID validation (windows)
+        run: cargo test -p ipc-transport --locked
+
   verify-desktop:
     # apps/desktop is the Tauri client's web layer (G16). Playwright runs the
     # production build in WebKit with labelled demo data (no Tauri runtime),
     # plus axe accessibility checks. macOS because the shipped target is macOS.
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     defaults:
       run:
         working-directory: apps/desktop
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 24
           cache: npm
@@ -132,6 +133,20 @@ jobs:
 
       - name: Data tests
         run: npm run test:data
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
+
+      - name: Native shell format
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - name: Native shell lint
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+
+      - name: Native shell tests
+        env:
+          TS_RS_EXPORT_DIR: ${{ runner.temp }}/runlith-bindings
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
       - name: Install WebKit
         run: npx playwright install webkit

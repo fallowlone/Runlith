@@ -64,6 +64,21 @@ impl RoutineStorePort for InMemory {
         inner.runs.insert(run.id.clone(), run.clone());
         Ok(())
     }
+    fn finish_run(
+        &mut self,
+        def: &RoutineDefinition,
+        run: &RoutineRun,
+    ) -> Result<(), BackgroundError> {
+        def.revalidate()?;
+        run.revalidate()?;
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.defs.contains_key(&def.id) || !inner.runs.contains_key(&run.id) {
+            return Err(BackgroundError::NotFound(run.id.to_string()));
+        }
+        inner.defs.insert(def.id.clone(), def.clone());
+        inner.runs.insert(run.id.clone(), run.clone());
+        Ok(())
+    }
     fn load_run(&self, id: &RunId) -> Result<Option<RoutineRun>, BackgroundError> {
         Ok(self.inner.lock().unwrap().runs.get(id).cloned())
     }

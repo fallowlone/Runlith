@@ -11,5 +11,8 @@ path = "src/lib.rs"
 repo-finder = { path = "../../crates/repo-finder" }
 ignore = "0.4"
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["fs"] }
+
 [dev-dependencies]
 repo-finder-contract = { path = "../../crates/repo-finder-contract" }

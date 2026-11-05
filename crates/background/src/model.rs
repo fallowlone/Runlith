@@ -254,6 +254,12 @@ impl RoutineDefinition {
             && self.runs_completed < self.budget_max_runs
     }
 
+    /// Advances the schedule after a non-executed (blocked) run without
+    /// consuming budget, so the routine is not re-blocked every tick.
+    pub fn record_blocked(&mut self, now: u64) {
+        self.next_run_at = now.saturating_add(self.interval_seconds.saturating_mul(1000));
+    }
+
     /// Records one completed run; advances schedule, may exhaust (B-4).
     pub fn record_completion(&mut self, now: u64) -> Result<(), BackgroundError> {
         if self.runs_completed >= self.budget_max_runs {
@@ -318,6 +324,12 @@ impl RoutineRun {
     }
 
     pub fn block(&mut self, now: u64) -> Result<(), BackgroundError> {
+        self.finish(RunStatus::Blocked, now)
+    }
+
+    /// Blocked with a machine-readable reason kept in `evidence_ref`.
+    pub fn block_with_reason(&mut self, reason: &str, now: u64) -> Result<(), BackgroundError> {
+        self.evidence_ref = Some(bounded(reason, "evidence_ref", MAX_TEXT_CHARS)?);
         self.finish(RunStatus::Blocked, now)
     }
 

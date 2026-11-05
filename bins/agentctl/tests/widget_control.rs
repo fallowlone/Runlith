@@ -45,7 +45,8 @@ async fn connection_status_stays_quick_during_a_long_draft() {
     std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 
     let config = agentd::DaemonConfig::with_execution(root.join("db").join("state.sqlite3"))
-        .with_provider_executable(provider);
+        .with_provider_executable(provider)
+        .with_confirmed_user_presence_for_tests();
     let daemon = {
         let endpoint = endpoint.clone();
         tokio::spawn(async move { agentd::run_on_endpoint(&endpoint, config).await })

@@ -95,7 +95,13 @@ pub fn resolve_revision(
     let (output, oid) = run_git_text(
         executable,
         &root,
-        &["rev-parse", "--verify", "--quiet", candidate.as_str()],
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            candidate.as_str(),
+        ],
     )?;
     if !output.status.success() {
         return Err(WorkspaceFailure::InvalidRevision {

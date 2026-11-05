@@ -11,6 +11,7 @@
 //! its refresh interval, and a rate limit stops all sources until it resets.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ const API_HOST: &str = "api.github.com";
 const API_BASE: &str = "https://api.github.com";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CACHE_BYTES: u64 = 2 * 1024 * 1024;
 /// GitHub asks for at least a minute after a secondary limit without a header.
 const DEFAULT_LIMIT_WAIT_SECONDS: u64 = 60;
 /// Timers drift: a poll a moment early must still count as due.
@@ -118,10 +120,10 @@ fn limit_wait(status: u16, headers: &HeaderMap, now_seconds: u64) -> Option<u64>
 async fn bounded_body(mut response: reqwest::Response) -> Option<Vec<u8>> {
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.ok()? {
-        body.extend_from_slice(&chunk);
-        if body.len() > MAX_BODY_BYTES {
+        if chunk.len() > MAX_BODY_BYTES.saturating_sub(body.len()) {
             return None;
         }
+        body.extend_from_slice(&chunk);
     }
     Some(body)
 }
@@ -195,9 +197,16 @@ struct State {
 /// One per app: the lock is what keeps requests serial.
 pub struct LiveMetrics {
     state: Mutex<State>,
+    outbound: Mutex<()>,
     client: reqwest::Client,
     base: String,
     cache_path: Option<PathBuf>,
+}
+
+fn same_api_origin(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some(API_HOST)
+        && url.port_or_known_default() == Some(443)
 }
 
 fn build_client(https_only: bool) -> reqwest::Result<reqwest::Client> {
@@ -206,8 +215,7 @@ fn build_client(https_only: bool) -> reqwest::Result<reqwest::Client> {
         .timeout(REQUEST_TIMEOUT)
         .https_only(https_only)
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            let same_host = attempt.url().host_str() == Some(API_HOST);
-            if same_host && attempt.previous().len() < 3 {
+            if same_api_origin(attempt.url()) && attempt.previous().len() < 3 {
                 attempt.follow()
             } else {
                 attempt.stop()
@@ -220,6 +228,7 @@ impl LiveMetrics {
     pub fn new(cache_path: PathBuf) -> reqwest::Result<Self> {
         Ok(Self {
             state: Mutex::new(State::default()),
+            outbound: Mutex::new(()),
             client: build_client(true)?,
             base: API_BASE.to_owned(),
             cache_path: Some(cache_path),
@@ -235,70 +244,88 @@ impl LiveMetrics {
         now_ms: u64,
     ) -> MetricDto {
         let key = format!("{}:{}", source.kind.as_wire(), source.repo.as_str());
-        let mut state = self.state.lock().await;
-        self.load_once(&mut state, now_ms);
+        let mut outbound = None;
+        loop {
+            let mut state = self.state.lock().await;
+            self.load_once(&mut state, now_ms);
 
-        let answer = |state: &State, status: MetricState, retry_at_ms: Option<u64>| {
-            let cached = state.values.get(&key);
-            MetricDto {
-                value: cached.map(|c| c.value),
-                fetched_at_ms: cached.map(|c| c.fetched_at_ms),
-                state: status,
-                retry_at_ms,
-            }
-        };
-        if state.blocked_until_ms > now_ms {
-            let until = state.blocked_until_ms;
-            return answer(&state, MetricState::RateLimited, Some(until));
-        }
-        let interval_ms = u64::from(every.get()) * 1000;
-        if let Some((asked_at, status)) = state.last_asked.get(&key).copied() {
-            if now_ms.saturating_sub(asked_at) + INTERVAL_SLACK_MS < interval_ms {
-                return answer(&state, status, Some(asked_at + interval_ms));
-            }
-        }
-
-        let etag = state.values.get(&key).and_then(|c| c.etag.clone());
-        let fetched = fetch(
-            &self.client,
-            &self.base,
-            source,
-            etag.as_deref(),
-            now_ms / 1000,
-        )
-        .await;
-        let status = match fetched {
-            Fetched::Value { value, etag } => {
-                let cached = Cached {
-                    value,
-                    etag,
-                    fetched_at_ms: now_ms,
-                };
-                state.values.insert(key.clone(), cached);
-                self.persist(&state);
-                MetricState::Fresh
-            }
-            Fetched::NotModified => {
-                if let Some(cached) = state.values.get_mut(&key) {
-                    cached.fetched_at_ms = now_ms;
+            let answer = |state: &State, status: MetricState, retry_at_ms: Option<u64>| {
+                let cached = state.values.get(&key);
+                MetricDto {
+                    value: cached.map(|c| c.value),
+                    fetched_at_ms: cached.map(|c| c.fetched_at_ms),
+                    state: status,
+                    retry_at_ms,
                 }
-                self.persist(&state);
-                MetricState::Fresh
-            }
-            Fetched::NotFound => {
-                state.values.remove(&key);
-                self.persist(&state);
-                MetricState::NotFound
-            }
-            Fetched::RateLimited { wait_seconds } => {
-                state.blocked_until_ms = now_ms + wait_seconds * 1000;
+            };
+            if state.blocked_until_ms > now_ms {
                 let until = state.blocked_until_ms;
                 return answer(&state, MetricState::RateLimited, Some(until));
             }
-            Fetched::Unreachable => MetricState::Offline,
-        };
-        state.last_asked.insert(key.clone(), (now_ms, status));
-        answer(&state, status, Some(now_ms + interval_ms))
+            let interval_ms = u64::from(every.get()) * 1000;
+            if let Some((asked_at, status)) = state.last_asked.get(&key).copied() {
+                if now_ms.saturating_sub(asked_at) + INTERVAL_SLACK_MS < interval_ms {
+                    return answer(&state, status, Some(asked_at + interval_ms));
+                }
+            }
+
+            if outbound.is_none() {
+                drop(state);
+                outbound = Some(self.outbound.lock().await);
+                continue;
+            }
+            let etag = state.values.get(&key).and_then(|c| c.etag.clone());
+            drop(state);
+            let fetched = fetch(
+                &self.client,
+                &self.base,
+                source,
+                etag.as_deref(),
+                now_ms / 1000,
+            )
+            .await;
+            let persist = matches!(
+                &fetched,
+                Fetched::Value { .. } | Fetched::NotModified | Fetched::NotFound
+            );
+            let mut state = self.state.lock().await;
+            let status = match fetched {
+                Fetched::Value { value, etag } => {
+                    let cached = Cached {
+                        value,
+                        etag,
+                        fetched_at_ms: now_ms,
+                    };
+                    state.values.insert(key.clone(), cached);
+                    MetricState::Fresh
+                }
+                Fetched::NotModified => {
+                    if let Some(cached) = state.values.get_mut(&key) {
+                        cached.fetched_at_ms = now_ms;
+                    }
+                    MetricState::Fresh
+                }
+                Fetched::NotFound => {
+                    state.values.remove(&key);
+                    MetricState::NotFound
+                }
+                Fetched::RateLimited { wait_seconds } => {
+                    state.blocked_until_ms =
+                        now_ms.saturating_add(wait_seconds.saturating_mul(1000));
+                    let until = state.blocked_until_ms;
+                    return answer(&state, MetricState::RateLimited, Some(until));
+                }
+                Fetched::Unreachable => MetricState::Offline,
+            };
+            state.last_asked.insert(key.clone(), (now_ms, status));
+            let response = answer(&state, status, Some(now_ms.saturating_add(interval_ms)));
+            let values = persist.then(|| state.values.clone());
+            drop(state);
+            if let Some(values) = values {
+                self.persist(values).await;
+            }
+            return response;
+        }
     }
 
     fn load_once(&self, state: &mut State, now_ms: u64) {
@@ -306,11 +333,26 @@ impl LiveMetrics {
             return;
         }
         let Some(path) = &self.cache_path else { return };
-        let Ok(text) = std::fs::read_to_string(path) else {
+        let Ok(file) = std::fs::File::open(path) else {
             return;
         };
+        if !file
+            .metadata()
+            .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= MAX_CACHE_BYTES)
+        {
+            return;
+        }
+        let mut bytes = Vec::new();
+        if file
+            .take(MAX_CACHE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() as u64 > MAX_CACHE_BYTES
+        {
+            return;
+        }
         // A broken cache only costs a request.
-        if let Ok(values) = serde_json::from_str::<HashMap<String, Cached>>(&text) {
+        if let Ok(values) = serde_json::from_slice::<HashMap<String, Cached>>(&bytes) {
             // The interval holds across restarts. A time from the future only
             // means the clock moved, so it does not count as having asked.
             state.last_asked = values
@@ -322,14 +364,22 @@ impl LiveMetrics {
         }
     }
 
-    fn persist(&self, state: &State) {
-        let Some(path) = &self.cache_path else { return };
-        let Ok(bytes) = serde_json::to_vec(&state.values) else {
+    async fn persist(&self, values: HashMap<String, Cached>) {
+        let Some(path) = self.cache_path.clone() else {
             return;
         };
-        if let Err(error) = write_atomic(path, &bytes) {
-            eprintln!("runlith: could not save the widget value cache: {error}");
-        }
+        let _ = tokio::task::spawn_blocking(move || {
+            let Ok(bytes) = serde_json::to_vec(&values) else {
+                return;
+            };
+            if bytes.len() as u64 > MAX_CACHE_BYTES {
+                return;
+            }
+            if let Err(error) = write_atomic(&path, &bytes) {
+                eprintln!("runlith: could not save the widget value cache: {error}");
+            }
+        })
+        .await;
     }
 }
 
@@ -386,9 +436,24 @@ mod tests {
     fn metrics(base: String) -> LiveMetrics {
         LiveMetrics {
             state: Mutex::new(State::default()),
+            outbound: Mutex::new(()),
             client: build_client(false).expect("client"),
             base,
             cache_path: None,
+        }
+    }
+
+    #[test]
+    fn redirects_stay_on_the_exact_https_api_origin() {
+        for (url, allowed) in [
+            ("https://api.github.com/repos/a/b", true),
+            ("https://api.github.com:443/other", true),
+            ("http://api.github.com/", false),
+            ("https://api.github.com:444/", false),
+            ("https://github.com/", false),
+            ("https://api.github.com.example.invalid/", false),
+        ] {
+            assert_eq!(same_api_origin(&url.parse().unwrap()), allowed, "{url}");
         }
     }
 
@@ -429,6 +494,77 @@ mod tests {
             .expect("runtime");
         let result = runtime.block_on(client.get("http://example.com/").send());
         assert!(result.is_err(), "https_only must refuse http");
+    }
+
+    #[tokio::test]
+    async fn cached_source_answers_while_another_source_is_waiting_for_http() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first = http("200 OK", "", r#"{"stargazers_count":7}"#);
+        let second = http("200 OK", "", r#"{"stargazers_count":20}"#);
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            stream.write_all(first.as_bytes()).unwrap();
+            drop(stream);
+            let (mut stream, _) = listener.accept().unwrap();
+            assert!(stream.read(&mut request).unwrap() > 0);
+            let _ = started_tx.send(());
+            release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            stream.write_all(second.as_bytes()).unwrap();
+        });
+        let metrics = Arc::new(metrics(base));
+        let cached = source(SourceType::GithubRepoStars, "cached/repo");
+        assert_eq!(
+            metrics.read(&cached, every(300), 1_000_000).await.value,
+            Some(7)
+        );
+        let pending = {
+            let metrics = metrics.clone();
+            tokio::spawn(async move {
+                metrics
+                    .read(
+                        &source(SourceType::GithubRepoStars, "new/repo"),
+                        every(300),
+                        1_000_001,
+                    )
+                    .await
+            })
+        };
+        started_rx.await.unwrap();
+        let answer = tokio::time::timeout(
+            Duration::from_millis(200),
+            metrics.read(&cached, every(300), 1_000_002),
+        )
+        .await;
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            answer
+                .expect("cached read waited for another HTTP request")
+                .value,
+            Some(7)
+        );
+        assert_eq!(pending.await.unwrap().value, Some(20));
+    }
+
+    #[test]
+    fn oversized_cache_is_ignored_before_deserialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_CACHE_BYTES + 1)
+            .unwrap();
+        let metrics = LiveMetrics {
+            cache_path: Some(path),
+            ..metrics("http://127.0.0.1".to_owned())
+        };
+        let mut state = State::default();
+        metrics.load_once(&mut state, 1000);
+        assert!(state.loaded && state.values.is_empty() && state.last_asked.is_empty());
     }
 
     #[tokio::test]

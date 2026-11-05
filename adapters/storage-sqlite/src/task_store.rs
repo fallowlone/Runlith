@@ -35,6 +35,14 @@ pub struct SqliteStore {
     connection: Connection,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskListEntry {
+    pub id: TaskId,
+    pub project_id: ProjectId,
+    pub objective: String,
+    pub state: TaskState,
+}
+
 /// One recorded binding proof consumption (ADR-0036 IMPL-C): the
 /// presence nonce that authorized binding one criterion of one task.
 /// At most one row per (task, criterion) — the durable AlreadyBound.
@@ -193,6 +201,36 @@ impl SqliteStore {
         Ok(projects)
     }
 
+    pub fn list_projects_page(
+        &self,
+        after_id: &str,
+        limit: u32,
+        byte_budget: usize,
+    ) -> StorageResult<Vec<Project>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT id, name FROM projects WHERE id > ?1 ORDER BY id LIMIT ?2")?;
+        let rows = statement.query_map(params![after_id, limit], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut projects = Vec::new();
+        let mut bytes = 0usize;
+        for row in rows {
+            let (id, name) = row?;
+            bytes = bytes.saturating_add(id.len()).saturating_add(name.len());
+            let id = ProjectId::new(id)
+                .map_err(|error| StorageError::DomainReconstruction(error.to_string()))?;
+            projects.push(
+                Project::new(id, name)
+                    .map_err(|error| StorageError::DomainReconstruction(error.to_string()))?,
+            );
+            if bytes > byte_budget {
+                break;
+            }
+        }
+        Ok(projects)
+    }
+
     // -- tasks ----------------------------------------------------------
 
     /// Persists a new validated task with its metadata and dependency
@@ -263,6 +301,49 @@ impl SqliteStore {
     /// Lists every stored task of one project, fully hydrated, in id order.
     pub fn list_tasks_for_project(&self, project_id: &ProjectId) -> StorageResult<Vec<Task>> {
         list_project_tasks(&self.connection, project_id)
+    }
+
+    pub fn list_task_summaries_page(
+        &self,
+        project_id: &ProjectId,
+        after_id: &str,
+        limit: u32,
+        byte_budget: usize,
+    ) -> StorageResult<Vec<TaskListEntry>> {
+        let mut statement = self.connection.prepare("SELECT id, project_id, objective, state FROM tasks WHERE project_id=?1 AND id > ?2 ORDER BY id LIMIT ?3")?;
+        let rows = statement.query_map(params![project_id.as_str(), after_id, limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut tasks = Vec::new();
+        let mut bytes = 0usize;
+        for row in rows {
+            let (id, project_id, objective, state) = row?;
+            let id = TaskId::new(id)
+                .map_err(|error| StorageError::DomainReconstruction(error.to_string()))?;
+            let project_id = ProjectId::new(project_id)
+                .map_err(|error| StorageError::DomainReconstruction(error.to_string()))?;
+            let task = Task::draft(id, project_id, objective)
+                .map_err(|error| StorageError::DomainReconstruction(error.to_string()))?;
+            bytes = bytes
+                .saturating_add(task.id().as_str().len())
+                .saturating_add(task.project_id().as_str().len())
+                .saturating_add(task.objective().len());
+            tasks.push(TaskListEntry {
+                id: task.id().clone(),
+                project_id: task.project_id().clone(),
+                objective: task.objective().to_owned(),
+                state: decode_state(&state)?,
+            });
+            if bytes > byte_budget {
+                break;
+            }
+        }
+        Ok(tasks)
     }
 
     /// Persists a validated task, inserting or replacing its stored image

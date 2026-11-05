@@ -33,6 +33,12 @@ pub trait MemoryStorePort {
     /// `NotFound` when absent; the record must revalidate.
     fn update(&mut self, record: &MemoryRecord) -> Result<(), MemoryError>;
 
+    fn supersede(
+        &mut self,
+        old: &MemoryId,
+        successor: &MemoryId,
+    ) -> Result<MemoryRecord, MemoryError>;
+
     /// Records a memory-to-memory link. Both ends must exist.
     fn link(&mut self, link: &MemoryLink) -> Result<(), MemoryError>;
 

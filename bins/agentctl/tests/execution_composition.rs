@@ -101,7 +101,8 @@ esac
         let endpoint = self.endpoint.clone();
         let db = self.db.clone();
         tokio::spawn(async move {
-            let config = agentd::DaemonConfig::with_execution(db);
+            let config =
+                agentd::DaemonConfig::with_execution(db).with_confirmed_user_presence_for_tests();
             let config = match provider {
                 Some(exe) => config.with_provider_executable(exe),
                 None => config,
@@ -720,15 +721,9 @@ async fn control_only_daemon_reports_execution_unavailable() {
     let sandbox = Sandbox::new("nounavailable");
     let endpoint = sandbox.endpoint.clone();
     let daemon = tokio::spawn(async move {
-        agentd::run_on_endpoint(
-            &endpoint,
-            agentd::DaemonConfig {
-                server_config: ipc_control::ServerConfig::g5_default(),
-                database_path: None,
-                provider_executable: None,
-            },
-        )
-        .await
+        let mut config = agentd::DaemonConfig::g1_default();
+        config.server_config = ipc_control::ServerConfig::g5_default();
+        agentd::run_on_endpoint(&endpoint, config).await
     });
     wait_ready(&sandbox.endpoint).await;
     // v2 handshake succeeds (version gate passes), handling answers

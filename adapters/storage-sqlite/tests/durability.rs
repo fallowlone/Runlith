@@ -1184,18 +1184,11 @@ fn invalid_persisted_identifiers_fail_reconstruction() {
     let db = TestDb::new("corrupt-ids");
     {
         let connection = rusqlite::Connection::open(&db.path).unwrap();
+        connection.execute_batch(MIGRATIONS_THROUGH_16[0]).unwrap();
         connection
             .execute_batch(
                 "PRAGMA foreign_keys = OFF;
              PRAGMA user_version = 1;
-             CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT NOT NULL);
-             CREATE TABLE IF NOT EXISTS tasks (
-                 id TEXT PRIMARY KEY, project_id TEXT NOT NULL, objective TEXT NOT NULL,
-                 parent_id TEXT NULL, state TEXT NOT NULL, kind TEXT NULL, risk TEXT NULL);
-             CREATE TABLE IF NOT EXISTS task_strings (
-                 task_id TEXT NOT NULL REFERENCES tasks (id),
-                 slot TEXT NOT NULL, position INTEGER NOT NULL, value TEXT NOT NULL,
-                 PRIMARY KEY (task_id, slot, position));
              INSERT INTO projects (id, name) VALUES ('', 'blank id');
              INSERT INTO tasks (id, project_id, objective, state)
                  VALUES ('T-1', '', 'objective', 'DRAFT');",

@@ -12,5 +12,8 @@ path = "src/lib.rs"
 evaluation = { path = "../../crates/evaluation" }
 sha2 = "0.10"
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["fs"] }
+
 [dev-dependencies]
 effect-capture-contract = { path = "../../crates/effect-capture-contract" }

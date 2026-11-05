@@ -322,6 +322,7 @@ pub struct ClientSession<T> {
     config: ClientConfig,
     state: SessionState,
     negotiated_version: Option<u32>,
+    accepted_capabilities: Vec<String>,
 }
 
 /// Server side of the bootstrap control protocol.
@@ -346,6 +347,7 @@ where
             config,
             state: SessionState::AwaitingHandshake,
             negotiated_version: None,
+            accepted_capabilities: Vec::new(),
         }
     }
 
@@ -359,6 +361,14 @@ where
     #[must_use]
     pub fn negotiated_version(&self) -> Option<u32> {
         self.negotiated_version
+    }
+
+    pub fn has_capability(&self, capability: &str) -> bool {
+        self.is_ready()
+            && self
+                .accepted_capabilities
+                .iter()
+                .any(|accepted| accepted == capability)
     }
 
     /// Reports whether this session negotiated business (G2 `task_core`)
@@ -502,6 +512,17 @@ where
                         accepted.selected_protocol_version
                     )));
                 }
+                if accepted
+                    .accepted_capabilities
+                    .iter()
+                    .any(|capability| !self.config.requested_capabilities.contains(capability))
+                {
+                    return self.fail(ControlError::InvalidHandshake(
+                        "daemon accepted an unrequested capability".to_owned(),
+                    ));
+                }
+                self.accepted_capabilities
+                    .clone_from(&accepted.accepted_capabilities);
                 self.state = SessionState::Ready;
                 self.negotiated_version = Some(accepted.selected_protocol_version);
                 Ok(HandshakeAcceptedInfo {
@@ -830,6 +851,22 @@ where
             Err(error) => return self.fail(error.into()),
         }
         self.state = SessionState::Terminated;
+        Ok(())
+    }
+
+    pub async fn respond_shutdown_denied(&mut self, reason: &str) -> ControlResult<()> {
+        self.require_ready()?;
+        let frame = Bytes::from(
+            ControlResponse {
+                payload: Some(control_response::Payload::Shutdown(ShutdownResponse {
+                    denial_reason: Some(reason.to_owned()),
+                })),
+            }
+            .encode_to_vec(),
+        );
+        if let Err(error) = self.transport.write_frame(frame).await {
+            return self.fail(error.into());
+        }
         Ok(())
     }
 
@@ -1251,7 +1288,9 @@ fn ping_response_frame() -> Bytes {
 fn shutdown_response_frame() -> Bytes {
     Bytes::from(
         ControlResponse {
-            payload: Some(control_response::Payload::Shutdown(ShutdownResponse {})),
+            payload: Some(control_response::Payload::Shutdown(
+                ShutdownResponse::default(),
+            )),
         }
         .encode_to_vec(),
     )

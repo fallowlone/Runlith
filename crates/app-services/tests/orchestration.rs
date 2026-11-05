@@ -293,6 +293,170 @@ fn verified_end_to_end_flow_survives_db_reopen() {
 }
 
 #[test]
+fn provider_secrets_are_redacted_before_journal_and_attempt_storage() {
+    const SECRET: &str = "short-sensitive-value";
+    const TEXT: &str = "result\nDOCKER_HUB_PAT=short-sensitive-value";
+    struct EchoExecutor(bool);
+    struct RedactedEvaluator;
+    impl EvaluationPort for RedactedEvaluator {
+        fn evaluate(
+            &self,
+            request: &app_services::EvaluationRequest,
+        ) -> evaluation::EvaluationResult<app_services::EvaluationVerdict> {
+            assert_eq!(request.summary, "result\nDOCKER_HUB_PAT=[redacted]");
+            Ok(app_services::EvaluationVerdict::Verified)
+        }
+
+        fn revalidate_before_completion(
+            &self,
+            request: &app_services::EvaluationRequest,
+        ) -> evaluation::EvaluationResult<()> {
+            assert!(!request.summary.contains(SECRET));
+            Ok(())
+        }
+    }
+    impl ExecutionPort for EchoExecutor {
+        fn provider_ref(&self) -> ProviderRef {
+            ProviderRef::new("echo-provider").unwrap()
+        }
+
+        fn execute(&self, _work: &WorkItem) -> Result<WorkEvidence, ExecutionProblem> {
+            if self.0 {
+                Ok(WorkEvidence {
+                    summary: TEXT.to_owned(),
+                    evidence_ref: "evidence:echo".to_owned(),
+                    partial: false,
+                })
+            } else {
+                Err(ExecutionProblem::Failed {
+                    detail: TEXT.to_owned(),
+                })
+            }
+        }
+    }
+    for succeeds in [true, false] {
+        let db = TestDb::new("redacted-provider");
+        let mut service = db.orchestration();
+        let task_id = seed_ready(&mut service, "P-REDACT", "T-REDACT");
+        let outcome = service
+            .schedule(
+                &task_id,
+                ids("E-REDACT", "A-REDACT"),
+                &EchoExecutor(succeeds),
+                &RedactedEvaluator,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            matches!(
+                outcome,
+                OrchestrationOutcome::ExecutionSucceededAndVerified { .. }
+            ),
+            succeeds
+        );
+        drop(service);
+        let tasks = db.tasks();
+        let runtime = db.runtime();
+        let attempt = runtime
+            .get_attempt(&AttemptId::new("A-REDACT").unwrap())
+            .unwrap()
+            .unwrap();
+        let detail = attempt.detail().unwrap();
+        assert!(
+            !detail.contains(SECRET),
+            "provider detail reached durable storage"
+        );
+        let history = tasks.list_events_for_task(&task_id).unwrap();
+        assert!(
+            history.iter().all(|event| event
+                .fact
+                .reason
+                .as_deref()
+                .is_none_or(|reason| !reason.contains(SECRET))),
+            "provider secret reached journal"
+        );
+        if succeeds {
+            let submitted = history
+                .iter()
+                .find(|event| event.fact.event_type == EventType::Submitted)
+                .unwrap();
+            assert_eq!(
+                submitted.fact.reason.as_deref(),
+                Some("result\nDOCKER_HUB_PAT=[redacted]")
+            );
+            assert_eq!(attempt.outcome(), Some(AttemptOutcome::Succeeded));
+        } else {
+            assert!(detail.contains("DOCKER_HUB_PAT=[redacted]"));
+            assert_eq!(attempt.outcome(), Some(AttemptOutcome::Failed));
+            assert!(!history
+                .iter()
+                .any(|event| event.fact.event_type == EventType::Submitted));
+        }
+    }
+}
+
+#[test]
+fn credential_shaped_evidence_reference_is_never_forwarded_to_evaluation() {
+    struct CredentialReference<'a>(&'a str);
+    impl ExecutionPort for CredentialReference<'_> {
+        fn provider_ref(&self) -> ProviderRef {
+            ProviderRef::new("reference-fixture").unwrap()
+        }
+        fn execute(&self, _work: &WorkItem) -> Result<WorkEvidence, ExecutionProblem> {
+            Ok(WorkEvidence {
+                summary: "completed fixture".to_owned(),
+                evidence_ref: self.0.to_owned(),
+                partial: false,
+            })
+        }
+    }
+    struct UnreachableEvaluator;
+    impl EvaluationPort for UnreachableEvaluator {
+        fn evaluate(
+            &self,
+            _request: &app_services::EvaluationRequest,
+        ) -> evaluation::EvaluationResult<app_services::EvaluationVerdict> {
+            panic!("credential-shaped reference reached independent evaluation");
+        }
+    }
+    for reference in [
+        "claude:session:NPM_AUTH=fixture-reference-value",
+        "claude:session:eyJhbGciOiJub25lIn0.e30.Zg",
+    ] {
+        let db = TestDb::new("credential-reference");
+        let mut service = db.orchestration();
+        let task = seed_ready(&mut service, "P-REF", "T-REF");
+        let outcome = service
+            .schedule(
+                &task,
+                ids("E-REF", "A-REF"),
+                &CredentialReference(reference),
+                &UnreachableEvaluator,
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            OrchestrationOutcome::ExecutionFailed { .. }
+        ));
+        drop(service);
+        let attempt = db
+            .runtime()
+            .get_attempt(&AttemptId::new("A-REF").unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(attempt.outcome(), Some(AttemptOutcome::Failed));
+        assert!(!attempt.detail().unwrap().contains(reference));
+        assert!(!db
+            .tasks()
+            .list_events_for_task(&task)
+            .unwrap()
+            .iter()
+            .any(|event| event.fact.event_type == EventType::Submitted));
+    }
+}
+
+#[test]
 fn production_orchestration_revalidates_before_verification_succeeded() {
     let db = TestDb::new("completion-revalidation-order");
     let mut service = db.orchestration();

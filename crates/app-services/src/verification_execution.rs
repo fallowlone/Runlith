@@ -211,6 +211,8 @@ impl<C: crate::Clock + Clone> VerificationRunner<C> {
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped());
+                #[cfg(unix)]
+                wire.process_group(0);
             })
             .map_err(|_| VerificationExecutionError::SpawnFailed)?;
         let outcome = wait_bounded(&mut child, request.timeout, request.per_stream_cap);
@@ -432,39 +434,36 @@ fn wait_bounded(
     });
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
-        match child.try_wait() {
+        match runner::try_wait_process_tree(child) {
             Ok(Some(status)) => break ChildStatus::Exited(status),
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    runner::kill_process_tree(child);
                     break ChildStatus::TimedOut;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                runner::kill_process_tree(child);
                 break ChildStatus::TimedOut;
             }
         }
     };
-    // Exited children close their pipes, so the drains always finish;
-    // killed children may leave orphaned grandchildren holding them,
-    // so the timeout path only grants a short collection grace.
+    runner::kill_process_tree(child);
     let grace = std::time::Duration::from_millis(500);
-    let stdout = match status {
-        ChildStatus::Exited(_) => stdout_rx.recv().unwrap_or_default(),
-        ChildStatus::TimedOut => stdout_rx.recv_timeout(grace).unwrap_or_default(),
-    };
-    let stderr = match status {
-        ChildStatus::Exited(_) => stderr_rx.recv().unwrap_or_default(),
-        ChildStatus::TimedOut => stderr_rx.recv_timeout(grace).unwrap_or_default(),
+    let capture_deadline = std::time::Instant::now() + grace;
+    let stdout = stdout_rx.recv_timeout(grace);
+    let stderr = stderr_rx
+        .recv_timeout(capture_deadline.saturating_duration_since(std::time::Instant::now()));
+    let status = if stdout.is_err() || stderr.is_err() {
+        ChildStatus::TimedOut
+    } else {
+        status
     };
     ChildOutcome {
         status,
-        stdout,
-        stderr,
+        stdout: stdout.unwrap_or_default(),
+        stderr: stderr.unwrap_or_default(),
     }
 }
 
@@ -500,6 +499,51 @@ fn digest_text(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::verification_levels::{derive_commands, Ecosystem, VerificationLevel};
+
+    #[cfg(unix)]
+    #[test]
+    fn wrapper_exit_does_not_wait_for_pipe_holding_descendants() {
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 3 & exit 0"])
+            .process_group(0)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let outcome = wait_bounded(&mut child, std::time::Duration::from_secs(5), 1024);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(matches!(outcome.status, ChildStatus::Exited(status) if status.success()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_stops_descendants_before_they_can_write() {
+        use std::os::unix::process::CommandExt;
+        let marker = std::env::temp_dir().join(format!(
+            "runlith-verifier-descendant-{}",
+            std::process::id()
+        ));
+        let mut child = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "(sleep 0.3; printf leaked > \"$1\") & sleep 3",
+                "fixture",
+            ])
+            .arg(&marker)
+            .process_group(0)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let outcome = wait_bounded(&mut child, std::time::Duration::from_millis(50), 1024);
+        assert!(matches!(outcome.status, ChildStatus::TimedOut));
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let leaked = marker.exists();
+        let _ = std::fs::remove_file(&marker);
+        assert!(!leaked);
+    }
 
     fn plan_with(
         ecosystem: Ecosystem,

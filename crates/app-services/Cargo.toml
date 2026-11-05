@@ -31,6 +31,7 @@ sha2 = "0.10"
 repo-finder = { path = "../repo-finder" }
 
 [dev-dependencies]
+storage-sqlite = { path = "../../adapters/storage-sqlite", features = ["test-support"] }
 background-contract = { path = "../background-contract" }
 worker-contract = { path = "../worker-contract" }
 fake-agent = { path = "../../adapters/fake-agent" }

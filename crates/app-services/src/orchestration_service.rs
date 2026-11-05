@@ -879,6 +879,17 @@ impl<C: Clock> OrchestrationService<C> {
         evaluator: &impl EvaluationPort,
         current_policy: Option<&str>,
     ) -> ServiceResult<OrchestrationOutcome> {
+        let behavior = behavior.and_then(|evidence| {
+            if crate::secret_redaction::redact_text(&evidence.evidence_ref) != evidence.evidence_ref
+            {
+                Err(scheduler::ExecutionProblem::Failed {
+                    detail: "provider evidence reference contains credential-shaped text"
+                        .to_owned(),
+                })
+            } else {
+                Ok(evidence)
+            }
+        });
         // -- conclude the Attempt exactly once -------------------------------
         let WorkItem {
             task_id,
@@ -909,6 +920,7 @@ impl<C: Clock> OrchestrationService<C> {
                 summary,
                 evidence_ref,
             } => {
+                let summary = crate::secret_redaction::redact_text(&summary);
                 self.runtime.conclude_attempt(
                     execution_id,
                     attempt_id,

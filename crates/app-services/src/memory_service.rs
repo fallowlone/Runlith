@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use memory::mint::mint_memory_id;
 use memory::model::{
-    AnchorFingerprint, LinkKind, MemoryError, MemoryId, MemoryKind, MemoryLink, MemoryRecord,
+    AnchorFingerprint, MemoryError, MemoryId, MemoryKind, MemoryRecord,
     MemorySensitivity as Sensitivity, SourceRef,
 };
 use memory::port::{CaptureOutcome, MemoryStorePort};
@@ -127,23 +127,12 @@ impl<S: MemoryStorePort> MemoryService<S> {
     }
 
     /// SUPERSEDE: successor must already be captured and confirmed.
-    /// Persists the state change plus the SUPERSEDES link atomically
-    /// at the service level (two store calls, each transactional).
     pub fn supersede(
         &mut self,
         old_id: &MemoryId,
         successor_id: &MemoryId,
     ) -> Result<MemoryRecord, MemoryError> {
-        let mut old = self.get(old_id)?;
-        let successor = self.get(successor_id)?;
-        old.supersede_by(&successor)?;
-        self.store.update(&old)?;
-        self.store.link(&MemoryLink {
-            from: successor_id.clone(),
-            to: old_id.clone(),
-            kind: LinkKind::Supersedes,
-        })?;
-        Ok(old)
+        self.store.supersede(old_id, successor_id)
     }
 
     /// ARCHIVE: retire a record (terminal, history retained).

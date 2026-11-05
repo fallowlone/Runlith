@@ -25,7 +25,25 @@ pub fn unavailable() -> RoutineCoreResponse {
     error_response("unavailable", "background composition is not available")
 }
 
-fn map_error(error: &BackgroundError) -> RoutineCoreResponse {
+pub(crate) fn presence_refusal(cause: &str) -> RoutineCoreResponse {
+    error_response("user_presence_required", cause)
+}
+
+pub(crate) fn confirmation_reason(
+    request: &RoutineCoreRequest,
+) -> Result<Option<String>, BackgroundError> {
+    let (action, id) = match request.payload.as_ref() {
+        Some(routine_core_request::Payload::Authorize(request)) => {
+            ("authorize", &request.routine_id)
+        }
+        Some(routine_core_request::Payload::Run(request)) => ("run", &request.routine_id),
+        _ => return Ok(None),
+    };
+    let id = parse_id(id)?;
+    Ok(Some(format!("{action} Runlith routine {:?}", id.as_str())))
+}
+
+pub(crate) fn map_error(error: &BackgroundError) -> RoutineCoreResponse {
     let code = match error {
         BackgroundError::InvalidInput(_) => "invalid_input",
         BackgroundError::UnknownKind(_) => "unknown_kind",
@@ -157,7 +175,7 @@ pub fn dispatch<S: RoutineStorePort>(
             }
         }
         Some(routine_core_request::Payload::Tick(req)) => {
-            match service.tick(req.now_millis, &req.evidence_ref) {
+            match service.tick_blocked(req.now_millis, crate::user_presence::REQUIRED_CAUSE) {
                 Ok(runs) => RoutineCoreResponse {
                     payload: Some(routine_core_response::Payload::List(RoutineListResponse {
                         routines: Vec::new(),

@@ -19,7 +19,7 @@ pub use phrase::{RecoveryPhrase, DEFAULT_PHRASE_WORDS, MAX_PHRASE_WORDS, MIN_PHR
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VaultError {
-    /// The password is shorter than [`Password::MIN_CHARS`].
+    /// The password is shorter than [`Password::MIN_CHARS`] or blocked when setting it.
     WeakPassword,
     /// The recovery phrase has a bad word count or a word not on the list.
     InvalidPhrase,
@@ -46,7 +46,9 @@ pub enum VaultError {
 impl fmt::Display for VaultError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
-            Self::WeakPassword => "vault password is too short",
+            Self::WeakPassword => {
+                "vault password is too weak; choose a less predictable passphrase"
+            }
             Self::InvalidPhrase => "recovery phrase is invalid",
             Self::InvalidParams => "vault key-derivation parameters are invalid",
             Self::UnlockFailed => "vault unlock failed",
@@ -80,6 +82,59 @@ impl Password {
 
     pub(crate) fn as_bytes(&self) -> &[u8] {
         self.0.as_bytes()
+    }
+
+    /// Enforce the blocklist on new settings while keeping old vaults unlockable.
+    pub(crate) fn validate_for_setting(&self) -> Result<(), VaultError> {
+        let value = self.0.as_str();
+        let predictable = [
+            "password",
+            "qwerty",
+            "letmein",
+            "changeme",
+            "administrator",
+            "welcome",
+            "runlith",
+        ]
+        .iter()
+        .any(|word| {
+            value
+                .get(..word.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(word))
+                && value.get(word.len()..).is_some_and(|suffix| {
+                    suffix
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || byte.is_ascii_punctuation())
+                })
+        });
+        let repeated = (1..=4).any(|width| {
+            value.char_indices().nth(width).is_some_and(|(end, _)| {
+                value.len().is_multiple_of(end)
+                    && value
+                        .as_bytes()
+                        .chunks(end)
+                        .all(|chunk| chunk == &value.as_bytes()[..end])
+            })
+        });
+        let sequential = [
+            "0123456789",
+            "1234567890",
+            "9876543210",
+            "abcdefghijklmnopqrstuvwxyz",
+            "qwertyuiopasdfghjklzxcvbnm",
+        ]
+        .iter()
+        .any(|pattern| {
+            value
+                .bytes()
+                .zip(pattern.bytes().cycle())
+                .all(|(left, right)| left.eq_ignore_ascii_case(&right))
+        });
+        if predictable || repeated || sequential {
+            Err(VaultError::WeakPassword)
+        } else {
+            Ok(())
+        }
     }
 }
 

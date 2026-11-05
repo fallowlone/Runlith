@@ -77,6 +77,8 @@ const MIGRATION_0039: &str = include_str!("../migrations/0039_task_requires_work
 pub(crate) const MIGRATION_0032_GUARD: &str =
     include_str!("../migrations/0032_journal_hash_chain_guard.sql");
 
+mod guard;
+
 /// Applies pending migrations to `connection`, which must already have
 /// `PRAGMA foreign_keys = ON`. Migrations run in order inside one SQLite
 /// transaction; each applies at most once. Historical migrations are never
@@ -92,6 +94,10 @@ pub(crate) fn migrate(connection: &mut Connection) -> StorageResult<u32> {
     }
     if found == SUPPORTED_SCHEMA_VERSION {
         return Ok(found);
+    }
+    if found > 0 {
+        guard::verify_schema_matches_version(connection, found)?;
+        guard::backup_before_migrate(connection, found)?;
     }
     // IMMEDIATE like every other write transaction in this adapter:
     // concurrent opens on a fresh database must serialize at BEGIN.
@@ -112,6 +118,7 @@ pub(crate) fn migrate(connection: &mut Connection) -> StorageResult<u32> {
         transaction.rollback()?;
         return Ok(current);
     }
+    let fk_baseline = guard::foreign_key_violations(&transaction)?;
     if current < 1 {
         transaction.execute_batch(MIGRATION_0001).map_err(|error| {
             StorageError::Migration(format!("0001_task_core.sql failed: {error}"))
@@ -347,6 +354,7 @@ pub(crate) fn migrate(connection: &mut Connection) -> StorageResult<u32> {
             StorageError::Migration(format!("0037_organizations.sql failed: {error}"))
         })?;
     }
+    guard::verify_integrity(&transaction, fk_baseline)?;
     if current < 38 {
         transaction.execute_batch(MIGRATION_0038).map_err(|error| {
             StorageError::Migration(format!(

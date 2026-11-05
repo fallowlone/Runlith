@@ -25,6 +25,7 @@
 //! the per-query filesystem walk.
 
 pub mod index;
+mod secure_read;
 
 pub use index::IndexedFinder;
 
@@ -144,8 +145,13 @@ impl LocalFinder {
                 },
             }));
         }
-        let len = full
-            .symlink_metadata()
+        let file = secure_read::open_beneath(root_path, relative).map_err(|error| {
+            FinderError::BackendFailure {
+                detail: bound_detail(&error.to_string()),
+            }
+        })?;
+        let len = file
+            .metadata()
             .map_err(|error| FinderError::BackendFailure {
                 detail: bound_detail(&error.to_string()),
             })?
@@ -156,9 +162,21 @@ impl LocalFinder {
                 reason: SkipReason::TooLarge { bytes: len },
             }));
         }
-        let bytes = std::fs::read(&full).map_err(|error| FinderError::BackendFailure {
-            detail: bound_detail(&error.to_string()),
-        })?;
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        file.take(self.max_file_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|error| FinderError::BackendFailure {
+                detail: bound_detail(&error.to_string()),
+            })?;
+        if bytes.len() as u64 > self.max_file_bytes {
+            return Ok(IngestedFile::Skipped(SkippedSource {
+                path: relative.to_path_buf(),
+                reason: SkipReason::TooLarge {
+                    bytes: bytes.len() as u64,
+                },
+            }));
+        }
         if bytes.contains(&0) {
             return Ok(IngestedFile::Skipped(SkippedSource {
                 path: relative.to_path_buf(),
@@ -679,9 +697,22 @@ impl LocalFinder {
                 detail: "path escapes repository scope".to_string(),
             });
         }
-        let bytes = std::fs::read(&canonical).map_err(|_| FinderError::UnknownEvidence {
-            detail: "file cannot be read".to_string(),
-        })?;
+        let file = secure_read::open_beneath(&canonical_root, std::path::Path::new(&evidence.path))
+            .map_err(|_| FinderError::UnknownEvidence {
+                detail: "file cannot be read".to_string(),
+            })?;
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        file.take(self.max_file_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|_| FinderError::UnknownEvidence {
+                detail: "file cannot be read".to_owned(),
+            })?;
+        if bytes.len() as u64 > self.max_file_bytes {
+            return Err(FinderError::UnknownEvidence {
+                detail: "file exceeds the read bound".to_owned(),
+            });
+        }
         let all: Vec<String> = String::from_utf8_lossy(&bytes)
             .lines()
             .map(str::to_string)

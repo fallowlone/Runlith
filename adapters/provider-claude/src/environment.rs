@@ -41,9 +41,9 @@ pub struct ProviderEnvironment {
 }
 
 impl ProviderEnvironment {
-    /// Prepares deterministic provider state for `workdir` under
-    /// `runtime_base/<worktree-leaf>`. The base must be absolute and must not
-    /// live inside the managed worktree. Missing/unsafe roots fail closed.
+    /// Prepares provider state under a versioned SHA-256 namespace of the
+    /// complete absolute workdir path. The base must be absolute, outside the
+    /// worktree, and fresh when migrating from the old leaf-only layout.
     pub fn prepare(workdir: &Path, runtime_base: &Path) -> Result<Self, String> {
         Self::prepare_from(workdir, runtime_base, &|name| std::env::var_os(name))
     }
@@ -71,7 +71,8 @@ impl ProviderEnvironment {
             return Err("provider workdir has invalid environment identity".to_owned());
         }
 
-        let runtime_root = runtime_base.join(leaf);
+        let identity = evaluation::candidate_sha256(workdir.as_os_str().as_encoded_bytes());
+        let runtime_root = runtime_base.join(format!("worktree-v2-{}", identity.replace(':', "-")));
         if runtime_root.starts_with(workdir) || workdir.starts_with(&runtime_root) {
             return Err("provider environment must be outside managed worktree".to_owned());
         }
@@ -321,6 +322,62 @@ fn ensure_private_dir(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn equal_worktree_leaves_do_not_share_runtime_state() {
+        use std::os::unix::fs::DirBuilderExt;
+        let (root, _, host_home) = fake_host_with_auth_anchors("full-worktree-identity");
+        let first_workdir = root.join("project-a/shared-task");
+        let second_workdir = root.join("project-b/shared-task");
+        fs::create_dir_all(&first_workdir).unwrap();
+        fs::create_dir_all(&second_workdir).unwrap();
+        let base = root.join("provider");
+        let legacy = base.join("shared-task");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&legacy)
+            .unwrap();
+        fs::write(legacy.join("legacy-state"), b"unbound old state").unwrap();
+        let first =
+            ProviderEnvironment::prepare_from(&first_workdir, &base, &lookup_for(&host_home))
+                .unwrap();
+        fs::write(
+            first.runtime_root().join("home/session-canary"),
+            b"first workspace",
+        )
+        .unwrap();
+        let second =
+            ProviderEnvironment::prepare_from(&second_workdir, &base, &lookup_for(&host_home))
+                .unwrap();
+        assert_ne!(first.runtime_root(), second.runtime_root());
+        assert!(!second.runtime_root().join("home/session-canary").exists());
+        for name in ["HOME", "CLAUDE_CONFIG_DIR", "XDG_STATE_HOME", "TMPDIR"] {
+            let value = |env: &ProviderEnvironment| {
+                env.child_environment()
+                    .into_iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value)
+                    .unwrap()
+            };
+            assert_ne!(value(&first), value(&second), "shared {name}");
+        }
+        let reopened =
+            ProviderEnvironment::prepare_from(&first_workdir, &base, &lookup_for(&host_home))
+                .unwrap();
+        assert_eq!(first.runtime_root(), reopened.runtime_root());
+        assert_eq!(
+            fs::read(reopened.runtime_root().join("home/session-canary")).unwrap(),
+            b"first workspace"
+        );
+        assert_ne!(first.runtime_root(), legacy);
+        assert_eq!(
+            fs::read(legacy.join("legacy-state")).unwrap(),
+            b"unbound old state"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]

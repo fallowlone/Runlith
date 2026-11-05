@@ -1,6 +1,6 @@
 //! G2 business real-process verification (TASK-0028).
 //!
-//! Real `agentd`/`agentctl` binaries against a test-owned endpoint and a
+//! Shipped `agentctl` and a daemon fixture with explicit test confirmation against a test-owned endpoint and a
 //! test-owned database (per-test sandbox via `AI_ENGINEERING_OS_RUNTIME_DIR`
 //! and `AI_ENGINEERING_OS_DATA_DIR`): project/task/dependency/lifecycle
 //! E2E, invalid-input atomicity, restart and kill-9 durability, v0
@@ -14,18 +14,14 @@
 
 #![cfg(unix)]
 
+#[path = "support/process_fixture.rs"]
+mod process_fixture;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use storage_sqlite::{JournalEvent, SqliteStore};
-
-fn workspace_bin(name: &str) -> PathBuf {
-    let mut dir = std::env::current_exe().expect("test executable path");
-    dir.pop();
-    dir.pop();
-    dir.join(name)
-}
 
 struct Sandbox {
     root: PathBuf,
@@ -43,11 +39,12 @@ impl Sandbox {
                     .as_nanos()
             }));
         std::fs::create_dir_all(&root).expect("sandbox root");
+        process_fixture::install(&root);
         Self { root }
     }
 
     fn agentctl(&self, args: &[&str]) -> Output {
-        Command::new(workspace_bin("agentctl"))
+        Command::new(process_fixture::binary(&self.root, "agentctl"))
             .args(args)
             .env("AI_ENGINEERING_OS_RUNTIME_DIR", &self.root)
             .env("AI_ENGINEERING_OS_DATA_DIR", &self.root)
@@ -56,7 +53,7 @@ impl Sandbox {
     }
 
     fn spawn_agentd(&self) -> Child {
-        Command::new(workspace_bin("agentd"))
+        Command::new(process_fixture::binary(&self.root, "agentd"))
             .env("AI_ENGINEERING_OS_RUNTIME_DIR", &self.root)
             .env("AI_ENGINEERING_OS_DATA_DIR", &self.root)
             .stdin(Stdio::null())

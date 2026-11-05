@@ -281,6 +281,11 @@ mod tests {
         fn link(&mut self, _link: &memory::model::MemoryLink) -> Result<(), MemoryError> {
             Ok(())
         }
+        fn supersede(&mut self, _: &MemoryId, _: &MemoryId) -> Result<MemoryRecord, MemoryError> {
+            Err(MemoryError::BackendFailure {
+                detail: "supersession is unavailable in this fixture".to_owned(),
+            })
+        }
         fn links_from(
             &self,
             _from: &MemoryId,

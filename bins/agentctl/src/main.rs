@@ -202,18 +202,70 @@ async fn run_business(
     endpoint: &ipc_transport::platform::unix::UnixEndpoint,
     request: TaskCoreRequest,
 ) -> ExitCode {
-    match agentctl::business_request(endpoint, spawn_sibling_daemon, request).await {
-        Ok(response) => print_response(response),
-        Err(error) => fail(&error),
-    }
+    run_business_pages(request, |request| {
+        agentctl::business_request(endpoint, spawn_sibling_daemon, request)
+    })
+    .await
 }
 
 /// Runs one business request and prints the deterministic response.
 #[cfg(windows)]
 async fn run_business(pipe_name: &str, request: TaskCoreRequest) -> ExitCode {
-    match agentctl::business_request(pipe_name, spawn_sibling_daemon, request).await {
-        Ok(response) => print_response(response),
-        Err(error) => fail(&error),
+    run_business_pages(request, |request| {
+        agentctl::business_request(pipe_name, spawn_sibling_daemon, request)
+    })
+    .await
+}
+
+async fn run_business_pages<F, Fut>(mut request: TaskCoreRequest, mut send: F) -> ExitCode
+where
+    F: FnMut(TaskCoreRequest) -> Fut,
+    Fut: std::future::Future<Output = Result<TaskCoreResponse, ClientError>>,
+{
+    loop {
+        let response = match send(request.clone()).await {
+            Ok(response) => response,
+            Err(error) => return fail(&error),
+        };
+        let cursor = match (&mut request.payload, &response.payload) {
+            (
+                Some(task_core_request::Payload::ListProjects(request)),
+                Some(task_core_response::Payload::ListProjects(reply)),
+            ) if !reply.next_after_id.is_empty() => {
+                if reply.next_after_id <= request.after_id
+                    || reply
+                        .projects
+                        .last()
+                        .is_none_or(|last| last.id != reply.next_after_id)
+                {
+                    eprintln!("agentctl: invalid project-list cursor");
+                    return ExitCode::FAILURE;
+                }
+                request.after_id.clone_from(&reply.next_after_id);
+                true
+            }
+            (
+                Some(task_core_request::Payload::ListTasksForProject(request)),
+                Some(task_core_response::Payload::ListTasks(reply)),
+            ) if !reply.next_after_id.is_empty() => {
+                if reply.next_after_id <= request.after_id
+                    || reply
+                        .tasks
+                        .last()
+                        .is_none_or(|last| last.id != reply.next_after_id)
+                {
+                    eprintln!("agentctl: invalid task-list cursor");
+                    return ExitCode::FAILURE;
+                }
+                request.after_id.clone_from(&reply.next_after_id);
+                true
+            }
+            _ => false,
+        };
+        let status = print_response(response);
+        if status != ExitCode::SUCCESS || !cursor {
+            return status;
+        }
     }
 }
 
@@ -324,6 +376,7 @@ fn business_error_name(code: i32) -> String {
         Ok(BusinessErrorCode::UnsupportedProtocol) => "UNSUPPORTED_PROTOCOL".to_owned(),
         Ok(BusinessErrorCode::Internal) => "INTERNAL".to_owned(),
         Ok(BusinessErrorCode::ProviderUnavailable) => "PROVIDER_UNAVAILABLE".to_owned(),
+        Ok(BusinessErrorCode::UserPresenceRequired) => "USER_PRESENCE_REQUIRED".to_owned(),
         _ => format!("UNKNOWN({code})"),
     }
 }
@@ -340,7 +393,7 @@ fn usage_task() -> ExitCode {
     ExitCode::FAILURE
 }
 
-const TASK_CREATE_PLANNED_USAGE: &str = "agentctl task create-planned <id> <project-id> <objective> --scope <workspace:path>... --acceptance <criterion-id>... --risk <low|medium|high|critical>";
+const TASK_CREATE_PLANNED_USAGE: &str = "agentctl task create-planned <id> <project-id> <objective> --scope <workspace:path>... --acceptance <criterion-id>... --risk <low|medium|high|critical> [--allow-no-change]";
 
 /// Parses the protocol-v6 authoring command. Positional words up to the first
 /// flag form the objective; every flag takes exactly one value. The client
@@ -1150,10 +1203,13 @@ async fn cmd_worker(args: Vec<String>) -> ExitCode {
             };
         }
         Some("sign") => {
-            let secret = args
-                .windows(2)
-                .find(|p| p[0] == "--secret")
-                .map(|p| p[1].as_str());
+            let secret = match agentctl::read_key_input(&args, "--secret-file") {
+                Ok(secret) => secret,
+                Err(error) => {
+                    eprintln!("{error}");
+                    return ExitCode::FAILURE;
+                }
+            };
             let nonce = args
                 .windows(2)
                 .find(|p| p[0] == "--nonce")
@@ -1162,19 +1218,17 @@ async fn cmd_worker(args: Vec<String>) -> ExitCode {
                 .windows(2)
                 .find(|p| p[0] == "--job")
                 .map(|p| p[1].as_str());
-            return match (secret, nonce, job) {
-                (Some(secret), Some(nonce), Some(job)) => {
-                    match agentctl::worker_sign(secret, nonce, job) {
-                        Ok(sig) => {
-                            println!("{sig}");
-                            ExitCode::SUCCESS
-                        }
-                        Err(e) => {
-                            eprintln!("{e}");
-                            ExitCode::FAILURE
-                        }
+            return match (nonce, job) {
+                (Some(nonce), Some(job)) => match agentctl::worker_sign(&secret, nonce, job) {
+                    Ok(sig) => {
+                        println!("{sig}");
+                        ExitCode::SUCCESS
                     }
-                }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        ExitCode::FAILURE
+                    }
+                },
                 _ => {
                     eprintln!("{}", agentctl::WORKER_USAGE);
                     ExitCode::FAILURE
@@ -1284,28 +1338,30 @@ async fn cmd_org_seal(
         org_core_request, OrgAccountIdRequest, OrgCoreRequest, OrgIdRequest,
     };
     let flag = |name: &str| args.windows(2).find(|p| p[0] == name).map(|p| p[1].clone());
-    let (
-        Some(account_id),
-        Some(secret),
-        Some(org_id),
-        Some(org_key),
-        Some(nonce),
-        Some(kind),
-        Some(sensitivity),
-        Some(text),
-    ) = (
+    let (Some(account_id), Some(org_id), Some(nonce), Some(kind), Some(sensitivity), Some(text)) = (
         flag("--account"),
-        flag("--secret"),
         flag("--org"),
-        flag("--org-key"),
         flag("--nonce"),
         flag("--kind"),
         flag("--sensitivity"),
         flag("--text"),
-    )
-    else {
+    ) else {
         eprintln!("{}", agentctl::ORG_USAGE);
         return ExitCode::FAILURE;
+    };
+    let secret = match agentctl::read_key_input(args, "--secret-file") {
+        Ok(secret) => secret,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let org_key = match agentctl::read_key_input(args, "--org-key-file") {
+        Ok(key) => key,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
     };
     let account = match agentctl::org_request(
         endpoint,
@@ -1570,7 +1626,10 @@ fn project_request(args: &[String]) -> Result<TaskCoreRequest, ()> {
         }
         "list" if args.len() == 1 => Ok(TaskCoreRequest {
             payload: Some(task_core_request::Payload::ListProjects(
-                ListProjectsRequest {},
+                ListProjectsRequest {
+                    page_size: ipc_contracts::MAX_LIST_PAGE_ITEMS,
+                    ..Default::default()
+                },
             )),
         }),
         _ => Err(()),
@@ -1613,6 +1672,8 @@ fn task_request(args: &[String]) -> Result<TaskCoreRequest, ()> {
                 payload: Some(task_core_request::Payload::ListTasksForProject(
                     ListTasksForProjectRequest {
                         project_id: project_id.clone(),
+                        page_size: ipc_contracts::MAX_LIST_PAGE_ITEMS,
+                        ..Default::default()
                     },
                 )),
             })

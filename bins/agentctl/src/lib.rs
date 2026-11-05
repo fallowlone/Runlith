@@ -31,6 +31,9 @@ use ipc_transport::{FramedTransport, TransportError};
 use prost::Message;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+mod secret_input;
+pub use secret_input::read_key_input;
+
 #[cfg(unix)]
 use ipc_transport::platform::unix::{
     connect as transport_connect, inspect_endpoint, resolve_endpoint, EndpointState, UnixEndpoint,
@@ -45,8 +48,8 @@ use tokio::net::UnixStream;
 /// Total startup/reconnect budget: 10 seconds, monotonic clock.
 pub const STARTUP_BUDGET: Duration = Duration::from_secs(10);
 
-/// Deadline for the `ShutdownResponse` acknowledgement.
-pub const SHUTDOWN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Includes the daemon's bounded OS confirmation before shutdown.
+pub const SHUTDOWN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Deadline for daemon endpoint/process disappearance after acknowledgement.
 pub const DISAPPEAR_TIMEOUT: Duration = Duration::from_secs(5);
@@ -63,7 +66,7 @@ pub const VAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 /// three atomic commits) before the provider half starts in the
 /// background, so this stays a fast-exchange bound — never provider
 /// time. Terminal results arrive via `status` polling.
-pub const EXECUTION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
+pub const EXECUTION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Deadline for one local approval control-plane exchange.
 pub const POLICY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -114,7 +117,7 @@ pub enum ClientError {
     /// The daemon process could not be spawned.
     SpawnFailed(String),
     /// The startup/reconnect budget expired without a usable daemon.
-    StartupTimeout,
+    StartupTimeout(String),
     /// Endpoint security, ownership, or permission failure. Fail closed:
     /// never retried, never bypassed with another endpoint.
     Security(String),
@@ -174,7 +177,12 @@ impl fmt::Display for ClientError {
             Self::DaemonUnavailable(endpoint) => write!(f, "daemon unavailable at {endpoint}"),
             Self::NotRunning => write!(f, "daemon not running"),
             Self::SpawnFailed(detail) => write!(f, "failed to spawn daemon: {detail}"),
-            Self::StartupTimeout => write!(f, "daemon startup timed out"),
+            Self::StartupTimeout(detail) if detail.is_empty() => {
+                write!(f, "daemon startup timed out")
+            }
+            Self::StartupTimeout(detail) => {
+                write!(f, "daemon startup timed out; agentd log:\n{detail}")
+            }
             Self::Security(detail) => write!(f, "client security failure: {detail}"),
             Self::ShutdownTimeout { stage } => {
                 write!(f, "shutdown timed out waiting for {stage}")
@@ -355,10 +363,11 @@ async fn handshake_stream_v1<S>(stream: S) -> Result<ClientSession<S>, ClientErr
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut session = ClientSession::new(
-        FramedTransport::new(stream),
-        ClientConfig::business_default(CLIENT_KIND_AGENTCTL),
-    );
+    let mut config = ClientConfig::business_default(CLIENT_KIND_AGENTCTL);
+    config
+        .requested_capabilities
+        .push(ipc_contracts::TASK_LIST_PAGES_V1.to_owned());
+    let mut session = ClientSession::new(FramedTransport::new(stream), config);
     session
         .perform_handshake()
         .await
@@ -431,6 +440,13 @@ async fn business_session<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    if ipc_contracts::is_paged_list_request(&request)
+        && !session.has_capability(ipc_contracts::TASK_LIST_PAGES_V1)
+    {
+        return Err(ClientError::Control(ControlError::UnsupportedCapability(
+            ipc_contracts::TASK_LIST_PAGES_V1.to_owned(),
+        )));
+    }
     let mut transport = session.into_inner();
     transport
         .write_frame(business_request_frame(request))
@@ -1682,6 +1698,9 @@ pub fn worker_sign(secret_hex: &str, nonce_hex: &str, job_id: &str) -> Result<St
         if raw.len() != N * 2 {
             return Err("bad hex length".to_owned());
         }
+        if !raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("bad hex".to_owned());
+        }
         let bytes: Vec<u8> = (0..N)
             .map(|i| {
                 u8::from_str_radix(&raw[i * 2..i * 2 + 2], 16).map_err(|_| "bad hex".to_owned())
@@ -1689,7 +1708,7 @@ pub fn worker_sign(secret_hex: &str, nonce_hex: &str, job_id: &str) -> Result<St
             .collect::<Result<Vec<u8>, String>>()?;
         bytes.try_into().map_err(|_| "bad hex length".to_owned())
     }
-    let secret = dec::<32>(secret_hex)?;
+    let secret = zeroize::Zeroizing::new(dec::<32>(secret_hex)?);
     let nonce = dec::<32>(nonce_hex)?;
     let job = worker::model::JobId::new(job_id.to_owned()).map_err(|e| e.to_string())?;
     let sig = worker::model::sign_challenge(&secret, &nonce, &job).map_err(|e| e.to_string())?;
@@ -1703,6 +1722,9 @@ fn hex_encode(bytes: &[u8]) -> String {
 fn hex_decode<const N: usize>(raw: &str, what: &str) -> Result<[u8; N], String> {
     if raw.len() != N * 2 {
         return Err(format!("{what} must be {} hex chars", N * 2));
+    }
+    if !raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("{what} is not hex"));
     }
     let bytes: Vec<u8> = (0..N)
         .map(|i| {
@@ -1767,8 +1789,8 @@ pub fn org_seal_local(
         SyncEnvelope,
     };
     let public = hex_decode::<32>(public_key_hex, "public_key")?;
-    let secret = hex_decode::<32>(secret_hex, "secret")?;
-    let org_key = hex_decode::<32>(org_key_hex, "org_key")?;
+    let secret = zeroize::Zeroizing::new(hex_decode::<32>(secret_hex, "secret")?);
+    let org_key = zeroize::Zeroizing::new(hex_decode::<32>(org_key_hex, "org_key")?);
     let nonce = hex_decode::<24>(nonce_hex, "nonce")?;
     let author = AccountRecord::register(
         AccountId::new(account_id.to_owned()).map_err(|e| e.to_string())?,
@@ -1835,10 +1857,21 @@ where
         Err(error) if !is_retryable(&error) => return Err(error),
         Err(_) => {}
     }
-    spawn()
+    let mut child = spawn()
         .map_err(|error| ClientError::SpawnFailed(format!("failed to spawn agentd: {error}")))?;
     let deadline = Instant::now() + STARTUP_BUDGET;
     for delay in backoff_sequence() {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| ClientError::SpawnFailed(error.to_string()))?
+        {
+            if status.code() != Some(2) {
+                return Err(ClientError::SpawnFailed(format!(
+                    "agentd exited during startup ({status}); {}",
+                    startup_log_tail()
+                )));
+            }
+        }
         if Instant::now() >= deadline {
             break;
         }
@@ -1853,7 +1886,7 @@ where
     match connect().await {
         Ok(session) => Ok(session),
         Err(error) if !is_retryable(&error) => Err(error),
-        Err(_) => Err(ClientError::StartupTimeout),
+        Err(_) => Err(ClientError::StartupTimeout(startup_log_tail())),
     }
 }
 
@@ -2040,7 +2073,12 @@ where
         ))
     })?;
     match response.payload {
-        Some(control_response::Payload::Shutdown(_)) => Ok(()),
+        Some(control_response::Payload::Shutdown(response)) => match response.denial_reason {
+            Some(reason) => Err(ClientError::Security(format!(
+                "shutdown requires OS confirmation: {reason}"
+            ))),
+            None => Ok(()),
+        },
         other => Err(ClientError::ShutdownAmbiguous(format!(
             "unexpected shutdown reply ({other:?}); endpoint {absence}; not replaying"
         ))),
@@ -2070,11 +2108,89 @@ pub fn daemon_executable_next_to(current_exe: &Path) -> io::Result<PathBuf> {
 /// Spawns the daemon executable directly: no shell, no command strings,
 /// no `sh -c`. Stdio is detached so the launcher can exit.
 pub fn spawn_daemon(exe: &Path) -> io::Result<Child> {
-    Command::new(exe)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+    let mut command = Command::new(exe);
+    command.stdin(Stdio::null()).stdout(Stdio::null());
+    // stderr goes to a private log in the runtime dir so a failed startup
+    // is diagnosable; falls back to /dev/null if the log cannot be opened.
+    match open_stderr_log() {
+        Some(file) => command.stderr(Stdio::from(file)),
+        None => command.stderr(Stdio::null()),
+    };
+    command.spawn()
+}
+
+#[cfg(unix)]
+fn open_stderr_log() -> Option<std::fs::File> {
+    let endpoint = resolve_endpoint().ok()?;
+    ipc_transport::platform::unix::ensure_runtime_dir(&endpoint.runtime_dir).ok()?;
+    let file = ipc_transport::platform::unix::open_runtime_log(
+        &endpoint,
+        ipc_transport::STDERR_LOG_FILE_NAME,
+        true,
+    )
+    .ok()?;
+    file.set_len(0).ok()?;
+    Some(file)
+}
+
+#[cfg(not(unix))]
+fn open_stderr_log() -> Option<std::fs::File> {
+    None
+}
+
+const LOG_TAIL_LINES: usize = 20;
+const LOG_LINE_MAX_CHARS: usize = 300;
+
+/// Last lines of the daemon's startup/stderr logs for the timeout error.
+/// Best effort: empty when nothing is readable. Lines are length-capped;
+/// agentd never logs secret material in these messages.
+fn startup_log_tail() -> String {
+    #[cfg(unix)]
+    {
+        use std::io::{Read, Seek, SeekFrom};
+        let Ok(endpoint) = resolve_endpoint() else {
+            return String::new();
+        };
+        let mut lines: Vec<String> = Vec::new();
+        for name in [
+            ipc_transport::STARTUP_LOG_FILE_NAME,
+            ipc_transport::STDERR_LOG_FILE_NAME,
+        ] {
+            if let Ok(mut file) =
+                ipc_transport::platform::unix::open_runtime_log(&endpoint, name, false)
+            {
+                let length = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+                let start = length.saturating_sub(64 * 1024);
+                if file.seek(SeekFrom::Start(start)).is_err() {
+                    continue;
+                }
+                let mut bytes = Vec::new();
+                if file.take(64 * 1024).read_to_end(&mut bytes).is_err() {
+                    continue;
+                }
+                let text = String::from_utf8_lossy(&bytes);
+                lines.extend(text.lines().filter(|l| !l.trim().is_empty()).map(|l| {
+                    l.chars()
+                        .filter(|ch| !ch.is_control() || *ch == '\t')
+                        .take(LOG_LINE_MAX_CHARS)
+                        .collect::<String>()
+                }));
+            }
+        }
+        // agentd's own log line and the redirected stderr carry the same
+        // message; show each distinct message once (stderr has no timestamp).
+        let stamped: Vec<String> = lines
+            .iter()
+            .filter_map(|l| l.rsplit_once(" (unix time ").map(|(m, _)| m.to_owned()))
+            .collect();
+        lines.retain(|l| l.contains(" (unix time ") || !stamped.contains(l));
+        let skip = lines.len().saturating_sub(LOG_TAIL_LINES);
+        lines.split_off(skip).join("\n")
+    }
+    #[cfg(not(unix))]
+    {
+        String::new()
+    }
 }
 
 /// Spawns the installed sibling `agentd` next to this `agentctl`.
@@ -2494,7 +2610,7 @@ pub fn format_routine_response(response: &RoutineCoreResponse) -> Result<String,
     }
 }
 
-pub const WORKER_USAGE: &str = "usage: agentctl worker <enroll|revoke|device|devices|offer|jobs|challenge|claim|complete|keygen|sign> ...\n  enroll --name <n> --public-key <hex64> --by <operator> | revoke <dev_id> | device <dev_id> | devices\n  offer --objective <text> --scope EXECUTION --by <operator> | jobs\n  challenge --device <dev_id> --job <job_id> --nonce <hex64> | claim --job <id> --device <id> --challenge <id> --signature <hex128>\n  complete --job <id> --device <id> --challenge <id> --signature <hex128> --evidence <ref>\n  keygen --secret-out <path> (local, secret never printed) | sign --secret <hex64> --nonce <hex64> --job <job_id> (local)";
+pub const WORKER_USAGE: &str = "usage: agentctl worker <enroll|revoke|device|devices|offer|jobs|challenge|claim|complete|keygen|sign> ...\n  enroll --name <n> --public-key <hex64> --by <operator> | revoke <dev_id> | device <dev_id> | devices\n  offer --objective <text> --scope EXECUTION --by <operator> | jobs\n  challenge --device <dev_id> --job <job_id> --nonce <hex64> | claim --job <id> --device <id> --challenge <id> --signature <hex128>\n  complete --job <id> --device <id> --challenge <id> --signature <hex128> --evidence <ref>\n  keygen --secret-out <path> (local, secret never printed) | sign --secret-file <path> (or --secret-stdin) --nonce <hex64> --job <job_id> (local)";
 
 pub fn parse_worker_args(args: &[String]) -> Result<WorkerCoreRequest, String> {
     use ipc_contracts::proto::{
@@ -2566,7 +2682,7 @@ pub fn parse_worker_args(args: &[String]) -> Result<WorkerCoreRequest, String> {
     })
 }
 
-pub const ORG_USAGE: &str = "usage: agentctl org <create|get|account|account-show|team|teams|member|policy|usage|sync|keygen> ...\n  create --name <n> --creator <acc_id> | get <org_id> | account --name <n> --public-key <hex64> | account-show <acc_id>\n  team --org <id> --actor <mem_id> --name <n> | teams --org <id>\n  member add --org <id> --actor <mem_id> --account <acc_id> --role <OWNER|ADMIN|MEMBER|VIEWER> [--team <team_id>] | member role --actor <mem_id> --membership <mem_id> --role <R> | member revoke --actor <mem_id> --membership <mem_id> | member list --org <id>\n  policy set --org <id> --actor <mem_id> --ceiling <READ_ONLY|WORKSPACE_WRITE|EXECUTION> --sync-max <PUBLIC|PROJECT|PRIVATE> [--quota <microusd>] --window <seconds> | policy show --org <id>\n  usage record --org <id> --account <acc_id> --kind <EXECUTION|PLANNING|EVALUATION> --units <n> --cost <microusd> --key <k> [--project <ref>] | usage list --org <id> | usage check --org <id> --estimate <microusd>\n  sync head --org <id> | sync seal --account <acc_id> --secret <hex64> --org <id> --org-key <hex64> --nonce <hex48> --kind <KIND> --sensitivity <S> --text <plaintext> | sync accept --id <env_id> --org <id> --author <acc_id> --kind <KIND> --revision <n> --base <n> --sensitivity <S> --nonce <hex48> --ciphertext <hex> --signature <hex128> --created <millis> --org-key <hex64>\n  keygen --secret-out <path> (local, secret never printed)";
+pub const ORG_USAGE: &str = "usage: agentctl org <create|get|account|account-show|team|teams|member|policy|usage|sync|keygen> ...\n  create --name <n> --creator <acc_id> | get <org_id> | account --name <n> --public-key <hex64> | account-show <acc_id>\n  team --org <id> --actor <mem_id> --name <n> | teams --org <id>\n  member add --org <id> --actor <mem_id> --account <acc_id> --role <OWNER|ADMIN|MEMBER|VIEWER> [--team <team_id>] | member role --actor <mem_id> --membership <mem_id> --role <R> | member revoke --actor <mem_id> --membership <mem_id> | member list --org <id>\n  policy set --org <id> --actor <mem_id> --ceiling <READ_ONLY|WORKSPACE_WRITE|EXECUTION> --sync-max <PUBLIC|PROJECT|PRIVATE> [--quota <microusd>] --window <seconds> | policy show --org <id>\n  usage record --org <id> --account <acc_id> --kind <EXECUTION|PLANNING|EVALUATION> --units <n> --cost <microusd> --key <k> [--project <ref>] | usage list --org <id> | usage check --org <id> --estimate <microusd>\n  sync head --org <id> | sync seal --account <acc_id> --secret-file <path> (or --secret-stdin) --org <id> --org-key-file <path> (or --org-key-stdin) --nonce <hex48> --kind <KIND> --sensitivity <S> --text <plaintext> | sync accept --id <env_id> --org <id> --author <acc_id> --kind <KIND> --revision <n> --base <n> --sensitivity <S> --nonce <hex48> --ciphertext <hex> --signature <hex128> --created <millis> --org-key-file <path> (or --org-key-stdin)\n  keygen --secret-out <path> (local, secret never printed)";
 
 pub const WIDGET_USAGE: &str =
     "usage: agentctl widget <draft <text>|start <text>|status <job>|cancel <job>>";
@@ -2814,7 +2930,7 @@ pub fn parse_org_args(args: &[String]) -> Result<OrgCoreRequest, String> {
                         .parse()
                         .map_err(|_| usage())?,
                 }),
-                org_key_hex: flag_value(args, "--org-key").ok_or_else(usage)?.to_owned(),
+                org_key_hex: read_key_input(args, "--org-key-file")?.to_string(),
             })
         }
         _ => return Err(usage()),
@@ -2888,9 +3004,16 @@ pub fn format_org_response(response: &OrgCoreResponse) -> Result<String, String>
             q.org_id, q.requested_estimate
         )),
         Some(org_core_response::Payload::Plaintext(p)) => {
-            let bytes: Vec<u8> = (0..p.plaintext_hex.len() / 2)
-                .filter_map(|i| u8::from_str_radix(&p.plaintext_hex[i * 2..i * 2 + 2], 16).ok())
-                .collect();
+            const MALFORMED: &str = "org: daemon returned malformed plaintext hex";
+            if !p.plaintext_hex.len().is_multiple_of(2) || !p.plaintext_hex.is_ascii() {
+                return Err(MALFORMED.to_owned());
+            }
+            let bytes = (0..p.plaintext_hex.len() / 2)
+                .map(|i| {
+                    u8::from_str_radix(&p.plaintext_hex[i * 2..i * 2 + 2], 16)
+                        .map_err(|_| MALFORMED.to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(format!(
                 "accepted revision={} plaintext={}",
                 p.revision,
@@ -3134,6 +3257,92 @@ fn escape_json(text: &str) -> String {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_org_plaintext_hex_is_refused_without_partial_output() {
+        use ipc_contracts::proto::org_core_response;
+        let response = |hex: &str| OrgCoreResponse {
+            payload: Some(org_core_response::Payload::Plaintext(
+                ipc_contracts::proto::OrgPlaintextResponse {
+                    plaintext_hex: hex.to_owned(),
+                    revision: 7,
+                },
+            )),
+        };
+        for malformed in ["\u{1f4a5}", "0", "6fZZ"] {
+            assert!(format_org_response(&response(malformed)).is_err());
+        }
+        assert_eq!(
+            format_org_response(&response("6f6b")).unwrap(),
+            "accepted revision=7 plaintext=ok"
+        );
+        assert_eq!(
+            format_org_response(&response("")).unwrap(),
+            "accepted revision=7 plaintext="
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_denial_is_an_error_without_replay() {
+        let (client, server) = tokio::io::duplex(8192);
+        let server = tokio::spawn(async move {
+            let mut server = ipc_control::ServerSession::new(
+                FramedTransport::new(server),
+                ipc_control::ServerConfig::g1_default(),
+            );
+            server.run_handshake().await.unwrap();
+            assert!(matches!(
+                server.next_request().await.unwrap(),
+                ipc_control::ReadyRequest::Shutdown
+            ));
+            server
+                .respond_shutdown_denied("user_presence_denied")
+                .await
+                .unwrap();
+            assert!(server.is_ready());
+            assert!(server.next_request().await.is_err());
+        });
+        let mut client = ClientSession::new(
+            FramedTransport::new(client),
+            ClientConfig::execution_default(CLIENT_KIND_AGENTCTL),
+        );
+        client.perform_handshake().await.unwrap();
+        assert!(
+            matches!(shutdown_session(client, "duplex fixture").await, Err(ClientError::Security(message)) if message.contains("user_presence_denied"))
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_page_capability_refuses_before_sending_the_request() {
+        let (client, server) = tokio::io::duplex(8192);
+        let server = tokio::spawn(async move {
+            let mut config = ipc_control::ServerConfig::g2_default();
+            config.supported_capabilities.clear();
+            let mut session = ipc_control::ServerSession::new(FramedTransport::new(server), config);
+            session.run_handshake().await.unwrap();
+            assert!(session.next_request().await.is_err());
+        });
+        let session = handshake_stream_v1(client).await.unwrap();
+        let request = TaskCoreRequest {
+            payload: Some(
+                ipc_contracts::proto::task_core_request::Payload::ListProjects(
+                    ipc_contracts::proto::ListProjectsRequest {
+                        page_size: 1,
+                        ..Default::default()
+                    },
+                ),
+            ),
+        };
+        let error = business_session(session, request, "duplex fixture")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ClientError::Control(ControlError::UnsupportedCapability(_))
+        ));
+        server.await.unwrap();
+    }
     use ipc_contracts::proto::{handshake_response, HandshakeAccepted, HandshakeResponse};
     use ipc_transport::platform::unix::{bind_server as transport_bind, SOCKET_FILE_NAME};
     use std::sync::{
@@ -3176,7 +3385,6 @@ mod tests {
     }
 
     /// Fake spawn: counts invocations and spawns a benign process.
-    /// Starts no daemon; the retry loop must time out.
     fn inert_spawn(counter: &Arc<AtomicU32>) -> impl FnOnce() -> io::Result<Child> {
         let counter = counter.clone();
         move || {
@@ -3196,10 +3404,17 @@ mod tests {
         move || {
             counter.fetch_add(1, Ordering::SeqCst);
             tokio::spawn(async move {
-                let _ =
-                    agentd::run_on_endpoint(&endpoint, agentd::DaemonConfig::g1_default()).await;
+                let _ = agentd::run_on_endpoint(
+                    &endpoint,
+                    agentd::DaemonConfig::g1_default().with_confirmed_user_presence_for_tests(),
+                )
+                .await;
             });
-            Command::new("true").spawn()
+            Command::new("cat")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
         }
     }
 
@@ -3301,7 +3516,7 @@ mod tests {
         assert!(!is_retryable(&ClientError::Control(
             ControlError::UnknownClientKind("x".to_owned())
         )));
-        assert!(!is_retryable(&ClientError::StartupTimeout));
+        assert!(!is_retryable(&ClientError::StartupTimeout(String::new())));
         assert!(!is_retryable(&ClientError::NotRunning));
         assert!(!is_retryable(&ClientError::SpawnFailed("x".to_owned())));
         // A possibly-committed business mutation is never retried: the
@@ -3332,7 +3547,11 @@ mod tests {
         let sandbox = Sandbox::new("connectfirst");
         let endpoint = sandbox.endpoint.clone();
         tokio::spawn(async move {
-            let _ = agentd::run_on_endpoint(&endpoint, agentd::DaemonConfig::g1_default()).await;
+            let _ = agentd::run_on_endpoint(
+                &endpoint,
+                agentd::DaemonConfig::g1_default().with_confirmed_user_presence_for_tests(),
+            )
+            .await;
         });
         wait_ready(&sandbox.endpoint).await;
         let counter = spawn_counter();
@@ -3395,7 +3614,11 @@ mod tests {
         let sandbox = Sandbox::new("shutdownok");
         let endpoint = sandbox.endpoint.clone();
         let daemon = tokio::spawn(async move {
-            agentd::run_on_endpoint(&endpoint, agentd::DaemonConfig::g1_default()).await
+            agentd::run_on_endpoint(
+                &endpoint,
+                agentd::DaemonConfig::g1_default().with_confirmed_user_presence_for_tests(),
+            )
+            .await
         });
         wait_ready(&sandbox.endpoint).await;
         shutdown(&sandbox.endpoint).await.expect("shutdown");

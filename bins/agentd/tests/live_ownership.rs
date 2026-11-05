@@ -487,7 +487,11 @@ fn two_shared_resumes_elect_a_single_live_owner() {
     let status = get_status(&shared, "E-1");
     assert!(
         status.execution_live,
-        "winner must stay live while the provider runs"
+        "winner must stay live while the provider runs; durable execution: {:?}",
+        storage_sqlite::SqliteStore::open(&sandbox.db)
+            .unwrap()
+            .get_execution(&agent_runtime::ExecutionId::new("E-1").unwrap())
+            .unwrap()
     );
 
     // Cancel must reach the actual running provider — not an abandoned

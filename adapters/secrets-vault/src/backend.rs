@@ -59,6 +59,7 @@ impl VaultBackend {
         word_count: usize,
         params: KdfParams,
     ) -> Result<(Self, RecoveryPhrase), VaultError> {
+        password.validate_for_setting()?;
         let phrase = RecoveryPhrase::generate(word_count)?;
         let (envelope, dek) = Envelope::create(password, &phrase, params)?;
         write_new_file(&path, &envelope.to_bytes()).map_err(|error| {
@@ -95,6 +96,7 @@ impl VaultBackend {
 
     /// Unlocks with the recovery phrase and replaces the password.
     pub fn recover(&self, phrase: &RecoveryPhrase, password: &Password) -> Result<(), VaultError> {
+        password.validate_for_setting()?;
         let mut state = self.state();
         let envelope = read_envelope(&self.path)?;
         let dek = envelope.unlock_with_recovery(phrase)?;
@@ -109,6 +111,7 @@ impl VaultBackend {
     /// Replaces the password. Requires the current password even when
     /// unlocked.
     pub fn change_password(&self, current: &Password, new: &Password) -> Result<(), VaultError> {
+        new.validate_for_setting()?;
         let mut state = self.state();
         let envelope = read_envelope(&self.path)?;
         let dek = envelope.unlock_with_password(current)?;
@@ -251,13 +254,35 @@ fn backend_error(error: VaultError) -> SecretBackendError {
 }
 
 fn read_envelope(path: &Path) -> Result<Envelope, VaultError> {
-    let file = File::open(path).map_err(|error| {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let flags =
+            i32::try_from((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits())
+                .map_err(|_| VaultError::Io)?;
+        options.custom_flags(flags);
+    }
+    let file = options.open(path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             VaultError::NotFound
         } else {
             VaultError::Io
         }
     })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata().map_err(|_| VaultError::Io)?;
+        if !metadata.is_file()
+            || metadata.uid() != rustix::process::geteuid().as_raw()
+            || metadata.nlink() != 1
+            || metadata.mode() & 0o7777 != 0o600
+        {
+            return Err(VaultError::Io);
+        }
+    }
     let mut bytes = Vec::new();
     file.take(MAX_FILE_LEN + 1)
         .read_to_end(&mut bytes)
@@ -350,6 +375,92 @@ mod tests {
             KdfParams::new(8, 1, 1).unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn new_vaults_reject_repeated_common_and_sequential_passwords() {
+        let dir = tempfile::tempdir().unwrap();
+        for (index, weak) in [
+            "aaaaaaaaaaaa",
+            "abcdabcdabcd",
+            "Password123!",
+            "123456789012",
+            "letmein123456",
+            "éééééééééééé",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let path = dir.path().join(format!("weak-{index}"));
+            let outcome = VaultBackend::create_with_params(
+                path.clone(),
+                &password(weak),
+                crate::DEFAULT_PHRASE_WORDS,
+                KdfParams::new(8, 1, 1).unwrap(),
+            );
+            assert!(
+                matches!(outcome, Err(VaultError::WeakPassword)),
+                "case {index}"
+            );
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn password_change_and_recovery_refuse_weak_replacements_without_mutation() {
+        for recovery in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("vault");
+            let (vault, phrase) = create(&path);
+            let before = fs::read(&path).unwrap();
+            let weak = password("aaaaaaaaaaaa");
+            let result = if recovery {
+                vault.recover(&phrase, &weak)
+            } else {
+                vault.change_password(&password("correct-horse-battery"), &weak)
+            };
+            assert_eq!(result, Err(VaultError::WeakPassword));
+            assert_eq!(fs::read(&path).unwrap(), before);
+            vault.lock();
+            vault.unlock(&password("correct-horse-battery")).unwrap();
+        }
+    }
+
+    #[test]
+    fn existing_weak_password_can_unlock_and_upgrade_to_a_stronger_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault");
+        let weak = password("aaaaaaaaaaaa");
+        let phrase = RecoveryPhrase::generate(crate::DEFAULT_PHRASE_WORDS).unwrap();
+        let (legacy, _) =
+            Envelope::create(&weak, &phrase, KdfParams::new(8, 1, 1).unwrap()).unwrap();
+        write_new_file(&path, &legacy.to_bytes()).unwrap();
+        let vault = VaultBackend::open(&path).unwrap();
+        vault.unlock(&weak).unwrap();
+        let strong = password("correct-horse-battery");
+        vault.change_password(&weak, &strong).unwrap();
+        vault.lock();
+        assert_eq!(vault.unlock(&weak), Err(VaultError::UnlockFailed));
+        vault.unlock(&strong).unwrap();
+    }
+
+    #[test]
+    fn opening_vault_refuses_symlinks_hardlinks_and_public_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault");
+        let (vault, _) = create(&path);
+        drop(vault);
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(matches!(VaultBackend::open(&link), Err(VaultError::Io)));
+        std::fs::remove_file(&link).unwrap();
+        std::fs::hard_link(&path, &link).unwrap();
+        assert!(matches!(VaultBackend::open(&path), Err(VaultError::Io)));
+        std::fs::remove_file(&link).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(VaultBackend::open(&path), Err(VaultError::Io)));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(VaultBackend::open(&path).is_ok());
     }
 
     fn directory_names(path: &Path) -> Vec<String> {
