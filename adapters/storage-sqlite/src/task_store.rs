@@ -961,7 +961,7 @@ fn load_evidence_requirements(
     }
     let mut statement = connection.prepare(
         "SELECT position, criterion_id, requirement_kind, subject_binding, required,
-                policy_fingerprint
+                policy_fingerprint, statement
          FROM task_evidence_requirements WHERE task_id = ?1 ORDER BY position",
     )?;
     let rows = statement.query_map(params![task_id], |row| {
@@ -972,12 +972,21 @@ fn load_evidence_requirements(
             row.get::<_, String>(3)?,
             row.get::<_, i64>(4)?,
             row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
         ))
     })?;
     let mut requirements = Vec::new();
     let mut seen_criteria: Vec<String> = Vec::new();
     for (expected, row) in (0_i64..).zip(rows) {
-        let (position, criterion_id, raw_kind, raw_binding, required, policy_fingerprint) = row?;
+        let (
+            position,
+            criterion_id,
+            raw_kind,
+            raw_binding,
+            required,
+            policy_fingerprint,
+            statement,
+        ) = row?;
         if position != expected {
             return Err(StorageError::Corrupt(format!(
                 "task {task_id} stores non-contiguous evidence requirement order"
@@ -1028,6 +1037,7 @@ fn load_evidence_requirements(
             policy_fingerprint,
             required,
         )
+        .map(|requirement| requirement.with_statement(statement))
         .map_err(|error| {
             StorageError::Corrupt(format!(
                 "task {task_id} stores an invalid evidence requirement: {error}"
@@ -1268,8 +1278,8 @@ pub(crate) fn insert_task_evidence_requirements(
             .execute(
                 "INSERT INTO task_evidence_requirements
                  (task_id, position, criterion_id, requirement_kind, subject_binding,
-                  required, policy_fingerprint)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                  required, policy_fingerprint, statement)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     snapshot.id.as_str(),
                     position as i64,
@@ -1278,6 +1288,7 @@ pub(crate) fn insert_task_evidence_requirements(
                     requirement.subject_binding.as_str(),
                     if requirement.required { 1_i64 } else { 0_i64 },
                     requirement.policy_fingerprint,
+                    requirement.statement,
                 ],
             )
             .map_err(|error| map_constraint(error, "insert evidence requirement"))?;

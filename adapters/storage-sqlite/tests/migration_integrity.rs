@@ -113,11 +113,11 @@ fn healthy_old_version_migrates_with_private_backup_and_keeps_three() {
         raw(
             &path,
             "DROP TABLE org_usage_entries; DROP TABLE org_sync_envelopes; DROP TABLE org_policies; \
-             DROP TABLE task_acceptance_statements; ALTER TABLE tasks DROP COLUMN requires_workspace_change; DROP TABLE org_memberships; DROP TABLE org_teams; DROP TABLE organizations; \
+             DROP TABLE task_acceptance_statements; ALTER TABLE tasks DROP COLUMN requires_workspace_change; ALTER TABLE task_evidence_requirements DROP COLUMN statement; DROP TABLE org_memberships; DROP TABLE org_teams; DROP TABLE organizations; \
              DROP TABLE org_accounts; PRAGMA user_version = 36;",
         );
         drop(SqliteStore::open(&path).unwrap());
-        assert_eq!(version(&path), 39, "round {round}");
+        assert_eq!(version(&path), 40, "round {round}");
         std::thread::sleep(std::time::Duration::from_millis(3));
     }
 
@@ -137,6 +137,6 @@ fn current_version_database_is_untouched() {
     let dir = TempDir::new();
     let path = fresh_db(dir.0.as_path());
     drop(SqliteStore::open(&path).unwrap());
-    assert_eq!(version(&path), 39);
+    assert_eq!(version(&path), 40);
     assert!(backups(dir.0.as_path()).is_empty());
 }

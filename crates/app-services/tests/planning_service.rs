@@ -2767,6 +2767,22 @@ fn criterion_statement_reaches_the_persisted_child_and_its_provider_lines() {
         child.acceptance_lines(),
         ["criterion-child-1: hello.txt contains exactly hi"]
     );
+    // ADR-0051: the requirement that proves the criterion carries the same
+    // text (and so its revision does), surviving the store round trip.
+    let requirement = child
+        .evidence_requirements()
+        .iter()
+        .find(|requirement| requirement.criterion_id == "criterion-child-1")
+        .expect("requirement for the statement-bearing criterion");
+    assert_eq!(
+        requirement.statement.as_deref(),
+        Some("hello.txt contains exactly hi")
+    );
+    let unstamped = requirement.clone().with_statement(None);
+    assert_ne!(
+        evaluation::requirement_revision(requirement),
+        evaluation::requirement_revision(&unstamped)
+    );
 }
 
 #[test]

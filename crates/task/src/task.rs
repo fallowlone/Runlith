@@ -354,6 +354,16 @@ impl Task {
             .into_iter()
             .collect::<std::collections::BTreeMap<_, _>>();
         validate_acceptance_statements(&self.acceptance, &map)?;
+        // ADR-0051: stamp the text onto the requirement that proves the
+        // criterion, so the requirement revision (and every verdict or review
+        // bound to it) covers this exact statement.
+        self.evidence_requirements = std::mem::take(&mut self.evidence_requirements)
+            .into_iter()
+            .map(|requirement| {
+                let statement = map.get(&requirement.criterion_id).cloned();
+                requirement.with_statement(statement)
+            })
+            .collect();
         self.acceptance_statements = map;
         Ok(())
     }
@@ -415,7 +425,18 @@ impl Task {
             )));
         }
         crate::requirement::validate_requirement_coverage(&self.acceptance, &requirements)?;
-        self.evidence_requirements = requirements;
+        // ADR-0051: statements already bound to this Task are stamped onto the
+        // replacement, so authoring order cannot drop the text binding.
+        self.evidence_requirements = requirements
+            .into_iter()
+            .map(|requirement| {
+                let statement = self
+                    .acceptance_statements
+                    .get(&requirement.criterion_id)
+                    .cloned();
+                requirement.with_statement(statement)
+            })
+            .collect();
         Ok(())
     }
 
@@ -612,6 +633,20 @@ impl Task {
             &snapshot.evidence_requirements,
         )?;
         validate_acceptance_statements(&snapshot.acceptance, &snapshot.acceptance_statements)?;
+        // A stored requirement must carry exactly the statement bound to its
+        // criterion; a mismatch means a stale or tampered revision input.
+        for requirement in &snapshot.evidence_requirements {
+            if requirement.statement.as_ref()
+                != snapshot
+                    .acceptance_statements
+                    .get(&requirement.criterion_id)
+            {
+                return Err(DomainError::input(format!(
+                    "requirement for {:?} disagrees with its acceptance statement",
+                    requirement.criterion_id
+                )));
+            }
+        }
         // TASK-0135: persisted prerequisites re-validate against the same
         // collection invariants authoring enforces (per-item shape is
         // guaranteed by the `Prerequisite` type itself).
@@ -1070,6 +1105,18 @@ mod tests {
         assert_eq!(task.acceptance_statement("c1"), Some("file has hi"));
         let restored = Task::restore(task.snapshot()).unwrap();
         assert_eq!(restored, task);
+        // The proving requirement carries the same text, and restore refuses
+        // a requirement that disagrees with the bound statement.
+        assert_eq!(
+            task.evidence_requirements()[0].statement.as_deref(),
+            Some("file has hi")
+        );
+        let mut tampered = task.snapshot();
+        tampered.evidence_requirements[0].statement = Some("other".into());
+        assert!(Task::restore(tampered).is_err());
+        let mut unstamped = task.snapshot();
+        unstamped.evidence_requirements[0].statement = None;
+        assert!(Task::restore(unstamped).is_err());
         task.define_planning_metadata(vec!["src".into()], vec!["c2".into()], "low")
             .unwrap();
         assert_eq!(task.acceptance_statement("c1"), None);

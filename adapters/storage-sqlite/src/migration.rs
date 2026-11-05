@@ -1,7 +1,7 @@
 //! Deterministic checked-in migrations with an explicit schema version.
 //!
 //! Versioning uses SQLite `PRAGMA user_version`: 0 means a fresh database,
-//! 39 is the supported version (`0001_task_core.sql`, then
+//! 40 is the supported version (`0001_task_core.sql`, then
 //! `0002_event_journal.sql`, then `0003_event_scope.sql`, then
 //! `0004_runtime_core.sql`, then `0005_workspace_leases.sql`, then
 //! `0006_attempt_reservations.sql`, then
@@ -22,7 +22,8 @@
 //! then `0034_memory.sql`, then
 //! `0035_routines.sql`, then `0036_workers.sql`, then
 //! `0037_organizations.sql`, then `0038_task_acceptance_statements.sql`, then
-//! `0039_task_requires_workspace_change.sql`). Newer
+//! `0039_task_requires_workspace_change.sql`, then
+//! `0040_requirement_statement.sql`). Newer
 //! versions fail closed; re-opening the current version is a no-op (never
 //! destructively re-applied). Executing migrations inside one SQLite
 //! transaction is storage consistency only — not TASK-0024 event atomicity.
@@ -32,7 +33,7 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::error::{StorageError, StorageResult};
 
 /// Schema version this adapter understands.
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 39;
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 40;
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_task_core.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_event_journal.sql");
@@ -74,6 +75,7 @@ const MIGRATION_0036: &str = include_str!("../migrations/0036_workers.sql");
 const MIGRATION_0037: &str = include_str!("../migrations/0037_organizations.sql");
 const MIGRATION_0038: &str = include_str!("../migrations/0038_task_acceptance_statements.sql");
 const MIGRATION_0039: &str = include_str!("../migrations/0039_task_requires_workspace_change.sql");
+const MIGRATION_0040: &str = include_str!("../migrations/0040_requirement_statement.sql");
 pub(crate) const MIGRATION_0032_GUARD: &str =
     include_str!("../migrations/0032_journal_hash_chain_guard.sql");
 
@@ -369,7 +371,12 @@ pub(crate) fn migrate(connection: &mut Connection) -> StorageResult<u32> {
             ))
         })?;
     }
-    transaction.execute_batch("PRAGMA user_version = 39")?;
+    if current < 40 {
+        transaction.execute_batch(MIGRATION_0040).map_err(|error| {
+            StorageError::Migration(format!("0040_requirement_statement.sql failed: {error}"))
+        })?;
+    }
+    transaction.execute_batch("PRAGMA user_version = 40")?;
     transaction.commit()?;
     Ok(SUPPORTED_SCHEMA_VERSION)
 }

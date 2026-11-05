@@ -212,6 +212,11 @@ pub struct EvidenceRequirement {
     /// Hard-floor flag (ADR-0030 §2 `required`, CV-7): policy-derived
     /// minimums cannot be weakened by task/session/UX configuration.
     pub required: bool,
+    /// ADR-0051 acceptance statement this requirement was stamped with, if
+    /// any. It is part of the requirement revision, so a verdict or review
+    /// attests to this exact text and goes stale when the text changes. The
+    /// text itself never grants or waives completion.
+    pub statement: Option<String>,
 }
 
 impl EvidenceRequirement {
@@ -251,7 +256,17 @@ impl EvidenceRequirement {
             params,
             policy_fingerprint,
             required,
+            statement: None,
         })
+    }
+
+    /// Returns this requirement stamped with (or cleared of) an acceptance
+    /// statement. Bound and character checks live where statements are
+    /// authored (`Task::define_acceptance_statements`).
+    #[must_use]
+    pub fn with_statement(mut self, statement: Option<String>) -> Self {
+        self.statement = statement;
+        self
     }
 
     /// The explicit v1 default (ADR-0030 §6): a `test-suite` requirement with

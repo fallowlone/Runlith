@@ -64,3 +64,19 @@ nonempty write scope, so permission to write implies an obligation to write.
 - A statement is descriptive; it never changes a requirement's verification.
   It is immutable after DRAFT, so no verification evidence can bind a stale
   statement.
+
+## Statement binding to verification (follow-up)
+
+The statement is stamped onto the `EvidenceRequirement` that proves its
+criterion (`EvidenceRequirement.statement`, migration 0040) and is part of
+`requirement_revision` when present (statement-free revisions are unchanged).
+Every verdict and review record is already bound to that revision, so it now
+attests to the exact text: editing or removing the text makes a prior verdict
+stale and completion admission refuses it (`adr0051_verdict_attests_to_the_exact_acceptance_statement`).
+`Task::restore` refuses a requirement that disagrees with its bound statement.
+
+Limit, by design: prose is not machine-checked. A statement does not make an
+automated check understand it; it makes the *reviewer's or verifier's verdict*
+about this text. A criterion proven only by a bare automated test therefore
+still passes whenever that test passes; use an independent-review or
+human-approval method when the sentence itself must be judged.
