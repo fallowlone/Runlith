@@ -1508,6 +1508,11 @@ fn criterion_statement_is_bounded_and_bound_into_proposal_hash() {
         "",
         "   ",
         "a\u{0}b",
+        "a\nb",
+        "a\rb",
+        "a\u{2028}b",
+        "a\u{202E}b",
+        "a\u{2067}b",
         &"x".repeat(plan_domain::MAX_CRITERION_STATEMENT_BYTES + 1),
     ] {
         assert!(base.clone().with_statement(bad).is_err(), "{bad:?}");

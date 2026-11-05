@@ -814,7 +814,7 @@ const PLANNER_ROLE: &str = concat!(
     "node_additions entries: {id,scope,criteria:[{id,method,statement}],risk_class,required_gate}, ",
     "where scope is a non-empty array of roots copied from scope_bound or nested inside one. ",
     // ADR-0051: statement is descriptive text only; it never grants completion.
-    "Each criterion's statement is a short (<=1024 bytes) plain-text condition the child must meet; it ",
+    "Each criterion's statement is a short (<=1024 bytes) single-line plain-text condition the child must meet; it ",
     "does not replace or waive the criterion's method or any parent obligation. ",
     // TASK-0123 carries every declared method into the child Task's explicit
     // EvidenceRequirement; keep the prompt aligned with the accepted G8

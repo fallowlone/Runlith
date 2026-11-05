@@ -735,10 +735,10 @@ fn validate_acceptance_statements(
         }
         if text.trim().is_empty()
             || text.len() > MAX_ACCEPTANCE_STATEMENT_BYTES
-            || text.chars().any(|c| c.is_control() && c != '\n')
+            || text.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'))
         {
             return Err(DomainError::input(format!(
-                "acceptance statement for {criterion:?} must be nonblank, at most {MAX_ACCEPTANCE_STATEMENT_BYTES} bytes, without control characters"
+                "acceptance statement for {criterion:?} must be nonblank, at most {MAX_ACCEPTANCE_STATEMENT_BYTES} bytes, single-line, without control or text-direction characters"
             )));
         }
     }
@@ -1053,9 +1053,11 @@ mod tests {
         assert!(task
             .define_acceptance_statements(vec![("nope".into(), "x".into())])
             .is_err());
-        assert!(task
-            .define_acceptance_statements(vec![("c1".into(), "  ".into())])
-            .is_err());
+        for bad in ["  ", "a\nb", "a\rb", "a\u{2029}b", "a\u{202E}b"] {
+            assert!(task
+                .define_acceptance_statements(vec![("c1".into(), bad.into())])
+                .is_err());
+        }
         task.define_acceptance_statements(vec![("c1".into(), "file has hi".into())])
             .unwrap();
         assert_eq!(task.acceptance_statement("c1"), Some("file has hi"));

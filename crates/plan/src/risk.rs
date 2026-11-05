@@ -166,10 +166,10 @@ impl CriterionDecl {
         let statement = statement.into();
         if statement.trim().is_empty()
             || statement.len() > MAX_CRITERION_STATEMENT_BYTES
-            || statement.chars().any(|c| c.is_control() && c != '\n')
+            || statement.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'))
         {
             return Err(PlanDomainError::input(format!(
-                "criterion {} statement must be nonblank, at most {MAX_CRITERION_STATEMENT_BYTES} bytes, without control characters",
+                "criterion {} statement must be nonblank, at most {MAX_CRITERION_STATEMENT_BYTES} bytes, single-line, without control or text-direction characters",
                 self.id.as_str()
             )));
         }
