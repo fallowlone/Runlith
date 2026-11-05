@@ -752,7 +752,7 @@ fn cv_2_schema_18_migrates_to_19_with_closed_capture_authority() {
     }
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 37);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 39);
     let connection = rusqlite::Connection::open(&db.path).unwrap();
     let sql: String = connection
         .query_row(
@@ -1881,6 +1881,8 @@ fn upgrade_backfills_fingerprint_for_quarantined_effect() {
              DROP TABLE IF EXISTS org_memberships;
              DROP TABLE IF EXISTS org_teams;
              DROP TABLE IF EXISTS org_accounts;
+             DROP TABLE IF EXISTS task_acceptance_statements;
+             ALTER TABLE tasks DROP COLUMN requires_workspace_change;
              DROP TABLE IF EXISTS organizations;
              DROP TABLE IF EXISTS worker_challenges;
              DROP TABLE IF EXISTS worker_jobs;
@@ -1893,7 +1895,7 @@ fn upgrade_backfills_fingerprint_for_quarantined_effect() {
         .unwrap();
     // Upgrade must succeed (not fail with Corrupt 'observed effect vanished').
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 37);
+    assert_eq!(store.schema_version().unwrap(), 39);
     // Fingerprint backfilled although the row stays quarantined.
     let fingerprint: Option<String> = raw(&db.path)
         .query_row(
@@ -2173,6 +2175,7 @@ fn migration_repairs_pretrigger_operations_shape() {
              DROP TABLE IF EXISTS org_memberships;
              DROP TABLE IF EXISTS org_teams;
              DROP TABLE IF EXISTS org_accounts;
+             DROP TABLE IF EXISTS task_acceptance_statements;
              DROP TABLE IF EXISTS organizations;
              DROP TABLE IF EXISTS worker_challenges;
              DROP TABLE IF EXISTS worker_jobs;
@@ -2187,6 +2190,7 @@ fn migration_repairs_pretrigger_operations_shape() {
              DROP TRIGGER IF EXISTS event_journal_no_delete;
              DROP TRIGGER IF EXISTS event_plan_causes_no_update;
              DROP TRIGGER IF EXISTS event_plan_causes_no_delete;
+             ALTER TABLE tasks DROP COLUMN requires_workspace_change;
              ALTER TABLE event_journal DROP COLUMN previous_hash;
              ALTER TABLE event_journal DROP COLUMN record_hash;
              ALTER TABLE observed_effects DROP COLUMN record_fingerprint;
@@ -2195,7 +2199,7 @@ fn migration_repairs_pretrigger_operations_shape() {
         .unwrap();
     }
     let store = db.open();
-    assert_eq!(store.schema_version().unwrap(), 37);
+    assert_eq!(store.schema_version().unwrap(), 39);
     drop(store);
     let conn = raw(&db.path);
     let tables: i64 = conn

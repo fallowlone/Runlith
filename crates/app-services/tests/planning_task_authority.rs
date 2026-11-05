@@ -62,6 +62,7 @@ impl TestDb {
                 vec!["repo:src".to_owned()],
                 vec!["criterion-root".to_owned()],
                 "low",
+                true,
             )
             .expect("author canonical planning task");
         tasks.mark_ready(&task(ROOT)).expect("root ready");

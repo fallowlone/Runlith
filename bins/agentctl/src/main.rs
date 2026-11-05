@@ -362,7 +362,19 @@ fn create_planned_task_request(args: &[String]) -> Result<TaskAuthoringCoreReque
         ..CreatePlanningTaskRequest::default()
     };
     let mut risk = None;
-    while let [flag, value, remaining @ ..] = flags {
+    // ADR-0051: `--allow-no-change` is the only flag without a value; it declares
+    // scoped work that need not change the worktree (requires protocol v14).
+    loop {
+        if let [flag, remaining @ ..] = flags {
+            if flag == "--allow-no-change" {
+                request.requires_workspace_change = Some(false);
+                flags = remaining;
+                continue;
+            }
+        }
+        let [flag, value, remaining @ ..] = flags else {
+            break;
+        };
         match flag.as_str() {
             "--scope" => request.allowed_paths.push(value.clone()),
             "--acceptance" => request.acceptance_criteria.push(value.clone()),
@@ -2154,6 +2166,35 @@ fn print_execution_response(response: &ExecutionCoreResponse, direct: bool) -> E
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn create_planned_allow_no_change_flag_sets_the_intent_only_when_given() {
+        let args = |extra: &[&str]| {
+            let mut v: Vec<String> = ["T-1", "P-1", "inspect", "--scope", "repo:src"]
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            v.extend(["--acceptance", "c", "--risk", "low"].map(ToString::to_string));
+            v.extend(extra.iter().map(ToString::to_string));
+            v
+        };
+        let intent = |request: TaskAuthoringCoreRequest| match request.payload {
+            Some(task_authoring_core_request::Payload::CreatePlanningTask(create)) => {
+                create.requires_workspace_change
+            }
+            other => panic!("unexpected payload {other:?}"),
+        };
+        assert_eq!(
+            intent(create_planned_task_request(&args(&[])).unwrap()),
+            None
+        );
+        assert_eq!(
+            intent(create_planned_task_request(&args(&["--allow-no-change"])).unwrap()),
+            Some(false)
+        );
+        assert!(create_planned_task_request(&args(&["--allow-no-change", "x"])).is_err());
+    }
+
     use super::*;
 
     fn decide_continuation(spelling: &str) -> i32 {

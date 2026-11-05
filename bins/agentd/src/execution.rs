@@ -3876,7 +3876,7 @@ fn run_background_inner(
             workspace_request.clone(),
             |task, lease| {
                 let prompt =
-                    provider_claude::build_task_prompt(task.objective(), task.acceptance());
+                    provider_claude::build_task_prompt(task.objective(), &task.acceptance_lines());
                 let config = provider_claude::ClaudeConfig::default()
                     .with_executable(executable.clone())
                     .expect("canonical provider executable is non-blank")

@@ -233,6 +233,31 @@ fn canonical_changeset_digest(changeset: &PlanChangeSet) -> sha2::digest::Output
     push_u64(&mut hasher, changeset.planning_cost_receipt.wall_time_ms);
     push_str(&mut hasher, &changeset.planning_cost_receipt.price_class);
 
+    // ADR-0051: statements are appended only when present, so hashes of
+    // legacy (statement-free) proposals are unchanged.
+    let mut statements: Vec<(&str, &str, &str)> = changeset
+        .node_additions
+        .iter()
+        .flat_map(|addition| {
+            addition.criteria.iter().filter_map(move |criterion| {
+                criterion
+                    .statement
+                    .as_deref()
+                    .map(|text| (addition.id.as_str(), criterion.id.as_str(), text))
+            })
+        })
+        .collect();
+    if !statements.is_empty() {
+        statements.sort_unstable();
+        push_str(&mut hasher, "criterion-statements-v1");
+        push_u64(&mut hasher, statements.len() as u64);
+        for (node, criterion, text) in statements {
+            push_str(&mut hasher, node);
+            push_str(&mut hasher, criterion);
+            push_str(&mut hasher, text);
+        }
+    }
+
     hasher.finalize()
 }
 

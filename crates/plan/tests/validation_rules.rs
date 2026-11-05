@@ -347,6 +347,86 @@ fn v3_acceptance_criteria_preservation_method_change_routes_to_v9() {
     assert_eq!(refusal_code(&graph, &cs, &ctx()), "RISK_GATE_OPEN");
 }
 
+#[test]
+fn v3_shared_criterion_cannot_hide_method_changes_by_reordering_nodes() {
+    let methods = [
+        VerificationMethod::AutomatedTest,
+        VerificationMethod::IndependentReview,
+        VerificationMethod::SecurityCheck,
+        VerificationMethod::HumanApproval,
+    ];
+    let graph = base_graph();
+    for parent_method in methods {
+        for changed_method in methods {
+            let mut context = ctx();
+            context.affected_parent_criteria[0].method = parent_method;
+            let kind = plan_domain::requirement_kind_for_method(parent_method);
+            context.affected_parent_criteria[0].requirement = Some(
+                EvidenceRequirement::new(
+                    "c1",
+                    kind,
+                    kind.default_subject_binding(),
+                    vec![],
+                    Some(context.policy_fingerprint.clone()),
+                    true,
+                )
+                .unwrap(),
+            );
+            let mut proposal = valid_changeset();
+            proposal.node_additions[0].criteria[0].method = changed_method;
+            let mut other = addition("a2", "ws1:src/api", "c1a");
+            other.criteria[0].method = parent_method;
+            proposal.node_additions.push(other);
+            proposal.proposal_hash = compute_proposal_hash(&proposal);
+            let mut reordered = proposal.clone();
+            reordered.node_additions.reverse();
+            assert_eq!(compute_proposal_hash(&reordered), proposal.proposal_hash);
+            let permutations = [proposal, reordered];
+            let outcomes = permutations
+                .iter()
+                .map(|proposal| validate_proposal(&graph, proposal, &context))
+                .collect::<Vec<_>>();
+            if parent_method == changed_method {
+                assert_eq!(
+                    outcomes,
+                    vec![
+                        ValidationOutcome::Accepted {
+                            risk_escalated: false
+                        };
+                        2
+                    ]
+                );
+            } else {
+                let codes = outcomes
+                    .iter()
+                    .map(|outcome| match outcome {
+                        ValidationOutcome::Refused(refusal) => refusal.code(),
+                        ValidationOutcome::Accepted { .. } => "ACCEPTED",
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    codes,
+                    ["RISK_GATE_OPEN", "RISK_GATE_OPEN"],
+                    "{parent_method:?} -> {changed_method:?} must escalate in either order"
+                );
+                for proposal in &permutations {
+                    context.risk_grant = Some(RiskEscalationGrant {
+                        proposal_hash: proposal.proposal_hash.clone(),
+                        expires_at_ms: 5_000,
+                        consumed: false,
+                    });
+                    assert_eq!(
+                        validate_proposal(&graph, proposal, &context),
+                        ValidationOutcome::Accepted {
+                            risk_escalated: true
+                        }
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// ADR-0030 CV-4/V9 reconciliation: when the parent Task's explicit
 /// evidence requirement is human-approval, a child that redeclares
 /// automated-test for that criterion is a method change and routes to V9,
@@ -1417,4 +1497,30 @@ fn v9_foreign_bound_params_still_escalate() {
             "RISK_GATE_OPEN"
         );
     }
+}
+
+#[test]
+fn criterion_statement_is_bounded_and_bound_into_proposal_hash() {
+    let plain = valid_changeset();
+    let legacy_hash = compute_proposal_hash(&plain);
+    let base = plain.node_additions[0].criteria[0].clone();
+    for bad in [
+        "",
+        "   ",
+        "a\u{0}b",
+        &"x".repeat(plan_domain::MAX_CRITERION_STATEMENT_BYTES + 1),
+    ] {
+        assert!(base.clone().with_statement(bad).is_err(), "{bad:?}");
+    }
+    let mut with = plain.clone();
+    with.node_additions[0].criteria[0] = base
+        .clone()
+        .with_statement("hello.txt contains hi")
+        .unwrap();
+    let mut other = plain.clone();
+    other.node_additions[0].criteria[0] = base.with_statement("hello.txt contains bye").unwrap();
+    let (h1, h2) = (compute_proposal_hash(&with), compute_proposal_hash(&other));
+    assert_ne!(h1, legacy_hash);
+    assert_ne!(h1, h2);
+    assert_eq!(compute_proposal_hash(&plain), legacy_hash);
 }

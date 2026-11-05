@@ -117,7 +117,7 @@ fn fresh_database_reaches_current_schema() {
     let db = TestDb::new("fresh-current");
     let store = db.open();
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 37);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 39);
     assert!(store.list_events_ordered().unwrap().is_empty());
 }
 
@@ -958,7 +958,8 @@ fn table_layout_matches_the_accepted_contract() {
             "parent_id",
             "state",
             "kind",
-            "risk"
+            "risk",
+            "requires_workspace_change"
         ]
     );
     drop(store);
@@ -1155,6 +1156,8 @@ fn legacy_journal_without_hashes_is_backfilled_on_upgrade() {
         .execute_batch(
             "DROP TABLE IF EXISTS entity_links;
              DROP TABLE IF EXISTS entities;
+             DROP TABLE IF EXISTS task_acceptance_statements;
+             ALTER TABLE tasks DROP COLUMN requires_workspace_change;
              DROP TABLE IF EXISTS memory_links;
              DROP TABLE IF EXISTS memory_anchors;
              DROP TABLE IF EXISTS memory_source_refs;

@@ -2169,6 +2169,21 @@ impl<C: Clock> PlanningService<C> {
             child
                 .define_evidence_requirements(requirements)
                 .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
+            // ADR-0051: statements ride with the criteria they describe.
+            child
+                .define_acceptance_statements(
+                    addition
+                        .criteria
+                        .iter()
+                        .filter_map(|criterion| {
+                            criterion
+                                .statement
+                                .clone()
+                                .map(|text| (criterion.id.as_str().to_owned(), text))
+                        })
+                        .collect(),
+                )
+                .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
             let created_event = child_lifecycle_event(
                 &child,
                 EventType::TaskCreated,

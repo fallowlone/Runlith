@@ -634,3 +634,15 @@ for `agentctl`; the desktop UI shows fixed wording per code instead.
 
 agentd does not call GitHub and does not store layouts. Both belong to the
 desktop host (`apps/desktop/src-tauri`), which validates a layout again on save.
+
+## 22. ADR-0051 protocol v14: workspace-change intent (implemented)
+
+Protocol version 14 lets `CreatePlanningTaskRequest` carry
+`optional bool requires_workspace_change = 7`. `false` declares scoped
+work that may finish with an unchanged worktree (it does not restrict
+writes; scope, confinement and verification still apply); absent keeps the default obligation (a scoped attempt must
+change the worktree). The daemon stores it as Task intent (DRAFT-only) and
+`PlanningTaskDto.requires_workspace_change` echoes it. A session below V14
+that sends the field receives a typed `UnsupportedProtocol` refusal; the
+field is never silently dropped. `agentctl task create-planned ... --allow-no-change`
+negotiates V14 and fails against an older daemon instead of sending it.

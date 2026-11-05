@@ -198,7 +198,7 @@ impl DaemonConfig {
     /// (TASK-0193 routine rollout) while preserving every older surface.
     pub fn with_execution(path: impl Into<PathBuf>) -> Self {
         Self {
-            server_config: ServerConfig::g16_default(),
+            server_config: ServerConfig::g17_default(),
             database_path: Some(path.into()),
             provider_executable: None,
         }

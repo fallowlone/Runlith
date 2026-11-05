@@ -60,6 +60,7 @@ fn run_cycle(
     tag: &str,
     scoped: bool,
     write: bool,
+    requires_change: bool,
 ) -> (
     Result<OrchestrationOutcome, app_services::ServiceError>,
     TaskState,
@@ -84,6 +85,7 @@ fn run_cycle(
         task.define_planning_metadata(vec!["repo:src".to_owned()], vec!["c1".to_owned()], "low")
             .unwrap();
     }
+    task.set_requires_workspace_change(requires_change).unwrap();
     orch.tasks_mut().create_task(&task).unwrap();
     orch.tasks_mut().mark_ready(task.id()).unwrap();
     let mut ws = WorkspaceService::open(
@@ -130,7 +132,7 @@ fn run_cycle(
 
 #[test]
 fn scoped_task_with_no_worktree_change_is_not_a_success() {
-    let (outcome, state) = run_cycle("scoped-empty", true, false);
+    let (outcome, state) = run_cycle("scoped-empty", true, false, true);
     assert!(
         matches!(outcome, Ok(OrchestrationOutcome::ExecutionFailed { .. })),
         "{outcome:?}"
@@ -142,13 +144,13 @@ fn scoped_task_with_no_worktree_change_is_not_a_success() {
 fn scoped_task_with_a_change_still_succeeds() {
     // No verifier evidence is bound here, so completion admission refuses
     // after the attempt succeeded and the task is left VERIFYING (G5).
-    let (_, state) = run_cycle("scoped-write", true, true);
+    let (_, state) = run_cycle("scoped-write", true, true, true);
     assert_eq!(state, TaskState::Verifying);
 }
 
 #[test]
 fn unscoped_task_without_change_keeps_existing_behaviour() {
-    let (outcome, _) = run_cycle("unscoped-empty", false, false);
+    let (outcome, _) = run_cycle("unscoped-empty", false, false, true);
     assert!(
         matches!(
             outcome,
@@ -156,4 +158,18 @@ fn unscoped_task_without_change_keeps_existing_behaviour() {
         ),
         "{outcome:?}"
     );
+}
+
+#[test]
+fn scoped_read_only_intent_without_change_is_not_failed_by_the_guard() {
+    // ADR-0051: explicit scoped read-only work may conclude on an unchanged
+    // worktree; the evaluator still decides.
+    // As with a real write, no verifier evidence is bound here, so completion
+    // admission refuses after the attempt succeeded: VERIFYING, not FAILED.
+    let (outcome, state) = run_cycle("scoped-readonly", true, false, false);
+    assert!(
+        !matches!(outcome, Ok(OrchestrationOutcome::ExecutionFailed { .. })),
+        "{outcome:?}"
+    );
+    assert_eq!(state, TaskState::Verifying);
 }

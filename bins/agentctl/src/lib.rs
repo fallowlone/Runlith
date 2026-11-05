@@ -1061,6 +1061,32 @@ where
     Ok(session)
 }
 
+/// Performs a protocol-v14 handshake for a request that carries the ADR-0051
+/// workspace-change intent. An older daemon is refused here, so the field is
+/// never sent to a peer that would silently ignore it.
+#[cfg(unix)]
+async fn handshake_stream_workspace_intent<S>(stream: S) -> Result<ClientSession<S>, ClientError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut session = ClientSession::new(
+        FramedTransport::new(stream),
+        ClientConfig::workspace_intent_default(CLIENT_KIND_AGENTCTL),
+    );
+    session
+        .perform_handshake()
+        .await
+        .map_err(classify_control)?;
+    let negotiated = session.negotiated_version().unwrap_or(0);
+    if !ipc_contracts::supports_workspace_change_intent_ipc(negotiated) {
+        return Err(ClientError::Control(ControlError::UnsupportedProtocol {
+            negotiated,
+            required: ipc_contracts::IPC_PROTOCOL_VERSION_V14,
+        }));
+    }
+    Ok(session)
+}
+
 /// Sends one protocol-v6 Task authoring mutation. A lost or ambiguous reply
 /// is [`ClientError::BusinessAmbiguous`]; creation is never replayed, and the
 /// caller re-probes with `task get`.
@@ -1070,11 +1096,20 @@ pub async fn task_authoring_request(
     spawn: impl FnOnce() -> io::Result<Child>,
     request: TaskAuthoringCoreRequest,
 ) -> Result<TaskAuthoringCoreResponse, ClientError> {
+    let carries_intent = matches!(
+        &request.payload,
+        Some(ipc_contracts::proto::task_authoring_core_request::Payload::CreatePlanningTask(create))
+            if create.requires_workspace_change.is_some()
+    );
     let session = connect_or_start_with(spawn, || async {
         let stream = transport_connect(endpoint)
             .await
             .map_err(classify_transport)?;
-        handshake_stream_v6(stream).await
+        if carries_intent {
+            handshake_stream_workspace_intent(stream).await
+        } else {
+            handshake_stream_v6(stream).await
+        }
     })
     .await?;
     let absence = absence_note(endpoint);

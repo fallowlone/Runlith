@@ -305,6 +305,15 @@ impl ClientConfig {
             .push(ipc_contracts::IPC_PROTOCOL_VERSION_V13);
         config
     }
+
+    /// ADR-0051 client profile: v14 may carry the workspace-change intent.
+    pub fn workspace_intent_default(client_kind: impl Into<String>) -> Self {
+        let mut config = Self::widget_default(client_kind);
+        config
+            .supported_versions
+            .push(ipc_contracts::IPC_PROTOCOL_VERSION_V14);
+        config
+    }
 }
 
 /// Client side of the bootstrap control protocol.
@@ -1098,7 +1107,20 @@ where
                 let negotiated = self
                     .negotiated_version
                     .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
-                match validate_task_authoring_allowed(negotiated) {
+                let carries_intent = matches!(
+                    &request.payload,
+                    Some(ipc_contracts::proto::task_authoring_core_request::Payload::CreatePlanningTask(
+                        create
+                    )) if create.requires_workspace_change.is_some()
+                );
+                let allowed = validate_task_authoring_allowed(negotiated).and_then(|()| {
+                    if carries_intent {
+                        crate::negotiation::validate_workspace_change_intent_allowed(negotiated)
+                    } else {
+                        Ok(())
+                    }
+                });
+                match allowed {
                     Ok(()) => Ok(ReadyRequest::TaskAuthoring(request)),
                     Err(error) => self.fail(error),
                 }
@@ -1871,6 +1893,10 @@ mod tests {
     }
 
     fn task_authoring_core_frame() -> Bytes {
+        task_authoring_core_frame_with_intent(None)
+    }
+
+    fn task_authoring_core_frame_with_intent(intent: Option<bool>) -> Bytes {
         use ipc_contracts::proto::{
             task_authoring_core_request, CreatePlanningTaskRequest, TaskAuthoringCoreRequest,
         };
@@ -1886,6 +1912,7 @@ mod tests {
                                 allowed_paths: vec!["repo:src".to_owned()],
                                 acceptance_criteria: vec!["criterion".to_owned()],
                                 baseline_risk: "low".to_owned(),
+                                requires_workspace_change: intent,
                             },
                         )),
                     },
@@ -1969,6 +1996,50 @@ mod tests {
         assert!(server.planning_allowed());
         raw_client
             .write_frame(task_authoring_core_frame())
+            .await
+            .expect("write");
+        assert!(matches!(
+            server.next_request().await,
+            Ok(ReadyRequest::TaskAuthoring(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn workspace_change_intent_needs_v14_and_is_refused_not_ignored_below_it() {
+        // v13: the field is refused, never silently dropped.
+        let (mut raw_client, mut server) =
+            session_after_handshake((0..=13).collect(), ServerConfig::g17_default()).await;
+        assert_eq!(server.negotiated_version(), Some(13));
+        raw_client
+            .write_frame(task_authoring_core_frame_with_intent(Some(false)))
+            .await
+            .expect("write");
+        assert!(matches!(
+            server.next_request().await,
+            Err(ControlError::UnsupportedProtocol {
+                negotiated: 13,
+                required: 14
+            })
+        ));
+
+        // v13 without the field is unchanged.
+        let (mut raw_client, mut server) =
+            session_after_handshake((0..=13).collect(), ServerConfig::g17_default()).await;
+        raw_client
+            .write_frame(task_authoring_core_frame())
+            .await
+            .expect("write");
+        assert!(matches!(
+            server.next_request().await,
+            Ok(ReadyRequest::TaskAuthoring(_))
+        ));
+
+        // v14 carries it.
+        let (mut raw_client, mut server) =
+            session_after_handshake((0..=14).collect(), ServerConfig::g17_default()).await;
+        assert_eq!(server.negotiated_version(), Some(14));
+        raw_client
+            .write_frame(task_authoring_core_frame_with_intent(Some(false)))
             .await
             .expect("write");
         assert!(matches!(

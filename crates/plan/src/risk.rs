@@ -141,13 +141,40 @@ pub struct CriterionDecl {
     pub id: crate::ids::CriterionId,
     /// How this criterion is proven (always present by construction).
     pub method: VerificationMethod,
+    /// ADR-0051 bounded acceptance statement; `None` for legacy criteria.
+    /// Text never grants or waives completion authority.
+    pub statement: Option<String>,
 }
 
+/// ADR-0051 upper bound on a statement's UTF-8 byte length.
+pub const MAX_CRITERION_STATEMENT_BYTES: usize = 1024;
+
 impl CriterionDecl {
-    /// Declares a criterion with its proof method.
+    /// Declares a criterion with its proof method and no statement.
     #[must_use]
     pub fn new(id: crate::ids::CriterionId, method: VerificationMethod) -> Self {
-        Self { id, method }
+        Self {
+            id,
+            method,
+            statement: None,
+        }
+    }
+
+    /// Attaches an acceptance statement; blank, oversized or control-character
+    /// text is refused.
+    pub fn with_statement(mut self, statement: impl Into<String>) -> Result<Self, PlanDomainError> {
+        let statement = statement.into();
+        if statement.trim().is_empty()
+            || statement.len() > MAX_CRITERION_STATEMENT_BYTES
+            || statement.chars().any(|c| c.is_control() && c != '\n')
+        {
+            return Err(PlanDomainError::input(format!(
+                "criterion {} statement must be nonblank, at most {MAX_CRITERION_STATEMENT_BYTES} bytes, without control characters",
+                self.id.as_str()
+            )));
+        }
+        self.statement = Some(statement);
+        Ok(self)
     }
 }
 

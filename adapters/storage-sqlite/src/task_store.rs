@@ -215,6 +215,7 @@ impl SqliteStore {
         insert_task_strings(&transaction, &snapshot)?;
         insert_task_evidence_requirements(&transaction, &snapshot)?;
         insert_task_prerequisites(&transaction, &snapshot)?;
+        insert_task_acceptance_statements(&transaction, &snapshot)?;
         insert_task_edges(&transaction, &snapshot)?;
         transaction.commit()?;
         Ok(())
@@ -245,6 +246,7 @@ impl SqliteStore {
         insert_task_strings(&transaction, &snapshot)?;
         insert_task_evidence_requirements(&transaction, &snapshot)?;
         insert_task_prerequisites(&transaction, &snapshot)?;
+        insert_task_acceptance_statements(&transaction, &snapshot)?;
         insert_task_edges(&transaction, &snapshot)?;
         let committed = insert_journal_event(&transaction, event)?;
         transaction.commit()?;
@@ -669,7 +671,8 @@ pub(crate) fn list_project_tasks(
 fn load_task_snapshot(connection: &Connection, id: &str) -> StorageResult<Option<TaskSnapshot>> {
     let row: Option<TaskRow> = connection
         .query_row(
-            "SELECT id, project_id, objective, parent_id, state, kind, risk
+            "SELECT id, project_id, objective, parent_id, state, kind, risk,
+                    requires_workspace_change
                  FROM tasks WHERE id = ?1",
             params![id],
             |row| {
@@ -681,6 +684,7 @@ fn load_task_snapshot(connection: &Connection, id: &str) -> StorageResult<Option
                     state: row.get(4)?,
                     kind: row.get(5)?,
                     risk: row.get(6)?,
+                    requires_workspace_change: row.get::<_, i64>(7)? != 0,
                 })
             },
         )
@@ -766,16 +770,53 @@ fn load_task_snapshot(connection: &Connection, id: &str) -> StorageResult<Option
         depends_on,
         acceptance: ordered_values(&strings, "acceptance"),
         evidence_requirements: load_evidence_requirements(connection, id.as_str())?,
+        acceptance_statements: load_acceptance_statements(connection, id.as_str())?,
         prerequisites: load_task_prerequisites(connection, id.as_str())?,
         allowed_paths: ordered_values(&strings, "allowed_path"),
         forbidden_paths: ordered_values(&strings, "forbidden_path"),
         verification: ordered_values(&strings, "verification"),
         required_review: ordered_values(&strings, "required_review"),
         risk: row.risk,
+        requires_workspace_change: row.requires_workspace_change,
         artifacts: ordered_values(&strings, "artifact"),
         kind: row.kind,
         state,
     }))
+}
+
+/// Loads one Task's ADR-0051 acceptance statements.
+fn load_acceptance_statements(
+    connection: &Connection,
+    task_id: &str,
+) -> StorageResult<std::collections::BTreeMap<String, String>> {
+    let mut statement = connection.prepare(
+        "SELECT criterion_id, statement FROM task_acceptance_statements WHERE task_id = ?1",
+    )?;
+    let rows = statement.query_map(params![task_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut statements = std::collections::BTreeMap::new();
+    for row in rows {
+        let (criterion, text) = row?;
+        statements.insert(criterion, text);
+    }
+    Ok(statements)
+}
+
+pub(crate) fn insert_task_acceptance_statements(
+    connection: &Connection,
+    snapshot: &TaskSnapshot,
+) -> StorageResult<()> {
+    for (criterion, text) in &snapshot.acceptance_statements {
+        connection
+            .execute(
+                "INSERT INTO task_acceptance_statements (task_id, criterion_id, statement)
+                 VALUES (?1, ?2, ?3)",
+                params![snapshot.id.as_str(), criterion, text],
+            )
+            .map_err(|error| map_constraint(error, "insert acceptance statement"))?;
+    }
+    Ok(())
 }
 
 /// Loads one Task's declared activation prerequisites in declaration order.
@@ -936,6 +977,7 @@ struct TaskRow {
     state: String,
     kind: Option<String>,
     risk: Option<String>,
+    requires_workspace_change: bool,
 }
 
 /// Validates that `event` is the `project.created` evidence for exactly
@@ -1016,8 +1058,9 @@ pub(crate) fn insert_task_row(
 ) -> StorageResult<()> {
     connection
         .execute(
-            "INSERT INTO tasks (id, project_id, objective, parent_id, state, kind, risk)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO tasks (id, project_id, objective, parent_id, state, kind, risk,
+                                requires_workspace_change)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 snapshot.id.as_str(),
                 snapshot.project_id.as_str(),
@@ -1026,6 +1069,7 @@ pub(crate) fn insert_task_row(
                 snapshot.state.as_str(),
                 snapshot.kind,
                 snapshot.risk,
+                i64::from(snapshot.requires_workspace_change),
             ],
         )
         .map_err(|error| map_constraint(error, "insert task"))?;
@@ -1073,9 +1117,14 @@ fn save_task_rows(
         "DELETE FROM task_prerequisites WHERE task_id = ?1",
         params![snapshot.id.as_str()],
     )?;
+    transaction.execute(
+        "DELETE FROM task_acceptance_statements WHERE task_id = ?1",
+        params![snapshot.id.as_str()],
+    )?;
     insert_task_strings(transaction, snapshot)?;
     insert_task_evidence_requirements(transaction, snapshot)?;
     insert_task_prerequisites(transaction, snapshot)?;
+    insert_task_acceptance_statements(transaction, snapshot)?;
     insert_task_edges(transaction, snapshot)?;
     Ok(())
 }
@@ -1083,11 +1132,13 @@ fn save_task_rows(
 fn insert_task_row_replace(connection: &Connection, snapshot: &TaskSnapshot) -> StorageResult<()> {
     connection
         .execute(
-            "INSERT INTO tasks (id, project_id, objective, parent_id, state, kind, risk)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO tasks (id, project_id, objective, parent_id, state, kind, risk,
+                                requires_workspace_change)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,
                 objective=excluded.objective, parent_id=excluded.parent_id,
-                state=excluded.state, kind=excluded.kind, risk=excluded.risk",
+                state=excluded.state, kind=excluded.kind, risk=excluded.risk,
+                requires_workspace_change=excluded.requires_workspace_change",
             params![
                 snapshot.id.as_str(),
                 snapshot.project_id.as_str(),
@@ -1096,6 +1147,7 @@ fn insert_task_row_replace(connection: &Connection, snapshot: &TaskSnapshot) -> 
                 snapshot.state.as_str(),
                 snapshot.kind,
                 snapshot.risk,
+                i64::from(snapshot.requires_workspace_change),
             ],
         )
         .map_err(|error| map_constraint(error, "save task"))?;

@@ -297,6 +297,9 @@ pub fn dispatch_task_authoring<C: app_services::Clock>(
         req.allowed_paths,
         req.acceptance_criteria,
         req.baseline_risk,
+        // ADR-0051: absent keeps the default obligation. The session layer
+        // already refused the field below protocol v14.
+        req.requires_workspace_change.unwrap_or(true),
     ) {
         Ok((task, _)) => {
             let facts = task.snapshot();
@@ -308,6 +311,7 @@ pub fn dispatch_task_authoring<C: app_services::Clock>(
                             allowed_paths: facts.allowed_paths,
                             acceptance_criteria: facts.acceptance,
                             baseline_risk: facts.risk.unwrap_or_default(),
+                            requires_workspace_change: facts.requires_workspace_change,
                         }),
                     },
                 )),
@@ -941,6 +945,7 @@ mod tests {
                     allowed_paths: allowed_paths.iter().map(ToString::to_string).collect(),
                     acceptance_criteria: acceptance.iter().map(ToString::to_string).collect(),
                     baseline_risk: risk.to_owned(),
+                    requires_workspace_change: None,
                 },
             )),
         }
@@ -951,6 +956,40 @@ mod tests {
             Some(task_authoring_core_response::Payload::Error(error)) => error,
             other => panic!("expected typed authoring error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn v14_no_change_intent_is_stored_and_echoed_and_absent_keeps_the_default() {
+        let mut service = service();
+        dispatch(&mut service, create_project_request("P-1", "Runlith"), None);
+        let mut request = planning_task_request("T-RO", &["repo:src"], &["c"], "low");
+        if let Some(task_authoring_core_request::Payload::CreatePlanningTask(create)) =
+            request.payload.as_mut()
+        {
+            create.requires_workspace_change = Some(false);
+        }
+        let response = dispatch_task_authoring(&mut service, request);
+        let Some(task_authoring_core_response::Payload::CreatePlanningTask(created)) =
+            response.payload
+        else {
+            panic!("expected created planning task");
+        };
+        assert!(!created.task.unwrap().requires_workspace_change);
+        assert!(!service
+            .get_task(&TaskId::new("T-RO").unwrap())
+            .unwrap()
+            .unwrap()
+            .requires_workspace_change());
+
+        dispatch_task_authoring(
+            &mut service,
+            planning_task_request("T-DEFAULT", &["repo:src"], &["c"], "low"),
+        );
+        assert!(service
+            .get_task(&TaskId::new("T-DEFAULT").unwrap())
+            .unwrap()
+            .unwrap()
+            .requires_workspace_change());
     }
 
     #[test]
@@ -1041,6 +1080,7 @@ mod tests {
                     allowed_paths: vec!["repo:src".to_owned()],
                     acceptance_criteria: vec!["c".to_owned()],
                     baseline_risk: "low".to_owned(),
+                    requires_workspace_change: None,
                 },
             )),
         };

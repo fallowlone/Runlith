@@ -600,7 +600,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture 
         let fixture_path = fixture(
             &env.dir,
             "claude-fixture.sh",
-            r#"echo proof > ./fixture-proof.txt; printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture worked","session_id":"22222222-3333-4444-5555-666666666666","usage":{"input_tokens":3,"output_tokens":5}}'"#,
+            r#"echo proof > ./fixture-proof.txt; printf '%s' '{"type":"result","subtype":"success","is_error":false,"result":"fixture worked\nNPM_AUTH=fixture-sensitive-value","session_id":"22222222-3333-4444-5555-666666666666","usage":{"input_tokens":3,"output_tokens":5}}'"#,
         );
         let mut orchestration = env.orchestration();
         let task_id = seed_ready(orchestration.tasks_mut(), "P-1", "T-1");
@@ -614,7 +614,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture 
                 ids("E-9", "A-9"),
                 workspace_request(&env, &ExecutionId::new("E-9").unwrap()),
                 |task, lease| {
-                    let prompt = build_task_prompt(task.objective(), task.acceptance());
+                    let prompt = build_task_prompt(task.objective(), &task.acceptance_lines());
                     let config = ClaudeConfig::default()
                         .with_executable(fixture_path.clone())
                         .expect("fixture exe")
@@ -710,7 +710,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture 
                 ids("E-H7", "A-H7"),
                 workspace_request(&env, &ExecutionId::new("E-H7").unwrap()),
                 |task, lease| {
-                    let prompt = build_task_prompt(task.objective(), task.acceptance());
+                    let prompt = build_task_prompt(task.objective(), &task.acceptance_lines());
                     let config = ClaudeConfig::default()
                         .with_executable(fixture_path.clone())
                         .expect("fixture exe")

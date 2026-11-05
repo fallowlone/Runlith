@@ -176,9 +176,11 @@ impl<C: Clock> TaskService<C> {
         allowed_paths: Vec<String>,
         acceptance: Vec<String>,
         baseline_risk: impl Into<String>,
+        requires_workspace_change: bool,
     ) -> ServiceResult<(Task, JournalEvent)> {
         let mut task = Task::draft(id, project_id, objective)?;
         task.define_planning_metadata(allowed_paths, acceptance, baseline_risk)?;
+        task.set_requires_workspace_change(requires_workspace_change)?;
         let facts = task.snapshot();
         TaskPlanningAuthority::derive(
             &facts.allowed_paths,

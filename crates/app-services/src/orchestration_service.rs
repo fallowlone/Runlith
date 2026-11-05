@@ -556,7 +556,10 @@ impl<C: Clock> OrchestrationService<C> {
         }
         let executor = WriteScopeGuard {
             inner: make_executor(&task, &ensured.lease),
-            requires_change: !task.snapshot().allowed_paths.is_empty(),
+            // ADR-0051: the obligation applies to scoped work unless the
+            // Task explicitly declared scoped read-only intent.
+            requires_change: task.requires_workspace_change()
+                && !task.snapshot().allowed_paths.is_empty(),
             workspace: &*workspace,
             lease_id: ensured.lease.id().clone(),
         };

@@ -94,6 +94,10 @@ pub struct Task {
     /// acceptance criterion, stamped at authoring or migration time. Never
     /// empty while `acceptance` is non-empty.
     evidence_requirements: Vec<crate::requirement::EvidenceRequirement>,
+    /// ADR-0051 acceptance statements keyed by criterion id. Descriptive
+    /// text bound at DRAFT; never completion authority. Keys are always a
+    /// subset of `acceptance`.
+    acceptance_statements: std::collections::BTreeMap<String, String>,
     /// Declared activation prerequisites (ADR-0030 / TASK-0135): checked by
     /// the preflight service before a workspace attempt runs; a task with
     /// unsatisfied prerequisites is blocked through the journaled `Block`
@@ -111,6 +115,11 @@ pub struct Task {
     /// (ADR-0027 TASK-0093 amendment). Same standing as `verification`.
     required_review: Vec<String>,
     risk: Option<String>,
+    /// ADR-0051 explicit workspace-change intent. Meaningful only with a
+    /// declared write scope: `true` (the default, the pre-ADR-0051 behavior)
+    /// obliges a scoped attempt to change the worktree; `false` declares
+    /// scoped read-only work. DRAFT-only to change.
+    requires_workspace_change: bool,
     artifacts: Vec<String>,
     kind: Option<String>,
     state: TaskState,
@@ -137,12 +146,14 @@ impl Task {
             depends_on: Vec::new(),
             acceptance: Vec::new(),
             evidence_requirements: Vec::new(),
+            acceptance_statements: std::collections::BTreeMap::new(),
             prerequisites: Vec::new(),
             allowed_paths: Vec::new(),
             forbidden_paths: Vec::new(),
             verification: Vec::new(),
             required_review: Vec::new(),
             risk: None,
+            requires_workspace_change: true,
             artifacts: Vec::new(),
             kind: None,
             state: TaskState::Draft,
@@ -318,8 +329,75 @@ impl Task {
             }
         }
         self.evidence_requirements = requirements;
+        let acceptance = &self.acceptance;
+        self.acceptance_statements
+            .retain(|criterion, _| acceptance.contains(criterion));
         self.risk = Some(risk);
         Ok(())
+    }
+
+    /// Binds ADR-0051 acceptance statements to existing criteria. `DRAFT`-only;
+    /// replaces any prior statements atomically. Each key must be a current
+    /// acceptance criterion and each text nonblank, control-free and at most
+    /// [`MAX_ACCEPTANCE_STATEMENT_BYTES`].
+    pub fn define_acceptance_statements(
+        &mut self,
+        statements: Vec<(String, String)>,
+    ) -> DomainResult<()> {
+        if self.state != TaskState::Draft {
+            return Err(DomainError::transition(format!(
+                "acceptance statements can only be authored while DRAFT; task {} is {}",
+                self.id, self.state
+            )));
+        }
+        let map = statements
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        validate_acceptance_statements(&self.acceptance, &map)?;
+        self.acceptance_statements = map;
+        Ok(())
+    }
+
+    /// Acceptance criteria as provider-facing lines: `id: statement` when a
+    /// statement is bound, else the bare criterion (ADR-0051).
+    #[must_use]
+    pub fn acceptance_lines(&self) -> Vec<String> {
+        self.acceptance
+            .iter()
+            .map(
+                |criterion| match self.acceptance_statements.get(criterion) {
+                    Some(text) => format!("{criterion}: {text}"),
+                    None => criterion.clone(),
+                },
+            )
+            .collect()
+    }
+
+    /// Declares whether a scoped attempt must change the worktree
+    /// (ADR-0051). `DRAFT`-only like all authoring.
+    pub fn set_requires_workspace_change(&mut self, required: bool) -> DomainResult<()> {
+        if self.state != TaskState::Draft {
+            return Err(DomainError::transition(format!(
+                "workspace change intent can only be authored while DRAFT; task {} is {}",
+                self.id, self.state
+            )));
+        }
+        self.requires_workspace_change = required;
+        Ok(())
+    }
+
+    /// Whether a scoped attempt must change the worktree (ADR-0051).
+    #[must_use]
+    pub fn requires_workspace_change(&self) -> bool {
+        self.requires_workspace_change
+    }
+
+    /// Acceptance statement for one criterion, if any (ADR-0051).
+    #[must_use]
+    pub fn acceptance_statement(&self, criterion: &str) -> Option<&str> {
+        self.acceptance_statements
+            .get(criterion)
+            .map(String::as_str)
     }
 
     /// Replaces the Task's evidence requirements (ADR-0030 §2). `DRAFT`-only
@@ -466,12 +544,14 @@ impl Task {
             depends_on: self.depends_on.clone(),
             acceptance: self.acceptance.clone(),
             evidence_requirements: self.evidence_requirements.clone(),
+            acceptance_statements: self.acceptance_statements.clone(),
             prerequisites: self.prerequisites.clone(),
             allowed_paths: self.allowed_paths.clone(),
             forbidden_paths: self.forbidden_paths.clone(),
             verification: self.verification.clone(),
             required_review: self.required_review.clone(),
             risk: self.risk.clone(),
+            requires_workspace_change: self.requires_workspace_change,
             artifacts: self.artifacts.clone(),
             kind: self.kind.clone(),
             state: self.state,
@@ -531,6 +611,7 @@ impl Task {
             &snapshot.acceptance,
             &snapshot.evidence_requirements,
         )?;
+        validate_acceptance_statements(&snapshot.acceptance, &snapshot.acceptance_statements)?;
         // TASK-0135: persisted prerequisites re-validate against the same
         // collection invariants authoring enforces (per-item shape is
         // guaranteed by the `Prerequisite` type itself).
@@ -562,6 +643,7 @@ impl Task {
             depends_on: snapshot.depends_on,
             acceptance: snapshot.acceptance,
             evidence_requirements: snapshot.evidence_requirements,
+            acceptance_statements: snapshot.acceptance_statements,
             allowed_paths: snapshot.allowed_paths,
             prerequisites: snapshot.prerequisites,
 
@@ -569,6 +651,7 @@ impl Task {
             verification: snapshot.verification,
             required_review: snapshot.required_review,
             risk: snapshot.risk,
+            requires_workspace_change: snapshot.requires_workspace_change,
             artifacts: snapshot.artifacts,
             kind: snapshot.kind,
             state: snapshot.state,
@@ -601,6 +684,8 @@ pub struct TaskSnapshot {
     /// acceptance criterion. Restore re-validates the coverage, so persisted
     /// content can never bypass the invariant.
     pub evidence_requirements: Vec<crate::requirement::EvidenceRequirement>,
+    /// ADR-0051 acceptance statements by criterion id; restore re-validates.
+    pub acceptance_statements: std::collections::BTreeMap<String, String>,
     /// Declared activation prerequisites (ADR-0030 / TASK-0135). Per-item
     /// shape is guaranteed by the `Prerequisite` type; restore re-validates
     /// the collection invariants (bounded count, no duplicates).
@@ -616,6 +701,8 @@ pub struct TaskSnapshot {
     pub required_review: Vec<String>,
     /// Risk metadata.
     pub risk: Option<String>,
+    /// ADR-0051 workspace-change intent (default `true`).
+    pub requires_workspace_change: bool,
     /// Artifact references.
     pub artifacts: Vec<String>,
     /// Routing/planning kind metadata.
@@ -631,8 +718,32 @@ pub const MAX_TASK_PREREQUISITES: usize = 32;
 pub const MAX_TASK_ALLOWED_PATHS: usize = 32;
 /// Upper bound on authored acceptance obligations per Task.
 pub const MAX_TASK_ACCEPTANCE: usize = 64;
+/// ADR-0051 upper bound in bytes on one acceptance statement.
+pub const MAX_ACCEPTANCE_STATEMENT_BYTES: usize = 1024;
 /// Upper bound in bytes on one authored planning metadata value.
 pub const MAX_TASK_METADATA_ITEM_LEN: usize = 256;
+
+fn validate_acceptance_statements(
+    acceptance: &[String],
+    statements: &std::collections::BTreeMap<String, String>,
+) -> DomainResult<()> {
+    for (criterion, text) in statements {
+        if !acceptance.contains(criterion) {
+            return Err(DomainError::input(format!(
+                "acceptance statement names undeclared criterion {criterion:?}"
+            )));
+        }
+        if text.trim().is_empty()
+            || text.len() > MAX_ACCEPTANCE_STATEMENT_BYTES
+            || text.chars().any(|c| c.is_control() && c != '\n')
+        {
+            return Err(DomainError::input(format!(
+                "acceptance statement for {criterion:?} must be nonblank, at most {MAX_ACCEPTANCE_STATEMENT_BYTES} bytes, without control characters"
+            )));
+        }
+    }
+    Ok(())
+}
 
 fn bounded_metadata_list(
     field: &str,
@@ -930,6 +1041,48 @@ mod tests {
     }
 
     #[test]
+    fn acceptance_statements_bind_only_to_declared_criteria_and_round_trip() {
+        let mut task = Task::draft(
+            TaskId::new("T-1").unwrap(),
+            ProjectId::new("P-1").unwrap(),
+            "obj",
+        )
+        .unwrap();
+        task.define_planning_metadata(vec!["src".into()], vec!["c1".into()], "low")
+            .unwrap();
+        assert!(task
+            .define_acceptance_statements(vec![("nope".into(), "x".into())])
+            .is_err());
+        assert!(task
+            .define_acceptance_statements(vec![("c1".into(), "  ".into())])
+            .is_err());
+        task.define_acceptance_statements(vec![("c1".into(), "file has hi".into())])
+            .unwrap();
+        assert_eq!(task.acceptance_statement("c1"), Some("file has hi"));
+        let restored = Task::restore(task.snapshot()).unwrap();
+        assert_eq!(restored, task);
+        task.define_planning_metadata(vec!["src".into()], vec!["c2".into()], "low")
+            .unwrap();
+        assert_eq!(task.acceptance_statement("c1"), None);
+    }
+
+    #[test]
+    fn workspace_change_intent_defaults_true_is_draft_only_and_round_trips() {
+        let mut task = Task::draft(
+            TaskId::new("T-1").unwrap(),
+            ProjectId::new("P-1").unwrap(),
+            "obj",
+        )
+        .unwrap();
+        assert!(task.requires_workspace_change());
+        task.set_requires_workspace_change(false).unwrap();
+        assert_eq!(Task::restore(task.snapshot()).unwrap(), task);
+        task.mark_ready().unwrap();
+        assert!(task.set_requires_workspace_change(true).is_err());
+        assert!(!task.requires_workspace_change());
+    }
+
+    #[test]
     fn acceptance_criteria_accumulate() {
         let mut task = draft_task("T-1");
         task.add_acceptance("compiles").unwrap();
@@ -1202,12 +1355,14 @@ mod tests {
                 depends_on: Vec::new(),
                 acceptance: Vec::new(),
                 evidence_requirements: Vec::new(),
+                acceptance_statements: Default::default(),
                 prerequisites: Vec::new(),
                 allowed_paths: Vec::new(),
                 forbidden_paths: Vec::new(),
                 verification: Vec::new(),
                 required_review: Vec::new(),
                 risk: None,
+                requires_workspace_change: true,
                 artifacts: Vec::new(),
                 kind: None,
                 state,
