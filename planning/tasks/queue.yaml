@@ -7064,3 +7064,12 @@ items:
     depends_on: []
     blocked_by: []
     references: [docs/ui/proposals/TASK-PROPOSED-G16-LIVE-WIDGETS.md, docs/architecture/adr/ADR-0007-no-direct-frontend-shell.md, docs/architecture/adr/ADR-0014-local-first-privacy.md, docs/architecture/adr/ADR-0016-agentctl-before-complex-ui.md]
+  - id: TASK-0260
+    gate: G5
+    title: Investigate and remove load-dependent flaky tests in agentd and agentctl
+    objective: Full workspace runs failed intermittently while the same tests passed alone, so a red CI after merge does not by itself mean a regression. Find each race and fix the test or the code it exposes. Known cases from the ADR-0051 session; vault backoff lock (bins/agentd/src/vault/backoff.rs) reported "too many failed attempts" when a concurrent fork briefly kept a just-closed lock descriptor alive (mitigated with a bounded 10x10 ms retry, root cause not proven); tests::shutdown_with_inflight_provider_run_exits_promptly failed opening the test database because state.sqlite3-journal vanished between inspect and open (UnsafePath); execution::tests::candidate_* failed with "candidate fixture did not authenticate" under load; agentctl execution_binaries (org_sync_policy_quota_take_effect_between_two_daemon_stores, live_ownership::binary_concurrent_resumes_elect_a_single_owner) failed with the daemon not ready or user_presence_busy. Record whether each is a test-only race or a product defect (for example the journal file inspection treating a transient file as unsafe).
+    scope: bins/agentd tests and vault backoff, bins/agentctl tests (execution_binaries), adapters/storage-sqlite open path (inspect of sqlite sidecar files); tests only unless a product defect is proven.
+    exit_criteria_summary: Each listed test passes 50 consecutive runs under cargo test --workspace -- --test-threads=8 on the owner machine; each race classified test-only or product defect with the fix; the workspace suite is green at default parallelism, not only with --test-threads=2.
+    depends_on: []
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0051-per-node-acceptance-statements-and-change-intent.md, docs/architecture/adr/ADR-0050-os-user-presence-for-local-control.md]
