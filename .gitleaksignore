@@ -1,0 +1,3 @@
+# Only PEM delimiter/truncated-DER literals in the historical redaction test.
+b7ca9341f65cda644ce1e864752be1b1ad5128da:crates/app-services/src/secret_redaction.rs:private-key:349
+b7ca9341f65cda644ce1e864752be1b1ad5128da:crates/app-services/src/secret_redaction.rs:private-key:352
