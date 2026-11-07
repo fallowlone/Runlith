@@ -4,4 +4,8 @@ export type TaskDto = { id: string, projectId: string, objective: string,
 /**
  * Canonical lifecycle name exactly as agentd reports it (DRAFT, READY, ...).
  */
-state: string, };
+state: string, 
+/**
+ * Direct dependency ids, in id order.
+ */
+dependsOn: Array<string>, };

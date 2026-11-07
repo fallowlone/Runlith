@@ -11,7 +11,7 @@ const SCREENS: Array<{ name: string; heading: RegExp; open: (page: Page) => Prom
   { name: "tasks", heading: /^Задачи$/, open: (page) => page.getByRole("link", { name: /Задачи/ }).first().click() },
   { name: "task", heading: /Чистый домен/, open: async (page) => {
     await page.getByRole("link", { name: /Задачи/ }).first().click();
-    await page.getByRole("row", { name: /TASK-0217/ }).click();
+    await page.getByRole("row", { name: /TASK-0217/ }).first().click();
   } },
   { name: "attention", heading: /Внимание/, open: (page) => page.getByRole("link", { name: /Внимание/ }).click() },
   { name: "map", heading: /Карта проекта/, open: (page) => page.getByRole("link", { name: "Карта" }).click() },
@@ -178,6 +178,22 @@ test("motion: a screen change adds no long frames over the idle baseline", async
   expect(over.length).toBe(0);
 });
 
+test("tasks: depends-on column shows real dependencies and flags open ones", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("link", { name: /Задачи/ }).first().click();
+  const rows = page.getByRole("table", { name: "Задачи" }).getByRole("row");
+  // A row's name now also lists its dependencies, so a task id can match its dependents:
+  // the task's own row always comes first in the id-ordered list.
+  // TASK-0218 (DRAFT) depends on TASK-0217 (READY, not completed): waits.
+  await expect(rows.filter({ hasText: "TASK-0218" }).first()).toContainText("TASK-0217 · ждёт зависимости");
+  // TASK-0217 depends on a completed task: lists it, does not wait.
+  const done = rows.filter({ hasText: "TASK-0217" }).first();
+  await expect(done).toContainText("TASK-0216");
+  await expect(done).not.toContainText("ждёт зависимости");
+  // No dependencies: a dash, never an invented value.
+  await expect(rows.filter({ hasText: "TASK-0215" }).first()).toContainText("—");
+});
+
 test("tasks: counters follow the search, the footer counts rows, J/K walk one Tab stop", async ({ page }) => {
   await setTheme(page, "dark");
   await page.goto("/");
@@ -212,7 +228,7 @@ test("tasks: counters follow the search, the footer counts rows, J/K walk one Ta
 async function openTask(page: Page, tab?: string): Promise<void> {
   await page.goto("/");
   await page.getByRole("link", { name: /Задачи/ }).first().click();
-  await page.getByRole("row", { name: /TASK-0217/ }).click();
+  await page.getByRole("row", { name: /TASK-0217/ }).first().click();
   if (tab) await page.getByRole("navigation", { name: "Разделы задачи" }).getByRole("link", { name: new RegExp(tab) }).click();
 }
 

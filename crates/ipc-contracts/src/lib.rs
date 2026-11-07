@@ -864,6 +864,7 @@ mod contract_tests {
             project_id: "P-1".to_owned(),
             objective: "ship G2".to_owned(),
             state: "DRAFT".to_owned(),
+            depends_on: Vec::new(),
         };
         let response = TaskCoreResponse {
             payload: Some(task_core_response::Payload::GetTask(

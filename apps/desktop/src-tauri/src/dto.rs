@@ -83,6 +83,8 @@ pub struct TaskDto {
     pub objective: String,
     /// Canonical lifecycle name exactly as agentd reports it (DRAFT, READY, ...).
     pub state: String,
+    /// Direct dependency ids, in id order.
+    pub depends_on: Vec<String>,
 }
 
 impl From<proto::TaskDto> for TaskDto {
@@ -92,6 +94,7 @@ impl From<proto::TaskDto> for TaskDto {
             project_id: value.project_id,
             objective: value.objective,
             state: value.state,
+            depends_on: value.depends_on,
         }
     }
 }
