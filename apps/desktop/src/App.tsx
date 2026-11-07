@@ -163,6 +163,7 @@ export function App() {
       className={`rl app${inTauri ? " in-tauri" : ""}`}
       data-theme={theme}
       data-density={settings.density}
+      data-text={settings.textSize}
       data-motion={settings.reduceMotion ? "reduce" : undefined}
     >
       <div className={`win${showAgent ? "" : " no-agent"}`}>

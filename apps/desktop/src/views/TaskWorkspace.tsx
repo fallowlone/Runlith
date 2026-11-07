@@ -1,6 +1,6 @@
 import type { TaskDto } from "../lib/bindings/TaskDto";
 import { api } from "../lib/api";
-import { BRANCH, COMMITS, CRITERIA, FILES, PLAN_ROWS } from "../lib/demo";
+import { BRANCH, COMMITS, CRITERIA, FILES, PLAN_ROWS, SCOPE } from "../lib/demo";
 import type { Route, Tab } from "../lib/router";
 import { useResource } from "../lib/useResource";
 import { Empty, ErrorState, SourceChip, StateLabel, VerdictLabel } from "../components/Feedback";
@@ -96,6 +96,16 @@ function OverviewTab({ taskId, task, navigate }: { taskId: string; task: TaskDto
           ))}
         </section>
       </div>
+      <section className="card reveal" aria-labelledby="sc-title" style={{ ["--i" as string]: 1 }}>
+        <div className="card-head"><h2 id="sc-title" className="title-4">Область изменений</h2><span className="spacer" /><span className="chip chip-demo">{DEMO_NOTE}</span></div>
+        <ul className="row" style={{ listStyle: "none", margin: 0, padding: 0, gap: 12, flexWrap: "wrap" }}>
+          {SCOPE.map(([crate, area]) => (
+            <li key={crate} className="card" style={{ padding: "8px 12px", borderRadius: 12, background: "var(--raise-2)", minWidth: 200 }}>
+              <div className="title-4">{crate}</div><div className="mono muted">{area}</div>
+            </li>
+          ))}
+        </ul>
+      </section>
       <section className="card list reveal" aria-labelledby="c-title" style={{ ["--i" as string]: 2 }}>
         <div className="card-head"><h2 id="c-title" className="title-4">Критерии проверки и evidence</h2><span className="spacer" /><span className="caption-4 tnum">{VERIFIED_NOTE}</span><span className="chip chip-demo">{DEMO_NOTE}</span></div>
         {CRITERIA.map(([verdict, text, source]) => (
@@ -105,6 +115,18 @@ function OverviewTab({ taskId, task, navigate }: { taskId: string; task: TaskDto
             <span className="caption-5 muted">{source}</span>
           </div>
         ))}
+      </section>
+      <section className="card reveal" aria-labelledby="tl-title" style={{ ["--i" as string]: 3 }}>
+        <div className="card-head"><h2 id="tl-title" className="title-4">Хронология ветки</h2><span className="spacer" /><span className="mono muted ellip">{BRANCH} · git log</span></div>
+        <ol className="row" style={{ listStyle: "none", margin: 0, padding: 0, gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+          {COMMITS.map(([hash, , message]) => (
+            <li key={hash} className="stack" style={{ gap: 4, flex: "0 0 140px", minWidth: 0 }}>
+              <span className="g g-done" aria-hidden="true" />
+              <span className="mono muted">{hash}</span>
+              <span className="caption-5">{message.replace(/^\w+\(\w+\): /, "")}</span>
+            </li>
+          ))}
+        </ol>
       </section>
     </>
   );

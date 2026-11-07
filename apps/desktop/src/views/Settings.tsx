@@ -1,4 +1,4 @@
-import type { Density, Settings as SettingsValue, ThemePref } from "../lib/settings";
+import type { Density, Settings as SettingsValue, TextSize, ThemePref } from "../lib/settings";
 import { Icon, type IconName } from "../components/Icon";
 
 type Props = {
@@ -8,6 +8,7 @@ type Props = {
 
 const THEMES: Array<[ThemePref, string, IconName]> = [["light", "Светлая", "sun"], ["dark", "Тёмная", "moon"], ["system", "Как в системе", "monitor"]];
 const DENSITIES: Array<[Density, string]> = [[32, "Компактно · 32"], [40, "Обычно · 40"], [48, "Свободно · 48"]];
+const TEXT_SIZES: Array<[TextSize, string]> = [[12, "12 / 16"], [14, "14 / 20"], [16, "16 / 24"]];
 const KEYS: Array<[string, string]> = [["Глобальный поиск", "⌘ K"], ["Назад к списку задач", "⌘ ["], ["Следующая и предыдущая задача в списке", "J K"], ["Скрыть или показать панель агента", "⌘ ⌥ B"]];
 const POLICY: Array<[string, string, string]> = [
   ["ALLOW", "chip", "Разрешено политикой. Это не значит, что операция уже выполнена."],
@@ -40,6 +41,15 @@ export function Settings({ settings, update }: Props) {
                   <button key={value} type="button" aria-pressed={settings.density === value} onClick={() => update({ density: value })}>{label}</button>
                 ))}
               </div>
+            </div>
+            <div className="stack">
+              <span className="title-4" id="ts-l">Размер текста</span>
+              <div className="seg" role="group" aria-labelledby="ts-l" style={{ alignSelf: "flex-start" }}>
+                {TEXT_SIZES.map(([value, label]) => (
+                  <button key={value} type="button" aria-pressed={settings.textSize === value} onClick={() => update({ textSize: value })}>{label}</button>
+                ))}
+              </div>
+              <p className="caption-5 muted">Не зависит от плотности строк.</p>
             </div>
             <label className="row" style={{ gap: 12, cursor: "pointer" }}>
               <input type="checkbox" checked={settings.reduceMotion} onChange={(event) => update({ reduceMotion: event.target.checked })}

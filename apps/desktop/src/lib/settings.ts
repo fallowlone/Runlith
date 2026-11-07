@@ -4,16 +4,18 @@ import { inTauri } from "./api";
 
 export type ThemePref = "dark" | "light" | "system";
 export type Density = 32 | 40 | 48;
+export type TextSize = 12 | 14 | 16;
 
 export interface Settings {
   theme: ThemePref;
   density: Density;
+  textSize: TextSize;
   reduceMotion: boolean;
   agentOpen: boolean;
 }
 
 const KEY = "runlith.settings.v1";
-const DEFAULTS: Settings = { theme: "dark", density: 40, reduceMotion: false, agentOpen: true };
+const DEFAULTS: Settings = { theme: "dark", density: 40, textSize: 14, reduceMotion: false, agentOpen: true };
 
 /** Per-viewer conveniences only; a broken or blocked store falls back to defaults. */
 function read(): Settings {
@@ -24,6 +26,7 @@ function read(): Settings {
     return {
       theme: value.theme === "light" || value.theme === "system" ? value.theme : "dark",
       density: value.density === 32 || value.density === 48 ? value.density : 40,
+      textSize: value.textSize === 12 || value.textSize === 16 ? value.textSize : 14,
       reduceMotion: value.reduceMotion === true,
       agentOpen: value.agentOpen !== false,
     };

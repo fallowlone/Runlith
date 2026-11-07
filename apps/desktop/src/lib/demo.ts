@@ -84,6 +84,13 @@ export const demo = {
 export const GATE_COUNTS = [5, 5, 11, 7, 6, 15, 17, 46, 30, 16, 9, 9, 9, 9, 10, 14];
 export const WEEKLY_COMMITS = [40, 167, 150, 34, 102, 33, 33];
 
+/** [crate, area]: scope from queue.yaml of TASK-0229. */
+export const SCOPE: Array<[string, string]> = [
+  ["app-services", "workspace/orchestration"],
+  ["storage-sqlite", "cycle guard, flock"],
+  ["agentd", "execution dispatch"],
+];
+
 export const BRANCH = "task-0229-cross-daemon-resume-race";
 
 /** [hash, time, message, changed lines, kind, added, deleted] */
