@@ -230,6 +230,11 @@ pub fn is_org_allowed(negotiated_version: u32) -> bool {
     ipc_contracts::supports_org_ipc(negotiated_version)
 }
 
+#[must_use]
+pub fn is_widget_allowed(negotiated_version: u32) -> bool {
+    ipc_contracts::supports_widget_ipc(negotiated_version)
+}
+
 pub fn validate_org_allowed(negotiated_version: u32) -> ControlResult<()> {
     if is_org_allowed(negotiated_version) {
         Ok(())
@@ -237,6 +242,35 @@ pub fn validate_org_allowed(negotiated_version: u32) -> ControlResult<()> {
         Err(ControlError::UnsupportedProtocol {
             negotiated: negotiated_version,
             required: ipc_contracts::IPC_PROTOCOL_VERSION_V12,
+        })
+    }
+}
+
+#[must_use]
+pub fn is_workspace_change_intent_allowed(negotiated_version: u32) -> bool {
+    ipc_contracts::supports_workspace_change_intent_ipc(negotiated_version)
+}
+
+/// ADR-0051: refuses (never silently drops) the workspace-change intent
+/// field on a session that cannot carry it.
+pub fn validate_workspace_change_intent_allowed(negotiated_version: u32) -> ControlResult<()> {
+    if is_workspace_change_intent_allowed(negotiated_version) {
+        Ok(())
+    } else {
+        Err(ControlError::UnsupportedProtocol {
+            negotiated: negotiated_version,
+            required: ipc_contracts::IPC_PROTOCOL_VERSION_V14,
+        })
+    }
+}
+
+pub fn validate_widget_allowed(negotiated_version: u32) -> ControlResult<()> {
+    if is_widget_allowed(negotiated_version) {
+        Ok(())
+    } else {
+        Err(ControlError::UnsupportedProtocol {
+            negotiated: negotiated_version,
+            required: ipc_contracts::IPC_PROTOCOL_VERSION_V13,
         })
     }
 }
@@ -375,7 +409,7 @@ impl ServerConfig {
         Self {
             supported_versions: vec![IPC_PROTOCOL_VERSION_V0, IPC_PROTOCOL_VERSION_V1],
             daemon_build_version: default_daemon_build_version(),
-            supported_capabilities: Vec::new(),
+            supported_capabilities: vec![ipc_contracts::TASK_LIST_PAGES_V1.to_owned()],
         }
     }
 
@@ -540,6 +574,57 @@ impl ServerConfig {
             ],
             daemon_build_version: default_daemon_build_version(),
             supported_capabilities: Vec::new(),
+        }
+    }
+
+    /// G16 daemon configuration (TASK-0230): v13 enables widget authoring
+    /// while preserving every historical surface.
+    pub fn g16_default() -> Self {
+        Self {
+            supported_versions: vec![
+                IPC_PROTOCOL_VERSION_V0,
+                IPC_PROTOCOL_VERSION_V1,
+                IPC_PROTOCOL_VERSION_V2,
+                IPC_PROTOCOL_VERSION_V3,
+                IPC_PROTOCOL_VERSION_V4,
+                IPC_PROTOCOL_VERSION_V5,
+                IPC_PROTOCOL_VERSION_V6,
+                IPC_PROTOCOL_VERSION_V7,
+                IPC_PROTOCOL_VERSION_V8,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V9,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V10,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V11,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V12,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V13,
+            ],
+            daemon_build_version: default_daemon_build_version(),
+            supported_capabilities: vec![ipc_contracts::TASK_LIST_PAGES_V1.to_owned()],
+        }
+    }
+
+    /// ADR-0051 daemon configuration: v14 adds the workspace-change intent
+    /// field while preserving every historical surface.
+    pub fn g17_default() -> Self {
+        Self {
+            supported_versions: vec![
+                IPC_PROTOCOL_VERSION_V0,
+                IPC_PROTOCOL_VERSION_V1,
+                IPC_PROTOCOL_VERSION_V2,
+                IPC_PROTOCOL_VERSION_V3,
+                IPC_PROTOCOL_VERSION_V4,
+                IPC_PROTOCOL_VERSION_V5,
+                IPC_PROTOCOL_VERSION_V6,
+                IPC_PROTOCOL_VERSION_V7,
+                IPC_PROTOCOL_VERSION_V8,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V9,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V10,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V11,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V12,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V13,
+                ipc_contracts::IPC_PROTOCOL_VERSION_V14,
+            ],
+            daemon_build_version: default_daemon_build_version(),
+            supported_capabilities: vec![ipc_contracts::TASK_LIST_PAGES_V1.to_owned()],
         }
     }
 
@@ -734,7 +819,7 @@ mod tests {
         assert_eq!(g6.supported_versions, vec![0, 1, 2, 3]);
         assert_eq!(
             IPC_PROTOCOL_VERSION,
-            ipc_contracts::IPC_PROTOCOL_VERSION_V12
+            ipc_contracts::IPC_PROTOCOL_VERSION_V14
         );
         assert!(validate_policy_allowed(3).is_ok());
         assert!(validate_policy_allowed(2).is_err());

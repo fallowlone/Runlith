@@ -29,7 +29,7 @@ use crate::negotiation::{
     validate_execution_allowed, validate_finder_allowed, validate_human_decision_allowed,
     validate_memory_allowed, validate_org_allowed, validate_planning_allowed,
     validate_policy_allowed, validate_routine_allowed, validate_task_authoring_allowed,
-    validate_vault_allowed, validate_worker_allowed, ServerConfig,
+    validate_vault_allowed, validate_widget_allowed, validate_worker_allowed, ServerConfig,
 };
 
 /// Deadline for a full client/server handshake exchange.
@@ -94,6 +94,8 @@ pub enum ReadyRequest {
     Worker(ipc_contracts::proto::WorkerCoreRequest),
     /// Decoded G13 cloud/team request on a version-12 session.
     Org(ipc_contracts::proto::OrgCoreRequest),
+    /// Decoded G16 widget authoring request on a version-13 session.
+    Widget(ipc_contracts::proto::WidgetCoreRequest),
 }
 
 /// Client-side handshake outcome.
@@ -294,6 +296,24 @@ impl ClientConfig {
             .push(ipc_contracts::IPC_PROTOCOL_VERSION_V12);
         config
     }
+
+    /// G16 widget authoring client profile (TASK-0230).
+    pub fn widget_default(client_kind: impl Into<String>) -> Self {
+        let mut config = Self::org_default(client_kind);
+        config
+            .supported_versions
+            .push(ipc_contracts::IPC_PROTOCOL_VERSION_V13);
+        config
+    }
+
+    /// ADR-0051 client profile: v14 may carry the workspace-change intent.
+    pub fn workspace_intent_default(client_kind: impl Into<String>) -> Self {
+        let mut config = Self::widget_default(client_kind);
+        config
+            .supported_versions
+            .push(ipc_contracts::IPC_PROTOCOL_VERSION_V14);
+        config
+    }
 }
 
 /// Client side of the bootstrap control protocol.
@@ -302,6 +322,7 @@ pub struct ClientSession<T> {
     config: ClientConfig,
     state: SessionState,
     negotiated_version: Option<u32>,
+    accepted_capabilities: Vec<String>,
 }
 
 /// Server side of the bootstrap control protocol.
@@ -326,6 +347,7 @@ where
             config,
             state: SessionState::AwaitingHandshake,
             negotiated_version: None,
+            accepted_capabilities: Vec::new(),
         }
     }
 
@@ -339,6 +361,14 @@ where
     #[must_use]
     pub fn negotiated_version(&self) -> Option<u32> {
         self.negotiated_version
+    }
+
+    pub fn has_capability(&self, capability: &str) -> bool {
+        self.is_ready()
+            && self
+                .accepted_capabilities
+                .iter()
+                .any(|accepted| accepted == capability)
     }
 
     /// Reports whether this session negotiated business (G2 `task_core`)
@@ -425,6 +455,12 @@ where
             .is_some_and(crate::negotiation::is_org_allowed)
     }
 
+    #[must_use]
+    pub fn widget_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_widget_allowed)
+    }
+
     /// Unwraps into the framed transport for lifecycle-owned exchanges
     /// (e.g. the `agentctl` shutdown sequence). Protocol use of this
     /// session ends here; the transport carries no handshake state.
@@ -476,6 +512,17 @@ where
                         accepted.selected_protocol_version
                     )));
                 }
+                if accepted
+                    .accepted_capabilities
+                    .iter()
+                    .any(|capability| !self.config.requested_capabilities.contains(capability))
+                {
+                    return self.fail(ControlError::InvalidHandshake(
+                        "daemon accepted an unrequested capability".to_owned(),
+                    ));
+                }
+                self.accepted_capabilities
+                    .clone_from(&accepted.accepted_capabilities);
                 self.state = SessionState::Ready;
                 self.negotiated_version = Some(accepted.selected_protocol_version);
                 Ok(HandshakeAcceptedInfo {
@@ -756,6 +803,23 @@ where
         }
     }
 
+    pub async fn respond_widget(
+        &mut self,
+        response: ipc_contracts::proto::WidgetCoreResponse,
+    ) -> ControlResult<()> {
+        self.require_ready()?;
+        let frame = bytes::Bytes::from(
+            ControlResponse {
+                payload: Some(control_response::Payload::WidgetCore(response)),
+            }
+            .encode_to_vec(),
+        );
+        match self.transport.write_frame(frame).await {
+            Ok(()) => Ok(()),
+            Err(error) => self.fail(error.into()),
+        }
+    }
+
     pub async fn respond_routine(
         &mut self,
         response: ipc_contracts::proto::RoutineCoreResponse,
@@ -787,6 +851,22 @@ where
             Err(error) => return self.fail(error.into()),
         }
         self.state = SessionState::Terminated;
+        Ok(())
+    }
+
+    pub async fn respond_shutdown_denied(&mut self, reason: &str) -> ControlResult<()> {
+        self.require_ready()?;
+        let frame = Bytes::from(
+            ControlResponse {
+                payload: Some(control_response::Payload::Shutdown(ShutdownResponse {
+                    denial_reason: Some(reason.to_owned()),
+                })),
+            }
+            .encode_to_vec(),
+        );
+        if let Err(error) = self.transport.write_frame(frame).await {
+            return self.fail(error.into());
+        }
         Ok(())
     }
 
@@ -884,6 +964,12 @@ where
     pub fn org_allowed(&self) -> bool {
         self.negotiated_version
             .is_some_and(crate::negotiation::is_org_allowed)
+    }
+
+    #[must_use]
+    pub fn widget_allowed(&self) -> bool {
+        self.negotiated_version
+            .is_some_and(crate::negotiation::is_widget_allowed)
     }
 
     /// Reads the first request (within [`HANDSHAKE_TIMEOUT`]), requires it
@@ -1058,7 +1144,20 @@ where
                 let negotiated = self
                     .negotiated_version
                     .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
-                match validate_task_authoring_allowed(negotiated) {
+                let carries_intent = matches!(
+                    &request.payload,
+                    Some(ipc_contracts::proto::task_authoring_core_request::Payload::CreatePlanningTask(
+                        create
+                    )) if create.requires_workspace_change.is_some()
+                );
+                let allowed = validate_task_authoring_allowed(negotiated).and_then(|()| {
+                    if carries_intent {
+                        crate::negotiation::validate_workspace_change_intent_allowed(negotiated)
+                    } else {
+                        Ok(())
+                    }
+                });
+                match allowed {
                     Ok(()) => Ok(ReadyRequest::TaskAuthoring(request)),
                     Err(error) => self.fail(error),
                 }
@@ -1105,6 +1204,15 @@ where
                     .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
                 match validate_org_allowed(negotiated) {
                     Ok(()) => Ok(ReadyRequest::Org(request)),
+                    Err(error) => self.fail(error),
+                }
+            }
+            Some(control_request::Payload::WidgetCore(request)) => {
+                let negotiated = self
+                    .negotiated_version
+                    .unwrap_or(ipc_contracts::IPC_PROTOCOL_VERSION_V0);
+                match validate_widget_allowed(negotiated) {
+                    Ok(()) => Ok(ReadyRequest::Widget(request)),
                     Err(error) => self.fail(error),
                 }
             }
@@ -1180,7 +1288,9 @@ fn ping_response_frame() -> Bytes {
 fn shutdown_response_frame() -> Bytes {
     Bytes::from(
         ControlResponse {
-            payload: Some(control_response::Payload::Shutdown(ShutdownResponse {})),
+            payload: Some(control_response::Payload::Shutdown(
+                ShutdownResponse::default(),
+            )),
         }
         .encode_to_vec(),
     )
@@ -1822,6 +1932,10 @@ mod tests {
     }
 
     fn task_authoring_core_frame() -> Bytes {
+        task_authoring_core_frame_with_intent(None)
+    }
+
+    fn task_authoring_core_frame_with_intent(intent: Option<bool>) -> Bytes {
         use ipc_contracts::proto::{
             task_authoring_core_request, CreatePlanningTaskRequest, TaskAuthoringCoreRequest,
         };
@@ -1837,6 +1951,7 @@ mod tests {
                                 allowed_paths: vec!["repo:src".to_owned()],
                                 acceptance_criteria: vec!["criterion".to_owned()],
                                 baseline_risk: "low".to_owned(),
+                                requires_workspace_change: intent,
                             },
                         )),
                     },
@@ -1920,6 +2035,50 @@ mod tests {
         assert!(server.planning_allowed());
         raw_client
             .write_frame(task_authoring_core_frame())
+            .await
+            .expect("write");
+        assert!(matches!(
+            server.next_request().await,
+            Ok(ReadyRequest::TaskAuthoring(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn workspace_change_intent_needs_v14_and_is_refused_not_ignored_below_it() {
+        // v13: the field is refused, never silently dropped.
+        let (mut raw_client, mut server) =
+            session_after_handshake((0..=13).collect(), ServerConfig::g17_default()).await;
+        assert_eq!(server.negotiated_version(), Some(13));
+        raw_client
+            .write_frame(task_authoring_core_frame_with_intent(Some(false)))
+            .await
+            .expect("write");
+        assert!(matches!(
+            server.next_request().await,
+            Err(ControlError::UnsupportedProtocol {
+                negotiated: 13,
+                required: 14
+            })
+        ));
+
+        // v13 without the field is unchanged.
+        let (mut raw_client, mut server) =
+            session_after_handshake((0..=13).collect(), ServerConfig::g17_default()).await;
+        raw_client
+            .write_frame(task_authoring_core_frame())
+            .await
+            .expect("write");
+        assert!(matches!(
+            server.next_request().await,
+            Ok(ReadyRequest::TaskAuthoring(_))
+        ));
+
+        // v14 carries it.
+        let (mut raw_client, mut server) =
+            session_after_handshake((0..=14).collect(), ServerConfig::g17_default()).await;
+        assert_eq!(server.negotiated_version(), Some(14));
+        raw_client
+            .write_frame(task_authoring_core_frame_with_intent(Some(false)))
             .await
             .expect("write");
         assert!(matches!(
@@ -2103,6 +2262,52 @@ mod tests {
         assert_eq!(config.supported_versions, vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
         let historical = ClientConfig::finder_default(CLIENT_KIND_AGENTCTL);
         assert_eq!(historical.supported_versions, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[tokio::test]
+    async fn v12_session_rejects_widget_authoring_as_unsupported() {
+        // A provider call must never start on a session below v13 (TASK-0230).
+        let (mut raw_client, raw_server) = raw_pair();
+        let mut server = ServerSession::new(raw_server, ServerConfig::g13_default());
+        raw_client
+            .write_frame(handshake_request_frame(HandshakeRequest {
+                supported_protocol_versions: vec![0, 12],
+                client_kind: CLIENT_KIND_AGENTCTL.to_owned(),
+                client_build_version: "test".to_owned(),
+                requested_capabilities: Vec::new(),
+            }))
+            .await
+            .expect("write");
+        let info = server.run_handshake().await.expect("ready");
+        assert_eq!(info.selected_version, 12);
+        assert!(server.org_allowed());
+        assert!(!server.widget_allowed());
+        use ipc_contracts::proto::{
+            widget_core_request, WidgetCoreRequest, WidgetDraftStartRequest,
+        };
+        let frame = Bytes::from(
+            ControlRequest {
+                payload: Some(control_request::Payload::WidgetCore(WidgetCoreRequest {
+                    payload: Some(widget_core_request::Payload::Start(
+                        WidgetDraftStartRequest {
+                            description: "звёзды".to_owned(),
+                        },
+                    )),
+                })),
+            }
+            .encode_to_vec(),
+        );
+        raw_client.write_frame(frame).await.expect("write");
+        match server.next_request().await {
+            Err(ControlError::UnsupportedProtocol {
+                negotiated,
+                required,
+            }) => {
+                assert_eq!(negotiated, 12);
+                assert_eq!(required, 13);
+            }
+            other => panic!("expected UnsupportedProtocol, got {other:?}"),
+        }
     }
 
     #[tokio::test]

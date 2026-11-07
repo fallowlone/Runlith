@@ -23,6 +23,14 @@ pub use error::{TransportError, TransportResult};
 pub use framing::{ControlFrameCodec, FramedTransport};
 pub use platform::peer::{same_local_principal, PeerIdentity};
 
+/// File in the daemon runtime directory where `agentd` appends its fatal
+/// startup error (mode 0600).
+pub const STARTUP_LOG_FILE_NAME: &str = "agentd-startup.log";
+
+/// File in the daemon runtime directory receiving the spawned daemon's
+/// stderr (truncated on each spawn by `agentctl`, mode 0600).
+pub const STDERR_LOG_FILE_NAME: &str = "agentd-stderr.log";
+
 /// Maximum IPC frame payload in bytes: `1 MiB = 1_048_576`.
 /// Control messages are tiny; larger artifacts must never travel as giant
 /// control frames. Raising this bound requires explicit protocol evolution.

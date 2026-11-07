@@ -196,6 +196,7 @@ impl<C: Clock> RuntimeService<C> {
         detail: impl Into<String>,
     ) -> ServiceResult<AppliedExecution> {
         let mut execution = self.load_execution(execution_id)?;
+        let detail = crate::secret_redaction::redact_text(&detail.into());
         execution.conclude_attempt(attempt_id, outcome, detail)?;
         let stored_detail = execution
             .get_attempt(attempt_id)

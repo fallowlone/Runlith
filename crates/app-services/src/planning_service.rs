@@ -2099,7 +2099,7 @@ impl<C: Clock> PlanningService<C> {
             // never here.
             let task_id = TaskId::new(addition.id.as_str().to_owned())
                 .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
-            let project_id = self
+            let parent = self
                 .store
                 .get_task(
                     &TaskId::new(policy.parent_task_ref.clone())
@@ -2109,13 +2109,19 @@ impl<C: Clock> PlanningService<C> {
                     PlanningServiceError::InvalidContext(
                         "parent task disappeared during child materialization".to_owned(),
                     )
-                })?
-                .project_id()
-                .clone();
+                })?;
+            // The planner proposal carries no per-node prose (node id, scope,
+            // criterion ids only), so the child inherits the parent's real
+            // objective; the node id keeps it distinguishable. Without this
+            // the provider prompt would contain no actionable objective.
             let mut child = Task::draft(
                 task_id,
-                project_id,
-                format!("planned child task {}", addition.id.as_str()),
+                parent.project_id().clone(),
+                format!(
+                    "{} [planned step {}]",
+                    parent.objective(),
+                    addition.id.as_str()
+                ),
             )
             .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
             child
@@ -2162,6 +2168,21 @@ impl<C: Clock> PlanningService<C> {
                 .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
             child
                 .define_evidence_requirements(requirements)
+                .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
+            // ADR-0051: statements ride with the criteria they describe.
+            child
+                .define_acceptance_statements(
+                    addition
+                        .criteria
+                        .iter()
+                        .filter_map(|criterion| {
+                            criterion
+                                .statement
+                                .clone()
+                                .map(|text| (criterion.id.as_str().to_owned(), text))
+                        })
+                        .collect(),
+                )
                 .map_err(|error| PlanningServiceError::InvalidContext(error.to_string()))?;
             let created_event = child_lifecycle_event(
                 &child,

@@ -196,6 +196,8 @@ enum ProposalCase {
     /// The child repeats one criterion id; validation must refuse it before
     /// the materialization boundary can turn it into an untyped context error.
     DuplicateCriterion,
+    /// ADR-0051: the child criterion carries an acceptance statement.
+    CriterionStatement,
 }
 
 struct TestPlanner {
@@ -305,6 +307,12 @@ impl TestPlanner {
                     criterion,
                     VerificationMethod::HumanApproval,
                 )];
+            }
+            ProposalCase::CriterionStatement => {
+                let decl = proposal.node_additions[0].criteria[0].clone();
+                proposal.node_additions[0].criteria[0] = decl
+                    .with_statement("hello.txt contains exactly hi")
+                    .unwrap();
             }
             ProposalCase::DuplicateCriterion => {
                 let criterion = proposal.node_additions[0].criteria[0].clone();
@@ -2710,6 +2718,74 @@ fn accepted_hash(outcome: &PlanningProposalOutcome) -> String {
 }
 
 #[test]
+fn materialized_child_objective_carries_the_parent_objective() {
+    let db = TestDb::new("child-objective");
+    db.service()
+        .propose_decomposition(
+            &TestPlanner::new(ProposalCase::Valid),
+            &branch(),
+            request("child-objective"),
+            &policy(false),
+        )
+        .unwrap();
+    let child = db
+        .store()
+        .get_task(&TaskId::new("node-1").unwrap())
+        .unwrap()
+        .expect("child");
+    assert!(
+        child.objective().contains("planning root"),
+        "child objective must carry the parent objective, got {:?}",
+        child.objective()
+    );
+    assert!(child.objective().contains("node-1"));
+}
+
+#[test]
+fn criterion_statement_reaches_the_persisted_child_and_its_provider_lines() {
+    let db = TestDb::new("child-statement");
+    let outcome = db
+        .service()
+        .propose_decomposition(
+            &TestPlanner::new(ProposalCase::CriterionStatement),
+            &branch(),
+            request("child-statement"),
+            &policy(false),
+        )
+        .unwrap();
+    assert!(matches!(outcome, PlanningProposalOutcome::Accepted(_)));
+    let child = db
+        .store()
+        .get_task(&TaskId::new("node-1").unwrap())
+        .unwrap()
+        .expect("child");
+    assert_eq!(
+        child.acceptance_statement("criterion-child-1"),
+        Some("hello.txt contains exactly hi")
+    );
+    assert_eq!(
+        child.acceptance_lines(),
+        ["criterion-child-1: hello.txt contains exactly hi"]
+    );
+    // ADR-0051: the requirement that proves the criterion carries the same
+    // text (and so its revision does), surviving the store round trip.
+    let requirement = child
+        .evidence_requirements()
+        .iter()
+        .find(|requirement| requirement.criterion_id == "criterion-child-1")
+        .expect("requirement for the statement-bearing criterion");
+    assert_eq!(
+        requirement.statement.as_deref(),
+        Some("hello.txt contains exactly hi")
+    );
+    let unstamped = requirement.clone().with_statement(None);
+    assert_ne!(
+        evaluation::requirement_revision(requirement),
+        evaluation::requirement_revision(&unstamped)
+    );
+}
+
+#[test]
 fn accepted_decomposition_materializes_planner_child_ready_under_the_parent() {
     let db = TestDb::new("child-materialized-ready");
     let outcome = db
@@ -3121,7 +3197,7 @@ fn exact_child_materialization_retry_reuses_the_existing_task() {
         connection
             .execute(
                 "INSERT INTO tasks (id, project_id, objective, parent_id, state, risk)
-                 VALUES ('node-1', ?1, 'planned child task node-1', 'TASK-0078', 'READY', 'low')",
+                 VALUES ('node-1', ?1, 'planning root [planned step node-1]', 'TASK-0078', 'READY', 'low')",
                 rusqlite::params![db.project_id.as_str()],
             )
             .unwrap();

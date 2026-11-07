@@ -1,8 +1,9 @@
-//! G5 execution surface through the shipped binaries (TASK-0047).
+//! G5 CLI execution surface through production daemon services (TASK-0047).
 //!
-//! Real `agentd` + `agentctl` processes against test-owned runtime/data
+//! Shipped `agentctl` + an explicit-confirmation daemon fixture against test-owned runtime/data
 //! directories, with a fixture provider named `claude` prepended to
-//! `PATH` (the exact production resolution — no daemon flags). Covers
+//! `PATH` (production provider resolution). The separate example executable
+//! injects test confirmation; the shipped daemon retains native OS confirmation. Covers
 //! the `main.rs` paths the in-process suite cannot: `execution run`
 //! wait-mode polling and exit codes, `--detach`, `status` printing, and
 //! `cancel` printing.
@@ -11,17 +12,13 @@
 
 #![cfg(unix)]
 
+#[path = "support/process_fixture.rs"]
+mod process_fixture;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
-
-fn workspace_bin(name: &str) -> PathBuf {
-    let mut dir = std::env::current_exe().expect("test executable path");
-    dir.pop();
-    dir.pop();
-    dir.join(name)
-}
 
 struct Sandbox {
     root: PathBuf,
@@ -36,6 +33,7 @@ impl Sandbox {
         let root =
             PathBuf::from("/tmp").join(format!("g5-bin-{}-{suite}-{id}", std::process::id()));
         std::fs::create_dir_all(&root).expect("sandbox root");
+        process_fixture::install(&root);
         // Production endpoint/data resolvers require the immediate
         // parents to exist (they create only the final component with
         // the secure mode); the daemon owns the rest.
@@ -71,7 +69,7 @@ impl Sandbox {
     }
 
     fn agentctl(&self, args: &[&str]) -> Output {
-        Command::new(workspace_bin("agentctl"))
+        Command::new(process_fixture::binary(&self.root, "agentctl"))
             .args(args)
             .env("AI_ENGINEERING_OS_RUNTIME_DIR", self.root.join("run"))
             .env("AI_ENGINEERING_OS_DATA_DIR", self.root.join("data"))
@@ -80,8 +78,21 @@ impl Sandbox {
             .expect("run agentctl")
     }
 
+    fn key_file(&self, name: &str, key: &str) -> String {
+        use std::os::unix::fs::OpenOptionsExt;
+        let path = self.root.join(name);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .expect("private key fixture");
+        file.write_all(key.as_bytes()).expect("key fixture bytes");
+        path.to_string_lossy().into_owned()
+    }
+
     fn spawn_agentd(&self) -> Child {
-        Command::new(workspace_bin("agentd"))
+        Command::new(process_fixture::binary(&self.root, "agentd"))
             .env("AI_ENGINEERING_OS_RUNTIME_DIR", self.root.join("run"))
             .env("AI_ENGINEERING_OS_DATA_DIR", self.root.join("data"))
             .env("PATH", &self.path_env)
@@ -94,7 +105,7 @@ impl Sandbox {
 
     /// Like [`Self::spawn_agentd`], with the daemon's stderr kept in `log`.
     fn spawn_agentd_logging(&self, log: &Path) -> Child {
-        Command::new(workspace_bin("agentd"))
+        Command::new(process_fixture::binary(&self.root, "agentd"))
             .env("AI_ENGINEERING_OS_RUNTIME_DIR", self.root.join("run"))
             .env("AI_ENGINEERING_OS_DATA_DIR", self.root.join("data"))
             .env("PATH", &self.path_env)
@@ -223,22 +234,22 @@ fn planning_decision_id(output: &Output) -> String {
         .to_owned()
 }
 
-const SUCCESS_BODY: &str = r#"printf '{"type":"result","subtype":"success","is_error":false,"result":"binary fixture finished","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"}'; exit 0
+const SUCCESS_BODY: &str = r#"echo changed > fixture-output.txt; printf '{"type":"result","subtype":"success","is_error":false,"result":"binary fixture finished","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"}'; exit 0
 "#;
 
 // The same fixture is a valid planner result and a successful execution
 // result. The planner adapter reads the JSON string in `result`; the
 // execution adapter only needs the outer successful provider event.
-const PLANNING_BODY: &str = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":0,\"reason\":\"fixture decomposition\",\"node_additions\":[{\"id\":\"T-PLAN-CHILD\",\"scope\":[\"repo:src\"],\"criteria\":[{\"id\":\"criterion-root\",\"method\":\"automated-test\"}],\"risk_class\":\"low\",\"required_gate\":null}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"fixture work is executable\",\"risk_delta\":[],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:src\"],\"coverage_map\":{\"criterion-root\":[\"criterion-root\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
+const PLANNING_BODY: &str = r#"echo changed > fixture-output.txt 2>/dev/null; printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":0,\"reason\":\"fixture decomposition\",\"node_additions\":[{\"id\":\"T-PLAN-CHILD\",\"scope\":[\"repo:src\"],\"criteria\":[{\"id\":\"criterion-root\",\"method\":\"automated-test\"}],\"risk_class\":\"low\",\"required_gate\":null}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"fixture work is executable\",\"risk_delta\":[],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:src\"],\"coverage_map\":{\"criterion-root\":[\"criterion-root\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
 "#;
 
-const RISK_PLANNING_BODY: &str = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":0,\"reason\":\"fixture risk escalation\",\"node_additions\":[{\"id\":\"T-RISK-CHILD\",\"scope\":[\"repo:src\"],\"criteria\":[{\"id\":\"criterion-root\",\"method\":\"automated-test\"}],\"risk_class\":\"high\",\"required_gate\":\"human-review\"}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"fixture work requires human approval\",\"risk_delta\":[{\"node\":\"T-RISK-CHILD\",\"from\":\"low\",\"to\":\"high\"}],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:src\"],\"coverage_map\":{\"criterion-root\":[\"criterion-root\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
+const RISK_PLANNING_BODY: &str = r#"echo changed > fixture-output.txt 2>/dev/null; printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":0,\"reason\":\"fixture risk escalation\",\"node_additions\":[{\"id\":\"T-RISK-CHILD\",\"scope\":[\"repo:src\"],\"criteria\":[{\"id\":\"criterion-root\",\"method\":\"automated-test\"}],\"risk_class\":\"high\",\"required_gate\":\"human-review\"}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"fixture work requires human approval\",\"risk_delta\":[{\"node\":\"T-RISK-CHILD\",\"from\":\"low\",\"to\":\"high\"}],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:src\"],\"coverage_map\":{\"criterion-root\":[\"criterion-root\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
 "#;
 
-const AUTHORITY_PLANNING_BODY: &str = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":0,\"reason\":\"canonical authority fixture\",\"node_additions\":[{\"id\":\"T-AUTH-CHILD\",\"scope\":[\"repo:canonical\"],\"criteria\":[{\"id\":\"criterion-canonical\",\"method\":\"automated-test\"}],\"risk_class\":\"medium\",\"required_gate\":null}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"canonical authority is preserved\",\"risk_delta\":[],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:canonical\"],\"coverage_map\":{\"criterion-canonical\":[\"criterion-canonical\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
+const AUTHORITY_PLANNING_BODY: &str = r#"echo changed > fixture-output.txt 2>/dev/null; printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":0,\"reason\":\"canonical authority fixture\",\"node_additions\":[{\"id\":\"T-AUTH-CHILD\",\"scope\":[\"repo:canonical\"],\"criteria\":[{\"id\":\"criterion-canonical\",\"method\":\"automated-test\"}],\"risk_class\":\"medium\",\"required_gate\":null}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"canonical authority is preserved\",\"risk_delta\":[],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:canonical\"],\"coverage_map\":{\"criterion-canonical\":[\"criterion-canonical\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
 "#;
 
-const RETURN_PLANNING_BODY: &str = r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":1,\"reason\":\"fixture takeover return\",\"node_additions\":[{\"id\":\"T-RETURN-CHILD\",\"scope\":[\"repo:src\"],\"criteria\":[{\"id\":\"criterion-root\",\"method\":\"automated-test\"}],\"risk_class\":\"low\",\"required_gate\":null}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"takeover return is executable\",\"risk_delta\":[],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:src\"],\"coverage_map\":{\"criterion-root\":[\"criterion-root\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
+const RETURN_PLANNING_BODY: &str = r#"echo changed > fixture-output.txt 2>/dev/null; printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"{\"base_plan_revision\":1,\"reason\":\"fixture takeover return\",\"node_additions\":[{\"id\":\"T-RETURN-CHILD\",\"scope\":[\"repo:src\"],\"criteria\":[{\"id\":\"criterion-root\",\"method\":\"automated-test\"}],\"risk_class\":\"low\",\"required_gate\":null}],\"node_updates\":[],\"node_removals\":[],\"edge_additions\":[],\"edge_removals\":[],\"expected_outcome\":\"takeover return is executable\",\"risk_delta\":[],\"budget_delta\":{\"planning_cost_movement\":0,\"expected_execution_cost_movement\":0},\"scope_delta\":[\"repo:src\"],\"coverage_map\":{\"criterion-root\":[\"criterion-root\"]}}","session_id":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","usage":{"input_tokens":1,"output_tokens":1}}'; exit 0
 "#;
 
 const SLOW_BODY: &str = "while :; do :; done\n";
@@ -1917,17 +1928,18 @@ fn routine_define_authorize_run_cycle_through_shipped_binaries() {
 
     let ran = sandbox.agentctl(&["routine", "run", &id, "--evidence", "evidence:dogfood"]);
     assert!(ran.status.success(), "run: {}", stderr(&ran));
-    assert!(stdout(&ran).contains("COMPLETED"), "run {}", stdout(&ran));
+    assert!(stdout(&ran).contains("BLOCKED"), "run {}", stdout(&ran));
+    assert!(!stdout(&ran).contains("COMPLETED"));
 
     // Durability: kill and restart the daemon; routine and run survive,
-    // and the background tick does not duplicate the completed run.
+    // and the background tick does not duplicate the blocked run.
     daemon.restart(&sandbox);
     let got = sandbox.agentctl(&["routine", "get", &id]);
     assert!(got.status.success(), "get: {}", stderr(&got));
-    assert!(stdout(&got).contains("runs=1"), "get {}", stdout(&got));
+    assert!(stdout(&got).contains("runs=0"), "get {}", stdout(&got));
     let listed = sandbox.agentctl(&["routine", "list"]);
     assert!(
-        stdout(&listed).contains("COMPLETED"),
+        stdout(&listed).contains("BLOCKED"),
         "list {}",
         stdout(&listed)
     );
@@ -1950,10 +1962,6 @@ fn worker_enroll_claim_complete_cycle_through_shipped_binaries() {
         !out.contains("secret="),
         "secret must not be printed: {out}"
     );
-    let secret = std::fs::read_to_string(&secret_path)
-        .expect("secret file")
-        .trim()
-        .to_owned();
     let public = out
         .lines()
         .find_map(|l| l.strip_prefix("public="))
@@ -2013,7 +2021,14 @@ fn worker_enroll_claim_complete_cycle_through_shipped_binaries() {
         .expect("challenge id")
         .to_owned();
     let sig = sandbox.agentctl(&[
-        "worker", "sign", "--secret", &secret, "--nonce", &nonce1, "--job", &job_id,
+        "worker",
+        "sign",
+        "--secret-file",
+        &secret_arg,
+        "--nonce",
+        &nonce1,
+        "--job",
+        &job_id,
     ]);
     assert!(sig.status.success(), "sign: {}", stderr(&sig));
     let signature = stdout(&sig).trim().to_owned();
@@ -2076,7 +2091,14 @@ fn worker_enroll_claim_complete_cycle_through_shipped_binaries() {
         .expect("challenge2 id")
         .to_owned();
     let sig2 = sandbox.agentctl(&[
-        "worker", "sign", "--secret", &secret, "--nonce", &nonce2, "--job", &job_id,
+        "worker",
+        "sign",
+        "--secret-file",
+        &secret_arg,
+        "--nonce",
+        &nonce2,
+        "--job",
+        &job_id,
     ]);
     let signature2 = stdout(&sig2).trim().to_owned();
     let done = sandbox.agentctl(&[
@@ -2128,10 +2150,6 @@ fn org_create_team_member_policy_sync_usage_cycle_through_shipped_binaries() {
     assert!(keygen.status.success(), "keygen: {}", stderr(&keygen));
     let out = stdout(&keygen);
     assert!(!out.contains("secret="), "secret must not print: {out}");
-    let secret = std::fs::read_to_string(&secret_path)
-        .expect("secret file")
-        .trim()
-        .to_owned();
     let public = out
         .lines()
         .find_map(|l| l.strip_prefix("public="))
@@ -2300,7 +2318,7 @@ fn org_create_team_member_policy_sync_usage_cycle_through_shipped_binaries() {
 
     // Encrypted sync: the owner seals locally, the daemon accepts.
     // NOTE: the author here is the OWNER account (secret from keygen).
-    let org_key = "ab".repeat(32);
+    let org_key = sandbox.key_file("org.key", &"ab".repeat(32));
     let nonce = "01".repeat(24);
     let sealed = sandbox.agentctl(&[
         "org",
@@ -2308,11 +2326,11 @@ fn org_create_team_member_policy_sync_usage_cycle_through_shipped_binaries() {
         "seal",
         "--account",
         &account_id,
-        "--secret",
-        &secret,
+        "--secret-file",
+        &secret_arg,
         "--org",
         &org_id,
-        "--org-key",
+        "--org-key-file",
         &org_key,
         "--nonce",
         &nonce,
@@ -2363,7 +2381,7 @@ fn org_create_team_member_policy_sync_usage_cycle_through_shipped_binaries() {
         &field("signature="),
         "--created",
         &field("created="),
-        "--org-key",
+        "--org-key-file",
         &org_key,
     ]);
     assert!(accepted.status.success(), "accept: {}", stderr(&accepted));
@@ -2399,7 +2417,7 @@ fn org_create_team_member_policy_sync_usage_cycle_through_shipped_binaries() {
         &field("signature="),
         "--created",
         &field("created="),
-        "--org-key",
+        "--org-key-file",
         &org_key,
     ]);
     assert!(!replay.status.success(), "replay must refuse");
@@ -2441,14 +2459,14 @@ fn org_account(sandbox: &Sandbox, name: &str, secret_file: &str) -> (String, Str
     assert!(keygen.status.success(), "keygen: {}", stderr(&keygen));
     let out = stdout(&keygen);
     assert!(!out.contains("secret="), "secret must not print: {out}");
+    let secret = std::fs::read_to_string(&secret_path)
+        .expect("private fixture key")
+        .trim()
+        .to_owned();
     let public = out
         .lines()
         .find_map(|l| l.strip_prefix("public="))
         .expect("public")
-        .to_owned();
-    let secret = std::fs::read_to_string(&secret_path)
-        .expect("secret file")
-        .trim()
         .to_owned();
     let account = sandbox.agentctl(&["org", "account", "--name", name, "--public-key", &public]);
     assert!(account.status.success(), "account: {}", stderr(&account));
@@ -2662,7 +2680,8 @@ fn org_sync_policy_quota_take_effect_between_two_daemon_stores() {
     );
     // The MEMBER seals locally on the sender side; only ciphertext and
     // bounded metadata cross to the receiver (C-2).
-    let org_key = "cd".repeat(32);
+    let org_key = sender.key_file("org.key", &"cd".repeat(32));
+    let member_secret_file = sender.key_file("member.secret", &fixture.member_secret);
     let plaintext = "org-profile-two-store-v1";
     let seal = |nonce: &str| {
         let sealed = sender.agentctl(&[
@@ -2671,11 +2690,11 @@ fn org_sync_policy_quota_take_effect_between_two_daemon_stores() {
             "seal",
             "--account",
             &fixture.member_account,
-            "--secret",
-            &fixture.member_secret,
+            "--secret-file",
+            &member_secret_file,
             "--org",
             &fixture.org_id,
-            "--org-key",
+            "--org-key-file",
             &org_key,
             "--nonce",
             nonce,
@@ -2738,7 +2757,7 @@ fn org_sync_policy_quota_take_effect_between_two_daemon_stores() {
             signature.to_owned(),
             "--created".to_owned(),
             created.to_owned(),
-            "--org-key".to_owned(),
+            "--org-key-file".to_owned(),
             org_key.clone(),
         ]
     };
@@ -2844,7 +2863,7 @@ fn org_sync_policy_quota_take_effect_between_two_daemon_stores() {
         &stale_signature,
         "--created",
         &stale_created,
-        "--org-key",
+        "--org-key-file",
         &org_key,
     ];
     let conflict = receiver.agentctl(&stale_args);

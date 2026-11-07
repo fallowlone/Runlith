@@ -600,7 +600,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture 
         let fixture_path = fixture(
             &env.dir,
             "claude-fixture.sh",
-            r#"echo proof > ./fixture-proof.txt; printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture worked","session_id":"22222222-3333-4444-5555-666666666666","usage":{"input_tokens":3,"output_tokens":5}}'"#,
+            r#"echo proof > ./fixture-proof.txt; printf '%s' '{"type":"result","subtype":"success","is_error":false,"result":"fixture worked\nNPM_AUTH=fixture-sensitive-value","session_id":"22222222-3333-4444-5555-666666666666","usage":{"input_tokens":3,"output_tokens":5}}'"#,
         );
         let mut orchestration = env.orchestration();
         let task_id = seed_ready(orchestration.tasks_mut(), "P-1", "T-1");
@@ -614,7 +614,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture 
                 ids("E-9", "A-9"),
                 workspace_request(&env, &ExecutionId::new("E-9").unwrap()),
                 |task, lease| {
-                    let prompt = build_task_prompt(task.objective(), task.acceptance());
+                    let prompt = build_task_prompt(task.objective(), &task.acceptance_lines());
                     let config = ClaudeConfig::default()
                         .with_executable(fixture_path.clone())
                         .expect("fixture exe")
@@ -687,6 +687,22 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture 
             TaskState::Completed,
             "verified path completes via evaluation"
         );
+        drop(orchestration);
+        let reopened = env.orchestration();
+        let history = reopened.tasks().list_events_for_task(&task_id).unwrap();
+        let submitted = history
+            .iter()
+            .find(|event| event.fact.event_type == storage_sqlite::EventType::Submitted)
+            .unwrap();
+        assert_eq!(
+            submitted.fact.reason.as_deref(),
+            Some("fixture worked\nNPM_AUTH=[redacted]")
+        );
+        assert!(history.iter().all(|event| event
+            .fact
+            .reason
+            .as_deref()
+            .is_none_or(|text| !text.contains("fixture-sensitive-value"))));
     }
 
     #[test]
@@ -710,7 +726,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture 
                 ids("E-H7", "A-H7"),
                 workspace_request(&env, &ExecutionId::new("E-H7").unwrap()),
                 |task, lease| {
-                    let prompt = build_task_prompt(task.objective(), task.acceptance());
+                    let prompt = build_task_prompt(task.objective(), &task.acceptance_lines());
                     let config = ClaudeConfig::default()
                         .with_executable(fixture_path.clone())
                         .expect("fixture exe")
@@ -751,9 +767,11 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"fixture 
             status.stdout.is_empty(),
             "provider runtime state must not dirty the managed worktree"
         );
-        let provider_state = environment_base
-            .join(worktree.file_name().expect("managed worktree leaf"))
-            .join("data/sessions.db");
+        let provider_state =
+            provider_claude::ProviderEnvironment::prepare(worktree, &environment_base)
+                .expect("provider environment for the durable worktree")
+                .xdg_data_home()
+                .join("sessions.db");
         assert!(
             provider_state.is_file(),
             "provider state must remain outside Git"

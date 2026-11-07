@@ -35,6 +35,14 @@ pub struct SqliteStore {
     connection: Connection,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskListEntry {
+    pub id: TaskId,
+    pub project_id: ProjectId,
+    pub objective: String,
+    pub state: TaskState,
+}
+
 /// One recorded binding proof consumption (ADR-0036 IMPL-C): the
 /// presence nonce that authorized binding one criterion of one task.
 /// At most one row per (task, criterion) — the durable AlreadyBound.
@@ -193,6 +201,36 @@ impl SqliteStore {
         Ok(projects)
     }
 
+    pub fn list_projects_page(
+        &self,
+        after_id: &str,
+        limit: u32,
+        byte_budget: usize,
+    ) -> StorageResult<Vec<Project>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT id, name FROM projects WHERE id > ?1 ORDER BY id LIMIT ?2")?;
+        let rows = statement.query_map(params![after_id, limit], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut projects = Vec::new();
+        let mut bytes = 0usize;
+        for row in rows {
+            let (id, name) = row?;
+            bytes = bytes.saturating_add(id.len()).saturating_add(name.len());
+            let id = ProjectId::new(id)
+                .map_err(|error| StorageError::DomainReconstruction(error.to_string()))?;
+            projects.push(
+                Project::new(id, name)
+                    .map_err(|error| StorageError::DomainReconstruction(error.to_string()))?,
+            );
+            if bytes > byte_budget {
+                break;
+            }
+        }
+        Ok(projects)
+    }
+
     // -- tasks ----------------------------------------------------------
 
     /// Persists a new validated task with its metadata and dependency
@@ -215,6 +253,7 @@ impl SqliteStore {
         insert_task_strings(&transaction, &snapshot)?;
         insert_task_evidence_requirements(&transaction, &snapshot)?;
         insert_task_prerequisites(&transaction, &snapshot)?;
+        insert_task_acceptance_statements(&transaction, &snapshot)?;
         insert_task_edges(&transaction, &snapshot)?;
         transaction.commit()?;
         Ok(())
@@ -245,6 +284,7 @@ impl SqliteStore {
         insert_task_strings(&transaction, &snapshot)?;
         insert_task_evidence_requirements(&transaction, &snapshot)?;
         insert_task_prerequisites(&transaction, &snapshot)?;
+        insert_task_acceptance_statements(&transaction, &snapshot)?;
         insert_task_edges(&transaction, &snapshot)?;
         let committed = insert_journal_event(&transaction, event)?;
         transaction.commit()?;
@@ -261,6 +301,49 @@ impl SqliteStore {
     /// Lists every stored task of one project, fully hydrated, in id order.
     pub fn list_tasks_for_project(&self, project_id: &ProjectId) -> StorageResult<Vec<Task>> {
         list_project_tasks(&self.connection, project_id)
+    }
+
+    pub fn list_task_summaries_page(
+        &self,
+        project_id: &ProjectId,
+        after_id: &str,
+        limit: u32,
+        byte_budget: usize,
+    ) -> StorageResult<Vec<TaskListEntry>> {
+        let mut statement = self.connection.prepare("SELECT id, project_id, objective, state FROM tasks WHERE project_id=?1 AND id > ?2 ORDER BY id LIMIT ?3")?;
+        let rows = statement.query_map(params![project_id.as_str(), after_id, limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut tasks = Vec::new();
+        let mut bytes = 0usize;
+        for row in rows {
+            let (id, project_id, objective, state) = row?;
+            let id = TaskId::new(id)
+                .map_err(|error| StorageError::DomainReconstruction(error.to_string()))?;
+            let project_id = ProjectId::new(project_id)
+                .map_err(|error| StorageError::DomainReconstruction(error.to_string()))?;
+            let task = Task::draft(id, project_id, objective)
+                .map_err(|error| StorageError::DomainReconstruction(error.to_string()))?;
+            bytes = bytes
+                .saturating_add(task.id().as_str().len())
+                .saturating_add(task.project_id().as_str().len())
+                .saturating_add(task.objective().len());
+            tasks.push(TaskListEntry {
+                id: task.id().clone(),
+                project_id: task.project_id().clone(),
+                objective: task.objective().to_owned(),
+                state: decode_state(&state)?,
+            });
+            if bytes > byte_budget {
+                break;
+            }
+        }
+        Ok(tasks)
     }
 
     /// Persists a validated task, inserting or replacing its stored image
@@ -669,7 +752,8 @@ pub(crate) fn list_project_tasks(
 fn load_task_snapshot(connection: &Connection, id: &str) -> StorageResult<Option<TaskSnapshot>> {
     let row: Option<TaskRow> = connection
         .query_row(
-            "SELECT id, project_id, objective, parent_id, state, kind, risk
+            "SELECT id, project_id, objective, parent_id, state, kind, risk,
+                    requires_workspace_change
                  FROM tasks WHERE id = ?1",
             params![id],
             |row| {
@@ -681,6 +765,7 @@ fn load_task_snapshot(connection: &Connection, id: &str) -> StorageResult<Option
                     state: row.get(4)?,
                     kind: row.get(5)?,
                     risk: row.get(6)?,
+                    requires_workspace_change: row.get::<_, i64>(7)? != 0,
                 })
             },
         )
@@ -766,16 +851,53 @@ fn load_task_snapshot(connection: &Connection, id: &str) -> StorageResult<Option
         depends_on,
         acceptance: ordered_values(&strings, "acceptance"),
         evidence_requirements: load_evidence_requirements(connection, id.as_str())?,
+        acceptance_statements: load_acceptance_statements(connection, id.as_str())?,
         prerequisites: load_task_prerequisites(connection, id.as_str())?,
         allowed_paths: ordered_values(&strings, "allowed_path"),
         forbidden_paths: ordered_values(&strings, "forbidden_path"),
         verification: ordered_values(&strings, "verification"),
         required_review: ordered_values(&strings, "required_review"),
         risk: row.risk,
+        requires_workspace_change: row.requires_workspace_change,
         artifacts: ordered_values(&strings, "artifact"),
         kind: row.kind,
         state,
     }))
+}
+
+/// Loads one Task's ADR-0051 acceptance statements.
+fn load_acceptance_statements(
+    connection: &Connection,
+    task_id: &str,
+) -> StorageResult<std::collections::BTreeMap<String, String>> {
+    let mut statement = connection.prepare(
+        "SELECT criterion_id, statement FROM task_acceptance_statements WHERE task_id = ?1",
+    )?;
+    let rows = statement.query_map(params![task_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut statements = std::collections::BTreeMap::new();
+    for row in rows {
+        let (criterion, text) = row?;
+        statements.insert(criterion, text);
+    }
+    Ok(statements)
+}
+
+pub(crate) fn insert_task_acceptance_statements(
+    connection: &Connection,
+    snapshot: &TaskSnapshot,
+) -> StorageResult<()> {
+    for (criterion, text) in &snapshot.acceptance_statements {
+        connection
+            .execute(
+                "INSERT INTO task_acceptance_statements (task_id, criterion_id, statement)
+                 VALUES (?1, ?2, ?3)",
+                params![snapshot.id.as_str(), criterion, text],
+            )
+            .map_err(|error| map_constraint(error, "insert acceptance statement"))?;
+    }
+    Ok(())
 }
 
 /// Loads one Task's declared activation prerequisites in declaration order.
@@ -839,7 +961,7 @@ fn load_evidence_requirements(
     }
     let mut statement = connection.prepare(
         "SELECT position, criterion_id, requirement_kind, subject_binding, required,
-                policy_fingerprint
+                policy_fingerprint, statement
          FROM task_evidence_requirements WHERE task_id = ?1 ORDER BY position",
     )?;
     let rows = statement.query_map(params![task_id], |row| {
@@ -850,12 +972,21 @@ fn load_evidence_requirements(
             row.get::<_, String>(3)?,
             row.get::<_, i64>(4)?,
             row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
         ))
     })?;
     let mut requirements = Vec::new();
     let mut seen_criteria: Vec<String> = Vec::new();
     for (expected, row) in (0_i64..).zip(rows) {
-        let (position, criterion_id, raw_kind, raw_binding, required, policy_fingerprint) = row?;
+        let (
+            position,
+            criterion_id,
+            raw_kind,
+            raw_binding,
+            required,
+            policy_fingerprint,
+            statement,
+        ) = row?;
         if position != expected {
             return Err(StorageError::Corrupt(format!(
                 "task {task_id} stores non-contiguous evidence requirement order"
@@ -906,6 +1037,7 @@ fn load_evidence_requirements(
             policy_fingerprint,
             required,
         )
+        .map(|requirement| requirement.with_statement(statement))
         .map_err(|error| {
             StorageError::Corrupt(format!(
                 "task {task_id} stores an invalid evidence requirement: {error}"
@@ -936,6 +1068,7 @@ struct TaskRow {
     state: String,
     kind: Option<String>,
     risk: Option<String>,
+    requires_workspace_change: bool,
 }
 
 /// Validates that `event` is the `project.created` evidence for exactly
@@ -1016,8 +1149,9 @@ pub(crate) fn insert_task_row(
 ) -> StorageResult<()> {
     connection
         .execute(
-            "INSERT INTO tasks (id, project_id, objective, parent_id, state, kind, risk)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO tasks (id, project_id, objective, parent_id, state, kind, risk,
+                                requires_workspace_change)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 snapshot.id.as_str(),
                 snapshot.project_id.as_str(),
@@ -1026,6 +1160,7 @@ pub(crate) fn insert_task_row(
                 snapshot.state.as_str(),
                 snapshot.kind,
                 snapshot.risk,
+                i64::from(snapshot.requires_workspace_change),
             ],
         )
         .map_err(|error| map_constraint(error, "insert task"))?;
@@ -1073,9 +1208,14 @@ fn save_task_rows(
         "DELETE FROM task_prerequisites WHERE task_id = ?1",
         params![snapshot.id.as_str()],
     )?;
+    transaction.execute(
+        "DELETE FROM task_acceptance_statements WHERE task_id = ?1",
+        params![snapshot.id.as_str()],
+    )?;
     insert_task_strings(transaction, snapshot)?;
     insert_task_evidence_requirements(transaction, snapshot)?;
     insert_task_prerequisites(transaction, snapshot)?;
+    insert_task_acceptance_statements(transaction, snapshot)?;
     insert_task_edges(transaction, snapshot)?;
     Ok(())
 }
@@ -1083,11 +1223,13 @@ fn save_task_rows(
 fn insert_task_row_replace(connection: &Connection, snapshot: &TaskSnapshot) -> StorageResult<()> {
     connection
         .execute(
-            "INSERT INTO tasks (id, project_id, objective, parent_id, state, kind, risk)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO tasks (id, project_id, objective, parent_id, state, kind, risk,
+                                requires_workspace_change)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,
                 objective=excluded.objective, parent_id=excluded.parent_id,
-                state=excluded.state, kind=excluded.kind, risk=excluded.risk",
+                state=excluded.state, kind=excluded.kind, risk=excluded.risk,
+                requires_workspace_change=excluded.requires_workspace_change",
             params![
                 snapshot.id.as_str(),
                 snapshot.project_id.as_str(),
@@ -1096,6 +1238,7 @@ fn insert_task_row_replace(connection: &Connection, snapshot: &TaskSnapshot) -> 
                 snapshot.state.as_str(),
                 snapshot.kind,
                 snapshot.risk,
+                i64::from(snapshot.requires_workspace_change),
             ],
         )
         .map_err(|error| map_constraint(error, "save task"))?;
@@ -1135,8 +1278,8 @@ pub(crate) fn insert_task_evidence_requirements(
             .execute(
                 "INSERT INTO task_evidence_requirements
                  (task_id, position, criterion_id, requirement_kind, subject_binding,
-                  required, policy_fingerprint)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                  required, policy_fingerprint, statement)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     snapshot.id.as_str(),
                     position as i64,
@@ -1145,6 +1288,7 @@ pub(crate) fn insert_task_evidence_requirements(
                     requirement.subject_binding.as_str(),
                     if requirement.required { 1_i64 } else { 0_i64 },
                     requirement.policy_fingerprint,
+                    requirement.statement,
                 ],
             )
             .map_err(|error| map_constraint(error, "insert evidence requirement"))?;

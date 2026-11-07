@@ -3,6 +3,11 @@
 Status: Accepted
 Date: 2026-09-09
 
+Amendment 2026-11-04: the OS principal below remains the peer identity.
+[ADR-0050](./ADR-0050-os-user-presence-for-local-control.md) additionally
+requires fresh daemon-owned OS user presence for Shutdown and starting or
+resuming execution, and removes unattended routine execution authority.
+
 ## Context
 
 G1 established a secure per-user endpoint (0700 runtime directory,

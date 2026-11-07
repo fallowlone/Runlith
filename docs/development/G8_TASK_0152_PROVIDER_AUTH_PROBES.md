@@ -116,7 +116,7 @@ For R6/R7 the network rule was changed by hand to
 `(allow network-outbound (remote tcp "localhost:<port>"))` (Seatbelt
 rejects a literal IP host here — measured:
 `sandbox-exec: host must be * or localhost in network address` — so
-`"localhost"` is used, resolving to loopback). This is **not** a
+`"localhost"` is used; L1 measures a broader local-address admission). This is **not** a
 reconstruction of an existing production code path: `profile_for`'s match
 (`adapters/runner-macos-seatbelt/src/lib.rs:230-245`) accepts only `[]` or
 exactly `NETWORK_SCOPE_OUTBOUND_TCP_443`; any other
@@ -325,18 +325,24 @@ this host was not exercising). This directly motivated the dual-stack
 `owner_proxy_probe.py` (T2c, below) and the residual-risk note there: a
 listener must bind everything this rule admits that it wants to guard,
 and this task's own probe binds only the two loopback addresses, not the
-LAN address the rule also happens to admit (no functional gap for THIS
-probe, since nothing this task builds ever binds the LAN address either —
-but the underlying Seatbelt admission itself remains broader than
-"loopback", which any future consumer of this same network-rule pattern
-must account for on its own).
+LAN address the rule also admits. The intended marker call reached the
+chosen endpoint; that is functionality evidence only. The absence of a
+**task-created** listener elsewhere does not exclude a foreign same-port
+listener on an admitted LAN/alias/IPv6 address. The probe does not reserve
+that larger destination set or prove confinement to its own listener.
+Additional scoped/global IPv6 survives as historical reviewer evidence;
+VPN/utun, mapped forms, dynamic addresses and firewall behavior remain
+unverified here (ADR-0037 D11). No new runtime measurement is asserted by
+this interpretation correction.
 
 ## Option B probe (trusted-host authenticated proxy)
 
 This section documents the probe for **Option B**: a trusted-host process
 holds the real credential and runs a tiny local HTTP proxy; the confined
-child receives only a random per-run placeholder and can reach nothing but
-that proxy's `127.0.0.1:<port>`. This is empirical support for the ADR's
+child receives only a random per-run placeholder and is configured to use
+that proxy's `127.0.0.1:<port>`. The sandbox rule admits a larger local-address
+set at that port (L1); the probe guards only its two loopback binds. This is
+empirical support for the ADR's
 selection of Option B — it is not itself the ADR and makes no
 recommendation.
 
@@ -349,7 +355,10 @@ throwaway temp keychains holding dummy, obviously-fake values created and
 destroyed within the same test run — see "Temp-keychain provisioning
 test" and "Agent-run end-to-end invalid-credential test" below for
 exactly which `security` subcommands were used and against which (never
-the owner's default/login) keychain. Design, in the order it executes:
+the owner's default/login) keychain. The original measured design is recorded
+below in execution order; the
+current-source corrections in “Review remediation” supersede its opener,
+header diagnostics and lifecycle mechanics. Historical receipts are unchanged:
 
 1. Binds `127.0.0.1:0` (random port), generates a random per-run
    placeholder (`secrets.token_urlsafe(32)`).
@@ -577,8 +586,8 @@ records what changed, fixed rather than merely noted:
   probe:** any other local, non-loopback interface address (or additional
   127/8 alias) reachable on the same port remains something Seatbelt's
   rule would admit a connection attempt to -- this probe's own listener
-  simply never binds those addresses, so nothing is there to accept such
-  a connection *for this specific proxy*, but the underlying Seatbelt
+  does not bind those addresses. A foreign same-port listener can accept
+  child traffic there; task listener absence is not sink exclusion. Seatbelt
   admission is broader than "loopback only" and a future implementation
   reusing this network rule must account for that itself.
 - **T2d — child-controlled path never recorded raw.** A local `403` for a
@@ -613,7 +622,8 @@ main-thread `recv()` inside the slow client it drove — which looked like
 a pass without the server having enforced anything on its own connection
 thread at all.
 
-Fix, verified directly (not just asserted):
+Historical round-7 change/verification record (superseded in part by the
+review remediation below; slot ownership and total lifetime were not proved):
 
 1. `signal.alarm` removed entirely.
 2. Concurrency model changed from one-thread-per-listener to one
@@ -631,8 +641,9 @@ Fix, verified directly (not just asserted):
    deadline — touching no other connection and never the main thread.
 4. The dry-self-check was rewritten so the slow client runs in a WORKER
    thread while the check's own code busy-loops on the main thread and
-   asserts it was never interrupted, in addition to asserting the
-   server-held time is within the deadline (±margin). A separate,
+   asserts it was never interrupted, in addition to observing client elapsed
+   time/EOF within the ingress deadline (±margin); this alone does not measure
+   handler termination. A separate,
    out-of-repo scratch test (below) proves the concrete failure mode
    directly: a real `subprocess.run` on the main thread, running
    concurrently with a slow connection whose deadline fires mid-way,
@@ -651,11 +662,10 @@ EOF
 main-thread subprocess.run(sleep 13) returncode: 0 elapsed: 13.1
 ```
 
-`returncode: 0` and `elapsed: ~13.1s` (not aborted early at ~10s) proves
-the main thread's own blocking work is never touched by the connection's
-deadline, even while that deadline fires concurrently on a different
-connection's thread — the exact property `signal.alarm` could not
-provide.
+This historical report says the main-thread sleep completed uninterrupted.
+Its abbreviated command and unavailable scratch source do not independently
+prove handler termination, upstream cancellation or slot release. No new
+runtime execution of that experiment is claimed.
 
 **K2 — does the CLI send its credential on `HEAD /api/hello`? NO,
 confirmed by evidence already in this document.** R6/R7/R8's stub request
@@ -682,8 +692,10 @@ running as a different UID on the same host, that discovers this
 ephemeral port can reach `HEAD /api/hello` (learning only "something is
 listening on this port," nothing else) and can attempt the same
 request-flood or slow-trickle abuse K1's deadline and connection cap
-already bound (at most `MAX_CONCURRENT_CONNECTIONS` connections held at
-once, each for at most `REQUEST_DEADLINE_SECONDS`). Such a process
+were intended to bound. The reviews of `3924bb7` found incorrect slot
+release and an ingress-only deadline; the current-source remediation below
+replaces that claim with explicit phase/total bounds and model checks. Such
+a process
 **cannot obtain the real credential** through this path: `/api/hello`
 never forwards anything and never holds or echoes the credential in any
 response, and the one path that does forward (`POST /v1/messages`)
@@ -714,6 +726,177 @@ predictable value).
   ambient environment-variable override surface refused outright (C3/T2a)
   — certificate/hostname verification itself is the Python/OpenSSL
   default, unchanged.
+
+### Review remediation (2026-09-30; synthetic mechanics only)
+
+Unified findings for the independent reports on `3924bb7`; original IDs
+are retained. “Resolved” means the bounded source/proposed-contract defect,
+not independent review PASS or production certification. AS-01 now has owner
+choice B; contract closure remains pending independent re-review.
+
+| Envelope row / finding IDs | Disposition | Correction and runnable evidence |
+| --- | --- | --- |
+| R1: AS-02 / A1 | resolved | Socket-owned admission map under the existing shared lock; only admitted sockets release once, including reject/exception/repeated close. `slots` saturates two listener instances, repeats rejections, releases/readmits and checks nonnegative aggregate count. |
+| R2: AS-03 / A2 | resolved | Only integer dropped-header count emitted; D15/D21 agree. Synthetic placeholder-as-name and exception-message checks cover snapshots/stdout/stderr. No hashing subsystem added. |
+| R3: AS-04 / A3 | resolved within stated probe/model scope | D16 separates finite production-configured ingress/forward/total/attempt/byte/cleanup bounds. Probe uses 10s ingress, 60s absolute forward/relay, 70s total from admission, 8 MiB response cap and existing 120s child wait. Timer cancels registered downstream/upstream sockets, server close joins handlers before shared credential references are dropped. Doubles prove stalled connect/TLS/send/headers/relay/SSE/consumer, trickled SSE and attempt cancellation terminate workers and release slots. No live DNS/TLS/socket proof. |
+| R4: AS-05 / A4 | resolved | Atomic pre-dispatch request reservation includes in-flight work, no completion recharge or failure refund. Probe enforces count only; Proposed D24 also mandates atomic declared-`max_tokens` reservation. Overlapping-admission boundary test exercises actual dispatch; no actual-spend claim. |
+| R5: A5 | resolved | `GetPassWarning` becomes an exception before fallback stdin reading. No-TTY and warning doubles refuse; hidden success and explicitly gated synthetic stdin path remain. No provisioning/Keychain execution. |
+| R6: AS-06 / A6 | resolved | Corrected L1/probe/pass/generator interpretation separates intended endpoint, admitted destinations and foreign listener possibility. Original measurement tables/receipts retained; IPv6/VPN/firewall/dynamic limitations remain. |
+| R7: AS-01 / B2 / F1 | owner choice B; contract submitted for re-review | ADR “AS-01 contract” selects bounded remote delegation with canonical current Execution/Attempt authority, complete protocol classification, exact scopes and pre-forward enforcement. P1/P2 are proposed binding/validity amendments; P3 is the prerequisite for the first remote shape. No remote operation has sufficient evidence today. Independent finding closure remains pending; no production capability granted. |
+| AS-07 | resolved | D22 replaces unconditional creator-trust superset claim with reader-identity substitution and empty-vs-singleton silent-read trade-off. Source logic correction only; no ACL experiment. |
+| Adversarial N1 | resolved | Exact-length EOF rejection before auth/reservation/forward, with focused check. Production unknown-length/encoding/duplicate-header refusal is explicit in D16. No HTTP-smuggling exploit is claimed. |
+
+Runnable protection, stdlib only:
+
+```sh
+python3 -I -B docs/development/task0152-probes/remediation_self_check.py
+```
+
+This executes actual imported probe methods with public synthetic strings,
+in-memory socket/TLS/HTTP doubles and bounded worker/event waits; tripwires
+refuse DNS/network/process execution. The unchanged reviewer `pure_checks.py`
+was read before execution and reproduced all seven starting counterexamples.
+The durable checks failed before correction (RED) and pass after correction
+(GREEN); baseline/verification logs and detailed result live in the remediation
+handback's temporary directory. Changed tests are author-written remediation
+evidence for independent validation, not an independent verdict.
+
+Current forwarding uses direct stdlib `http.client` on a registered socket
+instead of urllib's uncancellable `open`: it resolves one pinned-host address
+**before** credential read/child launch, performs TLS using the explicit
+TLS>=1.2 default-root context/hostname, and never follows redirects, reads
+proxy env or retries/reconnects. Startup libc DNS and OS cleanup scheduling
+are not aggregate-time-certified by this probe; production needs enforced
+startup/cleanup bounds. The response cap reuses the existing 8 MiB probe
+constant; these constants/test knobs are not new product-policy decisions.
+Extended live dry checks now fail the command when any printed check fails;
+they were not run in this remediation (no live network probes authorized).
+
+Deliberate deferrals: complete production D11 address binds/firewall,
+D17 pinned roots, D18 auth-failure latch, D24 strict JSON/model/declared-token
+implementation, D25 config-channel census and D26 admission remain post-ADR
+implementation obligations, unchanged in authority. Scoped/global IPv6
+scratch, VPN/utun/mapped/dynamic-address behavior, real-provider positive
+final-head behavior, OAuth refresh/revocation and development ACL identity
+are unverified here. Expanding into those areas would require forbidden
+runtime/credential/production work. The `9787690` owner positives and old
+9x401/ACL/redirect/sleep observations remain **inherited pre-remediation**
+evidence, never a fresh positive of the corrected subject.
+
+### B contract evidence and compatibility limits (2026-09-30)
+
+The owner selected **B — bounded remote delegation** in the contract/remediation
+envelope, superseding unfiltered remote-forwarding intent. The normative
+[AS-01 contract](../architecture/adr/ADR-0037-confined-provider-credential-gateway.md#as-01-contract--owner-choice-b-submitted-for-independent-re-review)
+distinguishes inference, client-only tool declarations/returned calls/results,
+server execution and unknown shapes. It requires canonical exact authority and
+mechanical enforcement before forwarding. Historical risk acceptance remains
+provenance and does not grant capabilities. ADR-0037 remains Proposed; B does
+not accept pending D11, in-process/ACL/core-dump or OAuth decisions.
+
+`owner_proxy_probe.py` is an **owner-operated diagnostic**, with no canonical
+Policy/Execution/Attempt admission gate. Its placeholder checks prove gateway
+credential-header possession; count/deadline/parser checks prove their named
+mechanics in the test model. Body/beta forwarding is not production authorization
+or scope proof. No fake production authorization object or executable redesign
+is added in this contract-only revision. The unchanged 16 synthetic remediation
+self-checks are rerun on this revision; prior RED/GREEN history above and old
+owner positives remain historical, not fresh final-head provider receipts.
+
+Targeted official protocol evidence, read-only retrieval on 2026-09-30:
+
+| Primary source / version provenance | Supported protocol fact | Limit on inference from it |
+| --- | --- | --- |
+| [Tool use overview](https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview), mutable official page | Custom/client tools return `tool_use`; application execution supplies `tool_result`. Provider tools execute remotely. | Neither a tool name nor `tools` presence proves where an enclosing CLI request executes. No exact CLI coding fixture. |
+| [MCP connector](https://platform.claude.com/docs/en/agents-and-tools/mcp-connector), `mcp-client-2025-11-20`; prior `mcp-client-2025-04-04` deprecated | `mcp_servers` supplies a remote entry URL; `mcp_toolset` controls enabled tools. | Entry URL/toolset does not prove all downstream destinations, actions or redirect enforcement. Both versions unsupported under current B evidence. |
+| [Web fetch](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-fetch-tool), `web_fetch_20250910`, `web_fetch_20260209` and later | Server fetching; domain/use controls. Dynamic filtering also enables code execution implicitly; a client-result continuation may resume fetching. | Request-level controls are not demonstrated Runlith per-hop enforcement. Unsupported under current B evidence. |
+
+These are dated documentation claims, not a live provider/API/sandbox probe,
+Runlith authority or proof of CLI `2.1.281` runtime behavior. Later page revisions
+must be re-reviewed; no complete admissible protocol-profile artifact exists here.
+Repository evidence remains R6/R8's marker run: HEAD `/api/hello`, Messages
+`beta=true`, API `2023-06-01`, per-mode betas and short inference/SSE. It did not
+record a complete coding-tool body/continuation fixture or prove all observed
+betas' semantics. Unknown beta interactions are an explicit profile-compatibility
+blocker, even for the marker workflow, until proven. Free-form descriptions are
+data; only actual dispatch-enabling protocol positions require classification.
+
+Client coding-tool declarations are conditionally eligible as client-only
+protocol shapes; they gain no remote authority. Returned calls remain untrusted
+requests for the existing Runlith Policy/Runner/tool boundary. A shape that cannot
+prove this boundary fails closed. Workflows requiring provider-side search/fetch,
+MCP, containers/code or ambiguous mixed continuations are currently unsupported.
+No complete CLI compatibility claim is made. The first remote operation needs
+P3's separate accepted exact mapping/enforcement proof; P1/P2 request binding and
+dispatch validity must be ratified and implemented before production forwarding.
+Future production compatibility evidence must include actual sanitized versioned
+CLI fixtures/negative cases and a canonical-admission confinement run. This
+contract revision ran only synthetic checks; historical tables/observations are retained.
+
+### CR-01 actual candidate and RR-N1 correction (2026-09-30)
+
+**CR-01 remains blocked.** Fresh actual diagnostic emission is now preserved in
+the versioned
+[claude-2.1.283-proposal-api-key-v1 candidate](task0152-probes/claude-2.1.283-proposal-api-key-v1/PROFILE.md).
+Its full request/header/beta/nested-field classification, unresolved exact
+semantics, launch/isolation limits, sanitization and reproducible artifact chain
+are recorded there. This does not replace the historical `2.1.281` measurements
+above or historical owner authentication receipts.
+
+The installed binary changed to `2.1.283`; its SHA-256 is
+`d8cb1e5c79684cc12a8bfc813e3a2073406921b6245744b3009be3ab5651d21e`.
+The actual argv uses the existing adapter proposal-only configuration:
+`-p --safe-mode --tools "" --disallowedTools "mcp__*" --output-format json`
+plus a benign marker prompt. No undocumented feature suppression was added.
+The child runs under the existing diagnostic Seatbelt generator with fresh
+temporary HOME/config/runtime/workspace and an environment constructed from
+scratch, a dummy API-key-class placeholder and a local endpoint that never
+forwards. No credential/login/auth-status/provisioning path is invoked. The
+capture is bounded to 45 seconds, eight requests, 2 MiB/request, 8 MiB total
+request bodies and 64 KiB child output. Full D11 and production confinement are
+not certified by this diagnostic extension.
+
+The final run exits 0, emits the marker and exactly two requests: HEAD
+`/api/hello`, POST `/v1/messages?beta=true` with SSE. All ten betas and complete
+body structure are retained, including an empty tool list, a system-role message
+with per-message effort, adaptive omitted thinking, keep-all context management,
+ephemeral cache markers and attribution metadata. The response is explicitly
+synthetic; no live authentication or provider receipt follows. No tool call or
+continuation occurs in this named workflow. API-key/OAuth differences were not
+re-probed: this candidate makes no OAuth profile-admission claim.
+
+`profile_check.py` proves capture/source hashes and complete strict normalization,
+accepts the local health shape and rejects Messages as
+`unsupported_beta_contract`. The four unresolved exact values are
+`claude-code-20250219`, `prompt-caching-scope-2026-01-05`,
+`mid-conversation-system-2026-04-07` and `per-turn-control-2026-07-01`.
+The candidate's primary-source table explains partial documented evidence and
+the smallest missing evidence; names/search hits do not prove the full contract.
+The official gateway guide's open forwarding recommendation cannot override B.
+The acceptance command exits 1; safety/provenance checks and 26 mutations pass.
+No whole-sequence positive is claimed, and no fields or beta values are removed
+to make the gate pass. P1/P2 production enforcement is pending; remote set stays
+empty until P3. Client-tool/continuation acceptance is still unverified.
+
+**RR-N1 corrected locally.** The actual stdlib parser previously responded 501
+to an unknown method and echoed its token before `_dispatch`. The focused
+`rr_n1_self_check.py` reproduced that RED result, then passes after
+`ProxyHandler.send_error` routes inherited errors to the existing fixed JSON
+refusal; unknown methods map to 403. Malformed request-version errors retain
+400 without supplied-token reflection. Both actual-parser cases prove no
+forward/reservation, no console reflection, terminated handler and zero owned
+slots. The original `remediation_self_check.py` is unchanged and passes 16/16.
+The new checks are author-added diagnostics, requiring independent re-review;
+they are not production or OS scheduling certification.
+
+The later [bounded CR-01 pass](task0152-probes/cr01-bounded-pass-20260930/EVIDENCE.md)
+adds version-pinned vendor evidence and one isolated actual
+[system-prompt alternative](task0152-probes/claude-2.1.283-system-prompt-api-key-v1/PROFILE.md).
+The legacy effort alias is partially explained, but all ten betas and the
+dynamic system-role/effort message remain in that alternative. Both complete
+sequences fail semantic admission. CR-01 is OPEN; this is blocked evidence with
+an owner decision package, not a submitted acceptance candidate. Historical
+captures, source hashes, RR-N1 and existing mechanics are preserved.
 
 ### Owner commands (round 4 — supersedes the manual `security` form)
 
@@ -855,12 +1038,16 @@ this real dump, not assumed correct from documentation alone.)
 A pass (`marker_present=True`, `forwarded=1`, exactly one `upstream_status_codes`
 entry in the 2xx range) proves: the confined child completed a real,
 authenticated Anthropic API round trip while holding only a random
-placeholder and having network access to nothing but `127.0.0.1:<port>`;
+placeholder and contacting the intended `127.0.0.1:<port>` endpoint;
 the trusted host's proxy correctly rejected the pre-flight wrong-credential
 probe with no upstream call; and the real credential never crossed into
 the sandbox in any form.
 
-It does **not** prove: that the proxy is hardened against a
+It does **not** prove the whole sandbox-admitted destination set is limited
+to that endpoint, exclude foreign same-port listeners, or prove full D11
+confinement/isolation. L1 establishes a broader observed local-address set;
+only two loopback addresses are guarded by the current probe. Nor does it
+prove: that the proxy is hardened against a
 concurrently-running hostile workload on the same host reusing the
 placeholder before the legitimate child does (single-probe, single-child
 design — no concurrency/TOCTOU analysis was performed); that a long-lived
@@ -1175,7 +1362,8 @@ compile for a real production launch. That means the real credential
 would sit inside a sandbox that can reach *any* HTTPS host on port 443,
 not only `api.anthropic.com` — a materially larger blast radius than
 Option B, where the confined child never holds the real credential at all
-and can reach nothing but the trusted host's own loopback proxy. Option A
+and is configured to contact the trusted host's proxy; L1's broader
+local-address admission and foreign-listener residual still apply. Option A
 is rejected on that basis; ADR-0037 selects Option B (the local proxy,
 below). This document keeps the note here rather than deleting all trace
 of Option A so the reasoning for rejecting it stays visible.

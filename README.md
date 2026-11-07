@@ -153,6 +153,21 @@ $agentctl execution run t1 /path/to/your/repo
 $agentctl execution status <execution-id>
 ```
 
+Execution `run`/`resume`, daemon shutdown and explicit routine
+authorization/run require fresh confirmation through macOS Touch ID or
+the system password dialog. Headless requests without available OS
+confirmation fail explicitly. Unattended routine ticks record `BLOCKED`
+with `user_presence_required` and consume no run budget. Status queries
+remain available. See [ADR-0050](docs/architecture/adr/ADR-0050-os-user-presence-for-local-control.md).
+
+On Unix, the daemon binary sets both core-dump limits to zero before creating
+the runtime or opening services; children inherit the zero hard limit.
+macOS also denies debugger attachment. Failure to apply either protection
+stops startup. To debug a build with debug assertions, set
+`RUNLITH_ALLOW_DEBUGGER=1` before launching the daemon. This permits debugger
+attachment while keeping core dumps disabled; builds without debug assertions
+(including the default release profile) ignore the variable.
+
 <details>
 <summary><b>More commands</b></summary>
 
@@ -171,6 +186,14 @@ agentctl vault     …                   # secret references and bindings
 
 There is intentionally **no** `set-state` and no `done` shortcut: lifecycle commands stay semantic, and
 completion is earned through verification.
+
+Worker signing and organization sealing read private keys through
+`--secret-file` / `--org-key-file` or piped `--secret-stdin` /
+`--org-key-stdin`. A key file contains exactly 64 hexadecimal characters
+and an optional final newline; on Unix it must be owned by the current user,
+have mode 0400 or 0600, and have no symlink or hardlink aliases. Only one key
+may come from stdin per command. Raw `--secret` and `--org-key` arguments
+are rejected to keep private keys out of process arguments and shell history.
 
 </details>
 

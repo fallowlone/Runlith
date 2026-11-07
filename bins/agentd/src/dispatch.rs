@@ -76,14 +76,7 @@ pub fn dispatch<C: app_services::Clock>(
                 Err(error) => error_response(error),
             }
         }
-        Some(task_core_request::Payload::ListProjects(_)) => match service.list_projects() {
-            Ok(projects) => success(task_core_response::Payload::ListProjects(
-                ListProjectsResponse {
-                    projects: projects.iter().map(project_dto).collect(),
-                },
-            )),
-            Err(error) => error_response(error),
-        },
+        Some(task_core_request::Payload::ListProjects(req)) => list_pages::projects(service, req),
         Some(task_core_request::Payload::CreateTask(req)) => {
             let task = match domain_task(&req.id, &req.project_id, &req.objective) {
                 Ok(task) => task,
@@ -112,16 +105,7 @@ pub fn dispatch<C: app_services::Clock>(
             }
         }
         Some(task_core_request::Payload::ListTasksForProject(req)) => {
-            let id = match ProjectId::new(req.project_id) {
-                Ok(id) => id,
-                Err(error) => return error_response(ServiceError::Domain(error)),
-            };
-            match service.list_tasks_for_project(&id) {
-                Ok(tasks) => success(task_core_response::Payload::ListTasks(ListTasksResponse {
-                    tasks: tasks.iter().map(task_dto).collect(),
-                })),
-                Err(error) => error_response(error),
-            }
+            list_pages::tasks(service, req)
         }
         Some(task_core_request::Payload::AddDependency(req)) => {
             let (task_id, depends_on_id) =
@@ -297,6 +281,9 @@ pub fn dispatch_task_authoring<C: app_services::Clock>(
         req.allowed_paths,
         req.acceptance_criteria,
         req.baseline_risk,
+        // ADR-0051: absent keeps the default obligation. The session layer
+        // already refused the field below protocol v14.
+        req.requires_workspace_change.unwrap_or(true),
     ) {
         Ok((task, _)) => {
             let facts = task.snapshot();
@@ -308,6 +295,7 @@ pub fn dispatch_task_authoring<C: app_services::Clock>(
                             allowed_paths: facts.allowed_paths,
                             acceptance_criteria: facts.acceptance,
                             baseline_risk: facts.risk.unwrap_or_default(),
+                            requires_workspace_change: facts.requires_workspace_change,
                         }),
                     },
                 )),
@@ -328,6 +316,8 @@ fn domain_task(id: &str, project_id: &str, objective: &str) -> Result<Task, Serv
         objective,
     )?)
 }
+
+mod list_pages;
 
 fn project_dto(project: &Project) -> ProjectDto {
     ProjectDto {
@@ -384,9 +374,27 @@ pub fn vault_unavailable() -> VaultCoreResponse {
 }
 
 fn success(payload: task_core_response::Payload) -> TaskCoreResponse {
-    TaskCoreResponse {
+    use prost::Message;
+    let response = TaskCoreResponse {
         payload: Some(payload),
+    };
+    let envelope = ipc_contracts::proto::ControlResponse {
+        payload: Some(ipc_contracts::proto::control_response::Payload::TaskCore(
+            response,
+        )),
+    };
+    if envelope.encoded_len() > ipc_transport::MAX_FRAME_BYTES {
+        return TaskCoreResponse { payload: Some(task_core_response::Payload::Error(BusinessError {
+            code: BusinessErrorCode::Internal as i32,
+            message: "reply exceeds the IPC frame limit; a mutation may have committed, so inspect its identity before retrying".to_owned(),
+        })) };
     }
+    let Some(ipc_contracts::proto::control_response::Payload::TaskCore(response)) =
+        envelope.payload
+    else {
+        unreachable!()
+    };
+    response
 }
 
 fn error_response(error: ServiceError) -> TaskCoreResponse {
@@ -941,6 +949,7 @@ mod tests {
                     allowed_paths: allowed_paths.iter().map(ToString::to_string).collect(),
                     acceptance_criteria: acceptance.iter().map(ToString::to_string).collect(),
                     baseline_risk: risk.to_owned(),
+                    requires_workspace_change: None,
                 },
             )),
         }
@@ -951,6 +960,40 @@ mod tests {
             Some(task_authoring_core_response::Payload::Error(error)) => error,
             other => panic!("expected typed authoring error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn v14_no_change_intent_is_stored_and_echoed_and_absent_keeps_the_default() {
+        let mut service = service();
+        dispatch(&mut service, create_project_request("P-1", "Runlith"), None);
+        let mut request = planning_task_request("T-RO", &["repo:src"], &["c"], "low");
+        if let Some(task_authoring_core_request::Payload::CreatePlanningTask(create)) =
+            request.payload.as_mut()
+        {
+            create.requires_workspace_change = Some(false);
+        }
+        let response = dispatch_task_authoring(&mut service, request);
+        let Some(task_authoring_core_response::Payload::CreatePlanningTask(created)) =
+            response.payload
+        else {
+            panic!("expected created planning task");
+        };
+        assert!(!created.task.unwrap().requires_workspace_change);
+        assert!(!service
+            .get_task(&TaskId::new("T-RO").unwrap())
+            .unwrap()
+            .unwrap()
+            .requires_workspace_change());
+
+        dispatch_task_authoring(
+            &mut service,
+            planning_task_request("T-DEFAULT", &["repo:src"], &["c"], "low"),
+        );
+        assert!(service
+            .get_task(&TaskId::new("T-DEFAULT").unwrap())
+            .unwrap()
+            .unwrap()
+            .requires_workspace_change());
     }
 
     #[test]
@@ -1041,6 +1084,7 @@ mod tests {
                     allowed_paths: vec!["repo:src".to_owned()],
                     acceptance_criteria: vec!["c".to_owned()],
                     baseline_risk: "low".to_owned(),
+                    requires_workspace_change: None,
                 },
             )),
         };

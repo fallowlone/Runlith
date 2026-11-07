@@ -13,6 +13,13 @@ pub trait RoutineStorePort {
     /// Due definitions at `now` (domain predicate), sorted by id.
     fn list_due(&self, now: u64) -> Result<Vec<RoutineDefinition>, BackgroundError>;
     fn start_run(&mut self, run: &RoutineRun) -> Result<(), BackgroundError>;
+    /// Persists the finished `run` and the updated `def` ATOMICALLY (F07):
+    /// either both land or neither does.
+    fn finish_run(
+        &mut self,
+        def: &RoutineDefinition,
+        run: &RoutineRun,
+    ) -> Result<(), BackgroundError>;
     fn load_run(&self, id: &RunId) -> Result<Option<RoutineRun>, BackgroundError>;
     fn update_run(&mut self, run: &RoutineRun) -> Result<(), BackgroundError>;
     /// Runs of one routine, sorted by id.

@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en" data-density="default" data-text="normal">
+<head>
+<meta charset="utf-8">
+<title>D05 · Variant B — IDE layout with bottom execution/evidence panel</title>
+<meta name="viewport" content="width=1440">
+<link rel="stylesheet" href="shared.css">
+</head>
+<body data-variant="b">
+<div class="shell">
+  <aside id="nav" class="nav" aria-label="Project navigation"></aside>
+
+  <main class="pane" aria-label="Primary document area">
+    <div class="workspace-header">
+      <div class="row-2">
+        <h1 id="ws-title"></h1>
+        <span class="badge state-VERIFYING">VERIFYING</span>
+        <span class="meta" id="ws-reason"></span>
+      </div>
+      <p class="meta">TASK-0342 · central tabs + bottom diagnostics · high horizontal area for code/diff</p>
+    </div>
+    <div class="tabs" id="tabs" role="tablist" aria-label="Document tabs">
+      <button class="tab" role="tab" aria-selected="true" data-panel="overview">Task</button>
+      <button class="tab" role="tab" aria-selected="false" data-panel="plan">Plan</button>
+      <button class="tab" role="tab" aria-selected="false" data-panel="changes">Diff</button>
+      <button class="tab" role="tab" aria-selected="false" data-panel="evidence">Artifact</button>
+    </div>
+    <div class="pane-scroll" id="panels">
+      <section data-panel="overview" data-active="true" aria-label="Task"></section>
+      <section data-panel="plan" aria-label="Plan"></section>
+      <section data-panel="changes" aria-label="Diff"></section>
+      <section data-panel="evidence" aria-label="Artifact"></section>
+    </div>
+  </main>
+
+  <section class="pane" aria-label="Execution diagnostics">
+    <div class="tabs" id="dtabs" role="tablist" aria-label="Diagnostics">
+      <button class="tab" role="tab" aria-selected="true" data-panel="dattempts">Attempts</button>
+      <button class="tab" role="tab" aria-selected="false" data-panel="devents">Events</button>
+      <button class="tab" role="tab" aria-selected="false" data-panel="dlogs">Logs</button>
+      <button class="tab" role="tab" aria-selected="false" data-panel="dterm">Terminal</button>
+      <span class="meta grow" style="align-self:center;padding-left:12px" id="dsummary"></span>
+    </div>
+    <div style="display:flex;flex-direction:column;min-height:0;flex:1" id="dpanels">
+      <section data-panel="dattempts" data-active="true" style="display:block" aria-label="Attempts"></section>
+      <section data-panel="devents" style="display:none" aria-label="Events"></section>
+      <section data-panel="dlogs" style="display:none;display:flex;flex-direction:column;min-height:0" aria-label="Logs"></section>
+      <section data-panel="dterm" style="display:none" aria-label="Terminal"></section>
+    </div>
+  </section>
+</div>
+
+<script src="fixture.js"></script>
+<script src="proto.js"></script>
+<script>
+(function () {
+  var F = window.FIXTURE, P = window.PROTO;
+  document.title = "D05 · B — " + F.task.id;
+  P.renderNav();
+  P.fill("ws-title", P.esc(F.task.objective));
+  P.fill("ws-reason", P.esc(F.task.headlineReason) + " · " + P.esc(F.task.nextCommand));
+  var root = document.getElementById("panels");
+  var content = { overview: P.renderOverview(), plan: P.renderPlan(), changes: P.renderChanges(), evidence: P.renderEvidence() };
+  root.querySelectorAll("section[data-panel]").forEach(function (s) {
+    s.innerHTML = content[s.getAttribute("data-panel")] || "";
+  });
+  P.wireTabs(document.getElementById("tabs"), root);
+
+  var dRoot = document.getElementById("dpanels");
+  P.fill("dattempts", P.renderAttempts());
+  P.fill("devents", P.renderHistory());
+  P.fill("dlogs", P.renderLogs());
+  P.fill("dterm",
+    '<div class="log" role="region" aria-label="Read-only command output" tabindex="0">' +
+    '<div><span class="src">[read-only]</span> command output appears here after an execution produces it.</div>' +
+    '<div><span class="src">[note]</span> no work has run live in the current observation window.</div></div>' +
+    '<p class="meta" style="padding:4px 8px">Empty output is not the main object before work starts (§10). ' +
+    'A writable terminal is not offered: it would require its own IPC/authority contract.</p>');
+  P.fill("dsummary", "Execution E-0901 · attempt 2 · no live run — observed 12m ago");
+
+  document.getElementById("dtabs").addEventListener("click", function (e) {
+    var btn = e.target.closest(".tab");
+    if (!btn) { return; }
+    document.querySelectorAll("#dtabs .tab").forEach(function (t) { t.setAttribute("aria-selected", "false"); });
+    btn.setAttribute("aria-selected", "true");
+    dRoot.querySelectorAll("section[data-panel]").forEach(function (s) {
+      var active = s.getAttribute("data-panel") === btn.dataset.panel;
+      s.style.display = active ? (s.getAttribute("data-panel") === "dlogs" ? "flex" : "block") : "none";
+      s.setAttribute("data-active", active ? "true" : "false");
+    });
+  });
+})();
+</script>
+</body>
+</html>

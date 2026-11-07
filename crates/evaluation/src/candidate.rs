@@ -1071,6 +1071,12 @@ pub fn requirement_revision(requirement: &task_domain::EvidenceRequirement) -> S
         field(&mut revision, param.key().as_bytes());
         field(&mut revision, param.value().as_bytes());
     }
+    // ADR-0051: appended only when a statement is bound, so revisions of
+    // statement-free requirements are unchanged.
+    if let Some(statement) = &requirement.statement {
+        revision.update(b"\0acceptance-statement\0");
+        field(&mut revision, statement.as_bytes());
+    }
     format!("sha256:{:x}", revision.finalize())
 }
 

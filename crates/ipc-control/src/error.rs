@@ -65,6 +65,7 @@ pub enum ControlError {
         /// Minimum version that enables business IPC (1).
         required: u32,
     },
+    UnsupportedCapability(String),
     /// The session already terminated (fatal protocol violation, rejection,
     /// or transport failure) and cannot continue.
     SessionTerminated,
@@ -99,6 +100,7 @@ impl fmt::Display for ControlError {
                 "business IPC unsupported for negotiated protocol version {negotiated} (requires {required})"
             ),
             Self::SessionTerminated => write!(f, "protocol session already terminated"),
+            Self::UnsupportedCapability(capability) => write!(f, "daemon did not negotiate required capability {capability}; upgrade the daemon"),
         }
     }
 }

@@ -255,6 +255,63 @@ impl RoutineStorePort for SqliteStore {
         Ok(())
     }
 
+    fn finish_run(
+        &mut self,
+        def: &RoutineDefinition,
+        run: &RoutineRun,
+    ) -> Result<(), BackgroundError> {
+        def.revalidate()?;
+        run.revalidate()?;
+        if run.routine_id != def.id || run.status == RunStatus::Running {
+            return Err(BackgroundError::InvalidInput(
+                "invalid finished run".to_owned(),
+            ));
+        }
+        let tx = self
+            .connection_mut()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(backend)?;
+        let previous_completions = def
+            .runs_completed
+            .checked_sub(u32::from(run.status == RunStatus::Completed))
+            .ok_or_else(|| {
+                BackgroundError::InvalidInput("invalid completion counter".to_owned())
+            })?;
+        let defs = tx
+            .execute(
+                "UPDATE routines SET state=?2, next_run_at=?3, runs_completed=?4
+                 WHERE routine_id=?1 AND state='AUTHORIZED' AND runs_completed=?5 AND budget_max_runs=?6",
+                params![
+                    def.id.as_str(),
+                    def.state.as_str(),
+                    u64_to_i64(def.next_run_at, "next_run_at")?,
+                    i64::from(def.runs_completed),
+                    i64::from(previous_completions),
+                    i64::from(def.budget_max_runs),
+                ],
+            )
+            .map_err(backend)?;
+        let runs = tx
+            .execute(
+                "UPDATE routine_runs SET status=?2, finished_at=?3, evidence_ref=?4
+                 WHERE run_id=?1 AND routine_id=?5 AND status='RUNNING'",
+                params![
+                    run.id.as_str(),
+                    run.status.as_str(),
+                    run.finished_at
+                        .map(|v| u64_to_i64(v, "finished_at"))
+                        .transpose()?,
+                    run.evidence_ref,
+                    def.id.as_str(),
+                ],
+            )
+            .map_err(backend)?;
+        if defs == 0 || runs == 0 {
+            return Err(BackgroundError::Conflict(run.id.to_string()));
+        }
+        tx.commit().map_err(backend)
+    }
+
     fn load_run(&self, id: &RunId) -> Result<Option<RoutineRun>, BackgroundError> {
         let row = self
             .connection()

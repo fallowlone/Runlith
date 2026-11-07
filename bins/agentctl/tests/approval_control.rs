@@ -99,7 +99,11 @@ async fn human_decision_over_v3_survives_daemon_and_consumes_once() {
     let endpoint = sandbox.endpoint.clone();
     let db = sandbox.db.clone();
     let daemon = tokio::spawn(async move {
-        agentd::run_on_endpoint(&endpoint, agentd::DaemonConfig::with_execution(db)).await
+        agentd::run_on_endpoint(
+            &endpoint,
+            agentd::DaemonConfig::with_execution(db).with_confirmed_user_presence_for_tests(),
+        )
+        .await
     });
     wait_ready(&sandbox.endpoint).await;
 

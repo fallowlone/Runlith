@@ -1,0 +1,192 @@
+{
+  "profile_id": "claude-2.1.283-system-prompt-api-key-v1",
+  "source_sha256": "f3d0c1f348e3d5cce6d3df5860e043567dc3d4f38b5428f0435d6138aa25db2b",
+  "requests": [
+    {
+      "source": "actual_cli_request",
+      "method": "HEAD",
+      "target": "/api/hello",
+      "headers": [
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "user-agent",
+          "Bun/1.4.3"
+        ],
+        [
+          "accept",
+          "*/*"
+        ],
+        [
+          "host",
+          "<LOCAL_ENDPOINT>"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate, br, zstd"
+        ]
+      ],
+      "wire_body_bytes": 0,
+      "body": null
+    },
+    {
+      "source": "actual_cli_request",
+      "method": "POST",
+      "target": "/v1/messages?beta=true",
+      "headers": [
+        [
+          "accept",
+          "application/json"
+        ],
+        [
+          "content-type",
+          "application/json"
+        ],
+        [
+          "user-agent",
+          "claude-cli/2.1.283 (external, sdk-cli)"
+        ],
+        [
+          "x-claude-code-session-id",
+          "<EPHEMERAL_ID_1>"
+        ],
+        [
+          "x-stainless-arch",
+          "arm64"
+        ],
+        [
+          "x-stainless-lang",
+          "js"
+        ],
+        [
+          "x-stainless-os",
+          "MacOS"
+        ],
+        [
+          "x-stainless-package-version",
+          "0.112.1"
+        ],
+        [
+          "x-stainless-retry-count",
+          "0"
+        ],
+        [
+          "x-stainless-runtime",
+          "node"
+        ],
+        [
+          "x-stainless-runtime-version",
+          "v26.3.0"
+        ],
+        [
+          "x-stainless-timeout",
+          "600"
+        ],
+        [
+          "anthropic-beta",
+          "claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24"
+        ],
+        [
+          "anthropic-dangerous-direct-browser-access",
+          "true"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ],
+        [
+          "x-api-key",
+          "<credential:dummy-api-key>"
+        ],
+        [
+          "x-app",
+          "cli"
+        ],
+        [
+          "connection",
+          "keep-alive"
+        ],
+        [
+          "host",
+          "<LOCAL_ENDPOINT>"
+        ],
+        [
+          "accept-encoding",
+          "gzip, deflate, br, zstd"
+        ],
+        [
+          "content-length",
+          "1435"
+        ]
+      ],
+      "wire_body_bytes": 1435,
+      "body": {
+        "model": "claude-opus-5-5",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Reply with exactly TASK0152_PROFILE_OK and nothing else."
+          },
+          {
+            "role": "system",
+            "content": [
+              {
+                "type": "text",
+                "text": "# Environment\nYou have been invoked in the following environment: \n - Primary working directory: <CAPTURE_ROOT>/workspace\n - Is a git repository: false\n - Platform: darwin\n - Shell: unknown\n - OS Version: Darwin 27.0.0\n\nYou are powered by the model named Opus 5.5 (1M context). The exact model ID is claude-opus-5-5[1m]. Assistant knowledge cutoff is June 2026.\n\n<total_tokens>15000000 tokens left</total_tokens>\n\nToday's date is 2026-09-30.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            ],
+            "output_config": {
+              "effort": "medium"
+            }
+          }
+        ],
+        "system": [
+          {
+            "type": "text",
+            "text": "x-anthropic-billing-header: cc_version=2.1.283.10e; cc_entrypoint=sdk-cli;"
+          },
+          {
+            "type": "text",
+            "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          },
+          {
+            "type": "text",
+            "text": "role",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ],
+        "tools": [],
+        "metadata": {
+          "user_id": "{\"device_id\":\"<EPHEMERAL_DEVICE_ID>\",\"account_uuid\":\"\",\"session_id\":\"<EPHEMERAL_ID_1>\"}"
+        },
+        "max_tokens": 128000,
+        "thinking": {
+          "type": "adaptive",
+          "display": "omitted"
+        },
+        "context_management": {
+          "edits": [
+            {
+              "type": "clear_thinking_20251015",
+              "keep": "all"
+            }
+          ]
+        },
+        "output_config": {
+          "effort": "medium"
+        },
+        "stream": true
+      }
+    }
+  ]
+}

@@ -483,6 +483,14 @@ fn error(code: BusinessErrorCode, message: &str) -> PlanningCoreResponse {
     }
 }
 
+pub(crate) fn invalid_argument(message: &'static str) -> PlanningCoreResponse {
+    error(BusinessErrorCode::InvalidArgument, message)
+}
+
+pub(crate) fn presence_refusal(cause: &'static str) -> PlanningCoreResponse {
+    error(BusinessErrorCode::UserPresenceRequired, cause)
+}
+
 pub fn unavailable() -> PlanningCoreResponse {
     error(BusinessErrorCode::Internal, "planning service unavailable")
 }

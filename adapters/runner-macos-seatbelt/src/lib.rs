@@ -18,6 +18,7 @@ use std::ffi::OsString;
 pub struct MacOsSeatbeltRunner {
     support_read_roots: Vec<PathBuf>,
     support_write_roots: Vec<PathBuf>,
+    parent_signature_queries: bool,
     /// Owner-ratified 2026-09-25: whether this backend instance emits the
     /// ancestor `file-read-metadata`/`file-test-existence` ("stat only")
     /// grant a nested workspace needs for `getcwd()`/`realpath()`
@@ -40,6 +41,7 @@ impl MacOsSeatbeltRunner {
         Self {
             support_read_roots,
             support_write_roots,
+            parent_signature_queries: false,
             grant_candidate_ancestor_metadata: false,
         }
     }
@@ -51,6 +53,13 @@ impl MacOsSeatbeltRunner {
     #[must_use]
     pub fn with_candidate_ancestor_metadata_grant(mut self) -> Self {
         self.grant_candidate_ancestor_metadata = true;
+        self
+    }
+
+    /// Enables read-only code-signature queries for internal parent attestation.
+    #[must_use]
+    pub fn with_parent_signature_queries(mut self) -> Self {
+        self.parent_signature_queries = true;
         self
     }
 }
@@ -179,6 +188,10 @@ impl MacOsSeatbeltRunner {
         let mut profile = String::from(
             "(version 1)\n(deny default)\n(import \"system.sb\")\n(allow process-fork)\n",
         );
+
+        if self.parent_signature_queries {
+            profile.push_str("(allow process-info-codesignature)\n");
+        }
 
         if !ancestors.is_empty() {
             profile.push_str("(allow file-read-metadata file-test-existence");
@@ -814,5 +827,24 @@ mod tests {
             !stat.status.success(),
             "a provider launch must not gain ancestor stat access (matches main)"
         );
+    }
+
+    #[test]
+    fn parent_signature_queries_require_explicit_helper_configuration() {
+        let case = Case::new("parent-signature");
+        let plan = case.plan(Path::new("/usr/bin/true"), None);
+        let provider = MacOsSeatbeltRunner::default().profile_for(&plan).unwrap();
+        assert!(!provider.contains("process-info-codesignature"));
+        let candidate_git = MacOsSeatbeltRunner::default()
+            .with_candidate_ancestor_metadata_grant()
+            .profile_for(&plan)
+            .unwrap();
+        assert!(!candidate_git.contains("process-info-codesignature"));
+        let helper = MacOsSeatbeltRunner::default()
+            .with_parent_signature_queries()
+            .profile_for(&plan)
+            .unwrap();
+        assert!(helper.contains("(allow process-info-codesignature)\n"));
+        assert!(!helper.contains("(allow process-info*)"));
     }
 }

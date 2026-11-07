@@ -5,6 +5,10 @@
 //! any Protobuf protocol semantics.
 
 #[cfg(unix)]
+mod client_auth;
+#[cfg(any(windows, test))]
+mod token_sid;
+#[cfg(unix)]
 pub mod unix;
 #[cfg(windows)]
 pub mod windows;

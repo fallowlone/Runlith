@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-human-decisions"
+description = "Enables the list_human_decisions command without any pre-configured scope."
+commands.allow = ["list_human_decisions"]
+
+[[permission]]
+identifier = "deny-list-human-decisions"
+description = "Denies the list_human_decisions command without any pre-configured scope."
+commands.deny = ["list_human_decisions"]

@@ -22,6 +22,49 @@ use tokio_util::codec::{
 
 use crate::{TransportError, FRAME_IO_TIMEOUT, MAX_FRAME_BYTES};
 
+/// Stages an opaque frame for OS peer authentication before protocol decoding.
+#[cfg(any(windows, test))]
+pub async fn read_authentication_frame<T>(io: &mut T) -> Result<BytesMut, TransportError>
+where
+    T: AsyncRead + Unpin,
+{
+    read_authentication_frame_with_timeout(io, FRAME_IO_TIMEOUT).await
+}
+
+#[cfg(any(windows, test))]
+async fn read_authentication_frame_with_timeout<T>(
+    io: &mut T,
+    deadline: Duration,
+) -> Result<BytesMut, TransportError>
+where
+    T: AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    time::timeout(deadline, async {
+        let mut header = [0; 4];
+        io.read_exact(&mut header).await?;
+        let declared = u32::from_be_bytes(header);
+        if declared == 0 {
+            return Err(TransportError::EmptyFrame);
+        }
+        let length = usize::try_from(declared).map_err(|_| TransportError::FrameTooLarge {
+            declared: Some(declared),
+            limit: MAX_FRAME_BYTES,
+        })?;
+        if length > MAX_FRAME_BYTES {
+            return Err(TransportError::FrameTooLarge {
+                declared: Some(declared),
+                limit: MAX_FRAME_BYTES,
+            });
+        }
+        let mut frame = BytesMut::zeroed(length);
+        io.read_exact(&mut frame).await?;
+        Ok(frame)
+    })
+    .await
+    .map_err(|_| TransportError::Timeout { after: deadline })?
+}
+
 /// Transport-facing framing codec for G1 control messages.
 ///
 /// Thin wrapper around [`LengthDelimitedCodec`] with every
@@ -33,6 +76,63 @@ use crate::{TransportError, FRAME_IO_TIMEOUT, MAX_FRAME_BYTES};
 pub struct ControlFrameCodec {
     inner: LengthDelimitedCodec,
     frame_in_progress: bool,
+}
+
+#[cfg(test)]
+mod authentication_frame_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn staging_does_not_consume_the_next_frame() {
+        let (mut client, mut server) = tokio::io::duplex(64);
+        client
+            .write_all(b"\0\0\0\x03one\0\0\0\x03two")
+            .await
+            .unwrap();
+        assert_eq!(
+            read_authentication_frame(&mut server).await.unwrap(),
+            &b"one"[..]
+        );
+        let mut next = [0; 7];
+        time::timeout(Duration::from_millis(50), server.read_exact(&mut next))
+            .await
+            .expect("staging discarded bytes after the first frame")
+            .unwrap();
+        assert_eq!(&next, b"\0\0\0\x03two");
+    }
+
+    #[tokio::test]
+    async fn silent_and_partial_authentication_frames_have_one_deadline() {
+        for input in [&b""[..], &b"\0\0"[..], &b"\0\0\0\x03x"[..]] {
+            let (mut client, mut server) = tokio::io::duplex(64);
+            client.write_all(input).await.unwrap();
+            assert!(matches!(
+                read_authentication_frame_with_timeout(&mut server, Duration::from_millis(25))
+                    .await,
+                Err(TransportError::Timeout { .. })
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_authentication_lengths_refuse_before_reading_payload() {
+        for declared in [0u32, MAX_FRAME_BYTES as u32 + 1, u32::MAX] {
+            let (mut client, mut server) = tokio::io::duplex(64);
+            client.write_all(&declared.to_be_bytes()).await.unwrap();
+            let error =
+                read_authentication_frame_with_timeout(&mut server, Duration::from_millis(25))
+                    .await
+                    .unwrap_err();
+            if declared == 0 {
+                assert!(matches!(error, TransportError::EmptyFrame));
+            } else {
+                assert!(
+                    matches!(error, TransportError::FrameTooLarge { declared: Some(value), limit: MAX_FRAME_BYTES } if value == declared)
+                );
+            }
+        }
+    }
 }
 
 impl ControlFrameCodec {

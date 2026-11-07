@@ -58,7 +58,7 @@ pub use resolved_evidence::{
 };
 pub use risk::{
     method_for_requirement_kind, requirement_kind_for_method, CriterionDecl, GateRef, RiskClass,
-    RiskDelta, VerificationMethod,
+    RiskDelta, VerificationMethod, MAX_CRITERION_STATEMENT_BYTES,
 };
 pub use scope::{PlanScope, ScopeBound};
 pub use task_authority::{trusted_candidate_task_refs, TaskPlanningAuthority};

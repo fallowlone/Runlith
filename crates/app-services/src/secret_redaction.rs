@@ -1,4 +1,4 @@
-//! INV-008 display redaction for finder output (TASK-0174).
+//! INV-008 redaction for finder output and durable provider text.
 //!
 //! Pure total functions: never fail, never panic, char-boundary
 //! safe. Assignment shapes follow the policy crate's
@@ -11,10 +11,9 @@
 //! (which rejects whole literals), display redacts *values*: names
 //! and separators stay so lines remain identifiable.
 //!
-//! Documented residuals (fail-open shapes, accepted): bare
+//! Documented residuals (unrecognized shapes): bare
 //! high-entropy tokens with no marker (indistinguishable from
-//! hashes, which must pass); dotted credentials such as JWTs (dots
-//! delimit runs); lone short base64 fragments with no redacted
+//! hashes, which must pass); lone short base64 fragments with no redacted
 //! neighbor; all-lowercase short fragments next to redacted lines.
 
 /// Display marker replacing redacted secret bytes.
@@ -22,8 +21,9 @@ pub const REDACTED: &str = "[redacted]";
 
 /// Canonical assignment keys, mirroring the policy crate's secret
 /// screen (`looks_like_secret_material`).
-const ASSIGNMENT_KEYS: [&str; 7] = [
-    "password", "passwd", "secret", "apikey", "api_key", "api-key", "token",
+const ASSIGNMENT_KEYS: [&str; 10] = [
+    "password", "passwd", "secret", "apikey", "api_key", "api-key", "token", "_key", "_pat",
+    "_auth",
 ];
 
 /// Vendor credential prefixes with minimum suffix lengths. The floor
@@ -51,6 +51,7 @@ pub fn redact_line(line: &str) -> String {
     }
     let redacted = redact_assignments(line);
     let redacted = redact_prefixed_tokens(&redacted);
+    let redacted = redact_jwts(&redacted);
     redact_base64_runs(&redacted, MIN_BODY_RUN, false)
 }
 
@@ -87,6 +88,10 @@ pub fn redact_lines(lines: &[String]) -> Vec<String> {
         }
     }
     redacted
+}
+
+pub(crate) fn redact_text(text: &str) -> String {
+    redact_lines(&text.split('\n').map(str::to_owned).collect::<Vec<_>>()).join("\n")
 }
 
 fn is_pem_private_begin(line: &str) -> bool {
@@ -131,8 +136,8 @@ fn first_assignment_value(line: &str) -> Option<(usize, usize)> {
             if value.is_empty() {
                 continue;
             }
-            let value_start = line.len() - value.len();
-            let value_end = if value.starts_with(['\'', '"']) {
+            let mut value_start = line.len() - value.len();
+            let mut value_end = if value.starts_with(['\'', '"']) {
                 let quote = value.as_bytes()[0];
                 match value[1..].find(quote as char) {
                     Some(end) => value_start + 1 + end + 1,
@@ -144,6 +149,14 @@ fn first_assignment_value(line: &str) -> Option<(usize, usize)> {
                     None => line.len(),
                 }
             };
+            if key.starts_with('_')
+                && value.starts_with(['\'', '"'])
+                && value_end > value_start + 1
+                && line.as_bytes()[value_end - 1] == value.as_bytes()[0]
+            {
+                value_start += 1;
+                value_end -= 1;
+            }
             // Skip values already consumed by an earlier pass (the
             // marker itself, possibly abutted by structural punctuation
             // like a JSON `}`): replacement must terminate, and a
@@ -173,6 +186,34 @@ fn redact_prefixed_tokens(line: &str) -> String {
         }
     }
     current
+}
+
+fn redact_jwts(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(index) = rest.find("eyJ") {
+        let end = index
+            + rest[index..]
+                .bytes()
+                .take_while(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+                })
+                .count();
+        let token = rest[index..end].trim_end_matches('.');
+        let mut parts = token.split('.');
+        let jwt = (0..3).all(|_| parts.next().is_some_and(|part| !part.is_empty()))
+            && parts.next().is_none();
+        let consumed = if jwt { token.len() } else { 3 };
+        out.push_str(&rest[..index]);
+        out.push_str(if jwt {
+            REDACTED
+        } else {
+            &rest[index..index + consumed]
+        });
+        rest = &rest[index + consumed..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn is_secret_char(byte: u8) -> bool {
@@ -317,6 +358,16 @@ fn redact_base64_runs(line: &str, floor: usize, strict: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn durable_text_preserves_line_endings_and_trailing_blank_lines() {
+        let plain = "ready\r\nresult\n\n";
+        assert_eq!(super::redact_text(plain), plain);
+        assert_eq!(
+            super::redact_text("ready\r\nCUSTOM_TOKEN=fixture-value\n\n"),
+            "ready\r\nCUSTOM_TOKEN=[redacted]\n\n"
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -329,6 +380,30 @@ mod tests {
         assert_eq!(redact_line("api-key = hunter2"), "api-key = [redacted]");
         assert_eq!(redact_line("secret=hunter2"), "secret=[redacted]");
         assert_eq!(redact_line("token: hunter2"), "token: [redacted]");
+        for name in [
+            "DOCKER_HUB_PAT",
+            "NPM_AUTH",
+            "DEPLOY_KEY",
+            "CUSTOM_TOKEN",
+            "CLIENT_SECRET",
+        ] {
+            assert_eq!(
+                redact_line(&format!("{name}=short-value")),
+                format!("{name}=[redacted]")
+            );
+        }
+    }
+
+    #[test]
+    fn redacts_short_jwt_segments_without_redacting_dotted_prose() {
+        assert_eq!(
+            redact_line("credential eyJhbGciOiJub25lIn0.e30.Zg."),
+            "credential [redacted]."
+        );
+        assert_eq!(
+            redact_line("version 2.1.317 and eyJ.sample"),
+            "version 2.1.317 and eyJ.sample"
+        );
     }
 
     #[test]

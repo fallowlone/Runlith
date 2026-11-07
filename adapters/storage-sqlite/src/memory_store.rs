@@ -343,6 +343,38 @@ impl MemoryStorePort for SqliteStore {
         Ok(())
     }
 
+    fn supersede(
+        &mut self,
+        old_id: &MemoryId,
+        successor_id: &MemoryId,
+    ) -> Result<MemoryRecord, MemoryError> {
+        let tx = self
+            .connection_mut()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(backend)?;
+        let mut old = decode_record(&tx, old_id.as_str())?
+            .ok_or_else(|| MemoryError::NotFound(old_id.to_string()))?;
+        let successor = decode_record(&tx, successor_id.as_str())?
+            .ok_or_else(|| MemoryError::NotFound(successor_id.to_string()))?;
+        old.supersede_by(&successor)?;
+        tx.execute(
+            "UPDATE memories SET trust_state=?2 WHERE memory_id=?1",
+            params![old_id.as_str(), old.trust_state.as_str()],
+        )
+        .map_err(backend)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO memory_links (from_id, to_id, kind) VALUES (?1, ?2, ?3)",
+            params![
+                successor_id.as_str(),
+                old_id.as_str(),
+                LinkKind::Supersedes.as_str()
+            ],
+        )
+        .map_err(backend)?;
+        tx.commit().map_err(backend)?;
+        Ok(old)
+    }
+
     fn link(&mut self, link: &MemoryLink) -> Result<(), MemoryError> {
         let connection = self.connection_mut();
         let tx = connection

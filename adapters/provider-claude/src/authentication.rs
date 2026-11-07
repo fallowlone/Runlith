@@ -12,7 +12,6 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::config::bounded_detail;
@@ -138,11 +137,21 @@ fn classify(raw: &str) -> Authentication {
 
 /// Bounded, non-interactive capture of the probe's stdout.
 fn probe(executable: &OsString) -> Result<String, String> {
-    let mut child = Command::new(executable)
-        .args(PROBE_ARGV)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+    let mut command = crate::detect::probe_command(executable, PROBE_ARGV[0]);
+    command.arg(PROBE_ARGV[1]);
+    for name in [
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    let mut child = command
         .spawn()
         .map_err(|error| bounded_detail(format!("claude auth probe failed to spawn: {error}")))?;
     let start = Instant::now();
@@ -197,6 +206,43 @@ fn probe(executable: &OsString) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn auth_probe_ignores_ambient_credentials() {
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD_FIXTURE: &str = "RUNLITH_AUTH_PROBE_TEST_EXECUTABLE";
+        if let Some(path) = std::env::var_os(CHILD_FIXTURE) {
+            assert_eq!(
+                probe_authentication(&path).state,
+                AuthenticationState::Authenticated
+            );
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("runlith-auth-probe-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let executable = root.join("claude-fixture");
+        std::fs::write(&executable, b"#!/bin/sh\n[ \"$1\" = auth ] && [ \"$2\" = status ] || exit 2\nif [ -n \"${AWS_SECRET_ACCESS_KEY+x}${ANTHROPIC_API_KEY+x}${CLAUDE_CODE_OAUTH_TOKEN+x}\" ] || [ -z \"$HOME\" ]; then\n printf '{\"loggedIn\":false}'\nelse\n printf '{\"loggedIn\":true}'\nfi\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "authentication::tests::auth_probe_ignores_ambient_credentials",
+                "--nocapture",
+            ])
+            .env(CHILD_FIXTURE, &executable)
+            .env("AWS_SECRET_ACCESS_KEY", "synthetic-probe-key")
+            .env("ANTHROPIC_API_KEY", "synthetic-probe-key")
+            .env("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-probe-token")
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
 
     #[test]
     fn signed_in_state_permits_launch_and_others_refuse() {

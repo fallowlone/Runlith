@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+package ai_engineering_os.ipc;
+
+import "task_core.proto";
+
+// G16 widget authoring IPC (protocol version 13 only), widget_core = 16.
+// A provider call takes seconds, longer than a client may hold one request
+// open, so a draft is a job: start returns at once, status polls it, cancel
+// stops the provider child. At most one draft runs at a time. Jobs live in
+// memory only; nothing here is durable and nothing here mutates a Task.
+// The wire carries validated fields, never raw model output (INV-093).
+
+message WidgetDraftStartRequest {
+  // The person's own words, 1..=500 characters.
+  string description = 1;
+}
+
+message WidgetDraftStatusRequest {
+  string job_id = 1;
+}
+
+message WidgetDraftCancelRequest {
+  string job_id = 1;
+}
+
+message WidgetCoreRequest {
+  oneof payload {
+    WidgetDraftStartRequest start = 1;
+    WidgetDraftStatusRequest status = 2;
+    WidgetDraftCancelRequest cancel = 3;
+  }
+}
+
+enum WidgetDraftState {
+  WIDGET_DRAFT_STATE_UNSPECIFIED = 0;
+  // The provider call is in progress.
+  WIDGET_DRAFT_RUNNING = 1;
+  // The provider proposed a metric and the validator admitted it.
+  WIDGET_DRAFT_PROPOSED = 2;
+  // The request is outside the supported sources.
+  WIDGET_DRAFT_REFUSED = 3;
+  // The call failed; failure_code says why.
+  WIDGET_DRAFT_FAILED = 4;
+  WIDGET_DRAFT_CANCELLED = 5;
+}
+
+message WidgetDraftStatus {
+  string job_id = 1;
+  WidgetDraftState state = 2;
+  // PROPOSED only: a source type admitted by the validator.
+  string source_type = 3;
+  // PROPOSED only: owner/name, empty when the description named no repository.
+  string repo = 4;
+  // FAILED only: provider_missing, provider_incompatible,
+  // provider_unavailable, not_authenticated, timed_out, bad_output or failed.
+  string failure_code = 5;
+  // FAILED only: bounded human-readable detail.
+  string failure_detail = 6;
+}
+
+message WidgetCoreResponse {
+  oneof payload {
+    WidgetDraftStatus status = 1;
+    BusinessError error = 2;
+  }
+}

@@ -32,13 +32,23 @@ which own durable transitions and journal evidence.
   ambiguous start instead of issuing `run` again.
 - [Candidate helpers](agentd/src/main.rs) dispatch `__candidate-snapshot-write`,
   `__candidate-snapshot-remove` and `__candidate-evaluate` before ordinary startup.
+  They require a private one-shot parent permit before candidate file access;
+  implementation is in [candidate_helper](agentd/src/candidate_helper.rs) and
+  [candidate_authorization](agentd/src/candidate_authorization.rs).
   Their caller and `candidate_test_evaluator_executable` are in
   [execution](agentd/src/execution.rs); snapshot mechanics are in
   [candidate_snapshot](../adapters/effect-capture-local/src/candidate_snapshot.rs).
 - [Process tests](agentctl/tests/real_process_matrix.rs) use `workspace_bin`
   to locate sibling executables under `target/<profile>`. Candidate library
-  tests override the evaluator with real `agentd`: the test harness has no
-  hidden candidate dispatch. Existing binaries may be stale.
+  tests re-exec the same test image through an explicit subprocess fixture,
+  retaining kernel parent-image authentication. Integration authorization
+  tests use Cargo's freshly built `agentd`. Existing sibling binaries used
+  by other process tests may be stale.
+  Positive process matrices install the shipped CLI beside the separate
+  [confirmation fixture](agentctl/tests/fixtures/confirmed_daemon.rs), built
+  as a Cargo example. This test composition supplies confirmation while
+  retaining production IPC, G6 and Runner code; it does not establish native
+  OS confirmation success.
 
 ## Targeted verification from repository root
 
@@ -46,6 +56,7 @@ Freshly build both siblings before agentctl process or agentd candidate tests:
 
 ```sh
 rtk cargo build --locked --bin agentd --bin agentctl
+rtk cargo build --locked -p agentctl --example confirmed-daemon-fixture
 rtk cargo test --locked -p agentctl --test real_process_matrix
 rtk cargo test --locked -p agentctl --test execution_binaries
 rtk cargo test --locked -p agentd --lib candidate_evaluator_admits_bound_evidence_without_completing_the_task

@@ -38,6 +38,10 @@ use ipc_transport::{
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub mod approval;
+#[cfg(target_os = "macos")]
+mod candidate_authorization;
+#[cfg(target_os = "macos")]
+mod candidate_helper;
 pub mod data_dir;
 pub mod dispatch;
 pub mod execution;
@@ -46,12 +50,39 @@ pub mod human_decision;
 pub mod memory;
 pub mod org;
 pub mod planning;
+#[cfg(unix)]
+mod process_security;
 mod provider_credential;
 pub mod routine;
+pub mod startup_log;
+mod user_presence;
+#[cfg(test)]
+mod user_presence_dispatch_tests;
 pub mod vault;
+pub mod widget;
 pub mod worker;
 
+#[doc(hidden)]
+pub fn run_candidate_helper(args: &[String]) -> std::process::ExitCode {
+    #[cfg(target_os = "macos")]
+    {
+        if let Err(error) = harden_process() {
+            eprintln!("agentd: {error}");
+            return std::process::ExitCode::FAILURE;
+        }
+        candidate_helper::run(args)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = args;
+        std::process::ExitCode::FAILURE
+    }
+}
+
 pub use data_dir::{resolve_data_dir, resolve_database_path};
+#[cfg(unix)]
+#[doc(hidden)]
+pub use process_security::harden as harden_process;
 
 #[cfg(unix)]
 use ipc_transport::platform::unix::{
@@ -167,6 +198,7 @@ pub struct DaemonConfig {
     /// `claude` via `PATH` at `run` time; `Some` pins an explicit binary
     /// (tests inject fixture doubles). Never client-supplied.
     pub provider_executable: Option<PathBuf>,
+    user_presence: Arc<user_presence::UserPresence>,
 }
 
 impl DaemonConfig {
@@ -176,6 +208,7 @@ impl DaemonConfig {
             server_config: ServerConfig::g1_default(),
             database_path: None,
             provider_executable: None,
+            user_presence: Arc::new(user_presence::UserPresence::system()),
         }
     }
 
@@ -187,6 +220,7 @@ impl DaemonConfig {
             server_config: ServerConfig::g2_default(),
             database_path: Some(path.into()),
             provider_executable: None,
+            user_presence: Arc::new(user_presence::UserPresence::system()),
         }
     }
 
@@ -197,9 +231,10 @@ impl DaemonConfig {
     /// (TASK-0193 routine rollout) while preserving every older surface.
     pub fn with_execution(path: impl Into<PathBuf>) -> Self {
         Self {
-            server_config: ServerConfig::g13_default(),
+            server_config: ServerConfig::g17_default(),
             database_path: Some(path.into()),
             provider_executable: None,
+            user_presence: Arc::new(user_presence::UserPresence::system()),
         }
     }
 
@@ -208,6 +243,21 @@ impl DaemonConfig {
     #[must_use]
     pub fn with_provider_executable(mut self, executable: impl Into<PathBuf>) -> Self {
         self.provider_executable = Some(executable.into());
+        self
+    }
+
+    #[cfg(test)]
+    fn with_test_user_presence(
+        mut self,
+        authenticate: fn(&str) -> Result<(), user_presence::Error>,
+    ) -> Self {
+        self.user_presence = Arc::new(user_presence::UserPresence::for_test(authenticate));
+        self
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn with_confirmed_user_presence_for_tests(mut self) -> Self {
+        self.user_presence = Arc::new(user_presence::UserPresence::for_test(|_| Ok(())));
         self
     }
 }
@@ -242,6 +292,7 @@ pub type OrgHandle = Arc<tokio::sync::Mutex<OrgService<storage_sqlite::SqliteSto
 
 #[derive(Clone)]
 struct ConnectionServices {
+    user_presence: Arc<user_presence::UserPresence>,
     business: Option<BusinessHandle>,
     execution: Option<execution::ExecutionHandle>,
     approval: Option<ApprovalHandle>,
@@ -252,6 +303,7 @@ struct ConnectionServices {
     routine: Option<RoutineHandle>,
     worker: Option<WorkerHandle>,
     org: Option<OrgHandle>,
+    widget: Option<widget::WidgetHandle>,
 }
 
 /// Terminal outcome of a daemon run.
@@ -440,6 +492,62 @@ pub(crate) fn authorize_peer(
     }
 }
 
+async fn blocking_service<S, R>(
+    handle: &Arc<tokio::sync::Mutex<S>>,
+    operation: impl FnOnce(&mut S) -> R + Send + 'static,
+) -> Result<R, tokio::task::JoinError>
+where
+    S: Send + 'static,
+    R: Send + 'static,
+{
+    let mut service = handle.clone().lock_owned().await;
+    tokio::task::spawn_blocking(move || operation(&mut service)).await
+}
+
+/// Daemon-resolved facts of the task a Run request names (ADR-0050
+/// amendment): a one-line summary for the OS dialog plus a digest of the
+/// authority-bearing fields, re-read after confirmation so the approved
+/// snapshot is the one that runs.
+async fn run_task_snapshot(
+    business: &Option<BusinessHandle>,
+    task_id: &str,
+) -> Option<(String, String)> {
+    let handle = business.as_ref()?;
+    let id = task_domain::TaskId::new(task_id.to_owned()).ok()?;
+    blocking_service(handle, move |service| {
+        let task = service.get_task(&id).ok()??;
+        let facts = task.snapshot();
+        let objective: String = facts.objective.chars().take(80).collect();
+        let summary = format!(
+            "{objective:?}, risk {}, {} scope path(s)",
+            facts.risk.as_deref().unwrap_or("unset"),
+            facts.allowed_paths.len()
+        );
+        let digest = format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}|{}",
+            facts.objective,
+            facts.state,
+            facts.allowed_paths,
+            facts.acceptance,
+            facts.risk,
+            facts.requires_workspace_change
+        );
+        Some((summary, digest))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn confirm_operation(
+    presence: Arc<user_presence::UserPresence>,
+    reason: String,
+) -> Result<(), user_presence::Error> {
+    tokio::task::spawn_blocking(move || presence.confirm(&reason))
+        .await
+        .unwrap_or(Err(user_presence::Error::Unavailable))
+}
+
 /// Serves one authenticated stream: handshake, then the READY loop. Ping
 /// is answered inside `ipc-control`; shutdown is acknowledged and
 /// surfaced; version-1 business requests dispatch through the shared
@@ -462,19 +570,49 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut session = ServerSession::new(FramedTransport::new(stream), config.clone());
-    let handshake = match prefetched {
-        Some(frame) => session.run_handshake_from_frame(frame).await,
-        None => session.run_handshake().await,
-    };
-    if handshake.is_err() {
+    let mut shutting_down = shutdown_tx.subscribe();
+    if *shutting_down.borrow() {
         return ConnectionOutcome::Ended;
     }
+    let handshake = tokio::select! {
+        biased;
+        _ = shutting_down.changed() => return ConnectionOutcome::Ended,
+        result = tokio::time::timeout(Duration::from_secs(5), async { match prefetched {
+        Some(frame) => session.run_handshake_from_frame(frame).await,
+        None => session.run_handshake().await,
+        } }) => match result { Ok(result) => result, Err(_) => return ConnectionOutcome::Ended },
+    };
+    let Ok(handshake) = handshake else {
+        return ConnectionOutcome::Ended;
+    };
+    let list_pages = handshake
+        .accepted_capabilities
+        .iter()
+        .any(|capability| capability == ipc_contracts::TASK_LIST_PAGES_V1);
     loop {
-        match session.next_request().await {
+        let next = tokio::select! {
+            biased;
+            _ = shutting_down.changed() => return ConnectionOutcome::Ended,
+            next = session.next_request() => next,
+        };
+        match next {
             Ok(ReadyRequest::Ping) => continue,
             Ok(ReadyRequest::Shutdown) => {
-                // Authorization basis: post-handshake request over the
-                // secured per-user endpoint — never `client_kind`.
+                if let Err(error) = confirm_operation(
+                    services.user_presence.clone(),
+                    "stop the Runlith daemon and cancel its active runs".to_owned(),
+                )
+                .await
+                {
+                    if session
+                        .respond_shutdown_denied(error.cause())
+                        .await
+                        .is_err()
+                    {
+                        return ConnectionOutcome::Ended;
+                    }
+                    continue;
+                }
                 // Acknowledge best-effort, then initiate shutdown even if
                 // the acknowledgement itself failed to flush.
                 let _ = session.respond_shutdown().await;
@@ -482,10 +620,33 @@ where
                 return ConnectionOutcome::ShutdownInitiated;
             }
             Ok(ReadyRequest::Business(request)) => {
+                let paged = ipc_contracts::is_paged_list_request(&request);
+                if paged && !list_pages {
+                    let response = ipc_contracts::proto::TaskCoreResponse {
+                        payload: Some(ipc_contracts::proto::task_core_response::Payload::Error(
+                            ipc_contracts::proto::BusinessError {
+                                code: ipc_contracts::proto::BusinessErrorCode::UnsupportedProtocol
+                                    as i32,
+                                message: "task-list-pages-v1 was not negotiated".to_owned(),
+                            },
+                        )),
+                    };
+                    if session.respond_business(response).await.is_err() {
+                        return ConnectionOutcome::Ended;
+                    }
+                    continue;
+                }
                 let response = match &services.business {
                     Some(handle) => {
-                        let mut service = handle.lock().await;
-                        dispatch::dispatch(&mut service, request, services.execution.as_deref())
+                        let composition = services.execution.clone();
+                        let Ok(response) = blocking_service(handle, move |service| {
+                            dispatch::dispatch(service, request, composition.as_deref())
+                        })
+                        .await
+                        else {
+                            return ConnectionOutcome::Ended;
+                        };
+                        response
                     }
                     None => dispatch::unavailable(),
                 };
@@ -494,8 +655,70 @@ where
                 }
             }
             Ok(ReadyRequest::Execution(request)) => {
+                use ipc_contracts::proto::BusinessErrorCode;
+                if services.execution.is_some() {
+                    let run_task = match request.payload.as_ref() {
+                        Some(ipc_contracts::proto::execution_core_request::Payload::Run(run)) => {
+                            Some(run.task_id.clone())
+                        }
+                        _ => None,
+                    };
+                    let confirmation = match user_presence::execution_reason(&request) {
+                        Ok(Some(mut reason)) => {
+                            let before = match &run_task {
+                                Some(id) => run_task_snapshot(&services.business, id).await,
+                                None => None,
+                            };
+                            if let Some((summary, _)) = &before {
+                                reason = format!("{reason}: {summary}");
+                            }
+                            let confirmed =
+                                confirm_operation(services.user_presence.clone(), reason)
+                                    .await
+                                    .map_err(|error| {
+                                        (BusinessErrorCode::UserPresenceRequired, error.cause())
+                                    });
+                            match (confirmed, before, &run_task) {
+                                (Ok(()), Some((_, digest)), Some(id)) => {
+                                    let after = run_task_snapshot(&services.business, id).await;
+                                    if after.map(|(_, digest)| digest) == Some(digest) {
+                                        Ok(())
+                                    } else {
+                                        Err((
+                                            BusinessErrorCode::Conflict,
+                                            "task changed while awaiting confirmation",
+                                        ))
+                                    }
+                                }
+                                (confirmed, _, _) => confirmed,
+                            }
+                        }
+                        Ok(None) => Ok(()),
+                        Err(message) => Err((BusinessErrorCode::InvalidArgument, message)),
+                    };
+                    if let Err((code, message)) = confirmation {
+                        if session
+                            .respond_execution(execution::exec_error(code, message))
+                            .await
+                            .is_err()
+                        {
+                            return ConnectionOutcome::Ended;
+                        }
+                        continue;
+                    }
+                }
                 let (response, job) = match &services.execution {
-                    Some(composition) => execution::dispatch_execution(composition, request),
+                    Some(composition) => {
+                        let composition = composition.clone();
+                        let Ok(result) = tokio::task::spawn_blocking(move || {
+                            execution::dispatch_execution(&composition, request)
+                        })
+                        .await
+                        else {
+                            return ConnectionOutcome::Ended;
+                        };
+                        result
+                    }
                     None => (execution::execution_unavailable(), None),
                 };
                 // Retained by design (F17, see `execution::run_background`):
@@ -528,8 +751,14 @@ where
             Ok(ReadyRequest::Policy(request)) => {
                 let response = match &services.approval {
                     Some(handle) => {
-                        let mut service = handle.lock().await;
-                        approval::dispatch(&mut service, request)
+                        let Ok(response) = blocking_service(handle, move |service| {
+                            approval::dispatch(service, request)
+                        })
+                        .await
+                        else {
+                            return ConnectionOutcome::Ended;
+                        };
+                        response
                     }
                     None => approval::unavailable(),
                 };
@@ -542,18 +771,31 @@ where
                 let response = match &services.human_decision {
                     Some(handle) => match &services.business {
                         Some(business) => {
-                            let tasks = business.lock().await;
-                            let mut service = handle.lock().await;
-                            human_decision::dispatch(
-                                &mut service,
-                                Some(&tasks),
-                                request,
-                                negotiated,
-                            )
+                            let tasks = business.clone().lock_owned().await;
+                            let mut service = handle.clone().lock_owned().await;
+                            let Ok(response) = tokio::task::spawn_blocking(move || {
+                                human_decision::dispatch(
+                                    &mut service,
+                                    Some(&tasks),
+                                    request,
+                                    negotiated,
+                                )
+                            })
+                            .await
+                            else {
+                                return ConnectionOutcome::Ended;
+                            };
+                            response
                         }
                         None => {
-                            let mut service = handle.lock().await;
-                            human_decision::dispatch(&mut service, None, request, negotiated)
+                            let Ok(response) = blocking_service(handle, move |service| {
+                                human_decision::dispatch(service, None, request, negotiated)
+                            })
+                            .await
+                            else {
+                                return ConnectionOutcome::Ended;
+                            };
+                            response
                         }
                     },
                     None => human_decision::unavailable(),
@@ -563,10 +805,35 @@ where
                 }
             }
             Ok(ReadyRequest::Planning(request)) => {
+                {
+                    let refusal = match user_presence::planning_reason(&request) {
+                        Ok(Some(reason)) => {
+                            confirm_operation(services.user_presence.clone(), reason)
+                                .await
+                                .err()
+                                .map(|error| planning::presence_refusal(error.cause()))
+                        }
+                        Ok(None) => None,
+                        Err(message) => Some(planning::invalid_argument(message)),
+                    };
+                    if let Some(response) = refusal {
+                        if session.respond_planning(response).await.is_err() {
+                            return ConnectionOutcome::Ended;
+                        }
+                        continue;
+                    }
+                }
                 let response = match (&services.execution, &services.human_decision) {
                     (Some(composition), Some(handle)) => {
-                        let mut decisions = handle.lock().await;
-                        planning::dispatch_control(composition, &mut decisions, request)
+                        let composition = composition.clone();
+                        let Ok(response) = blocking_service(handle, move |decisions| {
+                            planning::dispatch_control(&composition, decisions, request)
+                        })
+                        .await
+                        else {
+                            return ConnectionOutcome::Ended;
+                        };
+                        response
                     }
                     _ => planning::unavailable(),
                 };
@@ -577,8 +844,14 @@ where
             Ok(ReadyRequest::TaskAuthoring(request)) => {
                 let response = match &services.business {
                     Some(handle) => {
-                        let mut service = handle.lock().await;
-                        dispatch::dispatch_task_authoring(&mut service, request)
+                        let Ok(response) = blocking_service(handle, move |service| {
+                            dispatch::dispatch_task_authoring(service, request)
+                        })
+                        .await
+                        else {
+                            return ConnectionOutcome::Ended;
+                        };
+                        response
                     }
                     None => dispatch::task_authoring_unavailable(),
                 };
@@ -605,8 +878,14 @@ where
             Ok(ReadyRequest::Memory(request)) => {
                 let response = match &services.memory {
                     Some(handle) => {
-                        let mut service = handle.lock().await;
-                        memory::dispatch(&mut service, request)
+                        let Ok(response) = blocking_service(handle, move |service| {
+                            memory::dispatch(service, request)
+                        })
+                        .await
+                        else {
+                            return ConnectionOutcome::Ended;
+                        };
+                        response
                     }
                     None => memory::unavailable(),
                 };
@@ -615,10 +894,33 @@ where
                 }
             }
             Ok(ReadyRequest::Routine(request)) => {
+                if services.routine.is_some() {
+                    let confirmation = match routine::confirmation_reason(&request) {
+                        Ok(Some(reason)) => {
+                            confirm_operation(services.user_presence.clone(), reason)
+                                .await
+                                .map_err(|error| routine::presence_refusal(error.cause()))
+                        }
+                        Ok(None) => Ok(()),
+                        Err(error) => Err(routine::map_error(&error)),
+                    };
+                    if let Err(response) = confirmation {
+                        if session.respond_routine(response).await.is_err() {
+                            return ConnectionOutcome::Ended;
+                        }
+                        continue;
+                    }
+                }
                 let response = match &services.routine {
                     Some(handle) => {
-                        let mut service = handle.lock().await;
-                        routine::dispatch(&mut service, request)
+                        let Ok(response) = blocking_service(handle, move |service| {
+                            routine::dispatch(service, request)
+                        })
+                        .await
+                        else {
+                            return ConnectionOutcome::Ended;
+                        };
+                        response
                     }
                     None => routine::unavailable(),
                 };
@@ -629,8 +931,14 @@ where
             Ok(ReadyRequest::Worker(request)) => {
                 let response = match &services.worker {
                     Some(handle) => {
-                        let mut service = handle.lock().await;
-                        worker::dispatch(&mut service, request)
+                        let Ok(response) = blocking_service(handle, move |service| {
+                            worker::dispatch(service, request)
+                        })
+                        .await
+                        else {
+                            return ConnectionOutcome::Ended;
+                        };
+                        response
                     }
                     None => worker::unavailable(),
                 };
@@ -641,12 +949,44 @@ where
             Ok(ReadyRequest::Org(request)) => {
                 let response = match &services.org {
                     Some(handle) => {
-                        let mut service = handle.lock().await;
-                        org::dispatch(&mut service, request)
+                        let Ok(response) = blocking_service(handle, move |service| {
+                            org::dispatch(service, request)
+                        })
+                        .await
+                        else {
+                            return ConnectionOutcome::Ended;
+                        };
+                        response
                     }
                     None => org::unavailable(),
                 };
                 if session.respond_org(response).await.is_err() {
+                    return ConnectionOutcome::Ended;
+                }
+            }
+            Ok(ReadyRequest::Widget(request)) => {
+                {
+                    if let Some(reason) = user_presence::widget_reason(&request) {
+                        if let Err(error) =
+                            confirm_operation(services.user_presence.clone(), reason).await
+                        {
+                            if session
+                                .respond_widget(widget::presence_refusal(error.cause()))
+                                .await
+                                .is_err()
+                            {
+                                return ConnectionOutcome::Ended;
+                            }
+                            continue;
+                        }
+                    }
+                }
+                // Never blocks: the provider call runs on its own thread.
+                let response = match &services.widget {
+                    Some(handle) => widget::dispatch(handle, request),
+                    None => widget::unavailable(),
+                };
+                if session.respond_widget(response).await.is_err() {
                     return ConnectionOutcome::Ended;
                 }
             }
@@ -680,13 +1020,13 @@ async fn routine_tick_loop(
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
                     .unwrap_or(0);
-                let mut service = handle.lock().await;
-                match service.tick(now, "evidence:daemon-tick") {
-                    Ok(runs) if !runs.is_empty() => {
-                        eprintln!("agentd: routine tick completed {} run(s)", runs.len());
+                match blocking_service(&handle, move |service| service.tick_blocked(now, user_presence::REQUIRED_CAUSE)).await {
+                    Ok(Ok(runs)) if !runs.is_empty() => {
+                        eprintln!("agentd: routine tick recorded {} run(s)", runs.len());
                     }
-                    Ok(_) => {}
-                    Err(error) => eprintln!("agentd: routine tick failed: {error}"),
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => eprintln!("agentd: routine tick failed: {error}"),
+                    Err(error) => eprintln!("agentd: routine tick task failed: {error}"),
                 }
             }
         }
@@ -697,8 +1037,7 @@ async fn routine_tick_loop(
 const TAKEOVER_EXPIRY_TICK: Duration = Duration::from_secs(1);
 
 /// Reconciles expired ACTIVE takeovers without any service call.
-/// Shutdown-safe: exits when the shutdown watch flips and is aborted
-/// during wind-down; a reconcile failure is logged, never fatal.
+/// Finishes an in-flight reconciliation before shutdown; failures are logged.
 async fn takeover_expiry_loop(
     handle: HumanDecisionHandle,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
@@ -711,18 +1050,18 @@ async fn takeover_expiry_loop(
                 }
             }
             _ = tokio::time::sleep(TAKEOVER_EXPIRY_TICK) => {
-                let mut service = handle.lock().await;
-                match service.reconcile_takeover_expiry(None) {
-                    Ok(abandoned) if !abandoned.is_empty() => {
+                match blocking_service(&handle, |service| service.reconcile_takeover_expiry(None)).await {
+                    Ok(Ok(abandoned)) if !abandoned.is_empty() => {
                         eprintln!(
                             "agentd: takeover expiry abandoned {} record(s)",
                             abandoned.len()
                         );
                     }
-                    Ok(_) => {}
-                    Err(error) => {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
                         eprintln!("agentd: takeover expiry reconcile failed: {error}");
                     }
+                    Err(error) => eprintln!("agentd: takeover expiry task failed: {error}"),
                 }
             }
         }
@@ -736,10 +1075,6 @@ async fn takeover_expiry_loop(
 /// connection is closed, never a daemon failure. Only peer-authenticated
 /// streams ever arrive here — the pumps authenticate before sending.
 ///
-/// Background provider runs are retained threads, not tracked tasks:
-/// wind-down aborts connection tasks promptly while in-flight provider
-/// runs are joined through the composition registry (F17) so their
-/// terminal bookkeeping lands before the endpoint is released.
 /// Pre-attempt strands are reported at startup for explicit resume
 /// (TASK-0054).
 async fn serve_streams<S>(
@@ -769,10 +1104,28 @@ where
     let mut connections_served: u64 = 0;
 
     loop {
+        while let Some(result) = joins.try_join_next() {
+            if let Err(error) = result {
+                eprintln!(
+                    "agentd: connection task failed ({})",
+                    if error.is_panic() {
+                        "panic"
+                    } else {
+                        "cancelled"
+                    }
+                );
+            }
+        }
+        debug_assert!(joins.len() <= MAX_CONTROL_CLIENTS * 2);
         tokio::select! {
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
                     break;
+                }
+            }
+            result = joins.join_next(), if !joins.is_empty() => {
+                if let Some(Err(error)) = result {
+                    eprintln!("agentd: connection task failed ({})", if error.is_panic() { "panic" } else { "cancelled" });
                 }
             }
             next = accepted.recv() => {
@@ -798,29 +1151,24 @@ where
         }
     }
 
-    // Wind down: acceptor output is ignored from here on, stragglers are
-    // aborted, tasks reaped. In-flight provider runs are cancelled first
-    // through the composition registry, then joined: the cancel path
-    // concludes their bookkeeping instead of dying mid-write, and the
-    // join cannot stall behind provider time. The owned endpoint is
-    // released by the caller.
     // The accept task (F19) is stopped first so the listener closes
     // before the endpoint is released.
     acceptor.abort();
     let _ = acceptor.await;
-    joins.abort_all();
     while joins.join_next().await.is_some() {}
     if let Some(task) = vault_idle {
         task.abort();
         let _ = task.await;
     }
     if let Some(task) = takeover_tick {
-        task.abort();
         let _ = task.await;
     }
     if let Some(task) = routine_tick {
-        task.abort();
         let _ = task.await;
+    }
+    if let Some(widget) = services.widget.as_ref() {
+        let widget = widget.clone();
+        let _ = tokio::task::spawn_blocking(move || widget.shutdown()).await;
     }
     if let Some(handle) = services.vault.as_ref() {
         vault::lock_handle(handle);
@@ -970,6 +1318,7 @@ mod unix_daemon {
         config: DaemonConfig,
         source: impl PeerSource + 'static,
     ) -> Result<RunOutcome, DaemonError> {
+        harden_process()?;
         let listener = match acquire_endpoint(endpoint).await? {
             Acquisition::Owned(listener) => listener,
             Acquisition::LiveDaemon => return Err(DaemonError::AlreadyRunning),
@@ -1013,13 +1362,19 @@ mod unix_daemon {
         let approval = open_approval_service(&config)?;
         let human_decision = open_human_decision_service(&config)?;
         let vault = open_vault(&config);
+        let execution = open_execution(&config, vault.as_ref());
+        let widget = execution
+            .clone()
+            .map(crate::widget::WidgetAuthoring::production);
         let outcome = serve_streams(
             accepted_rx,
             acceptor,
             &config,
             ConnectionServices {
+                user_presence: config.user_presence.clone(),
                 business,
-                execution: open_execution(&config, vault.as_ref()),
+                execution,
+                widget,
                 approval,
                 human_decision,
                 vault,
@@ -1050,8 +1405,8 @@ pub use unix_daemon::{run, run_on_endpoint};
 #[cfg(windows)]
 mod windows_daemon {
     use super::*;
+    use ipc_transport::framing::read_authentication_frame;
     use ipc_transport::platform::peer::{daemon_identity, pipe_client_identity};
-    use ipc_transport::platform::windows::framed_server;
 
     /// Canonical production entry: first-instance bind, staged
     /// authenticate-then-serve, exit. No stale-socket deletion exists on
@@ -1094,15 +1449,13 @@ mod windows_daemon {
         let acceptor = tokio::spawn(async move {
             loop {
                 match listener.accept().await {
-                    Ok(server) => {
+                    Ok(mut server) => {
                         // Stage 1: one bounded frame as opaque bytes.
                         // Framing rules apply; nothing is decoded here.
-                        let mut framed = framed_server(server);
-                        let frame = match framed.read_frame().await {
+                        let frame = match read_authentication_frame(&mut server).await {
                             Ok(frame) => frame,
                             Err(_) => continue,
                         };
-                        let server = framed.into_inner().into_inner();
                         // Stage 2: authenticate before any decode. The
                         // frame stays undecoded until the serve loop runs
                         // the prefetched handshake below.
@@ -1123,13 +1476,19 @@ mod windows_daemon {
         let approval = super::open_approval_service(&config)?;
         let human_decision = super::open_human_decision_service(&config)?;
         let vault = super::open_vault(&config);
+        let execution = open_execution(&config, vault.as_ref());
+        let widget = execution
+            .clone()
+            .map(crate::widget::WidgetAuthoring::production);
         Ok(serve_streams(
             accepted_rx,
             acceptor,
             &config,
             ConnectionServices {
+                user_presence: config.user_presence.clone(),
                 business,
-                execution: open_execution(&config, vault.as_ref()),
+                execution,
+                widget,
                 approval,
                 human_decision,
                 vault,
@@ -1167,6 +1526,98 @@ mod tests {
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    #[tokio::test]
+    async fn blocked_database_write_keeps_other_control_connections_responsive() {
+        use ipc_contracts::proto::{task_core_request, CreateProjectRequest, TaskCoreRequest};
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("data").join("state.sqlite3");
+        let config = DaemonConfig::with_database(&db);
+        let services = ConnectionServices {
+            user_presence: Arc::new(user_presence::UserPresence::for_test(|_| Ok(()))),
+            business: open_business_service(&config).unwrap(),
+            execution: None,
+            approval: None,
+            human_decision: None,
+            vault: None,
+            finder: open_finder(),
+            memory: None,
+            routine: None,
+            worker: None,
+            org: None,
+            widget: None,
+        };
+        let (shutdown, _) = tokio::sync::watch::channel(false);
+        let (first_client, first_server) = tokio::io::duplex(8192);
+        let (second_client, second_server) = tokio::io::duplex(8192);
+        let first = {
+            let services = services.clone();
+            let config = config.server_config.clone();
+            let shutdown = shutdown.clone();
+            tokio::spawn(async move {
+                serve_connection(first_server, &config, services, shutdown, None).await
+            })
+        };
+        let second = {
+            let services = services.clone();
+            let config = config.server_config.clone();
+            let shutdown = shutdown.clone();
+            tokio::spawn(async move {
+                serve_connection(second_server, &config, services, shutdown, None).await
+            })
+        };
+        let mut writer = ClientSession::new(
+            FramedTransport::new(first_client),
+            ClientConfig::business_default(ipc_control::CLIENT_KIND_AGENTCTL),
+        );
+        writer.perform_handshake().await.unwrap();
+        let mut control = ClientSession::new(
+            FramedTransport::new(second_client),
+            ClientConfig::business_default(ipc_control::CLIENT_KIND_AGENTCTL),
+        );
+        control.perform_handshake().await.unwrap();
+        let mut writer = writer.into_inner();
+        let lock = rusqlite::Connection::open(&db).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1500));
+            lock.execute_batch("ROLLBACK").unwrap();
+        });
+        let started = std::time::Instant::now();
+        writer
+            .write_frame(Bytes::from(
+                ControlRequest {
+                    payload: Some(control_request::Payload::TaskCore(TaskCoreRequest {
+                        payload: Some(task_core_request::Payload::CreateProject(
+                            CreateProjectRequest {
+                                id: "project".to_owned(),
+                                name: "project".to_owned(),
+                            },
+                        )),
+                    })),
+                }
+                .encode_to_vec(),
+            ))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        control.ping().await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "control stalled behind the database writer"
+        );
+        tokio::task::spawn_blocking(move || holder.join().unwrap())
+            .await
+            .unwrap();
+        let response = ControlResponse::decode(writer.read_frame().await.unwrap()).unwrap();
+        assert!(matches!(
+            response.payload,
+            Some(control_response::Payload::TaskCore(_))
+        ));
+        shutdown.send(true).unwrap();
+        first.await.unwrap();
+        second.await.unwrap();
+    }
+
     struct Sandbox {
         root: PathBuf,
         endpoint: UnixEndpoint,
@@ -1197,7 +1648,13 @@ mod tests {
         endpoint: &UnixEndpoint,
     ) -> tokio::task::JoinHandle<Result<RunOutcome, DaemonError>> {
         let endpoint = endpoint.clone();
-        tokio::spawn(async move { run_on_endpoint(&endpoint, DaemonConfig::g1_default()).await })
+        tokio::spawn(async move {
+            run_on_endpoint(
+                &endpoint,
+                DaemonConfig::g1_default().with_test_user_presence(|_| Ok(())),
+            )
+            .await
+        })
     }
 
     async fn admin_session(endpoint: &UnixEndpoint) -> ClientSession<UnixStream> {
@@ -1525,7 +1982,9 @@ mod tests {
         let fixture = fixture_script(&sandbox.root, "slow-provider.sh", "while :; do :; done\n");
         seed_ready_task(&db, "P-SHUT", "T-SHUT");
         let endpoint = sandbox.endpoint.clone();
-        let config = DaemonConfig::with_execution(db.clone()).with_provider_executable(fixture);
+        let config = DaemonConfig::with_execution(db.clone())
+            .with_provider_executable(fixture)
+            .with_test_user_presence(|_| Ok(()));
         let handle =
             tokio::spawn(
                 async move { run_on_endpoint_with(&endpoint, config, OsPeerSource).await },
@@ -1747,7 +2206,12 @@ mod tests {
     ) -> tokio::task::JoinHandle<Result<RunOutcome, DaemonError>> {
         let endpoint = endpoint.clone();
         tokio::spawn(async move {
-            run_on_endpoint_with(&endpoint, DaemonConfig::g1_default(), source).await
+            run_on_endpoint_with(
+                &endpoint,
+                DaemonConfig::g1_default().with_test_user_presence(|_| Ok(())),
+                source,
+            )
+            .await
         })
     }
 
@@ -1857,7 +2321,12 @@ mod tests {
     ) -> tokio::task::JoinHandle<Result<RunOutcome, DaemonError>> {
         let endpoint = endpoint.clone();
         tokio::spawn(async move {
-            run_on_endpoint_with(&endpoint, DaemonConfig::with_database(db), source).await
+            run_on_endpoint_with(
+                &endpoint,
+                DaemonConfig::with_database(db).with_test_user_presence(|_| Ok(())),
+                source,
+            )
+            .await
         })
     }
 
@@ -1979,6 +2448,7 @@ mod tests {
                     server_config: ServerConfig::g2_default(),
                     database_path: None,
                     provider_executable: None,
+                    user_presence: Arc::new(user_presence::UserPresence::for_test(|_| Ok(()))),
                 },
                 OsPeerSource,
             )
@@ -1996,7 +2466,7 @@ mod tests {
             ControlRequest {
                 payload: Some(control_request::Payload::TaskCore(TaskCoreRequest {
                     payload: Some(task_core_request::Payload::ListProjects(
-                        ListProjectsRequest {},
+                        ListProjectsRequest::default(),
                     )),
                 })),
             }
@@ -2041,6 +2511,7 @@ mod tests {
             server_config: ServerConfig::g7_default(),
             database_path: Some(db.clone()),
             provider_executable: None,
+            user_presence: Arc::new(user_presence::UserPresence::for_test(|_| Ok(()))),
         };
         let handle =
             tokio::spawn(

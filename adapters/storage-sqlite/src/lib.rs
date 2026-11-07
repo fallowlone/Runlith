@@ -85,7 +85,7 @@ pub use side_effect_store::{SideEffectEscalation, SideEffectTransition};
 pub use takeover_store::{
     AbandonTakeover, AdmitTakeover, AppendTakeover, CompleteTakeoverReturn, TakeoverCompletion,
 };
-pub use task_store::{BindingProofConsumption, SqliteStore};
+pub use task_store::{BindingProofConsumption, SqliteStore, TaskListEntry};
 pub use test_mutation_store::EvaluatedPolicyBase;
 
 /// Fixture support for tamper tests. Re-chains the journal after a test has
@@ -93,6 +93,7 @@ pub use test_mutation_store::EvaluatedPolicyBase;
 /// past the chain check. Not a production API: the chain is unkeyed, so
 /// anyone with raw DB access can do this too (see journal_store.rs).
 #[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use std::path::Path;
 

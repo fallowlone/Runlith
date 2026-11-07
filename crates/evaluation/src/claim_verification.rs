@@ -1872,6 +1872,50 @@ mod tests {
     }
 
     #[test]
+    fn adr0051_verdict_attests_to_the_exact_acceptance_statement() {
+        let stamped =
+            |text: Option<&str>| candidate_requirement().with_statement(text.map(str::to_owned));
+        let fp = fingerprint('a');
+        let agent_claim = claim("claim-1", "agent-1", &fp);
+        let original = stamped(Some("hello.txt contains exactly hi"));
+        let expected = requirement_revision(&original);
+        assert_ne!(expected, requirement_revision(&stamped(None)));
+        assert_ne!(
+            expected,
+            requirement_revision(&stamped(Some("hello.txt contains exactly bye")))
+        );
+        let mut verdict_for_original = verdict(
+            "verification-1",
+            &agent_claim,
+            RequirementKind::TestSuite,
+            &fp,
+            ClaimVerdict::Verified,
+        );
+        verdict_for_original.requirement_revision = expected.clone();
+        verdict_for_original.policy_fingerprint = original.policy_fingerprint.clone();
+        with_basis(&mut verdict_for_original, "effect-1");
+        let decide = |requirement: &EvidenceRequirement| {
+            single_full(
+                requirement,
+                Some(&fp),
+                vec![&agent_claim],
+                vec![&verdict_for_original],
+                Some(integrity_for(&expected)),
+                vec![resolved("effect-1", &fp)],
+                Some(REQUIREMENT_FP),
+            )
+            .decision
+        };
+        assert_eq!(decide(&original), AdmissionDecision::Admit);
+        // The statement was edited, or removed, after the verdict: stale.
+        assert_eq!(
+            decide(&stamped(Some("hello.txt contains exactly bye"))),
+            AdmissionDecision::Refuse
+        );
+        assert_eq!(decide(&stamped(None)), AdmissionDecision::Refuse);
+    }
+
+    #[test]
     fn cv9_candidate_requires_a_clean_matching_integrity_assessment() {
         let req = candidate_requirement();
         let fp = fingerprint('a');

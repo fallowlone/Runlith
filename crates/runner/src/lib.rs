@@ -23,6 +23,9 @@ use zeroize::Zeroizing;
 
 use policy::{Capability, EffectiveCapabilities, ScopeId};
 
+mod process_cleanup;
+pub use process_cleanup::{kill_process_tree, terminate_process_tree, try_wait_process_tree};
+
 /// Coarse outbound HTTPS authority currently enforceable by the macOS
 /// Seatbelt backend. Scope text matches the actual OS primitive: any remote
 /// TCP destination on port 443, with all other remote ports denied.

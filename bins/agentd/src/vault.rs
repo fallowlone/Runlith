@@ -4,7 +4,7 @@
 //! The daemon owns the single vault file next to its database. Requests are
 //! handled one at a time (the caller holds the service lock), so at most one
 //! Argon2id derivation runs at once. Failed secret checks are rate limited
-//! in memory; an idle deadline locks the vault (see [`VaultService::expire_if_idle`]).
+//! durably; an idle deadline locks the vault (see [`VaultService::expire_if_idle`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
@@ -20,6 +20,8 @@ use secrets::{
 };
 use secrets_vault::{Password, RecoveryPhrase, VaultBackend, VaultError};
 use zeroize::Zeroizing;
+
+mod backoff;
 
 /// Vault file, in the daemon data directory beside the database.
 pub const VAULT_FILE_NAME: &str = "vault.rlv";
@@ -89,8 +91,7 @@ pub struct VaultService {
     vault: Option<VaultBackend>,
     idle: Duration,
     idle_deadline: Option<Instant>,
-    failures: u32,
-    retry_at: Option<Instant>,
+    rate_clock: Option<(Instant, u64)>,
     /// `created_at` of the provider credential last released to a launch.
     released: Option<u64>,
     /// `created_at` of a provider credential the provider refused; it stays
@@ -116,8 +117,7 @@ impl VaultService {
             vault: None,
             idle: minutes(DEFAULT_IDLE_MINUTES),
             idle_deadline: None,
-            failures: 0,
-            retry_at: None,
+            rate_clock: None,
             released: None,
             rejected: None,
         }
@@ -272,7 +272,9 @@ impl VaultService {
     ) -> Outcome {
         let idle = idle_from(request.idle_minutes)?;
         let password = password(request.password)?;
+        let backoff = backoff::Guard::open(&self.path)?;
         let (vault, phrase) = create_backend(&self.path, &password).map_err(wire)?;
+        backoff.save(backoff::State::default())?;
         self.vault = Some(vault);
         self.idle = idle;
         self.idle_deadline = Some(now + idle);
@@ -363,28 +365,37 @@ impl VaultService {
         now: Instant,
         check: impl FnOnce(&VaultBackend) -> Result<T, VaultError>,
     ) -> Result<T, WireError> {
-        if let Some(retry_at) = self.retry_at.filter(|retry_at| now < *retry_at) {
-            return Err(WireError {
-                code: VaultErrorCode::VaultErrorRateLimited as i32,
-                message: "too many failed attempts; retry later".to_owned(),
-                retry_after_ms: Some(
-                    u64::try_from((retry_at - now).as_millis()).unwrap_or(u64::MAX),
-                ),
-            });
+        let (anchor, epoch) = *self
+            .rate_clock
+            .get_or_insert_with(|| (now, unix_millis(SystemTime::now())));
+        let now_ms = epoch.saturating_add(
+            u64::try_from(now.saturating_duration_since(anchor).as_millis()).unwrap_or(u64::MAX),
+        );
+        let guard = backoff::Guard::open(&self.path)?;
+        let previous = guard.load()?;
+        if previous.retry_at_ms > now_ms {
+            return Err(backoff::limited(previous.retry_at_ms - now_ms));
         }
         let vault = self.backend()?.ok_or_else(|| wire(VaultError::NotFound))?;
         match check(vault) {
             Ok(value) => {
-                self.failures = 0;
-                self.retry_at = None;
+                guard.save(backoff::State::default())?;
                 Ok(value)
             }
             Err(VaultError::UnlockFailed) => {
-                self.failures = self.failures.saturating_add(1);
-                if let Some(exponent) = self.failures.checked_sub(FREE_FAILURES) {
+                let failures = previous.failures.saturating_add(1);
+                let mut state = backoff::State {
+                    failures,
+                    retry_at_ms: 0,
+                };
+                if let Some(exponent) = failures.checked_sub(FREE_FAILURES) {
                     let delay = 1_u64.checked_shl(exponent).unwrap_or(u64::MAX);
-                    self.retry_at = Some(now + Duration::from_secs(delay).min(MAX_BACKOFF));
+                    state.retry_at_ms = now_ms.saturating_add(
+                        u64::try_from(Duration::from_secs(delay).min(MAX_BACKOFF).as_millis())
+                            .unwrap_or(u64::MAX),
+                    );
                 }
+                guard.save(state)?;
                 Err(wire(VaultError::UnlockFailed))
             }
             Err(other) => Err(wire(other)),
@@ -661,7 +672,13 @@ mod tests {
     const TOKEN: &[u8] = b"sk-ant-oat01-TOKEN-MARKER-5c1e";
 
     fn service() -> (tempfile::TempDir, VaultService) {
-        let dir = tempfile::tempdir().unwrap();
+        let mut builder = tempfile::Builder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let dir = builder.tempdir().unwrap();
         let service = VaultService::new(dir.path().join(VAULT_FILE_NAME));
         (dir, service)
     }
@@ -887,11 +904,62 @@ mod tests {
     }
 
     #[test]
+    fn failed_secret_backoff_survives_service_restart_and_success_resets_it() {
+        let start = Instant::now();
+        let (dir, mut service) = locked_service(start);
+        let mut now = start;
+        for _ in 0..8 {
+            let response = error_of(send(&mut service, unlock("incorrect-horse", 0), now));
+            if response.code() == VaultErrorCode::VaultErrorRateLimited {
+                now += Duration::from_millis(response.retry_after_ms.unwrap());
+            } else {
+                assert_eq!(response.code(), VaultErrorCode::VaultErrorUnlockFailed);
+                continue;
+            }
+            assert_eq!(
+                code(send(&mut service, unlock("incorrect-horse", 0), now)),
+                VaultErrorCode::VaultErrorUnlockFailed
+            );
+        }
+        drop(service);
+        let mut restarted = VaultService::new(dir.path().join(VAULT_FILE_NAME));
+        let limited = error_of(send(&mut restarted, unlock(PASSWORD, 0), now));
+        assert_eq!(limited.code(), VaultErrorCode::VaultErrorRateLimited);
+        assert!(limited
+            .retry_after_ms
+            .is_some_and(|delay| delay > 0 && delay <= MAX_BACKOFF.as_millis() as u64));
+        assert_eq!(
+            state_of(send(&mut restarted, unlock(PASSWORD, 0), now + MAX_BACKOFF)).state(),
+            VaultState::VaultUnlocked
+        );
+        drop(restarted);
+        let mut restarted = VaultService::new(dir.path().join(VAULT_FILE_NAME));
+        assert_eq!(
+            code(send(
+                &mut restarted,
+                unlock("incorrect-horse", 0),
+                Instant::now()
+            )),
+            VaultErrorCode::VaultErrorUnlockFailed
+        );
+        assert_eq!(
+            state_of(send(&mut restarted, unlock(PASSWORD, 0), Instant::now())).state(),
+            VaultState::VaultUnlocked
+        );
+    }
+
+    #[test]
     fn backoff_is_capped() {
         let start = Instant::now();
         let (_dir, mut service) = locked_service(start);
-        service.failures = 40;
-        service.retry_at = None;
+        let guard = backoff::Guard::open(&service.path).unwrap();
+        guard
+            .save(backoff::State {
+                failures: 40,
+                retry_at_ms: 0,
+            })
+            .unwrap();
+        drop(guard);
 
         send(&mut service, unlock("incorrect-horse", 0), start);
         let limited = error_of(send(&mut service, unlock(PASSWORD, 0), start));

@@ -29,6 +29,10 @@ message CreatePlanningTaskRequest {
   repeated string acceptance_criteria = 5;
   // One of `low`, `medium`, `high`, `critical`.
   string baseline_risk = 6;
+  // ADR-0051 (protocol v14+): present only to declare scoped read-only work
+  // (`false`). Absent means the default obligation. A session below v14
+  // refuses a request that sets it.
+  optional bool requires_workspace_change = 7;
 }
 
 // Canonical committed view: the stored Task plus the planning metadata the
@@ -38,6 +42,8 @@ message PlanningTaskDto {
   repeated string allowed_paths = 2;
   repeated string acceptance_criteria = 3;
   string baseline_risk = 4;
+  // ADR-0051 (v14+): the stored intent; meaningful only on v14 sessions.
+  bool requires_workspace_change = 5;
 }
 
 message CreatePlanningTaskResponse {

@@ -8,8 +8,8 @@
 # G1 implementation is forbidden until TASK-0016 reports G0_COMPLETE.
 
 schema_version: 1
-current_gate: G14
-gate_status: PLANNED  # G13 closed by TASK-0214; G14 requires owner ratification before any G14 task starts
+current_gate: G16
+gate_status: IN_PROGRESS  # G16 Desktop UI ratified by owner 2026-11-01; G13 closed by TASK-0214; G14/G15 remain planned
 
 items:
   - id: TASK-0012
@@ -7055,3 +7055,30 @@ items:
       pre-fix and mutation-RED 2/2 with the lock neutralized; post-fix
       execution_recovery target 20/20, workspace 1947 passed / 0
       failed, fmt and clippy clean.
+  - id: TASK-0230
+    gate: G16
+    title: Live overview widgets authored from a plain-language description
+    objective: A person describes a widget in words; agentd asks the provider for a versioned widget proposal, a closed validator admits it, the overview shows it with live values and keeps it across restarts.
+    scope: crates/widget-spec (types and validator, no I/O); protocol v13 widget_core; adapters/provider-claude structured call; agentd service; agentctl widget; apps/desktop host and overview.
+    exit_criteria_summary: Live eval on the real provider, validator rejection suite, values equal to gh, generation does not stall other requests, layout survives restart and corruption, every failure state reproduced, layout audit clean.
+    depends_on: []
+    blocked_by: []
+    references: [docs/ui/proposals/TASK-PROPOSED-G16-LIVE-WIDGETS.md, docs/architecture/adr/ADR-0007-no-direct-frontend-shell.md, docs/architecture/adr/ADR-0014-local-first-privacy.md, docs/architecture/adr/ADR-0016-agentctl-before-complex-ui.md]
+  - id: TASK-0260
+    gate: G5
+    title: Investigate and remove load-dependent flaky tests in agentd and agentctl
+    objective: Full workspace runs failed intermittently while the same tests passed alone, so a red CI after merge does not by itself mean a regression. Find each race and fix the test or the code it exposes. Known cases from the ADR-0051 session; vault backoff lock (bins/agentd/src/vault/backoff.rs) reported "too many failed attempts" when a concurrent fork briefly kept a just-closed lock descriptor alive (mitigated with a bounded 10x10 ms retry, root cause not proven); tests::shutdown_with_inflight_provider_run_exits_promptly failed opening the test database because state.sqlite3-journal vanished between inspect and open (UnsafePath); execution::tests::candidate_* failed with "candidate fixture did not authenticate" under load (also on CI in PR 44, test candidate_evaluator_restart_reuse_is_idempotent_and_tamper_is_refused at bins/agentd/src/execution.rs line 8082); agentctl execution_binaries (org_sync_policy_quota_take_effect_between_two_daemon_stores, live_ownership::binary_concurrent_resumes_elect_a_single_owner) failed with the daemon not ready or user_presence_busy. Record whether each is a test-only race or a product defect (for example the journal file inspection treating a transient file as unsafe).
+    scope: bins/agentd tests and vault backoff, bins/agentctl tests (execution_binaries), adapters/storage-sqlite open path (inspect of sqlite sidecar files); tests only unless a product defect is proven.
+    exit_criteria_summary: Each listed test passes 50 consecutive runs under cargo test --workspace -- --test-threads=8 on the owner machine; each race classified test-only or product defect with the fix; the workspace suite is green at default parallelism, not only with --test-threads=2.
+    depends_on: []
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0051-per-node-acceptance-statements-and-change-intent.md, docs/architecture/adr/ADR-0050-os-user-presence-for-local-control.md]
+  - id: TASK-0261
+    gate: G16
+    title: Dependencies and gate in the desktop task list
+    objective: The desktop design shows the Tasks table with Depends-on and Gate columns and the state "waits for dependencies". TaskDto (apps/desktop/src-tauri/src/dto.rs, bindings in apps/desktop/src/lib/bindings/TaskDto.ts) carries only id, projectId, objective and state, so the UI cannot show them without inventing data. Add the dependency ids and the gate to the task list reply through the existing negotiated capability mechanism (task-list-pages-v1, protocol number stays 13), keep the byte-bounded pages and the legacy-client error, and derive "waits for dependencies" from real dependency state rather than renaming the canonical DRAFT lifecycle name.
+    scope: crates/ipc-contracts (proto and Rust), bins/agentd/src/dispatch/list_pages.rs, adapters/storage-sqlite list projection, apps/desktop/src-tauri dto and agentd client, apps/desktop Tasks view and ts-rs bindings (cargo test --lib regenerates them). The Gate source is an open question to settle in the task (queue.yaml is a planning file, not agentd state); do not hard-code gates in the frontend.
+    exit_criteria_summary: Tasks table shows Depends-on and Gate from agentd data; two 600 kB objectives and a many-task fixture still page within the 1 MiB frame cap; legacy clients get the explicit compatibility error; Playwright and axe stay green on both themes; SQL query count per task does not grow.
+    depends_on: []
+    blocked_by: []
+    references: [docs/development/AUDIT_REMEDIATION_2026-11-03.md, audit-reports/05-performance.md]

@@ -129,7 +129,13 @@ fn home_dir() -> DaemonResult<PathBuf> {
 pub fn ensure_data_dir(dir: &Path) -> DaemonResult<()> {
     match fs::symlink_metadata(dir) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir(dir).map_err(|error| match error.kind() {
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(DATA_DIR_MODE);
+            }
+            builder.create(dir).map_err(|error| match error.kind() {
                 io::ErrorKind::PermissionDenied => DaemonError::DataDir(format!(
                     "cannot create data directory {}: permission denied",
                     dir.display()

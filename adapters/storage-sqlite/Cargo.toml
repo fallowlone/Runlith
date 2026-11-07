@@ -8,6 +8,10 @@ edition = "2021"
 name = "storage_sqlite"
 path = "src/lib.rs"
 
+[features]
+# Tamper-test fixtures (reseal_journal_chain). Never enabled by default.
+test-support = []
+
 [dependencies]
 continuity = { path = "../../crates/continuity" }
 context-engine = { path = "../../crates/context-engine" }
@@ -34,6 +38,8 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
 
 [dev-dependencies]
+# Self dev-dependency enables test-support for this crate's integration tests only.
+storage-sqlite = { path = ".", features = ["test-support"] }
 continuity-contract = { path = "../../crates/continuity-contract" }
 memory-contract = { path = "../../crates/memory-contract" }
 background-contract = { path = "../../crates/background-contract" }

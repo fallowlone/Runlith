@@ -1,0 +1,1898 @@
+{
+ "sources": {
+  "cargoMetadata": "cargo metadata --no-deps (normal dependencies)",
+  "queue": "planning/tasks/queue.yaml",
+  "capabilities": "src/lib/map/capabilities.ts"
+ },
+ "crates": [
+  {
+   "name": "agent-runtime",
+   "path": "crates/agent-runtime",
+   "capability": "orch"
+  },
+  {
+   "name": "agentctl",
+   "path": "bins/agentctl",
+   "capability": "apps"
+  },
+  {
+   "name": "agentd",
+   "path": "bins/agentd",
+   "capability": "apps"
+  },
+  {
+   "name": "app-services",
+   "path": "crates/app-services",
+   "capability": "apps"
+  },
+  {
+   "name": "background",
+   "path": "crates/background",
+   "capability": "bg"
+  },
+  {
+   "name": "background-contract",
+   "path": "crates/background-contract",
+   "capability": "bg"
+  },
+  {
+   "name": "context-engine",
+   "path": "crates/context-engine",
+   "capability": "mem"
+  },
+  {
+   "name": "context-engine-contract",
+   "path": "crates/context-engine-contract",
+   "capability": "mem"
+  },
+  {
+   "name": "continuity",
+   "path": "crates/continuity",
+   "capability": "cont"
+  },
+  {
+   "name": "continuity-contract",
+   "path": "crates/continuity-contract",
+   "capability": "cont"
+  },
+  {
+   "name": "effect-capture-contract",
+   "path": "crates/effect-capture-contract",
+   "capability": "exec"
+  },
+  {
+   "name": "effect-capture-local",
+   "path": "adapters/effect-capture-local",
+   "capability": "exec"
+  },
+  {
+   "name": "evaluation",
+   "path": "crates/evaluation",
+   "capability": "eval"
+  },
+  {
+   "name": "execution-contract",
+   "path": "crates/execution-contract",
+   "capability": "orch"
+  },
+  {
+   "name": "fake-agent",
+   "path": "adapters/fake-agent",
+   "capability": "prov"
+  },
+  {
+   "name": "fake-evaluator",
+   "path": "adapters/fake-evaluator",
+   "capability": "eval"
+  },
+  {
+   "name": "fake-planner",
+   "path": "adapters/fake-planner",
+   "capability": "tasks"
+  },
+  {
+   "name": "finder-local",
+   "path": "adapters/finder-local",
+   "capability": "repo"
+  },
+  {
+   "name": "git-cli",
+   "path": "adapters/git-cli",
+   "capability": "repo"
+  },
+  {
+   "name": "ipc-contracts",
+   "path": "crates/ipc-contracts",
+   "capability": "ipc"
+  },
+  {
+   "name": "ipc-control",
+   "path": "crates/ipc-control",
+   "capability": "ipc"
+  },
+  {
+   "name": "ipc-transport",
+   "path": "crates/ipc-transport",
+   "capability": "ipc"
+  },
+  {
+   "name": "keychain-native",
+   "path": "adapters/keychain-native",
+   "capability": "secrets"
+  },
+  {
+   "name": "memory",
+   "path": "crates/memory",
+   "capability": "mem"
+  },
+  {
+   "name": "memory-contract",
+   "path": "crates/memory-contract",
+   "capability": "mem"
+  },
+  {
+   "name": "org",
+   "path": "crates/org",
+   "capability": "auth"
+  },
+  {
+   "name": "org-contract",
+   "path": "crates/org-contract",
+   "capability": "auth"
+  },
+  {
+   "name": "plan-domain",
+   "path": "crates/plan",
+   "capability": "tasks"
+  },
+  {
+   "name": "planner-contract",
+   "path": "crates/planner-contract",
+   "capability": "tasks"
+  },
+  {
+   "name": "policy",
+   "path": "crates/policy",
+   "capability": "auth"
+  },
+  {
+   "name": "product-version",
+   "path": "crates/product-version",
+   "capability": "ipc"
+  },
+  {
+   "name": "provider-claude",
+   "path": "adapters/provider-claude",
+   "capability": "prov"
+  },
+  {
+   "name": "repo-finder",
+   "path": "crates/repo-finder",
+   "capability": "repo"
+  },
+  {
+   "name": "repo-finder-contract",
+   "path": "crates/repo-finder-contract",
+   "capability": "repo"
+  },
+  {
+   "name": "runner",
+   "path": "crates/runner",
+   "capability": "exec"
+  },
+  {
+   "name": "runner-macos-seatbelt",
+   "path": "adapters/runner-macos-seatbelt",
+   "capability": "exec"
+  },
+  {
+   "name": "runner-native",
+   "path": "adapters/runner-native",
+   "capability": "exec"
+  },
+  {
+   "name": "scheduler",
+   "path": "crates/scheduler",
+   "capability": "orch"
+  },
+  {
+   "name": "secret-backend-contract",
+   "path": "crates/secret-backend-contract",
+   "capability": "secrets"
+  },
+  {
+   "name": "secrets",
+   "path": "crates/secrets",
+   "capability": "secrets"
+  },
+  {
+   "name": "secrets-vault",
+   "path": "adapters/secrets-vault",
+   "capability": "secrets"
+  },
+  {
+   "name": "security-audit",
+   "path": "crates/security-audit",
+   "capability": "auth"
+  },
+  {
+   "name": "storage-sqlite",
+   "path": "adapters/storage-sqlite",
+   "capability": "store"
+  },
+  {
+   "name": "takeover",
+   "path": "crates/takeover",
+   "capability": "cont"
+  },
+  {
+   "name": "task-domain",
+   "path": "crates/task",
+   "capability": "tasks"
+  },
+  {
+   "name": "widget-spec",
+   "path": "crates/widget-spec",
+   "capability": "apps"
+  },
+  {
+   "name": "worker",
+   "path": "crates/worker",
+   "capability": "bg"
+  },
+  {
+   "name": "worker-contract",
+   "path": "crates/worker-contract",
+   "capability": "bg"
+  },
+  {
+   "name": "workspace",
+   "path": "crates/workspace",
+   "capability": "repo"
+  }
+ ],
+ "crateEdges": [
+  [
+   "agent-runtime",
+   "task-domain"
+  ],
+  [
+   "agentctl",
+   "ipc-contracts"
+  ],
+  [
+   "agentctl",
+   "ipc-control"
+  ],
+  [
+   "agentctl",
+   "ipc-transport"
+  ],
+  [
+   "agentctl",
+   "org"
+  ],
+  [
+   "agentctl",
+   "worker"
+  ],
+  [
+   "agentd",
+   "agent-runtime"
+  ],
+  [
+   "agentd",
+   "app-services"
+  ],
+  [
+   "agentd",
+   "background"
+  ],
+  [
+   "agentd",
+   "effect-capture-local"
+  ],
+  [
+   "agentd",
+   "evaluation"
+  ],
+  [
+   "agentd",
+   "finder-local"
+  ],
+  [
+   "agentd",
+   "git-cli"
+  ],
+  [
+   "agentd",
+   "ipc-contracts"
+  ],
+  [
+   "agentd",
+   "ipc-control"
+  ],
+  [
+   "agentd",
+   "ipc-transport"
+  ],
+  [
+   "agentd",
+   "memory"
+  ],
+  [
+   "agentd",
+   "org"
+  ],
+  [
+   "agentd",
+   "plan-domain"
+  ],
+  [
+   "agentd",
+   "policy"
+  ],
+  [
+   "agentd",
+   "provider-claude"
+  ],
+  [
+   "agentd",
+   "repo-finder"
+  ],
+  [
+   "agentd",
+   "runner"
+  ],
+  [
+   "agentd",
+   "runner-macos-seatbelt"
+  ],
+  [
+   "agentd",
+   "runner-native"
+  ],
+  [
+   "agentd",
+   "scheduler"
+  ],
+  [
+   "agentd",
+   "secrets"
+  ],
+  [
+   "agentd",
+   "secrets-vault"
+  ],
+  [
+   "agentd",
+   "storage-sqlite"
+  ],
+  [
+   "agentd",
+   "task-domain"
+  ],
+  [
+   "agentd",
+   "widget-spec"
+  ],
+  [
+   "agentd",
+   "worker"
+  ],
+  [
+   "agentd",
+   "workspace"
+  ],
+  [
+   "app-services",
+   "agent-runtime"
+  ],
+  [
+   "app-services",
+   "background"
+  ],
+  [
+   "app-services",
+   "context-engine"
+  ],
+  [
+   "app-services",
+   "continuity"
+  ],
+  [
+   "app-services",
+   "evaluation"
+  ],
+  [
+   "app-services",
+   "memory"
+  ],
+  [
+   "app-services",
+   "org"
+  ],
+  [
+   "app-services",
+   "plan-domain"
+  ],
+  [
+   "app-services",
+   "policy"
+  ],
+  [
+   "app-services",
+   "repo-finder"
+  ],
+  [
+   "app-services",
+   "runner"
+  ],
+  [
+   "app-services",
+   "scheduler"
+  ],
+  [
+   "app-services",
+   "secrets"
+  ],
+  [
+   "app-services",
+   "security-audit"
+  ],
+  [
+   "app-services",
+   "storage-sqlite"
+  ],
+  [
+   "app-services",
+   "takeover"
+  ],
+  [
+   "app-services",
+   "task-domain"
+  ],
+  [
+   "app-services",
+   "worker"
+  ],
+  [
+   "app-services",
+   "workspace"
+  ],
+  [
+   "background-contract",
+   "background"
+  ],
+  [
+   "context-engine-contract",
+   "context-engine"
+  ],
+  [
+   "continuity-contract",
+   "agent-runtime"
+  ],
+  [
+   "continuity-contract",
+   "context-engine"
+  ],
+  [
+   "continuity-contract",
+   "continuity"
+  ],
+  [
+   "continuity-contract",
+   "task-domain"
+  ],
+  [
+   "continuity",
+   "agent-runtime"
+  ],
+  [
+   "continuity",
+   "context-engine"
+  ],
+  [
+   "continuity",
+   "task-domain"
+  ],
+  [
+   "effect-capture-contract",
+   "evaluation"
+  ],
+  [
+   "effect-capture-local",
+   "evaluation"
+  ],
+  [
+   "evaluation",
+   "agent-runtime"
+  ],
+  [
+   "evaluation",
+   "task-domain"
+  ],
+  [
+   "execution-contract",
+   "agent-runtime"
+  ],
+  [
+   "execution-contract",
+   "scheduler"
+  ],
+  [
+   "execution-contract",
+   "task-domain"
+  ],
+  [
+   "fake-agent",
+   "agent-runtime"
+  ],
+  [
+   "fake-agent",
+   "task-domain"
+  ],
+  [
+   "fake-evaluator",
+   "evaluation"
+  ],
+  [
+   "fake-planner",
+   "plan-domain"
+  ],
+  [
+   "finder-local",
+   "repo-finder"
+  ],
+  [
+   "git-cli",
+   "repo-finder"
+  ],
+  [
+   "git-cli",
+   "workspace"
+  ],
+  [
+   "ipc-control",
+   "ipc-contracts"
+  ],
+  [
+   "ipc-control",
+   "ipc-transport"
+  ],
+  [
+   "ipc-control",
+   "product-version"
+  ],
+  [
+   "keychain-native",
+   "secrets"
+  ],
+  [
+   "memory-contract",
+   "context-engine"
+  ],
+  [
+   "memory-contract",
+   "memory"
+  ],
+  [
+   "memory",
+   "context-engine"
+  ],
+  [
+   "org-contract",
+   "org"
+  ],
+  [
+   "plan-domain",
+   "task-domain"
+  ],
+  [
+   "planner-contract",
+   "plan-domain"
+  ],
+  [
+   "provider-claude",
+   "agent-runtime"
+  ],
+  [
+   "provider-claude",
+   "evaluation"
+  ],
+  [
+   "provider-claude",
+   "plan-domain"
+  ],
+  [
+   "provider-claude",
+   "runner"
+  ],
+  [
+   "provider-claude",
+   "scheduler"
+  ],
+  [
+   "provider-claude",
+   "task-domain"
+  ],
+  [
+   "provider-claude",
+   "workspace"
+  ],
+  [
+   "repo-finder-contract",
+   "repo-finder"
+  ],
+  [
+   "runner-macos-seatbelt",
+   "runner"
+  ],
+  [
+   "runner-native",
+   "runner"
+  ],
+  [
+   "runner",
+   "policy"
+  ],
+  [
+   "scheduler",
+   "agent-runtime"
+  ],
+  [
+   "scheduler",
+   "task-domain"
+  ],
+  [
+   "secret-backend-contract",
+   "secrets"
+  ],
+  [
+   "secrets-vault",
+   "secrets"
+  ],
+  [
+   "secrets",
+   "policy"
+  ],
+  [
+   "security-audit",
+   "policy"
+  ],
+  [
+   "storage-sqlite",
+   "agent-runtime"
+  ],
+  [
+   "storage-sqlite",
+   "background"
+  ],
+  [
+   "storage-sqlite",
+   "context-engine"
+  ],
+  [
+   "storage-sqlite",
+   "continuity"
+  ],
+  [
+   "storage-sqlite",
+   "evaluation"
+  ],
+  [
+   "storage-sqlite",
+   "memory"
+  ],
+  [
+   "storage-sqlite",
+   "org"
+  ],
+  [
+   "storage-sqlite",
+   "plan-domain"
+  ],
+  [
+   "storage-sqlite",
+   "policy"
+  ],
+  [
+   "storage-sqlite",
+   "secrets"
+  ],
+  [
+   "storage-sqlite",
+   "security-audit"
+  ],
+  [
+   "storage-sqlite",
+   "takeover"
+  ],
+  [
+   "storage-sqlite",
+   "task-domain"
+  ],
+  [
+   "storage-sqlite",
+   "worker"
+  ],
+  [
+   "storage-sqlite",
+   "workspace"
+  ],
+  [
+   "takeover",
+   "context-engine"
+  ],
+  [
+   "takeover",
+   "continuity"
+  ],
+  [
+   "takeover",
+   "plan-domain"
+  ],
+  [
+   "takeover",
+   "task-domain"
+  ],
+  [
+   "worker-contract",
+   "worker"
+  ],
+  [
+   "workspace",
+   "agent-runtime"
+  ],
+  [
+   "workspace",
+   "task-domain"
+  ]
+ ],
+ "capabilityEdgesAll": [
+  [
+   "apps",
+   "auth"
+  ],
+  [
+   "apps",
+   "bg"
+  ],
+  [
+   "apps",
+   "cont"
+  ],
+  [
+   "apps",
+   "eval"
+  ],
+  [
+   "apps",
+   "exec"
+  ],
+  [
+   "apps",
+   "ipc"
+  ],
+  [
+   "apps",
+   "mem"
+  ],
+  [
+   "apps",
+   "orch"
+  ],
+  [
+   "apps",
+   "prov"
+  ],
+  [
+   "apps",
+   "repo"
+  ],
+  [
+   "apps",
+   "secrets"
+  ],
+  [
+   "apps",
+   "store"
+  ],
+  [
+   "apps",
+   "tasks"
+  ],
+  [
+   "cont",
+   "mem"
+  ],
+  [
+   "cont",
+   "orch"
+  ],
+  [
+   "cont",
+   "tasks"
+  ],
+  [
+   "eval",
+   "orch"
+  ],
+  [
+   "eval",
+   "tasks"
+  ],
+  [
+   "exec",
+   "auth"
+  ],
+  [
+   "exec",
+   "eval"
+  ],
+  [
+   "orch",
+   "tasks"
+  ],
+  [
+   "prov",
+   "eval"
+  ],
+  [
+   "prov",
+   "exec"
+  ],
+  [
+   "prov",
+   "orch"
+  ],
+  [
+   "prov",
+   "repo"
+  ],
+  [
+   "prov",
+   "tasks"
+  ],
+  [
+   "repo",
+   "orch"
+  ],
+  [
+   "repo",
+   "tasks"
+  ],
+  [
+   "secrets",
+   "auth"
+  ],
+  [
+   "store",
+   "auth"
+  ],
+  [
+   "store",
+   "bg"
+  ],
+  [
+   "store",
+   "cont"
+  ],
+  [
+   "store",
+   "eval"
+  ],
+  [
+   "store",
+   "mem"
+  ],
+  [
+   "store",
+   "orch"
+  ],
+  [
+   "store",
+   "repo"
+  ],
+  [
+   "store",
+   "secrets"
+  ],
+  [
+   "store",
+   "tasks"
+  ]
+ ],
+ "map": {
+  "width": 1578,
+  "height": 1480,
+  "nodes": [
+   {
+    "id": "apps",
+    "title": "Точки входа",
+    "summary": "Daemon, CLI, композиция сервисов и формат виджетов",
+    "crates": [
+     "agentd",
+     "agentctl",
+     "app-services",
+     "widget-spec"
+    ],
+    "confidence": 950,
+    "validated": false,
+    "x": 706,
+    "y": 32,
+    "w": 248,
+    "h": 176
+   },
+   {
+    "id": "ipc",
+    "title": "Локальный IPC",
+    "summary": "Протокол, handshake и сокет с проверкой владельца",
+    "crates": [
+     "ipc-contracts",
+     "ipc-control",
+     "ipc-transport",
+     "product-version"
+    ],
+    "confidence": 920,
+    "validated": false,
+    "x": 410,
+    "y": 280,
+    "w": 248,
+    "h": 176
+   },
+   {
+    "id": "auth",
+    "title": "Авторизация и политика",
+    "summary": "ALLOW, REQUIRE_APPROVAL, DENY, роли и аудит",
+    "crates": [
+     "policy",
+     "security-audit",
+     "org",
+     "org-contract"
+    ],
+    "confidence": 780,
+    "validated": false,
+    "x": 665,
+    "y": 800,
+    "w": 248,
+    "h": 176
+   },
+   {
+    "id": "secrets",
+    "title": "Секреты",
+    "summary": "Vault, keychain и контракт бэкенда",
+    "crates": [
+     "secrets",
+     "secret-backend-contract",
+     "secrets-vault",
+     "keychain-native"
+    ],
+    "confidence": 900,
+    "validated": false,
+    "x": 624,
+    "y": 540,
+    "w": 248,
+    "h": 176
+   },
+   {
+    "id": "orch",
+    "title": "Исполнение агента",
+    "summary": "Рантайм агента, планировщик, контракт исполнения",
+    "crates": [
+     "agent-runtime",
+     "scheduler",
+     "execution-contract"
+    ],
+    "confidence": 840,
+    "validated": false,
+    "x": 920,
+    "y": 1048,
+    "w": 248,
+    "h": 152
+   },
+   {
+    "id": "tasks",
+    "title": "Задачи и планы",
+    "summary": "Домен Task и Plan, контракт планировщика",
+    "crates": [
+     "task-domain",
+     "plan-domain",
+     "planner-contract",
+     "fake-planner"
+    ],
+    "confidence": 900,
+    "validated": false,
+    "x": 920,
+    "y": 1272,
+    "w": 248,
+    "h": 176
+   },
+   {
+    "id": "exec",
+    "title": "Песочница",
+    "summary": "Запуск команд, seatbelt и захват эффектов",
+    "crates": [
+     "runner",
+     "runner-native",
+     "runner-macos-seatbelt",
+     "effect-capture-contract",
+     "effect-capture-local"
+    ],
+    "confidence": 860,
+    "validated": false,
+    "x": 1216,
+    "y": 528,
+    "w": 248,
+    "h": 200
+   },
+   {
+    "id": "eval",
+    "title": "Проверка результатов",
+    "summary": "Оценка попыток по критериям",
+    "crates": [
+     "evaluation",
+     "fake-evaluator"
+    ],
+    "confidence": 820,
+    "validated": false,
+    "x": 1298,
+    "y": 816,
+    "w": 248,
+    "h": 128
+   },
+   {
+    "id": "prov",
+    "title": "Провайдеры агентов",
+    "summary": "Claude и тестовый агент",
+    "crates": [
+     "provider-claude",
+     "fake-agent"
+    ],
+    "confidence": 880,
+    "validated": false,
+    "x": 1002,
+    "y": 312,
+    "w": 248,
+    "h": 128
+   },
+   {
+    "id": "mem",
+    "title": "Память и контекст",
+    "summary": "Структурная память и сборка контекста",
+    "crates": [
+     "memory",
+     "memory-contract",
+     "context-engine",
+     "context-engine-contract"
+    ],
+    "confidence": 870,
+    "validated": false,
+    "x": 287,
+    "y": 800,
+    "w": 248,
+    "h": 176
+   },
+   {
+    "id": "cont",
+    "title": "Продолжение работы",
+    "summary": "Continuity и передача управления человеку",
+    "crates": [
+     "continuity",
+     "continuity-contract",
+     "takeover"
+    ],
+    "confidence": 760,
+    "validated": false,
+    "x": 328,
+    "y": 560,
+    "w": 248,
+    "h": 152
+   },
+   {
+    "id": "repo",
+    "title": "Репозиторий",
+    "summary": "Рабочие копии, git и поиск по коду",
+    "crates": [
+     "workspace",
+     "git-cli",
+     "repo-finder",
+     "repo-finder-contract",
+     "finder-local"
+    ],
+    "confidence": 850,
+    "validated": false,
+    "x": 920,
+    "y": 528,
+    "w": 248,
+    "h": 200
+   },
+   {
+    "id": "bg",
+    "title": "Фон и воркеры",
+    "summary": "Рутины и удалённые воркеры",
+    "crates": [
+     "background",
+     "background-contract",
+     "worker",
+     "worker-contract"
+    ],
+    "confidence": 800,
+    "validated": false,
+    "x": 32,
+    "y": 528,
+    "w": 248,
+    "h": 176
+   },
+   {
+    "id": "store",
+    "title": "Хранилище",
+    "summary": "Состояние daemon в SQLite",
+    "crates": [
+     "storage-sqlite"
+    ],
+    "confidence": 930,
+    "validated": false,
+    "x": 706,
+    "y": 340,
+    "w": 248,
+    "h": 104
+   }
+  ],
+  "edges": [
+   {
+    "from": "apps",
+    "to": "ipc",
+    "points": [
+     {
+      "x": 768,
+      "y": 208
+     },
+     {
+      "x": 768,
+      "y": 232
+     },
+     {
+      "x": 534,
+      "y": 232
+     },
+     {
+      "x": 534,
+      "y": 280
+     }
+    ]
+   },
+   {
+    "from": "apps",
+    "to": "prov",
+    "points": [
+     {
+      "x": 892,
+      "y": 208
+     },
+     {
+      "x": 892,
+      "y": 232
+     },
+     {
+      "x": 1126,
+      "y": 232
+     },
+     {
+      "x": 1126,
+      "y": 312
+     }
+    ]
+   },
+   {
+    "from": "apps",
+    "to": "store",
+    "points": [
+     {
+      "x": 830,
+      "y": 208
+     },
+     {
+      "x": 830,
+      "y": 340
+     }
+    ]
+   },
+   {
+    "from": "cont",
+    "to": "mem",
+    "points": [
+     {
+      "x": 411,
+      "y": 712
+     },
+     {
+      "x": 411,
+      "y": 800
+     }
+    ]
+   },
+   {
+    "from": "cont",
+    "to": "orch",
+    "points": [
+     {
+      "x": 493,
+      "y": 712
+     },
+     {
+      "x": 493,
+      "y": 752
+     },
+     {
+      "x": 640,
+      "y": 752
+     },
+     {
+      "x": 640,
+      "y": 1000
+     },
+     {
+      "x": 982,
+      "y": 1000
+     },
+     {
+      "x": 982,
+      "y": 1048
+     }
+    ]
+   },
+   {
+    "from": "eval",
+    "to": "orch",
+    "points": [
+     {
+      "x": 1422,
+      "y": 944
+     },
+     {
+      "x": 1422,
+      "y": 1000
+     },
+     {
+      "x": 1106,
+      "y": 1000
+     },
+     {
+      "x": 1106,
+      "y": 1048
+     }
+    ]
+   },
+   {
+    "from": "exec",
+    "to": "auth",
+    "points": [
+     {
+      "x": 1299,
+      "y": 728
+     },
+     {
+      "x": 1299,
+      "y": 752
+     },
+     {
+      "x": 830,
+      "y": 752
+     },
+     {
+      "x": 830,
+      "y": 800
+     }
+    ]
+   },
+   {
+    "from": "exec",
+    "to": "eval",
+    "points": [
+     {
+      "x": 1381,
+      "y": 728
+     },
+     {
+      "x": 1381,
+      "y": 816
+     }
+    ]
+   },
+   {
+    "from": "orch",
+    "to": "tasks",
+    "points": [
+     {
+      "x": 1044,
+      "y": 1200
+     },
+     {
+      "x": 1044,
+      "y": 1272
+     }
+    ]
+   },
+   {
+    "from": "prov",
+    "to": "exec",
+    "points": [
+     {
+      "x": 1167,
+      "y": 440
+     },
+     {
+      "x": 1167,
+      "y": 490
+     },
+     {
+      "x": 1340,
+      "y": 490
+     },
+     {
+      "x": 1340,
+      "y": 528
+     }
+    ]
+   },
+   {
+    "from": "prov",
+    "to": "repo",
+    "points": [
+     {
+      "x": 1085,
+      "y": 440
+     },
+     {
+      "x": 1085,
+      "y": 528
+     }
+    ]
+   },
+   {
+    "from": "repo",
+    "to": "orch",
+    "points": [
+     {
+      "x": 1044,
+      "y": 728
+     },
+     {
+      "x": 1044,
+      "y": 1048
+     }
+    ]
+   },
+   {
+    "from": "secrets",
+    "to": "auth",
+    "points": [
+     {
+      "x": 748,
+      "y": 716
+     },
+     {
+      "x": 748,
+      "y": 800
+     }
+    ]
+   },
+   {
+    "from": "store",
+    "to": "bg",
+    "points": [
+     {
+      "x": 747,
+      "y": 444
+     },
+     {
+      "x": 747,
+      "y": 480
+     },
+     {
+      "x": 156,
+      "y": 480
+     },
+     {
+      "x": 156,
+      "y": 528
+     }
+    ]
+   },
+   {
+    "from": "store",
+    "to": "cont",
+    "points": [
+     {
+      "x": 789,
+      "y": 444
+     },
+     {
+      "x": 789,
+      "y": 490
+     },
+     {
+      "x": 452,
+      "y": 490
+     },
+     {
+      "x": 452,
+      "y": 560
+     }
+    ]
+   },
+   {
+    "from": "store",
+    "to": "eval",
+    "points": [
+     {
+      "x": 913,
+      "y": 444
+     },
+     {
+      "x": 913,
+      "y": 480
+     },
+     {
+      "x": 1488,
+      "y": 480
+     },
+     {
+      "x": 1488,
+      "y": 752
+     },
+     {
+      "x": 1463,
+      "y": 752
+     },
+     {
+      "x": 1463,
+      "y": 816
+     }
+    ]
+   },
+   {
+    "from": "store",
+    "to": "repo",
+    "points": [
+     {
+      "x": 871,
+      "y": 444
+     },
+     {
+      "x": 871,
+      "y": 490
+     },
+     {
+      "x": 1003,
+      "y": 490
+     },
+     {
+      "x": 1003,
+      "y": 528
+     }
+    ]
+   },
+   {
+    "from": "store",
+    "to": "secrets",
+    "points": [
+     {
+      "x": 830,
+      "y": 444
+     },
+     {
+      "x": 830,
+      "y": 500
+     },
+     {
+      "x": 748,
+      "y": 500
+     },
+     {
+      "x": 748,
+      "y": 540
+     }
+    ]
+   }
+  ]
+ },
+ "g15": {
+  "width": 772,
+  "height": 184,
+  "critical": [
+   "TASK-0217",
+   "TASK-0218",
+   "TASK-0219",
+   "TASK-0220",
+   "TASK-0223",
+   "TASK-0224",
+   "TASK-0225",
+   "TASK-0226",
+   "TASK-0227",
+   "TASK-0228"
+  ],
+  "nodes": [
+   {
+    "id": "TASK-0215",
+    "state": "done",
+    "x": 4,
+    "y": 120,
+    "w": 48,
+    "h": 48
+   },
+   {
+    "id": "TASK-0216",
+    "state": "done",
+    "x": 64,
+    "y": 120,
+    "w": 48,
+    "h": 48
+   },
+   {
+    "id": "TASK-0217",
+    "state": "ready",
+    "x": 124,
+    "y": 120,
+    "w": 48,
+    "h": 48
+   },
+   {
+    "id": "TASK-0218",
+    "state": "wait",
+    "x": 184,
+    "y": 120,
+    "w": 48,
+    "h": 48
+   },
+   {
+    "id": "TASK-0219",
+    "state": "wait",
+    "x": 244,
+    "y": 120,
+    "w": 48,
+    "h": 48
+   },
+   {
+    "id": "TASK-0220",
+    "state": "wait",
+    "x": 304,
+    "y": 120,
+    "w": 48,
+    "h": 48
+   },
+   {
+    "id": "TASK-0221",
+    "state": "wait",
+    "x": 386,
+    "y": 4,
+    "w": 48,
+    "h": 48
+   },
+   {
+    "id": "TASK-0222",
+    "state": "wait",
+    "x": 386,
+    "y": 68,
+    "w": 48,
+    "h": 48
+   },
+   {
+    "id": "TASK-0223",
+    "state": "wait",
+    "x": 386,
+    "y": 132,
+    "w": 48,
+    "h": 48
+   },
+   {
+    "id": "TASK-0224",
+    "state": "wait",
+    "x": 468,
+    "y": 132,
+    "w": 48,
+    "h": 48
+   },
+   {
+    "id": "TASK-0225",
+    "state": "wait",
+    "x": 528,
+    "y": 132,
+    "w": 48,
+    "h": 48
+   },
+   {
+    "id": "TASK-0226",
+    "state": "wait",
+    "x": 588,
+    "y": 132,
+    "w": 48,
+    "h": 48
+   },
+   {
+    "id": "TASK-0227",
+    "state": "wait",
+    "x": 648,
+    "y": 132,
+    "w": 48,
+    "h": 48
+   },
+   {
+    "id": "TASK-0228",
+    "state": "wait",
+    "x": 720,
+    "y": 95,
+    "w": 48,
+    "h": 48
+   }
+  ],
+  "edges": [
+   {
+    "from": "TASK-0215",
+    "to": "TASK-0216",
+    "points": [
+     {
+      "x": 52,
+      "y": 144
+     },
+     {
+      "x": 64,
+      "y": 144
+     }
+    ],
+    "kind": "done"
+   },
+   {
+    "from": "TASK-0216",
+    "to": "TASK-0217",
+    "points": [
+     {
+      "x": 112,
+      "y": 144
+     },
+     {
+      "x": 124,
+      "y": 144
+     }
+    ],
+    "kind": "main"
+   },
+   {
+    "from": "TASK-0217",
+    "to": "TASK-0218",
+    "points": [
+     {
+      "x": 172,
+      "y": 144
+     },
+     {
+      "x": 184,
+      "y": 144
+     }
+    ],
+    "kind": "main"
+   },
+   {
+    "from": "TASK-0218",
+    "to": "TASK-0219",
+    "points": [
+     {
+      "x": 232,
+      "y": 144
+     },
+     {
+      "x": 244,
+      "y": 144
+     }
+    ],
+    "kind": "main"
+   },
+   {
+    "from": "TASK-0219",
+    "to": "TASK-0220",
+    "points": [
+     {
+      "x": 292,
+      "y": 144
+     },
+     {
+      "x": 304,
+      "y": 144
+     }
+    ],
+    "kind": "main"
+   },
+   {
+    "from": "TASK-0220",
+    "to": "TASK-0221",
+    "points": [
+     {
+      "x": 352,
+      "y": 132
+     },
+     {
+      "x": 364,
+      "y": 132
+     },
+     {
+      "x": 364,
+      "y": 28
+     },
+     {
+      "x": 386,
+      "y": 28
+     }
+    ],
+    "kind": "side"
+   },
+   {
+    "from": "TASK-0220",
+    "to": "TASK-0222",
+    "points": [
+     {
+      "x": 352,
+      "y": 144
+     },
+     {
+      "x": 374,
+      "y": 144
+     },
+     {
+      "x": 374,
+      "y": 92
+     },
+     {
+      "x": 386,
+      "y": 92
+     }
+    ],
+    "kind": "side"
+   },
+   {
+    "from": "TASK-0220",
+    "to": "TASK-0223",
+    "points": [
+     {
+      "x": 352,
+      "y": 156
+     },
+     {
+      "x": 386,
+      "y": 156
+     }
+    ],
+    "kind": "main"
+   },
+   {
+    "from": "TASK-0223",
+    "to": "TASK-0224",
+    "points": [
+     {
+      "x": 434,
+      "y": 156
+     },
+     {
+      "x": 468,
+      "y": 156
+     }
+    ],
+    "kind": "main"
+   },
+   {
+    "from": "TASK-0224",
+    "to": "TASK-0225",
+    "points": [
+     {
+      "x": 516,
+      "y": 156
+     },
+     {
+      "x": 528,
+      "y": 156
+     }
+    ],
+    "kind": "main"
+   },
+   {
+    "from": "TASK-0225",
+    "to": "TASK-0226",
+    "points": [
+     {
+      "x": 576,
+      "y": 156
+     },
+     {
+      "x": 588,
+      "y": 156
+     }
+    ],
+    "kind": "main"
+   },
+   {
+    "from": "TASK-0226",
+    "to": "TASK-0227",
+    "points": [
+     {
+      "x": 636,
+      "y": 156
+     },
+     {
+      "x": 648,
+      "y": 156
+     }
+    ],
+    "kind": "main"
+   },
+   {
+    "from": "TASK-0227",
+    "to": "TASK-0228",
+    "points": [
+     {
+      "x": 696,
+      "y": 156
+     },
+     {
+      "x": 708,
+      "y": 156
+     },
+     {
+      "x": 708,
+      "y": 131
+     },
+     {
+      "x": 720,
+      "y": 131
+     }
+    ],
+    "kind": "main"
+   },
+   {
+    "from": "TASK-0222",
+    "to": "TASK-0228",
+    "points": [
+     {
+      "x": 434,
+      "y": 92
+     },
+     {
+      "x": 446,
+      "y": 92
+     },
+     {
+      "x": 446,
+      "y": 119
+     },
+     {
+      "x": 720,
+      "y": 119
+     }
+    ],
+    "kind": "side"
+   },
+   {
+    "from": "TASK-0221",
+    "to": "TASK-0228",
+    "points": [
+     {
+      "x": 434,
+      "y": 28
+     },
+     {
+      "x": 456,
+      "y": 28
+     },
+     {
+      "x": 456,
+      "y": 107
+     },
+     {
+      "x": 720,
+      "y": 107
+     }
+    ],
+    "kind": "side"
+   }
+  ]
+ }
+}

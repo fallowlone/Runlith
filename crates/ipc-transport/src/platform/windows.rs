@@ -25,14 +25,14 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 #[cfg(test)]
 use windows_sys::Win32::Security::{
-    AclSizeInformation, GetAce, GetAclInformation, GetSecurityDescriptorDacl, ACL_SIZE_INFORMATION,
-    PSECURITY_DESCRIPTOR,
+    AclSizeInformation, GetAce, GetAclInformation, GetLengthSid, GetSecurityDescriptorDacl,
+    ACL_SIZE_INFORMATION, PSECURITY_DESCRIPTOR,
 };
 use windows_sys::Win32::Security::{
-    AddAccessAllowedAceEx, CreateWellKnownSid, GetLengthSid, GetTokenInformation, InitializeAcl,
+    AddAccessAllowedAceEx, CreateWellKnownSid, GetTokenInformation, InitializeAcl,
     InitializeSecurityDescriptor, SetSecurityDescriptorDacl, TokenUser, WinLocalSystemSid,
     ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, PSID, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
-    SECURITY_MAX_SID_SIZE, TOKEN_QUERY, TOKEN_USER,
+    SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -136,17 +136,21 @@ fn current_user_token_sid_bytes() -> TransportResult<Vec<u8>> {
 }
 
 /// Reads the user SID out of an open process or thread token.
+///
+/// # Safety
+/// The caller must keep `token` open for both GetTokenInformation calls.
 pub(crate) unsafe fn token_sid_bytes(token: HANDLE) -> TransportResult<Vec<u8>> {
-    // Safety invariants: `token` is a live process-token handle owned by the
-    // caller; the first call reports the required length; the second fills a
-    // buffer of exactly that size, so the embedded `TOKEN_USER` and its SID
-    // are fully inside `buffer`.
+    const _: () = assert!(std::mem::size_of::<TOKEN_USER>() == std::mem::size_of::<usize>() * 2);
+    const _: () = assert!(std::mem::offset_of!(TOKEN_USER, User) == 0);
+    const _: () = assert!(std::mem::offset_of!(SID_AND_ATTRIBUTES, Sid) == 0);
     let mut needed: u32 = 0;
     GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut needed);
     if needed == 0 || needed > 65_536 {
         return Err(env_error("GetTokenInformation size probe"));
     }
-    let mut buffer = vec![0u8; needed as usize];
+    let size = usize::try_from(needed).map_err(|_| env_error("token buffer size"))?;
+    // WinAPI receives aligned initialized storage; SID addresses are checked without dereferencing them.
+    let mut buffer = vec![0usize; size.div_ceil(std::mem::size_of::<usize>())];
     if GetTokenInformation(
         token,
         TokenUser,
@@ -157,20 +161,12 @@ pub(crate) unsafe fn token_sid_bytes(token: HANDLE) -> TransportResult<Vec<u8>> 
     {
         return Err(env_error("GetTokenInformation"));
     }
-    let user: TOKEN_USER = ptr::read_unaligned(buffer.as_ptr().cast::<TOKEN_USER>());
-    if user.User.Sid.is_null() {
-        return Err(TransportError::InvalidEndpoint(
-            "token holds no user SID".to_owned(),
-        ));
-    }
-    let sid_len = GetLengthSid(user.User.Sid) as usize;
-    if sid_len == 0 || sid_len > buffer.len() {
-        return Err(TransportError::InvalidEndpoint(
-            "token user SID has an implausible length".to_owned(),
-        ));
-    }
-    let bytes = std::slice::from_raw_parts(user.User.Sid.cast::<u8>(), sid_len);
-    Ok(bytes.to_vec())
+    let returned = usize::try_from(needed).map_err(|_| env_error("returned token buffer size"))?;
+    super::token_sid::copy_token_user_sid(&buffer, returned).ok_or_else(|| {
+        TransportError::InvalidEndpoint(
+            "token user SID is invalid or outside the returned buffer".to_owned(),
+        )
+    })
 }
 
 /// Returns the LOCAL SYSTEM SID in binary form.
@@ -563,8 +559,8 @@ mod tests {
         drop(server);
     }
 
-    #[test]
-    fn remote_rejection_is_configured_in_the_single_constructor() {
+    #[tokio::test]
+    async fn remote_rejection_is_configured_in_the_single_constructor() {
         // No stable Win32 read-back API exposes PIPE_REJECT_REMOTE_CLIENTS,
         // so this pins the invariant at the construction site: every server
         // instance in this crate is built by `create_server`, which sets

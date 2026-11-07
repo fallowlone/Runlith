@@ -9,8 +9,8 @@
 use context_engine::model::Sensitivity;
 use memory::mint::{mint_entity_id, mint_memory_id};
 use memory::model::{
-    AnchorFingerprint, AnchorKind, Entity, EntityLink, LinkKind, MemoryKind, MemoryLink,
-    MemoryRecord, SourceRef, SourceRefKind, TrustState,
+    AnchorFingerprint, AnchorKind, Entity, EntityLink, LinkKind, MemoryKind, MemoryRecord,
+    SourceRef, SourceRefKind, TrustState,
 };
 use memory::port::MemoryStorePort;
 
@@ -109,13 +109,8 @@ fn assert_links_entities<S: MemoryStorePort>(store: &mut S) {
     store.capture(&new).unwrap();
     new.validate("reviewer", 2_000).unwrap();
     store.update(&new).unwrap();
-    store
-        .link(&MemoryLink {
-            from: new.id.clone(),
-            to: old.id.clone(),
-            kind: LinkKind::Supersedes,
-        })
-        .unwrap();
+    let superseded = store.supersede(&old.id, &new.id).unwrap();
+    assert_eq!(store.load(&old.id).unwrap(), Some(superseded));
     let links = store.links_from(&new.id).unwrap();
     assert_eq!(links.len(), 1);
     assert_eq!(links[0].kind, LinkKind::Supersedes);

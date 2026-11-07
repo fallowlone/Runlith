@@ -552,10 +552,16 @@ fn parse_criteria(value: &Json) -> Parsed<Vec<CriterionDecl>> {
     array(value)?
         .iter()
         .map(|item| {
-            Ok(CriterionDecl::new(
+            let decl = CriterionDecl::new(
                 CriterionId::new(required_str(item, "id")?.to_owned()).map_err(malformed)?,
                 parse_method(required_str(item, "method")?)?,
-            ))
+            );
+            // ADR-0051: optional bounded acceptance statement.
+            match item.get("statement") {
+                None | Some(Json::Null) => Ok(decl),
+                Some(Json::Str(text)) => decl.with_statement(text.clone()).map_err(malformed),
+                Some(_) => Err(Malformed("criterion statement must be string".to_owned())),
+            }
         })
         .collect()
 }
@@ -805,8 +811,11 @@ const PLANNER_ROLE: &str = concat!(
     // Scope values are echoed from the request's own scope_bound rather than
     // described by a pattern: TASK-0109 measured a run returning the literal
     // "workspace:repo:src" after copying a `[workspace:path]` placeholder.
-    "node_additions entries: {id,scope,criteria:[{id,method}],risk_class,required_gate}, ",
+    "node_additions entries: {id,scope,criteria:[{id,method,statement}],risk_class,required_gate}, ",
     "where scope is a non-empty array of roots copied from scope_bound or nested inside one. ",
+    // ADR-0051: statement is descriptive text only; it never grants completion.
+    "Each criterion's statement is a short (<=1024 bytes) single-line plain-text condition the child must meet; it ",
+    "does not replace or waive the criterion's method or any parent obligation. ",
     // TASK-0123 carries every declared method into the child Task's explicit
     // EvidenceRequirement; keep the prompt aligned with the accepted G8
     // vocabulary instead of describing the superseded TASK-0096 refusal.
@@ -895,6 +904,22 @@ fn json_string(value: &str) -> String {
 mod tests {
     use super::*;
     use plan_domain::ScopeBound;
+
+    #[test]
+    fn criterion_statement_is_parsed_and_bounded() {
+        let parse = |text: &str| parse_criteria(&crate::json::parse_json(text).unwrap());
+        let ok = parse(r#"[{"id":"c1","method":"automated-test","statement":"hi"},{"id":"c2","method":"automated-test"}]"#).ok().unwrap();
+        assert_eq!(ok[0].statement.as_deref(), Some("hi"));
+        assert_eq!(ok[1].statement, None);
+        for bad in [
+            r#"{"statement":""}"#,
+            r#"{"statement":7}"#,
+            r#"{"statement":"a\u0000b"}"#,
+        ] {
+            let item = bad.replace('{', r#"{"id":"c1","method":"automated-test","#);
+            assert!(parse(&format!("[{item}]")).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn planner_timeout_is_clamped_to_g7_bound() {

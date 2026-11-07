@@ -49,10 +49,12 @@ async fn main() -> ExitCode {
         Some("routine") => cmd_routine(args.collect()).await,
         Some("worker") => cmd_worker(args.collect()).await,
         Some("org") => cmd_org(args.collect()).await,
+        Some("widget") => cmd_widget(args.collect()).await,
         Some("daemon") => cmd_daemon(args.collect()).await,
         _ => {
-            eprintln!("usage: agentctl <start|ping|shutdown|daemon|routine|project|task|execution|approval|human-decision|planning|vault|find|memory> ...");
+            eprintln!("usage: agentctl <start|ping|shutdown|daemon|routine|project|task|execution|approval|human-decision|planning|vault|find|memory|widget> ...");
             eprintln!("  {}", vault::USAGE);
+            eprintln!("  {}", agentctl::WIDGET_USAGE);
             eprintln!("  agentctl project create <id> <name>");
             eprintln!("  agentctl project get <id>");
             eprintln!("  agentctl project list");
@@ -200,18 +202,70 @@ async fn run_business(
     endpoint: &ipc_transport::platform::unix::UnixEndpoint,
     request: TaskCoreRequest,
 ) -> ExitCode {
-    match agentctl::business_request(endpoint, spawn_sibling_daemon, request).await {
-        Ok(response) => print_response(response),
-        Err(error) => fail(&error),
-    }
+    run_business_pages(request, |request| {
+        agentctl::business_request(endpoint, spawn_sibling_daemon, request)
+    })
+    .await
 }
 
 /// Runs one business request and prints the deterministic response.
 #[cfg(windows)]
 async fn run_business(pipe_name: &str, request: TaskCoreRequest) -> ExitCode {
-    match agentctl::business_request(pipe_name, spawn_sibling_daemon, request).await {
-        Ok(response) => print_response(response),
-        Err(error) => fail(&error),
+    run_business_pages(request, |request| {
+        agentctl::business_request(pipe_name, spawn_sibling_daemon, request)
+    })
+    .await
+}
+
+async fn run_business_pages<F, Fut>(mut request: TaskCoreRequest, mut send: F) -> ExitCode
+where
+    F: FnMut(TaskCoreRequest) -> Fut,
+    Fut: std::future::Future<Output = Result<TaskCoreResponse, ClientError>>,
+{
+    loop {
+        let response = match send(request.clone()).await {
+            Ok(response) => response,
+            Err(error) => return fail(&error),
+        };
+        let cursor = match (&mut request.payload, &response.payload) {
+            (
+                Some(task_core_request::Payload::ListProjects(request)),
+                Some(task_core_response::Payload::ListProjects(reply)),
+            ) if !reply.next_after_id.is_empty() => {
+                if reply.next_after_id <= request.after_id
+                    || reply
+                        .projects
+                        .last()
+                        .is_none_or(|last| last.id != reply.next_after_id)
+                {
+                    eprintln!("agentctl: invalid project-list cursor");
+                    return ExitCode::FAILURE;
+                }
+                request.after_id.clone_from(&reply.next_after_id);
+                true
+            }
+            (
+                Some(task_core_request::Payload::ListTasksForProject(request)),
+                Some(task_core_response::Payload::ListTasks(reply)),
+            ) if !reply.next_after_id.is_empty() => {
+                if reply.next_after_id <= request.after_id
+                    || reply
+                        .tasks
+                        .last()
+                        .is_none_or(|last| last.id != reply.next_after_id)
+                {
+                    eprintln!("agentctl: invalid task-list cursor");
+                    return ExitCode::FAILURE;
+                }
+                request.after_id.clone_from(&reply.next_after_id);
+                true
+            }
+            _ => false,
+        };
+        let status = print_response(response);
+        if status != ExitCode::SUCCESS || !cursor {
+            return status;
+        }
     }
 }
 
@@ -322,6 +376,7 @@ fn business_error_name(code: i32) -> String {
         Ok(BusinessErrorCode::UnsupportedProtocol) => "UNSUPPORTED_PROTOCOL".to_owned(),
         Ok(BusinessErrorCode::Internal) => "INTERNAL".to_owned(),
         Ok(BusinessErrorCode::ProviderUnavailable) => "PROVIDER_UNAVAILABLE".to_owned(),
+        Ok(BusinessErrorCode::UserPresenceRequired) => "USER_PRESENCE_REQUIRED".to_owned(),
         _ => format!("UNKNOWN({code})"),
     }
 }
@@ -338,7 +393,7 @@ fn usage_task() -> ExitCode {
     ExitCode::FAILURE
 }
 
-const TASK_CREATE_PLANNED_USAGE: &str = "agentctl task create-planned <id> <project-id> <objective> --scope <workspace:path>... --acceptance <criterion-id>... --risk <low|medium|high|critical>";
+const TASK_CREATE_PLANNED_USAGE: &str = "agentctl task create-planned <id> <project-id> <objective> --scope <workspace:path>... --acceptance <criterion-id>... --risk <low|medium|high|critical> [--allow-no-change]";
 
 /// Parses the protocol-v6 authoring command. Positional words up to the first
 /// flag form the objective; every flag takes exactly one value. The client
@@ -360,7 +415,19 @@ fn create_planned_task_request(args: &[String]) -> Result<TaskAuthoringCoreReque
         ..CreatePlanningTaskRequest::default()
     };
     let mut risk = None;
-    while let [flag, value, remaining @ ..] = flags {
+    // ADR-0051: `--allow-no-change` is the only flag without a value; it declares
+    // scoped work that need not change the worktree (requires protocol v14).
+    loop {
+        if let [flag, remaining @ ..] = flags {
+            if flag == "--allow-no-change" {
+                request.requires_workspace_change = Some(false);
+                flags = remaining;
+                continue;
+            }
+        }
+        let [flag, value, remaining @ ..] = flags else {
+            break;
+        };
         match flag.as_str() {
             "--scope" => request.allowed_paths.push(value.clone()),
             "--acceptance" => request.acceptance_criteria.push(value.clone()),
@@ -1136,10 +1203,13 @@ async fn cmd_worker(args: Vec<String>) -> ExitCode {
             };
         }
         Some("sign") => {
-            let secret = args
-                .windows(2)
-                .find(|p| p[0] == "--secret")
-                .map(|p| p[1].as_str());
+            let secret = match agentctl::read_key_input(&args, "--secret-file") {
+                Ok(secret) => secret,
+                Err(error) => {
+                    eprintln!("{error}");
+                    return ExitCode::FAILURE;
+                }
+            };
             let nonce = args
                 .windows(2)
                 .find(|p| p[0] == "--nonce")
@@ -1148,19 +1218,17 @@ async fn cmd_worker(args: Vec<String>) -> ExitCode {
                 .windows(2)
                 .find(|p| p[0] == "--job")
                 .map(|p| p[1].as_str());
-            return match (secret, nonce, job) {
-                (Some(secret), Some(nonce), Some(job)) => {
-                    match agentctl::worker_sign(secret, nonce, job) {
-                        Ok(sig) => {
-                            println!("{sig}");
-                            ExitCode::SUCCESS
-                        }
-                        Err(e) => {
-                            eprintln!("{e}");
-                            ExitCode::FAILURE
-                        }
+            return match (nonce, job) {
+                (Some(nonce), Some(job)) => match agentctl::worker_sign(&secret, nonce, job) {
+                    Ok(sig) => {
+                        println!("{sig}");
+                        ExitCode::SUCCESS
                     }
-                }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        ExitCode::FAILURE
+                    }
+                },
                 _ => {
                     eprintln!("{}", agentctl::WORKER_USAGE);
                     ExitCode::FAILURE
@@ -1270,28 +1338,30 @@ async fn cmd_org_seal(
         org_core_request, OrgAccountIdRequest, OrgCoreRequest, OrgIdRequest,
     };
     let flag = |name: &str| args.windows(2).find(|p| p[0] == name).map(|p| p[1].clone());
-    let (
-        Some(account_id),
-        Some(secret),
-        Some(org_id),
-        Some(org_key),
-        Some(nonce),
-        Some(kind),
-        Some(sensitivity),
-        Some(text),
-    ) = (
+    let (Some(account_id), Some(org_id), Some(nonce), Some(kind), Some(sensitivity), Some(text)) = (
         flag("--account"),
-        flag("--secret"),
         flag("--org"),
-        flag("--org-key"),
         flag("--nonce"),
         flag("--kind"),
         flag("--sensitivity"),
         flag("--text"),
-    )
-    else {
+    ) else {
         eprintln!("{}", agentctl::ORG_USAGE);
         return ExitCode::FAILURE;
+    };
+    let secret = match agentctl::read_key_input(args, "--secret-file") {
+        Ok(secret) => secret,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let org_key = match agentctl::read_key_input(args, "--org-key-file") {
+        Ok(key) => key,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
     };
     let account = match agentctl::org_request(
         endpoint,
@@ -1374,6 +1444,59 @@ async fn cmd_org_seal(
             ExitCode::FAILURE
         }
     }
+}
+
+/// `widget draft <text>` waits for the provider; `start`, `status` and `cancel`
+/// expose the job itself.
+#[cfg(unix)]
+async fn cmd_widget(args: Vec<String>) -> ExitCode {
+    const POLL: std::time::Duration = std::time::Duration::from_millis(500);
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+    let endpoint = match resolve_production_endpoint() {
+        Ok(value) => value,
+        Err(error) => return fail(&error),
+    };
+    let (request, wait) = match agentctl::parse_widget_args(&args) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            eprintln!("{message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut response =
+        match agentctl::widget_request(&endpoint, spawn_sibling_daemon, request).await {
+            Ok(response) => response,
+            Err(error) => return fail(&error),
+        };
+    let deadline = std::time::Instant::now() + WAIT;
+    while wait && agentctl::widget_is_running(&response) {
+        if std::time::Instant::now() > deadline {
+            eprintln!("agentctl: the widget draft did not finish in time");
+            return ExitCode::FAILURE;
+        }
+        tokio::time::sleep(POLL).await;
+        let status = agentctl::widget_status_request(&response);
+        response = match agentctl::widget_request(&endpoint, spawn_sibling_daemon, status).await {
+            Ok(response) => response,
+            Err(error) => return fail(&error),
+        };
+    }
+    match agentctl::format_widget_response(&response) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("{message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn cmd_widget(_args: Vec<String>) -> ExitCode {
+    eprintln!("agentctl: widget control is unavailable on this build");
+    ExitCode::FAILURE
 }
 
 #[cfg(windows)]
@@ -1503,7 +1626,10 @@ fn project_request(args: &[String]) -> Result<TaskCoreRequest, ()> {
         }
         "list" if args.len() == 1 => Ok(TaskCoreRequest {
             payload: Some(task_core_request::Payload::ListProjects(
-                ListProjectsRequest {},
+                ListProjectsRequest {
+                    page_size: ipc_contracts::MAX_LIST_PAGE_ITEMS,
+                    ..Default::default()
+                },
             )),
         }),
         _ => Err(()),
@@ -1546,6 +1672,8 @@ fn task_request(args: &[String]) -> Result<TaskCoreRequest, ()> {
                 payload: Some(task_core_request::Payload::ListTasksForProject(
                     ListTasksForProjectRequest {
                         project_id: project_id.clone(),
+                        page_size: ipc_contracts::MAX_LIST_PAGE_ITEMS,
+                        ..Default::default()
                     },
                 )),
             })
@@ -2099,6 +2227,35 @@ fn print_execution_response(response: &ExecutionCoreResponse, direct: bool) -> E
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn create_planned_allow_no_change_flag_sets_the_intent_only_when_given() {
+        let args = |extra: &[&str]| {
+            let mut v: Vec<String> = ["T-1", "P-1", "inspect", "--scope", "repo:src"]
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            v.extend(["--acceptance", "c", "--risk", "low"].map(ToString::to_string));
+            v.extend(extra.iter().map(ToString::to_string));
+            v
+        };
+        let intent = |request: TaskAuthoringCoreRequest| match request.payload {
+            Some(task_authoring_core_request::Payload::CreatePlanningTask(create)) => {
+                create.requires_workspace_change
+            }
+            other => panic!("unexpected payload {other:?}"),
+        };
+        assert_eq!(
+            intent(create_planned_task_request(&args(&[])).unwrap()),
+            None
+        );
+        assert_eq!(
+            intent(create_planned_task_request(&args(&["--allow-no-change"])).unwrap()),
+            Some(false)
+        );
+        assert!(create_planned_task_request(&args(&["--allow-no-change", "x"])).is_err());
+    }
+
     use super::*;
 
     fn decide_continuation(spelling: &str) -> i32 {

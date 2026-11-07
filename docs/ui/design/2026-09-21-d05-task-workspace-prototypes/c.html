@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en" data-density="default" data-text="normal">
+<head>
+<meta charset="utf-8">
+<title>D05 · Variant C — adaptive inspector with stable central workspace</title>
+<meta name="viewport" content="width=1440">
+<link rel="stylesheet" href="shared.css">
+</head>
+<body data-variant="c">
+<div class="shell">
+  <aside id="nav" class="nav" aria-label="Project navigation"></aside>
+
+  <main class="pane" aria-label="Task Workspace">
+    <div class="workspace-header">
+      <div class="row-2">
+        <h1 id="ws-title"></h1>
+        <span class="badge state-VERIFYING">VERIFYING</span>
+        <span class="meta" id="ws-reason"></span>
+      </div>
+      <p class="meta">TASK-0342 · full-width work object · inspector and diagnostics open only on explicit request (§11-C)</p>
+    </div>
+    <div class="tabs" id="tabs" role="tablist" aria-label="Task sections">
+      <button class="tab" role="tab" aria-selected="true" data-panel="overview">Overview</button>
+      <button class="tab" role="tab" aria-selected="false" data-panel="plan">Plan</button>
+      <button class="tab" role="tab" aria-selected="false" data-panel="changes">Changes</button>
+      <button class="tab" role="tab" aria-selected="false" data-panel="evidence">Evidence</button>
+      <button class="tab" role="tab" aria-selected="false" data-panel="history">History</button>
+    </div>
+    <div class="pane-scroll" id="panels">
+      <section data-panel="overview" data-active="true" aria-label="Overview"></section>
+      <section data-panel="plan" aria-label="Plan"></section>
+      <section data-panel="changes" aria-label="Changes"></section>
+      <section data-panel="evidence" aria-label="Evidence"></section>
+      <section data-panel="history" aria-label="History"></section>
+    </div>
+    <div class="toolbar" style="border-top:1px solid rgba(228,233,239,0.08)">
+      <button class="btn" id="btn-inspector" aria-expanded="false" aria-controls="inspector">Open inspector</button>
+      <button class="btn pin" id="btn-pin" aria-pressed="false">Pin inspector</button>
+      <button class="btn" id="btn-diag" aria-expanded="false" aria-controls="diagnostics">Open diagnostics</button>
+      <span class="grow"></span>
+      <span class="meta">Inspector never opens itself and never takes keyboard focus. At insufficient width it becomes a separate detail view.</span>
+    </div>
+    <section class="pane" id="diagnostics" style="display:none;height:220px" aria-label="Diagnostics">
+      <div class="drawer-header"><strong>Diagnostics</strong><span class="meta grow">Attempts · Events · Logs</span></div>
+      <div style="display:flex;flex-direction:column;min-height:0;flex:1">
+        <div id="dattempts" style="display:none;overflow:auto"></div>
+        <div id="devents" style="display:none;overflow:auto"></div>
+        <div id="dlogs" style="display:flex;flex-direction:column;min-height:0;flex:1"></div>
+      </div>
+      <div class="tabs" id="dtabs" role="tablist" aria-label="Diagnostics sections">
+        <button class="tab" role="tab" aria-selected="true" data-panel="dattempts">Attempts</button>
+        <button class="tab" role="tab" aria-selected="false" data-panel="devents">Events</button>
+        <button class="tab" role="tab" aria-selected="false" data-panel="dlogs">Logs</button>
+      </div>
+    </section>
+  </main>
+
+  <aside class="pane" id="inspector" style="display:none" aria-label="Inspector">
+    <div class="drawer-header"><strong>Inspector</strong>
+      <span class="meta grow">Conversation · Decision</span>
+      <button class="btn meta" id="btn-close-inspector">Close</button></div>
+    <div class="pane-scroll">
+      <div id="agent-panel"></div>
+      <div id="decision-panel" style="margin-top:12px"></div>
+    </div>
+  </aside>
+</div>
+
+<script src="fixture.js"></script>
+<script src="proto.js"></script>
+<script>
+(function () {
+  var F = window.FIXTURE, P = window.PROTO;
+  document.title = "D05 · C — " + F.task.id;
+  P.renderNav();
+  P.fill("ws-title", P.esc(F.task.objective));
+  P.fill("ws-reason", P.esc(F.task.headlineReason) + " · " + P.esc(F.task.nextCommand));
+  var root = document.getElementById("panels");
+  var content = {
+    overview: P.renderOverview(), plan: P.renderPlan(), changes: P.renderChanges(),
+    evidence: P.renderEvidence(), history: P.renderHistory()
+  };
+  root.querySelectorAll("section[data-panel]").forEach(function (s) {
+    s.innerHTML = content[s.getAttribute("data-panel")] || "";
+  });
+  P.wireTabs(document.getElementById("tabs"), root);
+
+  P.fill("agent-panel",
+    '<p class="meta" style="margin-bottom:8px">Task-level conversation — distinct from the provider transcript ' +
+    '(continuity across attempts/providers is an unresolved product question, §13.3).</p>' +
+    '<p><strong>You:</strong> Retry stability is the goal; do not touch planner code.</p>' +
+    '<p><strong>Agent (reported claim):</strong> “Retries now use jitter; concurrent refresh is guarded.” ' +
+    '<span class="meta">Agent-reported claim — not completion evidence until verified (C1–C3).</span></p>' +
+    '<div class="btn-row" style="margin-top:8px"><button class="btn meta">Attach to attempt 2</button>' +
+    '<button class="btn meta">Open provider transcript</button></div>');
+  P.fill("decision-panel", P.renderAttentionItem(F.attention[0]) + P.renderAttentionItem(F.attention[1]));
+
+  var body = document.body;
+  var inspector = document.getElementById("inspector");
+  var btnOpen = document.getElementById("btn-inspector");
+  var btnPin = document.getElementById("btn-pin");
+  var btnDiag = document.getElementById("btn-diag");
+  var diag = document.getElementById("diagnostics");
+
+  btnOpen.addEventListener("click", function () {
+    var open = inspector.style.display === "none";
+    inspector.style.display = open ? "flex" : "none";
+    body.classList.toggle("inspector-open", open);
+    btnOpen.setAttribute("aria-expanded", open ? "true" : "false");
+    btnOpen.textContent = open ? "Close inspector" : "Open inspector";
+    // No focus is moved into the inspector: opening is never intrusive (§11-C).
+  });
+  document.getElementById("btn-close-inspector").addEventListener("click", function () {
+    btnOpen.click();
+    btnOpen.focus(); // focus returns to the initiator (§15.2)
+  });
+  btnPin.addEventListener("click", function () {
+    var pinned = btnPin.getAttribute("aria-pressed") === "true";
+    btnPin.setAttribute("aria-pressed", pinned ? "false" : "true");
+    if (!pinned && inspector.style.display === "none") { btnOpen.click(); }
+  });
+  btnDiag.addEventListener("click", function () {
+    var open = diag.style.display === "none";
+    diag.style.display = open ? "block" : "none";
+    btnDiag.setAttribute("aria-expanded", open ? "true" : "false");
+    btnDiag.textContent = open ? "Close diagnostics" : "Open diagnostics";
+  });
+
+  P.fill("dattempts", P.renderAttempts());
+  P.fill("devents", P.renderHistory());
+  P.fill("dlogs", P.renderLogs());
+  P.wireTabs(document.getElementById("dtabs"), document.getElementById("diagnostics"));
+})();
+</script>
+</body>
+</html>

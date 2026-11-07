@@ -59,14 +59,15 @@ fn assert_run_lifecycle<S: RoutineStorePort>(store: &mut S) {
     store.start_run(&run).unwrap();
     assert_eq!(store.list_running().unwrap().len(), 1);
     run.complete("evidence:ok", 2_000).unwrap();
-    store.update_run(&run).unwrap();
+    let mut done = def.clone();
+    done.record_completion(2_000).unwrap();
+    store.finish_run(&done, &run).unwrap();
+    assert_eq!(store.load(&def.id).unwrap().unwrap(), done);
     assert!(store.list_running().unwrap().is_empty());
     let runs = store.list_runs(&def.id).unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].status, RunStatus::Completed);
     // Completion on the definition advances and exhausts.
-    let mut done = def.clone();
-    done.record_completion(2_000).unwrap();
     done.record_completion(3_000).unwrap();
     store.update(&done).unwrap();
     assert_eq!(

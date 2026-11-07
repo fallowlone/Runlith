@@ -17,11 +17,17 @@ use plan_domain::{
 
 use crate::{StorageError, StorageResult};
 
-const CODEC_VERSION: &str = "runlith-approved-plan-changeset-v1";
+/// v1 predates ADR-0051 criterion statements; it stays readable.
+const CODEC_VERSION_V1: &str = "runlith-approved-plan-changeset-v1";
+const CODEC_VERSION: &str = "runlith-approved-plan-changeset-v2";
 
 pub(crate) fn encode(changeset: &PlanChangeSet) -> Vec<u8> {
+    encode_versioned(changeset, CODEC_VERSION)
+}
+
+fn encode_versioned(changeset: &PlanChangeSet, version: &str) -> Vec<u8> {
     let mut out = Vec::new();
-    put_str(&mut out, CODEC_VERSION);
+    put_str(&mut out, version);
     put_u64(&mut out, changeset.base_plan_revision);
     put_str(&mut out, &changeset.reason);
     put_strings(
@@ -40,6 +46,9 @@ pub(crate) fn encode(changeset: &PlanChangeSet) -> Vec<u8> {
         for criterion in &node.criteria {
             put_str(&mut out, criterion.id.as_str());
             put_str(&mut out, criterion.method.as_str());
+            if version == CODEC_VERSION {
+                put_option_str(&mut out, criterion.statement.as_deref());
+            }
         }
         put_str(&mut out, node.risk_class.as_str());
         put_option_str(&mut out, node.required_gate.as_ref().map(GateRef::as_str));
@@ -119,11 +128,15 @@ pub(crate) fn encode(changeset: &PlanChangeSet) -> Vec<u8> {
 
 pub(crate) fn decode(bytes: &[u8]) -> StorageResult<PlanChangeSet> {
     let mut input = Decoder::new(bytes);
-    if input.string()? != CODEC_VERSION {
-        return Err(StorageError::Corrupt(
-            "approved PlanChangeSet has unknown codec version".to_owned(),
-        ));
-    }
+    let has_statements = match input.string()?.as_str() {
+        CODEC_VERSION => true,
+        CODEC_VERSION_V1 => false,
+        _ => {
+            return Err(StorageError::Corrupt(
+                "approved PlanChangeSet has unknown codec version".to_owned(),
+            ))
+        }
+    };
     let base_plan_revision = input.u64()?;
     let reason = input.string()?;
     let source_evidence_refs = input
@@ -134,16 +147,22 @@ pub(crate) fn decode(bytes: &[u8]) -> StorageResult<PlanChangeSet> {
         .map_err(domain)?;
 
     let addition_count = input.len()?;
-    let mut node_additions = Vec::with_capacity(addition_count);
+    let mut node_additions = Vec::new();
     for _ in 0..addition_count {
         let id = PlanNodeId::new(input.string()?).map_err(domain)?;
         let scope = PlanScope::new(input.strings()?).map_err(domain)?;
         let criterion_count = input.len()?;
-        let mut criteria = Vec::with_capacity(criterion_count);
+        let mut criteria = Vec::new();
         for _ in 0..criterion_count {
             let id = CriterionId::new(input.string()?).map_err(domain)?;
             let method = VerificationMethod::from_str(&input.string()?).map_err(domain)?;
-            criteria.push(CriterionDecl::new(id, method));
+            let mut decl = CriterionDecl::new(id, method);
+            if has_statements {
+                if let Some(text) = input.option_string()? {
+                    decl = decl.with_statement(text).map_err(domain)?;
+                }
+            }
+            criteria.push(decl);
         }
         let risk_class = RiskClass::parse(&input.string()?).map_err(domain)?;
         let required_gate = input
@@ -161,7 +180,7 @@ pub(crate) fn decode(bytes: &[u8]) -> StorageResult<PlanChangeSet> {
     }
 
     let update_count = input.len()?;
-    let mut node_updates = Vec::with_capacity(update_count);
+    let mut node_updates = Vec::new();
     for _ in 0..update_count {
         let target = PlanNodeId::new(input.string()?).map_err(domain)?;
         let scope = match input.u8()? {
@@ -197,7 +216,7 @@ pub(crate) fn decode(bytes: &[u8]) -> StorageResult<PlanChangeSet> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(domain)?;
     let edge_addition_count = input.len()?;
-    let mut edge_additions = Vec::with_capacity(edge_addition_count);
+    let mut edge_additions = Vec::new();
     for _ in 0..edge_addition_count {
         edge_additions.push(EdgeAddition {
             from: PlanNodeId::new(input.string()?).map_err(domain)?,
@@ -205,7 +224,7 @@ pub(crate) fn decode(bytes: &[u8]) -> StorageResult<PlanChangeSet> {
         });
     }
     let edge_removal_count = input.len()?;
-    let mut edge_removals = Vec::with_capacity(edge_removal_count);
+    let mut edge_removals = Vec::new();
     for _ in 0..edge_removal_count {
         edge_removals.push(EdgeRemoval {
             from: PlanNodeId::new(input.string()?).map_err(domain)?,
@@ -214,7 +233,7 @@ pub(crate) fn decode(bytes: &[u8]) -> StorageResult<PlanChangeSet> {
     }
     let expected_outcome = input.string()?;
     let risk_count = input.len()?;
-    let mut risk_delta = Vec::with_capacity(risk_count);
+    let mut risk_delta = Vec::new();
     for _ in 0..risk_count {
         risk_delta.push(RiskDelta {
             node: PlanNodeId::new(input.string()?).map_err(domain)?,
@@ -394,7 +413,7 @@ impl<'a> Decoder<'a> {
 
     fn strings(&mut self) -> StorageResult<Vec<String>> {
         let len = self.len()?;
-        let mut values = Vec::with_capacity(len);
+        let mut values = Vec::new();
         for _ in 0..len {
             values.push(self.string()?);
         }
@@ -417,5 +436,114 @@ impl<'a> Decoder<'a> {
                 "approved PlanChangeSet has trailing bytes".to_owned(),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(statements: [Option<&str>; 2]) -> PlanChangeSet {
+        let scope = |root: &str| PlanScope::new(vec![root.to_owned()]).unwrap();
+        let addition = |id: &str, criterion: &str, statement: Option<&str>| {
+            let mut decl = CriterionDecl::new(
+                CriterionId::new(criterion.to_owned()).unwrap(),
+                VerificationMethod::AutomatedTest,
+            );
+            if let Some(text) = statement {
+                decl = decl.with_statement(text).unwrap();
+            }
+            NodeAddition {
+                id: PlanNodeId::new(id.to_owned()).unwrap(),
+                scope: scope("repo:src"),
+                criteria: vec![decl],
+                risk_class: RiskClass::Low,
+                required_gate: None,
+            }
+        };
+        let mut changeset = PlanChangeSet {
+            base_plan_revision: 1,
+            reason: "split".to_owned(),
+            source_evidence_refs: vec![],
+            node_additions: vec![
+                addition("n1", "c-a", statements[0]),
+                addition("n2", "c-b", statements[1]),
+            ],
+            node_updates: vec![],
+            node_removals: vec![],
+            edge_additions: vec![],
+            edge_removals: vec![],
+            expected_outcome: "done".to_owned(),
+            risk_delta: vec![],
+            budget_delta: BudgetDelta::new(1, 2),
+            scope_delta: scope("repo:src"),
+            coverage_map: BTreeMap::new(),
+            proposal_hash: String::new(),
+            proposed_by: PlannerIdentity::new(
+                PlannerAdapterId::new("fake-planner").unwrap(),
+                "m".to_owned(),
+            )
+            .unwrap(),
+            planning_cost_receipt: PlanningCostReceipt::new(1, 1, 1, "c".to_owned()).unwrap(),
+        };
+        changeset.proposal_hash = plan_domain::compute_proposal_hash(&changeset);
+        changeset
+    }
+
+    #[test]
+    fn v2_round_trips_distinct_per_node_statements() {
+        let original = sample([Some("n1 writes a.txt"), Some("n2 writes b.txt")]);
+        let decoded = decode(&encode(&original)).unwrap();
+        assert_eq!(decoded.node_additions, original.node_additions);
+        assert_eq!(
+            decoded.node_additions[1].criteria[0].statement.as_deref(),
+            Some("n2 writes b.txt")
+        );
+    }
+
+    #[test]
+    fn v1_records_stay_readable_without_statements() {
+        let original = sample([None, None]);
+        let v1 = encode_versioned(&original, CODEC_VERSION_V1);
+        assert_ne!(v1, encode(&original));
+        let decoded = decode(&v1).unwrap();
+        assert_eq!(decoded.node_additions, original.node_additions);
+    }
+
+    #[test]
+    fn tampered_statement_fails_the_proposal_hash_check() {
+        let original = sample([Some("aaaa"), None]);
+        let mut bytes = encode(&original);
+        let at = bytes.windows(4).position(|w| w == b"aaaa").unwrap();
+        bytes[at] = b'b';
+        assert!(decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn unknown_codec_version_and_oversized_statement_are_refused() {
+        let original = sample([None, None]);
+        assert!(decode(&encode_versioned(
+            &original,
+            "runlith-approved-plan-changeset-v9"
+        ))
+        .is_err());
+        let mut bytes = encode(&sample([Some("ok"), None]));
+        // Replace "ok" length prefix with a prefix larger than the buffer:
+        // must be an error, not an allocation.
+        let at = bytes.windows(2).position(|w| w == b"ok").unwrap() - 8;
+        bytes[at..at + 8].copy_from_slice(&u64::MAX.to_be_bytes());
+        assert!(matches!(decode(&bytes), Err(StorageError::Corrupt(_))));
+    }
+
+    #[test]
+    fn corrupt_collection_counts_return_errors_without_allocating_from_the_prefix() {
+        let mut bytes = Vec::new();
+        put_str(&mut bytes, CODEC_VERSION);
+        put_u64(&mut bytes, 0);
+        put_str(&mut bytes, "reason");
+        put_u64(&mut bytes, 0);
+        put_u64(&mut bytes, u64::MAX);
+        assert!(matches!(decode(&bytes), Err(StorageError::Corrupt(_))));
+        assert!(Decoder::new(&u64::MAX.to_be_bytes()).strings().is_err());
     }
 }

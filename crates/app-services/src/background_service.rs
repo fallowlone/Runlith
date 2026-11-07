@@ -10,6 +10,9 @@ use background::model::{
 };
 use background::port::RoutineStorePort;
 
+/// Reason recorded on runs that could not execute (F16).
+pub const NO_EXECUTOR_REASON: &str = "no_executor_configured";
+
 #[derive(Debug)]
 pub struct DefineRequest {
     pub name: String,
@@ -116,32 +119,34 @@ impl<S: RoutineStorePort> BackgroundService<S> {
         Ok(out)
     }
 
-    /// One background tick: each due routine runs at most once (B-7).
-    /// A run completes with `evidence` as its evidence reference.
-    pub fn tick(&mut self, now: u64, evidence: &str) -> Result<Vec<RoutineRun>, BackgroundError> {
+    /// One background tick: each due routine is attempted at most once
+    /// (B-7). No executor is wired yet (F16), so the run ends BLOCKED
+    /// with `no_executor_configured` and consumes NO budget.
+    pub fn tick(&mut self, now: u64, _evidence: &str) -> Result<Vec<RoutineRun>, BackgroundError> {
+        self.tick_blocked(now, NO_EXECUTOR_REASON)
+    }
+
+    pub fn tick_blocked(
+        &mut self,
+        now: u64,
+        reason: &str,
+    ) -> Result<Vec<RoutineRun>, BackgroundError> {
         if self.draining {
             return Err(BackgroundError::Draining("daemon is draining".to_owned()));
         }
         let mut out = Vec::new();
         for mut def in self.store.list_due(now)? {
-            let seq = u128::from(self.id_seq.fetch_add(1, Ordering::SeqCst));
-            let mut run = RoutineRun::start(mint_run_id(now, seq), def.id.clone(), now)?;
-            self.store.start_run(&run)?;
-            run.complete(evidence, now)?;
-            self.store.update_run(&run)?;
-            def.record_completion(now)?;
-            self.store.update(&def)?;
-            out.push(run);
+            out.push(self.attempt(&mut def, now, reason)?);
         }
         Ok(out)
     }
 
-    /// Runs one routine immediately when it is authorized (run-now).
+    /// Attempts one routine immediately when it is authorized (run-now).
     pub fn run_now(
         &mut self,
         id: &RoutineId,
         now: u64,
-        evidence: &str,
+        _evidence: &str,
     ) -> Result<RoutineRun, BackgroundError> {
         if self.draining {
             return Err(BackgroundError::Draining("daemon is draining".to_owned()));
@@ -157,13 +162,22 @@ impl<S: RoutineStorePort> BackgroundService<S> {
         if def.runs_completed >= def.budget_max_runs {
             return Err(BackgroundError::BudgetExhausted(def.id.to_string()));
         }
+        self.attempt(&mut def, now, NO_EXECUTOR_REASON)
+    }
+
+    fn attempt(
+        &mut self,
+        def: &mut RoutineDefinition,
+        now: u64,
+        reason: &str,
+    ) -> Result<RoutineRun, BackgroundError> {
         let seq = u128::from(self.id_seq.fetch_add(1, Ordering::SeqCst));
-        let mut run = RoutineRun::start(mint_run_id(now, seq), def.id.clone(), now)?;
-        self.store.start_run(&run)?;
-        run.complete(evidence, now)?;
-        self.store.update_run(&run)?;
-        def.record_completion(now)?;
-        self.store.update(&def)?;
+        let started = RoutineRun::start(mint_run_id(now, seq), def.id.clone(), now)?;
+        let mut run = started.clone();
+        run.block_with_reason(reason, now)?;
+        self.store.start_run(&started)?;
+        def.record_blocked(now);
+        self.store.finish_run(def, &run)?;
         Ok(run)
     }
 }

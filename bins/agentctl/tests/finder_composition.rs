@@ -87,7 +87,8 @@ impl Sandbox {
         let endpoint = self.endpoint.clone();
         let db = self.db.clone();
         tokio::spawn(async move {
-            let config = agentd::DaemonConfig::with_execution(db);
+            let config =
+                agentd::DaemonConfig::with_execution(db).with_confirmed_user_presence_for_tests();
             agentd::run_on_endpoint(&endpoint, config).await
         })
     }

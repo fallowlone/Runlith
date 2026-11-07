@@ -45,7 +45,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode<const N: usize>(raw: &str, what: &str) -> Result<[u8; N], WorkerError> {
-    if raw.len() != N * 2 {
+    if raw.len() != N * 2 || !raw.is_ascii() {
         return Err(WorkerError::InvalidInput(format!(
             "{what} must be {} hex chars",
             N * 2
@@ -238,5 +238,61 @@ pub fn dispatch<S: WorkerStorePort>(
             Err(e) => map_error(&e),
         },
         None => error_response("invalid_input", "missing worker payload"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_hex_enrollment_refuses_without_mutating_the_store() {
+        let root = tempfile::tempdir().unwrap();
+        let store = storage_sqlite::SqliteStore::open(root.path().join("state.sqlite3")).unwrap();
+        let mut service = WorkerService::new(store);
+        for public_key_hex in [
+            "\u{1f4a5}".repeat(16),
+            format!("a{}", "\u{3042}".repeat(21)),
+            "gg".repeat(32),
+            String::new(),
+        ] {
+            let response = dispatch(
+                &mut service,
+                WorkerCoreRequest {
+                    payload: Some(worker_core_request::Payload::Enroll(
+                        ipc_contracts::proto::WorkerEnrollRequest {
+                            name: "unicode-fixture".to_owned(),
+                            public_key_hex,
+                            enrolled_by: "fixture-operator".to_owned(),
+                            now_millis: 1,
+                        },
+                    )),
+                },
+            );
+            assert!(matches!(response.payload,
+                Some(worker_core_response::Payload::Error(error)) if error.code == "invalid_input"));
+        }
+        assert!(service.list_devices().unwrap().is_empty());
+        let (_, public) = worker::model::keypair_from_secret(&[7; 32]).unwrap();
+        let enrolled = dispatch(
+            &mut service,
+            WorkerCoreRequest {
+                payload: Some(worker_core_request::Payload::Enroll(
+                    ipc_contracts::proto::WorkerEnrollRequest {
+                        name: "valid-fixture".to_owned(),
+                        public_key_hex: hex_encode(&public),
+                        enrolled_by: "fixture-operator".to_owned(),
+                        now_millis: 2,
+                    },
+                )),
+            },
+        );
+        assert!(matches!(
+            enrolled.payload,
+            Some(worker_core_response::Payload::Device(_))
+        ));
+        assert_eq!(service.list_devices().unwrap().len(), 1);
+        assert_eq!(hex_decode::<3>("00Ff80", "key").unwrap(), [0, 255, 128]);
+        assert!(hex_decode::<64>(&"\u{1f4a5}".repeat(32), "signature").is_err());
     }
 }

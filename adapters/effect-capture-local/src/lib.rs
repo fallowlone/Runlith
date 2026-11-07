@@ -241,6 +241,8 @@ impl LocalEffectCapture {
     }
 }
 
+mod secure_read;
+
 fn artifact(path: &str, subject_ref: &str) -> Result<CapturedObservation, EffectError> {
     let canonical =
         fs::canonicalize(path).map_err(|_| EffectError::CaptureFailed("artifact unavailable"))?;
@@ -249,7 +251,14 @@ fn artifact(path: &str, subject_ref: &str) -> Result<CapturedObservation, Effect
     if !pre.is_file() || pre.file_type().is_symlink() {
         return Err(EffectError::CaptureFailed("artifact is not a regular file"));
     }
-    let mut file = fs::File::open(&canonical)
+    let anchor = canonical
+        .ancestors()
+        .last()
+        .ok_or(EffectError::CaptureFailed("artifact path unavailable"))?;
+    let relative = canonical
+        .strip_prefix(anchor)
+        .map_err(|_| EffectError::CaptureFailed("artifact path unavailable"))?;
+    let mut file = secure_read::open_beneath(anchor, relative)
         .map_err(|_| EffectError::CaptureFailed("artifact unavailable"))?;
     let opened = file
         .metadata()
@@ -366,7 +375,7 @@ fn walk(
                     "filesystem content exceeded bound",
                 ));
             }
-            let mut file = fs::File::open(&item_path)
+            let mut file = secure_read::open_beneath(root, relative)
                 .map_err(|_| EffectError::CaptureFailed("filesystem file unavailable"))?;
             let opened = file
                 .metadata()
@@ -395,6 +404,7 @@ fn walk(
                 digest: None,
             });
             walk(root, &item_path, entries, depth + 1, total_bytes, deadline)?;
+            verify_same_path_identity(&item_path, &metadata)?;
         } else {
             return Err(EffectError::CaptureFailed(
                 "filesystem state contains unsupported entry",
@@ -460,7 +470,13 @@ fn verify_same_path_identity(path: &Path, expected: &fs::Metadata) -> Result<(),
 #[cfg(unix)]
 fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
-    left.dev() == right.dev() && left.ino() == right.ino()
+    left.dev() == right.dev()
+        && left.ino() == right.ino()
+        && left.len() == right.len()
+        && left.mtime() == right.mtime()
+        && left.mtime_nsec() == right.mtime_nsec()
+        && left.ctime() == right.ctime()
+        && left.ctime_nsec() == right.ctime_nsec()
 }
 
 #[cfg(not(unix))]
@@ -496,6 +512,49 @@ mod tests {
             ExecutionId::new("execution-1").unwrap(),
             AttemptId::new("attempt-1").unwrap(),
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_refuses_content_changes_on_the_same_inode() {
+        use std::os::unix::fs::MetadataExt;
+        use std::time::{Duration, SystemTime};
+
+        let path = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "runlith-capture-version-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        let mut file = fs::File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"before").unwrap();
+        file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+            .unwrap();
+        let before = file.metadata().unwrap();
+        let mut reader = fs::File::open(&path).unwrap();
+        let (_, bytes) =
+            hash_reader(&mut reader, Instant::now() + TIMEOUT, MAX_CAPTURE_BYTES).unwrap();
+        assert_eq!(bytes, before.len());
+        verify_same_path_identity(&path, &before).unwrap();
+
+        fs::write(&path, b"edited").unwrap();
+        file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(2))
+            .unwrap();
+        let edited = file.metadata().unwrap();
+        assert_eq!((before.dev(), before.ino()), (edited.dev(), edited.ino()));
+        assert_eq!(before.len(), edited.len());
+        let result = verify_same_path_identity(&path, &before);
+        fs::remove_file(path).unwrap();
+        assert!(matches!(result, Err(EffectError::CaptureFailed(_))));
     }
 
     #[test]

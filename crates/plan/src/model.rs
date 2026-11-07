@@ -322,10 +322,7 @@ impl PlanChangeSet {
                 )));
             }
             // ADR-0030 §2/§6 (TASK-0123): one node declares each criterion at
-            // most once. V3 compares methods through a last-wins map, so a
-            // duplicate would pass validation and then fail materialization as
-            // an untyped service error — refused here as malformed input
-            // instead, so it is a typed refusal with a durable L3 count.
+            // most once, so malformed criteria cannot reach materialization.
             let mut criteria = std::collections::BTreeSet::new();
             for criterion in &addition.criteria {
                 if !criteria.insert(criterion.id.as_str()) {

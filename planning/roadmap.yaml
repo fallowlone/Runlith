@@ -8,7 +8,7 @@
 # Near-term work lives in planning/tasks/queue.yaml, not here.
 
 schema_version: 1
-current_gate: G14
+current_gate: G16
 task_queue: planning/tasks/queue.yaml
 
 gates:
@@ -220,6 +220,16 @@ gates:
       in ADR-0048 (TASK-0216); requires owner ratification before
       any G15 implementation task starts.
     scope_ref: docs/architecture/adr/ADR-0048-g15-git-graph-operations-contract.md
+
+  - id: G16
+    name: Desktop UI
+    status: in_progress
+    objective: >-
+      A thin Tauri client over agentd contracts (ADR-0007, ADR-0016) with a
+      customizable overview: widgets are data, never code, and any model
+      output is untrusted (INV-093) until it passes a closed validator.
+      Ratified by the owner on 2026-11-01.
+    scope_ref: docs/ui/proposals/TASK-PROPOSED-G16-LIVE-WIDGETS.md
 
 future_product_engineering_spikes:
   - id: UI-TECHNOLOGY-SPIKE

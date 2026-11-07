@@ -38,6 +38,35 @@ fn unauthorized_routine_never_ticks() {
 }
 
 #[test]
+fn user_presence_blocks_scheduled_runs_without_consuming_budget() {
+    let (mut service, db) = service();
+    let definition = service.define(request(), 1_000).unwrap();
+    service
+        .authorize(&definition.id, "operator", 1_000)
+        .unwrap();
+    let before = service.get(&definition.id).unwrap();
+    assert!(service.tick_blocked(2_000, " ").is_err());
+    assert_eq!(service.get(&definition.id).unwrap(), before);
+    assert!(service.list_runs(&definition.id).unwrap().is_empty());
+    let runs = service
+        .tick_blocked(2_000, "user_presence_required")
+        .unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, RunStatus::Blocked);
+    assert_eq!(
+        runs[0].evidence_ref.as_deref(),
+        Some("user_presence_required")
+    );
+    assert_eq!(service.get(&definition.id).unwrap().runs_completed, 0);
+    drop(service);
+    let reopened = BackgroundService::new(SqliteStore::open(&db).unwrap());
+    assert_eq!(reopened.list_runs(&definition.id).unwrap(), runs);
+    assert_eq!(reopened.get(&definition.id).unwrap().runs_completed, 0);
+    drop(reopened);
+    std::fs::remove_file(db).unwrap();
+}
+
+#[test]
 fn self_authorization_refused_then_operator_authorizes_and_ticks() {
     let (mut svc, db) = service();
     let def = svc.define(request(), 1_000).unwrap();
@@ -46,13 +75,22 @@ fn self_authorization_refused_then_operator_authorizes_and_ticks() {
     svc.authorize(&def.id, "operator", 1_000).unwrap();
     let runs = svc.tick(2_000, "evidence:tick").unwrap();
     assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].status, RunStatus::Completed);
-    // Not due again until interval passes; budget 2 allows one more.
+    assert_eq!(runs[0].status, RunStatus::Blocked);
+    assert_eq!(
+        runs[0].evidence_ref.as_deref(),
+        Some("no_executor_configured")
+    );
+    assert_eq!(
+        svc.get(&def.id).unwrap().runs_completed,
+        0,
+        "no budget consumed"
+    );
+    // Not due again until interval passes.
     assert!(svc.tick(3_000, "evidence:tick").unwrap().is_empty());
     let runs = svc.tick(2_000 + 3_600_000, "evidence:tick").unwrap();
     assert_eq!(runs.len(), 1);
-    assert_eq!(svc.get(&def.id).unwrap().state, RoutineState::Exhausted);
-    assert!(svc.tick(9_999_999_999, "evidence:tick").unwrap().is_empty());
+    // Blocked runs never exhaust the budget.
+    assert_eq!(svc.get(&def.id).unwrap().state, RoutineState::Authorized);
     std::fs::remove_file(db).ok();
 }
 

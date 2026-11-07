@@ -114,9 +114,34 @@ impl crate::task_store::SqliteStore {
 
     fn acquire_cycle_lock(&self, lock_path: PathBuf) -> StorageResult<Option<ExecutionCycleGuard>> {
         if let Some(directory) = lock_path.parent() {
-            std::fs::create_dir_all(directory).map_err(|error| {
-                StorageError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
-            })?;
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(StorageError::UnsafePath(error.to_string())),
+            }
+            let metadata = std::fs::symlink_metadata(directory)
+                .map_err(|error| StorageError::UnsafePath(error.to_string()))?;
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err(StorageError::UnsafePath(
+                    "invalid execution lock directory".to_owned(),
+                ));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o7022 != 0 {
+                    return Err(StorageError::UnsafePath(
+                        "execution lock directory must be owned by this user and not writable by other users"
+                            .to_owned(),
+                    ));
+                }
+            }
         }
         let file = lock_cycle_file(&lock_path)?;
         Ok(file.map(|file| ExecutionCycleGuard { _file: Some(file) }))
@@ -129,6 +154,7 @@ impl crate::task_store::SqliteStore {
 /// database itself is not yet implemented (Windows `path_security`).
 #[cfg(unix)]
 fn lock_cycle_file(lock_path: &std::path::Path) -> StorageResult<Option<std::fs::File>> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     use std::os::unix::io::AsRawFd;
 
     let file = std::fs::OpenOptions::new()
@@ -136,10 +162,24 @@ fn lock_cycle_file(lock_path: &std::path::Path) -> StorageResult<Option<std::fs:
         .write(true)
         .create(true)
         .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(lock_path)
         .map_err(|error| {
             StorageError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
         })?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| StorageError::UnsafePath(error.to_string()))?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o7133 != 0
+    {
+        return Err(StorageError::UnsafePath(
+            "invalid execution cycle lock file".to_owned(),
+        ));
+    }
     let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if result != 0 {
         let error = std::io::Error::last_os_error();
@@ -210,6 +250,46 @@ fn lock_cycle_file(_lock_path: &std::path::Path) -> StorageResult<Option<std::fs
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlink_directories_and_symlink_or_hardlinked_lock_files() {
+        use std::os::unix::fs::{symlink, DirBuilderExt, PermissionsExt};
+        let root = std::env::temp_dir().join(format!(
+            "runlith-lock-admission-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let store = crate::SqliteStore::open(root.join("state.sqlite3")).unwrap();
+        let outside = root.join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let locks = root.join("execution-cycle-locks");
+        let execution = ExecutionId::new("E-ADMISSION").unwrap();
+        symlink(&outside, &locks).unwrap();
+        assert!(store.try_acquire_execution_cycle(&execution).is_err());
+        assert!(!outside.join("E-ADMISSION.lock").exists());
+        std::fs::remove_file(&locks).unwrap();
+        std::fs::create_dir(&locks).unwrap();
+        let canary = root.join("canary");
+        std::fs::write(&canary, b"unchanged").unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let lock = locks.join("E-ADMISSION.lock");
+        symlink(&canary, &lock).unwrap();
+        assert!(store.try_acquire_execution_cycle(&execution).is_err());
+        std::fs::remove_file(&lock).unwrap();
+        std::fs::hard_link(&canary, &lock).unwrap();
+        assert!(store.try_acquire_execution_cycle(&execution).is_err());
+        assert_eq!(std::fs::read(&canary).unwrap(), b"unchanged");
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn cycle_guard_excludes_second_holder_until_release() {

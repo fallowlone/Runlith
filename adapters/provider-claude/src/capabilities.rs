@@ -48,6 +48,8 @@ pub struct ClaudeCapabilities {
     /// a role as the session's own context instead of as a message-body
     /// instruction competing with the provider's default prompt.
     pub system_prompt_override: bool,
+    /// Answers held to a JSON Schema (`--json-schema`).
+    pub structured_answers: bool,
     /// Execution inside a caller-bound working directory. Always true:
     /// cwd binding is adapter-enforced (`current_dir`), not CLI-advertised.
     pub workspace_execution: bool,
@@ -79,6 +81,7 @@ impl ClaudeCapabilities {
             tool_restriction: false,
             mcp_tool_denial: false,
             system_prompt_override: false,
+            structured_answers: false,
             workspace_execution: true,
             cancellation: true,
             usage_reporting: false,
@@ -113,6 +116,7 @@ pub fn probe_capabilities(executable: &OsStr, version: Option<CliVersion>) -> Cl
         tool_restriction: help.contains("--tools"),
         mcp_tool_denial: help.contains("--disallowedTools") || help.contains("--disallowed-tools"),
         system_prompt_override: help.contains("--system-prompt"),
+        structured_answers: help.contains("--json-schema"),
         workspace_execution: true,
         cancellation: true,
         usage_reporting: structured_json,

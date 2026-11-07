@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::framing::FramedTransport;
+use crate::platform::client_auth::{verify_endpoint_nodes, verify_peer_uid};
+use crate::platform::peer::{peer_identity, peer_uid};
 use crate::{TransportError, TransportResult};
 
 /// Socket node inside the private runtime directory.
@@ -106,6 +108,39 @@ pub fn preflight_socket_path(path: &Path) -> TransportResult<()> {
     Ok(())
 }
 
+pub fn open_runtime_log(
+    endpoint: &UnixEndpoint,
+    name: &str,
+    write: bool,
+) -> TransportResult<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if name != crate::STARTUP_LOG_FILE_NAME && name != crate::STDERR_LOG_FILE_NAME {
+        return Err(TransportError::EndpointSecurity(
+            "invalid runtime log name".to_owned(),
+        ));
+    }
+    validate_runtime_dir(&endpoint.runtime_dir)?;
+    let file = std::fs::OpenOptions::new()
+        .read(!write)
+        .write(write)
+        .append(write)
+        .create(write)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(endpoint.runtime_dir.join(name))?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != current_uid()
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err(TransportError::EndpointSecurity(
+            "unsafe runtime log file".to_owned(),
+        ));
+    }
+    Ok(file)
+}
+
 /// Creates the application-owned runtime directory when absent and admits
 /// an existing one only when it is owned by the current effective UID, is
 /// not a symlink, and has exactly mode `0700`. Anything else fails closed:
@@ -114,17 +149,21 @@ pub fn preflight_socket_path(path: &Path) -> TransportResult<()> {
 pub fn ensure_runtime_dir(dir: &Path) -> TransportResult<()> {
     match fs::symlink_metadata(dir) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir(dir).map_err(|error| match error.kind() {
-                io::ErrorKind::PermissionDenied => TransportError::EndpointSecurity(format!(
-                    "cannot create runtime directory {}: permission denied",
-                    dir.display()
-                )),
-                io::ErrorKind::NotFound => TransportError::InvalidEndpoint(format!(
-                    "runtime parent for {} does not exist",
-                    dir.display()
-                )),
-                _ => TransportError::Io(error),
-            })?;
+            use std::os::unix::fs::DirBuilderExt;
+            fs::DirBuilder::new()
+                .mode(RUNTIME_DIR_MODE)
+                .create(dir)
+                .map_err(|error| match error.kind() {
+                    io::ErrorKind::PermissionDenied => TransportError::EndpointSecurity(format!(
+                        "cannot create runtime directory {}: permission denied",
+                        dir.display()
+                    )),
+                    io::ErrorKind::NotFound => TransportError::InvalidEndpoint(format!(
+                        "runtime parent for {} does not exist",
+                        dir.display()
+                    )),
+                    _ => TransportError::Io(error),
+                })?;
             // Harden against umask: enforce 0700 explicitly, then re-validate.
             fs::set_permissions(dir, fs::Permissions::from_mode(RUNTIME_DIR_MODE))?;
             validate_runtime_dir(dir)
@@ -342,7 +381,9 @@ pub fn bind_server(endpoint: &UnixEndpoint) -> TransportResult<UnixListener> {
 /// Connects a local client stream. No TCP, no retries, no spawn: lifecycle
 /// belongs to TASK-0020.
 pub async fn connect(endpoint: &UnixEndpoint) -> TransportResult<UnixStream> {
-    UnixStream::connect(&endpoint.socket_path)
+    let uid = current_uid();
+    verify_endpoint_nodes(&endpoint.runtime_dir, &endpoint.socket_path, uid)?;
+    let stream = UnixStream::connect(&endpoint.socket_path)
         .await
         .map_err(|error| match error.kind() {
             io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
@@ -355,7 +396,10 @@ pub async fn connect(endpoint: &UnixEndpoint) -> TransportResult<UnixStream> {
                 endpoint.socket_path.display()
             )),
             _ => TransportError::Io(error),
-        })
+        })?;
+    // Authenticate the daemon before any handshake/secret byte is written.
+    verify_peer_uid(peer_uid(&peer_identity(&stream)?), uid)?;
+    Ok(stream)
 }
 
 /// Accepts one inbound byte stream. Handshake/session handling belongs to
@@ -452,6 +496,27 @@ mod tests {
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn runtime_log_admission_refuses_symlinks_and_hardlinks_without_writing_the_target() {
+        use std::io::Write;
+        let sandbox = Sandbox::new("log-admission");
+        ensure_runtime_dir(&sandbox.endpoint.runtime_dir).unwrap();
+        let name = crate::STDERR_LOG_FILE_NAME;
+        let path = sandbox.endpoint.runtime_dir.join(name);
+        let mut file = open_runtime_log(&sandbox.endpoint, name, true).unwrap();
+        file.write_all(b"original").unwrap();
+        drop(file);
+        let target = sandbox.root.join("target");
+        fs::rename(&path, &target).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(open_runtime_log(&sandbox.endpoint, name, true).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+        fs::remove_file(&path).unwrap();
+        fs::hard_link(&target, &path).unwrap();
+        assert!(open_runtime_log(&sandbox.endpoint, name, true).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+    }
 
     /// Test-owned sandbox under `/tmp` with a short unique name: macOS
     /// `sun_path` fits 104 bytes, so sandboxes must stay short. Removed on

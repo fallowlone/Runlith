@@ -1,16 +1,20 @@
 //! Post-admission recovery across a real daemon restart (TASK-0054).
 //!
-//! Shipped `agentd` + `agentctl` processes against test-owned runtime/data
+//! Shipped `agentctl` + an explicit-confirmation daemon fixture against test-owned runtime/data
 //! directories, with a fixture provider named `claude` on `PATH`. A
 //! detached `run` followed by an immediate `SIGSTOP` + `SIGKILL` strands
 //! the entry pre-attempt (the background half never runs — the frozen
 //! process is killed); the restarted daemon then reports the honest
 //! intermediate, and `execution resume` drives the SAME execution to its
 //! terminal outcome through the production control plane.
+//! The fixture changes only user-presence composition; Runner isolation remains mandatory.
 //!
 //! Unix-only. No quota, no network, no real Claude.
 
 #![cfg(unix)]
+
+#[path = "support/process_fixture.rs"]
+mod process_fixture;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -18,13 +22,6 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use workspace::WorkspaceStore;
-
-fn workspace_bin(name: &str) -> PathBuf {
-    let mut dir = std::env::current_exe().expect("test executable path");
-    dir.pop();
-    dir.pop();
-    dir.join(name)
-}
 
 struct Sandbox {
     root: PathBuf,
@@ -39,6 +36,7 @@ impl Sandbox {
         let root =
             PathBuf::from("/tmp").join(format!("g5-recovery-{}-{suite}-{id}", std::process::id()));
         std::fs::create_dir_all(&root).expect("sandbox root");
+        process_fixture::install(&root);
         std::fs::create_dir_all(root.join("run")).expect("runtime parent");
         std::fs::create_dir_all(root.join("data")).expect("data parent");
         let repo = root.join("repo");
@@ -69,7 +67,7 @@ impl Sandbox {
     }
 
     fn agentctl(&self, args: &[&str]) -> Output {
-        Command::new(workspace_bin("agentctl"))
+        Command::new(process_fixture::binary(&self.root, "agentctl"))
             .args(args)
             .env("AI_ENGINEERING_OS_RUNTIME_DIR", self.root.join("run"))
             .env("AI_ENGINEERING_OS_DATA_DIR", self.root.join("data"))
@@ -79,7 +77,7 @@ impl Sandbox {
     }
 
     fn spawn_agentd(&self) -> Child {
-        Command::new(workspace_bin("agentd"))
+        Command::new(process_fixture::binary(&self.root, "agentd"))
             .env("AI_ENGINEERING_OS_RUNTIME_DIR", self.root.join("run"))
             .env("AI_ENGINEERING_OS_DATA_DIR", self.root.join("data"))
             .env("PATH", &self.path_env)
@@ -369,7 +367,7 @@ fn seed_accepted_plan(sandbox: &Sandbox, task: &str) {
     ));
 }
 
-const SUCCESS_BODY: &str = r#"printf '{"type":"result","subtype":"success","is_error":false,"result":"binary recovery fixture finished","session_id":"dddddddd-dddd-dddd-dddd-dddddddddddd"}'; exit 0
+const SUCCESS_BODY: &str = r#"echo changed > fixture-output.txt; printf '{"type":"result","subtype":"success","is_error":false,"result":"binary recovery fixture finished","session_id":"dddddddd-dddd-dddd-dddd-dddddddddddd"}'; exit 0
 "#;
 
 /// Stranded status shape: RUNNING, nothing live, zero attempt lines.

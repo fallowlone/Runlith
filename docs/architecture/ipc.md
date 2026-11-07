@@ -126,12 +126,19 @@ evidence only — not Task failure, database corruption, or daemon
 process proof-of-death; the client may reconnect/probe per lifecycle
 logic.
 
-Shutdown is an empty request with an acknowledgement reply; no force
-flag, grace period, descendant handling, or reason code exists. During
+Shutdown is an empty request; no force flag or client-chosen grace period
+exists. The reply acknowledges an accepted shutdown or carries an optional
+`denial_reason`. During
 G1, a client may send `ShutdownRequest` only after successful handshake
 over the secured per-user IPC endpoint. Authorization basis for G1 is
 OS/user-private endpoint admission plus successful protocol handshake —
-not `client_kind`. This is a bootstrap local-user control policy.
+not `client_kind`. This is the historical bootstrap local-user policy.
+Since [ADR-0050](./adr/ADR-0050-os-user-presence-for-local-control.md),
+Shutdown also requires a fresh daemon-owned OS confirmation. A refusal
+returns `denial_reason`, leaves the daemon running and does not acknowledge
+shutdown. Run/Resume execution requests require the same confirmation;
+refusal is `USER_PRESENCE_REQUIRED` without execution admission. Read-only
+queries stay available. A missing interactive OS session fails closed.
 
 On accepted `ShutdownRequest`, `agentd` enters internal `SHUTTING_DOWN`
 lifecycle state (daemon process terminology, not a Task lifecycle state —
@@ -146,7 +153,8 @@ shutdown state. There is no `ForceKillRequest`: if graceful shutdown
 times out, failure is surfaced, and launcher-side process-force-termination
 stays a separate OS lifecycle concern, never a generic IPC command.
 
-Timing: the client waits 5 seconds for `ShutdownResponse`; after
+Timing: the client waits 45 seconds for `ShutdownResponse`, including the
+30-second OS confirmation bound; after
 acknowledgement, launcher/client allows another 5 seconds for daemon
 process/endpoint disappearance. If either deadline expires, a shutdown
 timeout is reported — success is never silently claimed.
@@ -169,6 +177,14 @@ transport → OS peer authentication (same OS-user principal) →
 handshake → READY, with the Windows first-frame staging exception
 (one bounded frame read as opaque bytes before token authentication;
 no protocol authority until authentication succeeds).
+
+Unix clients also authenticate the daemon before sending a handshake or
+business data: the runtime directory and socket must have the expected owner
+and private permissions, and the connected socket's kernel peer UID must
+match the current user. Both the CLI and native desktop client use this
+transport check. Installation identity and human presence remain separate
+authority requirements. ADR-0050 implements the latter on macOS for
+protected operations; no same-UID-readable file token substitutes for it.
 
 Even after handshake, a client request is not automatic authorization:
 future business/privileged operations still require relevant
@@ -434,6 +450,25 @@ this contract atomically — including the three new journal types
 any CLI command shipped, and old-G1-client compatibility is preserved
 and tested.
 
+### Optional bounded list pages
+
+`task-list-pages-v1` extends the existing business envelope without changing
+the protocol number. Clients request it in the handshake and use page fields
+only after the daemon accepts it. The daemon rejects page requests from a
+session without that capability before dispatch.
+
+`ListProjectsRequest` and `ListTasksForProjectRequest` accept `after_id` and
+`page_size` (1–256). Results are ordered by ID, restricted to the requested
+project for tasks, and bounded by both item count and the 1 MiB frame cap.
+Responses carry `next_after_id`: empty means finished; otherwise the client
+passes the last returned ID into its next request. Each page is a separate
+read, so concurrent changes can require restarting the list.
+
+Omitted page fields preserve the legacy single-response list. A legacy list
+that exceeds one frame returns a typed error requesting pagination; it never
+silently returns a prefix. The CLI and native desktop client collect every
+page and reject a cursor that does not advance.
+
 ## 16. G5 protocol v2: provider-neutral execution IPC (implemented)
 
 Accepted in
@@ -604,3 +639,45 @@ quota are enforced there, never in the CLI. Account private keys never
 cross the wire: envelope sealing is local (`agentctl org sync seal`,
 `org keygen`), and the org AEAD key is presented per accept call over
 the authenticated local IPC only — never stored or logged.
+
+## 21. G16 protocol v13: widget authoring IPC (implemented)
+
+Protocol version 13 adds the bounded `widget_core` envelope
+(`widget_core = 16`, TASK-0230). Verbs: `start`, `status`, `cancel`.
+Sessions below V13 receive a typed `UnsupportedProtocol` refusal.
+
+A control channel handles one request at a time and the desktop host waits
+5 s for a response, while a provider call can take a minute. Drafting is
+therefore a job: `start` returns at once with a `job_id`, the provider runs
+on its own thread, and the client polls `status`. Other connections are
+served meanwhile, so `connection_status` stays responsive during a draft
+(`bins/agentctl/tests/widget_control.rs`). At most one draft runs at a time;
+jobs live in memory only and do not survive a daemon restart. `cancel` reaches
+the running call through its `CancelFlag`.
+
+Terminal states are `PROPOSED`, `REFUSED`, `FAILED` and `CANCELLED`. `FAILED`
+carries one `failure_code`: `provider_missing`, `provider_incompatible`,
+`provider_unavailable`, `not_authenticated`, `timed_out`, `bad_output` or
+`failed`.
+
+The provider receives only the person's text and the list of sources, with
+no tools, no files, an empty working directory, and output limited by
+`--json-schema`. Its answer is untrusted (INV-093): `crates/widget-spec`
+parses it, and only a `source` from the closed list and a valid `repo` cross
+the wire. Provider prose never does. `failure_detail` is a bounded diagnostic
+for `agentctl`; the desktop UI shows fixed wording per code instead.
+
+agentd does not call GitHub and does not store layouts. Both belong to the
+desktop host (`apps/desktop/src-tauri`), which validates a layout again on save.
+
+## 22. ADR-0051 protocol v14: workspace-change intent (implemented)
+
+Protocol version 14 lets `CreatePlanningTaskRequest` carry
+`optional bool requires_workspace_change = 7`. `false` declares scoped
+work that may finish with an unchanged worktree (it does not restrict
+writes; scope, confinement and verification still apply); absent keeps the default obligation (a scoped attempt must
+change the worktree). The daemon stores it as Task intent (DRAFT-only) and
+`PlanningTaskDto.requires_workspace_change` echoes it. A session below V14
+that sends the field receives a typed `UnsupportedProtocol` refusal; the
+field is never silently dropped. `agentctl task create-planned ... --allow-no-change`
+negotiates V14 and fails against an older daemon instead of sending it.

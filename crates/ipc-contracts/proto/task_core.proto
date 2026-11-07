@@ -81,6 +81,7 @@ enum BusinessErrorCode {
   UNSUPPORTED_PROTOCOL = 8;
   INTERNAL = 9;
   PROVIDER_UNAVAILABLE = 10;
+  USER_PRESENCE_REQUIRED = 11;
 }
 
 // Typed business failure. Returned as the `error` variant of
@@ -99,7 +100,10 @@ message GetProjectRequest {
   string id = 1;
 }
 
-message ListProjectsRequest {}
+message ListProjectsRequest {
+  string after_id = 1;
+  uint32 page_size = 2;
+}
 
 message CreateTaskRequest {
   string id = 1;
@@ -113,6 +117,8 @@ message GetTaskRequest {
 
 message ListTasksForProjectRequest {
   string project_id = 1;
+  string after_id = 2;
+  uint32 page_size = 3;
 }
 
 // Dependency edges carry Task IDs only. The server owns all edge
@@ -162,6 +168,7 @@ message GetProjectResponse {
 
 message ListProjectsResponse {
   repeated ProjectDto projects = 1;
+  string next_after_id = 2;
 }
 
 message CreateTaskResponse {
@@ -174,6 +181,7 @@ message GetTaskResponse {
 
 message ListTasksResponse {
   repeated TaskDto tasks = 1;
+  string next_after_id = 2;
 }
 
 message AddDependencyResponse {}

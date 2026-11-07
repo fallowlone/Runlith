@@ -515,10 +515,13 @@ fn check_criteria_preservation(
     changeset: &PlanChangeSet,
     ctx: &ValidationContext,
 ) -> Result<bool, ValidationRefusal> {
-    let mut declared: BTreeMap<&str, VerificationMethod> = BTreeMap::new();
+    let mut declared: BTreeMap<&str, Vec<VerificationMethod>> = BTreeMap::new();
     for addition in &changeset.node_additions {
         for criterion in &addition.criteria {
-            declared.insert(criterion.id.as_str(), criterion.method);
+            declared
+                .entry(criterion.id.as_str())
+                .or_default()
+                .push(criterion.method);
         }
     }
     let mut requirement_changed = false;
@@ -547,11 +550,12 @@ fn check_criteria_preservation(
                         ),
                     });
                 }
-                Some(method) => {
-                    if *method != parent.method
-                        || parent.requirement.as_ref().is_some_and(|requirement| {
-                            let kind = crate::risk::requirement_kind_for_method(*method);
-                            requirement.requirement_kind != kind
+                Some(methods) => {
+                    if methods.iter().any(|method| {
+                        *method != parent.method
+                            || parent.requirement.as_ref().is_some_and(|requirement| {
+                                let kind = crate::risk::requirement_kind_for_method(*method);
+                                requirement.requirement_kind != kind
                                 || requirement.subject_binding != kind.default_subject_binding()
                                 || (!requirement.params.is_empty()
                                     && !is_authorized_bound_candidate_params(requirement))
@@ -565,8 +569,8 @@ fn check_criteria_preservation(
                                         fingerprint != ctx.policy_fingerprint
                                     })
                                 || !requirement.required
-                        })
-                    {
+                            })
+                    }) {
                         requirement_changed = true;
                     }
                 }

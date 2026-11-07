@@ -293,7 +293,7 @@ pub(crate) fn spawn_and_supervise(
             join_drain(stderr_buf, stderr_handle);
             break ChildOutcome::Cancelled;
         }
-        match child.try_wait() {
+        match runner::try_wait_process_tree(&mut child) {
             Ok(Some(status)) => {
                 // Natural exit: the child is reaped, but a double-forked
                 // daemon grandchild may still hold an inherited pipe end.
@@ -335,79 +335,9 @@ pub(crate) fn spawn_and_supervise(
     Ok(outcome)
 }
 
-/// Best-effort kill of the owned child *tree*, then reap. Sequence (F7):
-///
-/// 1. `SIGTERM` the child's process group (unix), giving a well-behaved
-///    CLI a bounded grace to flush and exit instead of dying mid-write.
-/// 2. Poll briefly; a child that exits on SIGTERM is reaped as-is, so its
-///    real exit disposition (not a kill we inflicted) is what supervision
-///    observes.
-/// 3. Past the grace, `kill` the direct child through its handle (exact,
-///    never by name) and `SIGKILL` the group, then `wait` to reap.
-/// 4. Signal the child's process group once more after the reap (narrowing
-///    the PID-reuse window to the microseconds between our child's death
-///    and the group signal) so forked grandchildren — which otherwise
-///    survive as orphans holding our stdout/stderr pipes open and stalling
-///    capture — die too.
-///
-/// Kill errors (already-exited races) are ignored: `wait` observes the
-/// truth. Never `pkill`/`killall`/name matching on any path.
 fn kill_tree_and_reap(child: &mut Child) {
-    let pid = child.id();
-    terminate_gracefully(child, pid);
-    let _ = child.kill();
-    let _ = child.wait();
-    signal_process_group(pid, SIGKILL);
+    runner::terminate_process_tree(child, Duration::from_secs(2));
 }
-
-/// F7 first stage (unix): SIGTERM the group, then allow up to TERM_GRACE
-/// for the child to exit on its own. Non-unix: no signal API — the
-/// SIGKILL in [`kill_tree_and_reap`] is the whole tree kill.
-#[cfg(unix)]
-fn terminate_gracefully(child: &mut Child, group_id: u32) {
-    signal_process_group(group_id, SIGTERM);
-    let deadline = Instant::now() + TERM_GRACE;
-    while Instant::now() < deadline {
-        match child.try_wait() {
-            Ok(Some(_)) | Err(_) => return,
-            Ok(None) => std::thread::sleep(WAIT_POLL_QUANTUM),
-        }
-    }
-}
-
-/// Grace period between SIGTERM and SIGKILL escalation: long enough for a
-/// well-behaved CLI to flush and exit, bounded so cancel/timeout paths
-/// stay prompt even when the child ignores SIGTERM.
-#[cfg(unix)]
-const TERM_GRACE: Duration = Duration::from_secs(2);
-
-/// Signals the process group `group_id` (a group-leader PID from our own
-/// spawn) with `sig`. Unix only: on other platforms the direct
-/// `kill` + `wait` is the whole tree kill.
-#[cfg(unix)]
-fn signal_process_group(group_id: u32, sig: i32) {
-    // Direct libc binding without a new dependency: libc is always
-    // linked on unix targets, and this is the only symbol needed.
-    extern "C" {
-        fn killpg(pgrp: i32, sig: i32) -> i32;
-    }
-    let _ = unsafe { killpg(group_id as i32, sig) };
-}
-
-#[cfg(unix)]
-const SIGKILL: i32 = 9;
-
-#[cfg(unix)]
-const SIGTERM: i32 = 15;
-
-#[cfg(not(unix))]
-fn signal_process_group(_group_id: u32, _sig: i32) {}
-
-#[cfg(not(unix))]
-fn terminate_gracefully(_child: &mut Child, _group_id: u32) {}
-
-#[cfg(not(unix))]
-const SIGKILL: i32 = 9;
 
 /// Shared capture buffer: the drain thread appends bounded chunks here,
 /// so the supervisor can finalize with the bytes collected so far even

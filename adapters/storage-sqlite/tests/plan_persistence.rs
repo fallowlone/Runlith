@@ -350,7 +350,7 @@ fn journal_evidence(seq: u64) -> PlanCommitJournalEvidence {
 fn fresh_database_reaches_schema_16() {
     let db = TestDb::new("schema");
     let store = db.open();
-    assert_eq!(SUPPORTED_SCHEMA_VERSION, 37);
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 40);
     assert_eq!(store.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
 }
 
@@ -1895,6 +1895,8 @@ fn schema_13_revision_history_without_lineage_fails_closed_after_upgrade() {
                  DROP TABLE org_memberships;
                  DROP TABLE org_teams;
                  DROP TABLE org_accounts;
+                 DROP TABLE task_acceptance_statements;
+                 ALTER TABLE tasks DROP COLUMN requires_workspace_change;
                  DROP TABLE organizations;
                  DROP TABLE worker_challenges;
                  DROP TABLE worker_jobs;

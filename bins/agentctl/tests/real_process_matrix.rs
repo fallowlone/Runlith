@@ -1,6 +1,6 @@
 //! G1 gate real-process verification (TASK-0021).
 //!
-//! Uses the built `agentd`/`agentctl` binaries against the canonical
+//! Uses the shipped CLI and a separate daemon fixture with explicit test confirmation against the canonical
 //! per-user endpoint in one ordered sequence: singleton ownership across
 //! real processes, concurrent launcher convergence, idempotent reuse,
 //! shutdown, no-spawn-on-shutdown, and kill-9 crash plus stale recovery.
@@ -13,6 +13,9 @@
 
 #![cfg(unix)]
 
+#[path = "support/process_fixture.rs"]
+mod process_fixture;
+
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -20,19 +23,12 @@ use std::time::{Duration, Instant};
 const TEST_RUNTIME_ENV: &str = "AI_ENGINEERING_OS_RUNTIME_DIR";
 const TEST_DATA_ENV: &str = "AI_ENGINEERING_OS_DATA_DIR";
 
-fn workspace_bin(name: &str) -> PathBuf {
-    let mut dir = std::env::current_exe().expect("test executable path");
-    dir.pop();
-    dir.pop();
-    dir.join(name)
-}
-
 fn agentd_bin() -> PathBuf {
-    workspace_bin("agentd")
+    process_fixture::binary(&test_runtime_parent(), "agentd")
 }
 
 fn agentctl_bin() -> PathBuf {
-    workspace_bin("agentctl")
+    process_fixture::binary(&test_runtime_parent(), "agentctl")
 }
 
 fn agentctl(args: &[&str]) -> std::process::Output {
@@ -189,6 +185,7 @@ fn g1_real_process_matrix() {
     let _ = std::fs::remove_dir_all(test_runtime_parent());
     std::fs::create_dir_all(test_runtime_parent()).expect("create test runtime parent");
     std::fs::create_dir_all(test_data_parent()).expect("create test data parent");
+    process_fixture::install(&test_runtime_parent());
 
     // Phase 0 — prescribed precondition: no test daemon running. If a live
     // daemon owns the endpoint, shut it down through the product flow.

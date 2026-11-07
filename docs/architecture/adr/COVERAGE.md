@@ -10,7 +10,7 @@
 
 | Architecture area | Classification | Earliest gate | ADR coverage | Required action |
 |---|---|---|---|---|
-| Local IPC peer authentication | ACTIVE DECISION | G2 | ADR-0020 | none — covered; implementation in TASK-0026 before mutable business IPC |
+| Local IPC peer authentication and protected-operation user presence | ACTIVE DECISION | G2 | ADR-0020 + ADR-0050 (owner decision 2026-11-04) | OS confirmation implemented for execution/shutdown/routine control; native success smoke and independent closure remain pending |
 | G2 business IPC + local data composition | ACTIVE DECISION | G2 | ADR-0021 | none — covered; implementation in TASK-0028 before CLI commands |
 | G3 runtime Event Journal scope (execution/attempt aggregate references, initial runtime vocabulary, outcome/version/provenance semantics) | ACTIVE DECISION | G3 | ADR-0022 | none — covered; implementation in TASK-0035 (migration 0004 + RuntimeService) before FakeAgent |
 | Workspace/Git ownership and worktree lifecycle (lease ownership, identities, base revision, cleanup safety, reconciliation, failure taxonomy) | ACTIVE DECISION | G4 | ADR-0023 | none — covered; implementation in TASK-0041/0042/0043 against this contract |

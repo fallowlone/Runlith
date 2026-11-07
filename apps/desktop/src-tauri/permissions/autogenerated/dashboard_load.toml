@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-dashboard-load"
+description = "Enables the dashboard_load command without any pre-configured scope."
+commands.allow = ["dashboard_load"]
+
+[[permission]]
+identifier = "deny-dashboard-load"
+description = "Denies the dashboard_load command without any pre-configured scope."
+commands.deny = ["dashboard_load"]

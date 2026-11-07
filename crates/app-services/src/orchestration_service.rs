@@ -554,7 +554,15 @@ impl<C: Clock> OrchestrationService<C> {
                 });
             }
         }
-        let executor = make_executor(&task, &ensured.lease);
+        let executor = WriteScopeGuard {
+            inner: make_executor(&task, &ensured.lease),
+            // ADR-0051: the obligation applies to scoped work unless the
+            // Task explicitly declared scoped read-only intent.
+            requires_change: task.requires_workspace_change()
+                && !task.snapshot().allowed_paths.is_empty(),
+            workspace: &*workspace,
+            lease_id: ensured.lease.id().clone(),
+        };
         // Durable identities for the error-path advisory check below;
         // `run_workspace_attempt` takes `work` by value.
         let error_path_work = work.clone();
@@ -871,6 +879,17 @@ impl<C: Clock> OrchestrationService<C> {
         evaluator: &impl EvaluationPort,
         current_policy: Option<&str>,
     ) -> ServiceResult<OrchestrationOutcome> {
+        let behavior = behavior.and_then(|evidence| {
+            if crate::secret_redaction::redact_text(&evidence.evidence_ref) != evidence.evidence_ref
+            {
+                Err(scheduler::ExecutionProblem::Failed {
+                    detail: "provider evidence reference contains credential-shaped text"
+                        .to_owned(),
+                })
+            } else {
+                Ok(evidence)
+            }
+        });
         // -- conclude the Attempt exactly once -------------------------------
         let WorkItem {
             task_id,
@@ -901,6 +920,7 @@ impl<C: Clock> OrchestrationService<C> {
                 summary,
                 evidence_ref,
             } => {
+                let summary = crate::secret_redaction::redact_text(&summary);
                 self.runtime.conclude_attempt(
                     execution_id,
                     attempt_id,
@@ -1099,5 +1119,41 @@ impl<C: Clock + Clone> OrchestrationService<C> {
             TaskService::open(&path, clock.clone())?,
             RuntimeService::open(&path, clock)?,
         ))
+    }
+}
+
+/// Executor wrapper enforcing one narrow invariant: a Task that declares a
+/// write scope (allowed paths) cannot conclude a Succeeded attempt when the
+/// provider left the worktree byte-for-byte at its base (the provider said
+/// it "made no changes"). Such a result becomes a Failed attempt; Tasks
+/// without a declared scope and every verification rule are untouched.
+/// An unreadable diff never blocks (fail open: the evaluator still decides).
+struct WriteScopeGuard<'a, E, G: GitPort, C: Clock> {
+    inner: E,
+    requires_change: bool,
+    workspace: &'a WorkspaceService<G, C>,
+    lease_id: workspace::WorkspaceId,
+}
+
+impl<E: ExecutionPort, G: GitPort, C: Clock> ExecutionPort for WriteScopeGuard<'_, E, G, C> {
+    fn provider_ref(&self) -> agent_runtime::ProviderRef {
+        self.inner.provider_ref()
+    }
+
+    fn execute(
+        &self,
+        work: &WorkItem,
+    ) -> Result<scheduler::WorkEvidence, scheduler::ExecutionProblem> {
+        let evidence = self.inner.execute(work)?;
+        if self.requires_change {
+            if let Ok(diff) = self.workspace.compute_diff(&self.lease_id) {
+                if diff.diff.committed.is_empty() && diff.diff.working.is_empty() {
+                    return Err(scheduler::ExecutionProblem::Failed {
+                        detail: "provider reported success but the worktree has no changes for a task with a declared write scope".to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(evidence)
     }
 }

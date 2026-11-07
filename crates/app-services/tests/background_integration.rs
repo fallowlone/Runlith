@@ -42,14 +42,14 @@ fn authorized_routine_runs_without_client_and_survives_restart() {
         svc.authorize(&id, "operator", 1_000).unwrap();
         let runs = svc.tick(2_000, "evidence:tick").unwrap();
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].status, RunStatus::Completed);
+        assert_eq!(runs[0].status, RunStatus::Blocked);
     }
     // Daemon restart: state durable, next tick waits for the interval.
     {
         let mut svc = open(&db);
         let def = svc.get(&id).unwrap();
         assert_eq!(def.state, RoutineState::Authorized);
-        assert_eq!(def.runs_completed, 1);
+        assert_eq!(def.runs_completed, 0);
         assert!(svc.tick(3_000, "evidence:tick").unwrap().is_empty());
         assert_eq!(svc.list_runs(&id).unwrap().len(), 1);
         let runs = svc.tick(2_000 + 3_600_000, "evidence:tick").unwrap();
