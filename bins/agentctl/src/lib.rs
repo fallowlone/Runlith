@@ -1879,14 +1879,49 @@ where
         tokio::time::sleep(delay.min(remaining)).await;
         match connect().await {
             Ok(session) => return Ok(session),
-            Err(error) if !is_retryable(&error) => return Err(error),
+            Err(error) if !is_retryable(&error) => {
+                return Err(startup_exit_or(error, &mut child).await);
+            }
             Err(_) => continue,
         }
     }
     match connect().await {
         Ok(session) => Ok(session),
-        Err(error) if !is_retryable(&error) => Err(error),
+        Err(error) if !is_retryable(&error) => Err(startup_exit_or(error, &mut child).await),
         Err(_) => Err(ClientError::StartupTimeout(startup_log_tail())),
+    }
+}
+
+/// Grace for a daemon that closed its socket while dying to be reaped.
+const STARTUP_EXIT_GRACE: Duration = Duration::from_millis(500);
+
+/// A daemon that dies mid-handshake closes the socket before it exits, so the
+/// client first sees a closed connection. When the spawned daemon turns out to
+/// have exited with a failure, report that (with its log) instead of the
+/// closed-connection symptom. Any other error is returned unchanged.
+async fn startup_exit_or(error: ClientError, child: &mut Child) -> ClientError {
+    let closed_mid_handshake = matches!(
+        &error,
+        ClientError::Transport(TransportError::MalformedFrame(_))
+            | ClientError::Control(ControlError::Transport(TransportError::MalformedFrame(_)))
+    );
+    if !closed_mid_handshake {
+        return error;
+    }
+    let deadline = Instant::now() + STARTUP_EXIT_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.code() != Some(2) => {
+                return ClientError::SpawnFailed(format!(
+                    "agentd exited during startup ({status}); {}",
+                    startup_log_tail()
+                ));
+            }
+            Ok(None) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            _ => return error,
+        }
     }
 }
 
@@ -3530,6 +3565,38 @@ mod tests {
         assert!(!is_retryable(&ClientError::ExecutionAmbiguous(
             "x".to_owned()
         )));
+    }
+
+    /// A daemon that closes the socket while dying is reported by its own
+    /// startup failure, not by the closed-connection symptom (F6 race).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn daemon_that_dies_mid_handshake_reports_its_startup_failure() {
+        let mut calls = 0_u32;
+        let result = connect_or_start_with::<tokio::io::DuplexStream, _, _>(
+            || {
+                // Still running at the first liveness check, exits 1 shortly after.
+                Command::new("sh").args(["-c", "sleep 0.3; exit 1"]).spawn()
+            },
+            || {
+                calls += 1;
+                let first = calls == 1;
+                async move {
+                    Err(if first {
+                        ClientError::DaemonUnavailable("not yet".to_owned())
+                    } else {
+                        ClientError::Transport(TransportError::MalformedFrame(
+                            "connection closed before a frame completed".to_owned(),
+                        ))
+                    })
+                }
+            },
+        )
+        .await;
+        let Err(ClientError::SpawnFailed(detail)) = result else {
+            panic!("expected SpawnFailed, got {:?}", result.err());
+        };
+        assert!(detail.contains("agentd exited during startup"), "{detail}");
     }
 
     #[test]
