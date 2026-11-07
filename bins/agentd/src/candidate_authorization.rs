@@ -121,14 +121,37 @@ pub(crate) fn authenticate(expected_args: Option<&[String]>) -> io::Result<(Vec<
     let mut request = [0; 64];
     request[..32].copy_from_slice(&nonce);
     request[32..].copy_from_slice(&binding(&args, &input));
-    channel.set_write_timeout(Some(deadline.saturating_duration_since(Instant::now())))?;
+    arm(&channel, deadline)?;
     channel.write_all(&request)?;
-    let mut reply = [0];
-    read_before(&mut channel, &mut reply, deadline)?;
-    if reply != [1] {
-        return Err(denied());
-    }
+    read_reply(&mut channel)?;
     Ok((args, input))
+}
+
+/// Sets both socket timeouts before the request leaves. macOS rejects
+/// `setsockopt` with EINVAL once the peer has closed, and the parent closes
+/// right after it replies, so a timeout set after the write can fail on a
+/// loaded machine even though the reply is already waiting.
+fn arm(channel: &UnixStream, deadline: Instant) -> io::Result<()> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "candidate permit expired",
+        ));
+    }
+    channel.set_write_timeout(Some(remaining))?;
+    channel.set_read_timeout(Some(remaining))
+}
+
+/// Reads the one-byte grant on a channel already armed by [`arm`].
+fn read_reply(channel: &mut UnixStream) -> io::Result<()> {
+    let mut reply = [0];
+    match channel.read_exact(&mut reply) {
+        Ok(()) if reply == [1] => Ok(()),
+        Ok(()) => Err(denied()),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Err(denied()),
+        Err(error) => Err(error),
+    }
 }
 
 fn binding(args: &[String], input: &[u8]) -> [u8; 32] {

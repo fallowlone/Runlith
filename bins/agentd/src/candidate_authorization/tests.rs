@@ -140,3 +140,24 @@ fn permit_expires_and_cannot_be_replayed() {
     let _ = client.write_all(&request);
     assert_eq!(client.read(&mut reply).unwrap(), 0);
 }
+
+#[test]
+fn grant_is_readable_after_the_peer_replied_and_closed() {
+    let (mut child, mut parent) = UnixStream::pair().unwrap();
+    arm(&child, Instant::now() + Duration::from_secs(5)).unwrap();
+    parent.write_all(&[1]).unwrap();
+    drop(parent);
+    // Previously the reply read set its timeout here and failed with EINVAL.
+    read_reply(&mut child).unwrap();
+}
+
+#[test]
+fn closed_peer_without_a_grant_is_denied() {
+    let (mut child, parent) = UnixStream::pair().unwrap();
+    arm(&child, Instant::now() + Duration::from_secs(5)).unwrap();
+    drop(parent);
+    assert_eq!(
+        read_reply(&mut child).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+}
