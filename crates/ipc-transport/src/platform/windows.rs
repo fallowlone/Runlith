@@ -559,8 +559,8 @@ mod tests {
         drop(server);
     }
 
-    #[test]
-    fn remote_rejection_is_configured_in_the_single_constructor() {
+    #[tokio::test]
+    async fn remote_rejection_is_configured_in_the_single_constructor() {
         // No stable Win32 read-back API exposes PIPE_REJECT_REMOTE_CLIENTS,
         // so this pins the invariant at the construction site: every server
         // instance in this crate is built by `create_server`, which sets
