@@ -1,0 +1,60 @@
+name: dependency and secret checks
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependencies:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+      - name: Install audit tools
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install cargo-deny --version 0.20.2 --locked
+      - name: Audit core dependencies
+        run: cargo audit --file Cargo.lock
+      - name: Audit native desktop dependencies
+        run: cargo audit --file apps/desktop/src-tauri/Cargo.lock
+      - name: Check dependency sources and bans
+        run: |
+          cargo deny --locked check advisories bans sources
+      - name: Check native dependency sources and bans
+        if: ${{ !cancelled() }}
+        run: cargo deny --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --config deny.toml check advisories bans sources
+      - name: Audit desktop web dependencies
+        if: ${{ !cancelled() }}
+        working-directory: apps/desktop
+        run: npm audit
+
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Scan history with redacted findings
+        run: >-
+          docker run --rm --network=none --read-only
+          --user "$(id -u):$(id -g)"
+          --volume "$GITHUB_WORKSPACE:/repo:ro"
+          ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:b109bc5f8f76a38196a3e413704fc5b9e3c32360bce4e4b603bd6f45b3721dbb
+          git /repo --redact=100 --no-banner
+          --gitleaks-ignore-path /repo/.gitleaksignore
+          --log-opts="--all --full-history --no-abbrev-commit"
