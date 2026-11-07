@@ -101,6 +101,13 @@ Project map (`Карта`): a pan and zoom canvas of capabilities the agent reco
 real crates and dependencies. Layout is computed at build time by elkjs, so the
 library is not in the app bundle. `stitch/` holds DESIGN.md and a Stitch prompt.
 
+## Known limits
+
+- The frame-gap e2e (`motion: a screen change adds no long frames`) measures real
+  vsync timing. On the shared macOS CI runner it failed on every attempt (busy max
+  48-70 ms against idle 19-28 ms), so it is skipped when `CI` is set and runs locally
+  only. It was never green on CI.
+
 On this Mac cargo needs `DEVELOPER_DIR=/Library/Developer/CommandLineTools`.
 Browser preview can force states: `?demo=empty`, `?demo=unavailable`, `?demo=loading`,
 and for widgets `draft-slow`, `draft-missing`, `draft-incompatible`, `draft-auth`, `draft-timeout`,
