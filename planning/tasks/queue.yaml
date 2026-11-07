@@ -7073,3 +7073,12 @@ items:
     depends_on: []
     blocked_by: []
     references: [docs/architecture/adr/ADR-0051-per-node-acceptance-statements-and-change-intent.md, docs/architecture/adr/ADR-0050-os-user-presence-for-local-control.md]
+  - id: TASK-0261
+    gate: G16
+    title: Dependencies and gate in the desktop task list
+    objective: The desktop design shows the Tasks table with Depends-on and Gate columns and the state "waits for dependencies". TaskDto (apps/desktop/src-tauri/src/dto.rs, bindings in apps/desktop/src/lib/bindings/TaskDto.ts) carries only id, projectId, objective and state, so the UI cannot show them without inventing data. Add the dependency ids and the gate to the task list reply through the existing negotiated capability mechanism (task-list-pages-v1, protocol number stays 13), keep the byte-bounded pages and the legacy-client error, and derive "waits for dependencies" from real dependency state rather than renaming the canonical DRAFT lifecycle name.
+    scope: crates/ipc-contracts (proto and Rust), bins/agentd/src/dispatch/list_pages.rs, adapters/storage-sqlite list projection, apps/desktop/src-tauri dto and agentd client, apps/desktop Tasks view and ts-rs bindings (cargo test --lib regenerates them). The Gate source is an open question to settle in the task (queue.yaml is a planning file, not agentd state); do not hard-code gates in the frontend.
+    exit_criteria_summary: Tasks table shows Depends-on and Gate from agentd data; two 600 kB objectives and a many-task fixture still page within the 1 MiB frame cap; legacy clients get the explicit compatibility error; Playwright and axe stay green on both themes; SQL query count per task does not grow.
+    depends_on: []
+    blocked_by: []
+    references: [docs/development/AUDIT_REMEDIATION_2026-11-03.md, audit-reports/05-performance.md]
