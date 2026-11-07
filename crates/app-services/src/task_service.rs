@@ -168,6 +168,7 @@ impl<C: Clock> TaskService<C> {
     /// into G7 planning authority through the same derivation that planning
     /// and Plan publication use, so nothing underivable is ever persisted.
     /// The control plane exposes no later edit of this intent.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_planning_task(
         &mut self,
         id: TaskId,
