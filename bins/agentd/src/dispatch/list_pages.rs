@@ -93,6 +93,7 @@ pub(super) fn tasks<C: Clock>(
             project_id: task.project_id.to_string(),
             objective: task.objective,
             state: task.state.as_str().to_owned(),
+            depends_on: task.depends_on.iter().map(ToString::to_string).collect(),
         };
         let cost = dto.encoded_len() + 10;
         if (!legacy && reply.tasks.len() == request.page_size as usize)
@@ -205,6 +206,54 @@ mod tests {
             after_id = reply.next_after_id;
         }
         assert_eq!(ids, ["a", "b"]);
+    }
+
+    #[test]
+    fn task_pages_carry_dependency_ids_for_their_own_tasks_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut service = service(dir.path());
+        let project = ProjectId::new("project").unwrap();
+        service
+            .create_project(&Project::new(project.clone(), "project").unwrap())
+            .unwrap();
+        for id in ["a", "b", "c"] {
+            service
+                .create_task(&Task::draft(TaskId::new(id).unwrap(), project.clone(), "x").unwrap())
+                .unwrap();
+        }
+        for (task, target) in [("c", "b"), ("c", "a"), ("b", "a")] {
+            service
+                .add_dependency(&TaskId::new(task).unwrap(), &TaskId::new(target).unwrap())
+                .unwrap();
+        }
+        let mut seen = Vec::new();
+        let mut after_id = String::new();
+        loop {
+            let response = tasks(
+                &service,
+                ListTasksForProjectRequest {
+                    project_id: project.to_string(),
+                    after_id: after_id.clone(),
+                    page_size: 2,
+                },
+            );
+            let Some(task_core_response::Payload::ListTasks(reply)) = response.payload else {
+                panic!("page failed");
+            };
+            seen.extend(reply.tasks.into_iter().map(|t| (t.id, t.depends_on)));
+            if reply.next_after_id.is_empty() {
+                break;
+            }
+            after_id = reply.next_after_id;
+        }
+        assert_eq!(
+            seen,
+            [
+                ("a".to_owned(), vec![]),
+                ("b".to_owned(), vec!["a".to_owned()]),
+                ("c".to_owned(), vec!["a".to_owned(), "b".to_owned()]),
+            ]
+        );
     }
 
     #[test]

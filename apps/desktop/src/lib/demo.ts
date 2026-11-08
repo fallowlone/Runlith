@@ -37,6 +37,19 @@ const TASKS: Array<[string, string, string]> = [
 
 const empty = (): boolean => demoScenario() === "empty";
 
+const DEPENDENCIES: Record<string, string[]> = {
+  "TASK-0216": ["TASK-0215"],
+  "TASK-0217": ["TASK-0216"],
+  "TASK-0218": ["TASK-0217"],
+  "TASK-0219": ["TASK-0218"],
+  "TASK-0220": ["TASK-0219"],
+  "TASK-0221": ["TASK-0220"],
+  "TASK-0222": ["TASK-0220"],
+  "TASK-0223": ["TASK-0220"],
+  "TASK-0224": ["TASK-0223"],
+  "TASK-0228": ["TASK-0227", "TASK-0222", "TASK-0221"],
+};
+
 export const demo = {
   get connection(): ConnectionDto {
     return { state: "connected", protocol: 12, daemonBuild: "демо", clientBuild: "0.1.0", detail: null };
@@ -45,20 +58,9 @@ export const demo = {
     return empty() ? [] : [{ id: PROJECT, name: "runlith" }];
   },
   get tasks(): TaskDto[] {
-    return empty() ? [] : TASKS.map(([id, objective, state]) => ({ id, projectId: PROJECT, objective, state }));
+    return empty() ? [] : TASKS.map(([id, objective, state]) => ({ id, projectId: PROJECT, objective, state, dependsOn: DEPENDENCIES[id] ?? [] }));
   },
-  dependencies: {
-    "TASK-0216": ["TASK-0215"],
-    "TASK-0217": ["TASK-0216"],
-    "TASK-0218": ["TASK-0217"],
-    "TASK-0219": ["TASK-0218"],
-    "TASK-0220": ["TASK-0219"],
-    "TASK-0221": ["TASK-0220"],
-    "TASK-0222": ["TASK-0220"],
-    "TASK-0223": ["TASK-0220"],
-    "TASK-0224": ["TASK-0223"],
-    "TASK-0228": ["TASK-0227", "TASK-0222", "TASK-0221"],
-  } as Record<string, string[]>,
+  dependencies: DEPENDENCIES,
   get decisions(): DecisionDto[] {
     if (empty()) return [];
     return [

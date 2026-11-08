@@ -332,6 +332,8 @@ fn task_dto(task: &Task) -> TaskDto {
         project_id: task.project_id().to_string(),
         objective: task.objective().to_owned(),
         state: task.state().as_str().to_owned(),
+        // Dependencies travel only in paged lists (task-list-pages-v1).
+        depends_on: Vec::new(),
     }
 }
 

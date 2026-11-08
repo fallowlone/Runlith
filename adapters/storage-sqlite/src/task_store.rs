@@ -41,6 +41,8 @@ pub struct TaskListEntry {
     pub project_id: ProjectId,
     pub objective: String,
     pub state: TaskState,
+    /// Direct dependencies in id order.
+    pub depends_on: Vec<TaskId>,
 }
 
 /// One recorded binding proof consumption (ADR-0036 IMPL-C): the
@@ -303,6 +305,37 @@ impl SqliteStore {
         list_project_tasks(&self.connection, project_id)
     }
 
+    /// Fills `depends_on` for one page with a single query, so the cost
+    /// per page does not grow with the number of tasks on it.
+    fn attach_dependencies(
+        &self,
+        project_id: &ProjectId,
+        after_id: &str,
+        tasks: &mut [TaskListEntry],
+    ) -> StorageResult<()> {
+        let Some(last) = tasks.last().map(|task| task.id.to_string()) else {
+            return Ok(());
+        };
+        let mut statement = self.connection.prepare(
+            "SELECT d.task_id, d.depends_on_id FROM task_dependencies d \
+             JOIN tasks t ON t.id = d.task_id \
+             WHERE t.project_id=?1 AND d.task_id > ?2 AND d.task_id <= ?3 \
+             ORDER BY d.task_id, d.depends_on_id",
+        )?;
+        let rows = statement.query_map(params![project_id.as_str(), after_id, last], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (task_id, target) = row?;
+            let target = TaskId::new(target)
+                .map_err(|error| StorageError::DomainReconstruction(error.to_string()))?;
+            if let Some(task) = tasks.iter_mut().find(|task| task.id.as_str() == task_id) {
+                task.depends_on.push(target);
+            }
+        }
+        Ok(())
+    }
+
     pub fn list_task_summaries_page(
         &self,
         project_id: &ProjectId,
@@ -338,11 +371,13 @@ impl SqliteStore {
                 project_id: task.project_id().clone(),
                 objective: task.objective().to_owned(),
                 state: decode_state(&state)?,
+                depends_on: Vec::new(),
             });
             if bytes > byte_budget {
                 break;
             }
         }
+        self.attach_dependencies(project_id, after_id, &mut tasks)?;
         Ok(tasks)
     }
 

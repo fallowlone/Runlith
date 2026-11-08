@@ -231,7 +231,7 @@ a.tr.tr-next:hover { background: color-mix(in srgb, var(--accent) 24%, transpare
 button.tr { width: 100%; text-align: left; }
 .tr-text { padding-block: var(--s-75); align-items: baseline; }
 .cols-tasks { grid-template-columns: 176px 96px minmax(0, 1fr) 144px 48px; }
-.cols-task-list { grid-template-columns: 176px 112px minmax(0, 1fr); }
+.cols-task-list { grid-template-columns: 176px 112px minmax(0, 1fr) minmax(0, 240px); }
 .cols-plan { grid-template-columns: 160px 96px minmax(0, 1fr) 200px; }
 /* Same two right columns in both cards, so their meters line up. */
 .cols-commits { grid-template-columns: 64px minmax(0, 1fr) 176px 104px; }
