@@ -3,7 +3,16 @@ all-features = true
 
 [advisories]
 version = 2
-ignore = []
+# Every entry is Linux-only: none of these crates is in the macOS or Windows
+# dependency tree (checked with cargo tree --target), and none can be updated
+# from here because the owner pins them. Re-check when keyring or Tauri move.
+ignore = [
+  { id = "RUSTSEC-2026-0370", reason = "zvariant is unmaintained; Linux-only via keyring secret-service (zbus), no replacement released" },
+  { id = "RUSTSEC-2026-0371", reason = "zbus_names is unmaintained; Linux-only via keyring secret-service (zbus), no replacement released" },
+  { id = "RUSTSEC-2026-0372", reason = "zvariant_derive is unmaintained; Linux-only via keyring secret-service (zbus), no replacement released" },
+  { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is unmaintained; Linux-only via Tauri's GTK3 stack (glib-macros), compile-time only" },
+  { id = "RUSTSEC-2024-0429", reason = "glib 0.18 VariantStrIter is unsound; Linux-only via Tauri's GTK3 stack, fixed only in glib 0.20 which Tauri 2 does not use yet" },
+]
 unmaintained = "all"
 unsound = "all"
 
