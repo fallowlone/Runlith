@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Три интерактивных эскиза изометрического пиксельного мира для Runlith.">
+  <meta name="color-scheme" content="light dark">
+  <title>Runlith: маленькие миры</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23738652' d='M16 2 30 10 30 22 16 30 2 22 2 10Z'/%3E%3Cpath fill='%23f4f2e9' d='m16 7 9 5-9 5-9-5Zm-9 9 7 4v7l-7-4Z'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script defer src="world.js"></script>
+  <script defer src="render.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#world">К миру</a>
+  <header class="masthead">
+    <a class="brand" href="./index.html" aria-label="Runlith, начало прототипа"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="m16 3 13 7v12l-13 7L3 22V10Z M3 10l13 7 13-7 M16 17v12"/></svg>runlith<span>маленькие миры</span></a>
+    <div class="header-actions"><a class="concept-link" href="concept-board.png" target="_blank" rel="noopener">Лист концептов</a><button id="theme" class="quiet" aria-pressed="false">Тёмная тема</button></div>
+  </header>
+  <main>
+    <div class="intro"><div><h1>Место для твоих агентов</h1><p>Три наброска одной команды. Выбери, где ей поселиться.</p></div><span class="prototype">Автономный прототип</span></div>
+    <div class="workspace">
+      <aside aria-label="Выбор эскиза">
+        <h2 class="section-title">Выбери мир</h2>
+        <div class="sketches" role="group" aria-label="Варианты мира">
+          <button class="sketch" data-scene="studio" aria-pressed="true"><canvas width="320" height="213" aria-hidden="true"></canvas><span class="sketch-line"><strong>01 / Студия</strong><span class="check" aria-hidden="true">✓</span></span><span class="description">Свет, растения и общий стол</span></button>
+          <button class="sketch" data-scene="forest" aria-pressed="false"><canvas width="320" height="213" aria-hidden="true"></canvas><span class="sketch-line"><strong>02 / Лесной лагерь</strong><span class="check" aria-hidden="true">✓</span></span><span class="description">Код у костра, мысли у воды</span></button>
+          <button class="sketch" data-scene="orbit" aria-pressed="false"><canvas width="320" height="213" aria-hidden="true"></canvas><span class="sketch-line"><strong>03 / Орбитальная станция</strong><span class="check" aria-hidden="true">✓</span></span><span class="description">Тихий космос и большие идеи</span></button>
+        </div>
+        <p class="aside-note">Одна команда, разная атмосфера.<br>Все состояния здесь вымышленные.</p>
+      </aside>
+      <section class="world-panel" aria-labelledby="scene-title">
+        <div class="world-heading"><div><h2 id="scene-title">Студия</h2><p id="scene-description">Небольшая мастерская, где у каждой идеи есть своё место.</p></div><span class="scene-index" id="scene-index">01 / 03</span></div>
+        <div class="stage" data-backdrop="paper" id="world" tabindex="-1">
+          <canvas id="scene" width="1536" height="1024" role="img" aria-label="Изометрическая студия. Шесть демонстрационных ИИ ходят между рабочими местами."></canvas>
+          <span class="stage-note">Изометрия / pixel art</span>
+          <span class="stage-hint">Выбери персонажа внизу</span>
+        </div>
+        <div class="toolbar">
+          <fieldset><legend>Фон</legend><div class="swatches"><button class="swatch paper" data-backdrop="paper" aria-label="Фон: бумага" aria-pressed="true"></button><button class="swatch sage" data-backdrop="sage" aria-label="Фон: шалфей" aria-pressed="false"></button><button class="swatch rose" data-backdrop="rose" aria-label="Фон: персик" aria-pressed="false"></button><button class="swatch night" data-backdrop="night" aria-label="Фон: ночь" aria-pressed="false"></button></div></fieldset>
+          <div class="playback"><button id="labels" class="quiet" aria-pressed="true">Имена</button><button id="speed" class="quiet" aria-label="Скорость анимации: 1×">1×</button><button id="pause" class="primary" aria-pressed="false"><span aria-hidden="true">Ⅱ</span> Пауза</button></div>
+        </div>
+        <div class="team-heading"><h2 class="section-title">Твоя маленькая команда</h2><span>Демо · 6 персонажей</span></div>
+        <div id="team" class="team" role="group" aria-label="Выбор персонажа"></div>
+        <p id="agent-detail" class="agent-detail" aria-live="polite">Выбери персонажа, чтобы познакомиться с его ролью.</p>
+      </section>
+    </div>
+    <footer><span>Наброски для Runlith</span><span>Пиксельный мир живёт отдельно от приложения</span></footer>
+  </main>
+  <noscript><p class="noscript">Для анимации и переключения эскизов включи JavaScript. Это автономный визуальный прототип.</p></noscript>
+</body>
+</html>
