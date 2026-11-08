@@ -715,6 +715,75 @@ mod tests {
     /// TASK-SEC-R1 R1-H2 (adversarial, real sandboxed child): a poisoned
     /// ambient environment must not reach the child through `sandbox-exec`,
     /// which the Seatbelt profile cannot restrict by itself.
+    /// ADR-0052: a sandboxed child must not reach a Unix socket, so an
+    /// extension cannot connect to the public agentd socket. Two controls make
+    /// "denied" mean something: the same probe outside the sandbox connects,
+    /// and inside the sandbox the probe runs and reports the sandbox's own
+    /// errno (EPERM), not some unrelated failure.
+    #[test]
+    fn sandboxed_child_cannot_connect_to_a_unix_socket() {
+        use std::os::unix::net::UnixListener;
+        use std::time::{Duration, Instant};
+
+        const PROBE: &str =
+            "use Socket; socket(S, PF_UNIX, SOCK_STREAM, 0) or die \"socket: $!\\n\"; \
+            connect(S, sockaddr_un($ARGV[0])) or die \"connect: $!\\n\"; print \"connected\\n\";";
+
+        fn accepts(listener: &UnixListener) -> bool {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                if listener.accept().is_ok() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            false
+        }
+
+        let case = Case::new("u");
+        let backend = MacOsSeatbeltRunner::default();
+        // Outside the workspace (where agentd keeps its socket) and inside it.
+        for (label, dir) in [
+            ("outside", case.root.clone()),
+            ("inside", case.workspace.clone()),
+        ] {
+            let socket = dir.join("s");
+            let socket_arg = socket.to_string_lossy().into_owned();
+
+            let listener = UnixListener::bind(&socket).unwrap();
+            let control = std::process::Command::new("/usr/bin/perl")
+                .args(["-e", PROBE, &socket_arg])
+                .output()
+                .unwrap();
+            assert!(
+                control.status.success() && accepts(&listener),
+                "{label}: unsandboxed control must connect: {:?}",
+                String::from_utf8_lossy(&control.stderr)
+            );
+            drop(listener);
+            std::fs::remove_file(&socket).unwrap();
+
+            let listener = UnixListener::bind(&socket).unwrap();
+            let output = run(
+                &backend,
+                &case,
+                Path::new("/usr/bin/perl"),
+                None,
+                &["-e", PROBE, &socket_arg],
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{label}: connect succeeded");
+            assert!(
+                stderr.contains("connect: Operation not permitted"),
+                "{label}: expected the sandbox's EPERM, got {stderr:?}"
+            );
+            assert!(!accepts(&listener), "{label}: listener saw a connection");
+            drop(listener);
+            let _ = std::fs::remove_file(&socket);
+        }
+    }
+
     #[test]
     fn r1_h2_sandboxed_child_env_cannot_see_poisoned_vars() {
         const CANARY: &str = "RUNLITH_SEC_CANARY_AWS_SECRET_ACCESS_KEY";

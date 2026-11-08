@@ -7082,3 +7082,12 @@ items:
     depends_on: []
     blocked_by: []
     references: [docs/development/AUDIT_REMEDIATION_2026-11-03.md, audit-reports/05-performance.md]
+  - id: TASK-0262
+    gate: G17
+    title: First extension slice, ExecutionPort served by an out-of-process sample extension
+    objective: Prove the extension model of ADR-0052 end to end with the smallest real case. The fake agent runs as a separate executable described by a manifest, started by agentd under the sandbox runner on a channel agentd creates, and serves ExecutionPort. The manifest is data checked by a closed validator, its capabilities compile to a PolicyRequest, and install or any change of digest or capabilities needs approval bound to the manifest hash. Stage hooks and added steps are out of scope until the Procedure Engine has an ADR.
+    scope: crates/ipc-contracts (extension-contract-v1 capability and protocol), crates/ipc-control (per-listener client kinds), a new manifest crate in the widget-spec style, bins/agentd extension host, bundle install and handshake, crates/runner use only, a small sample extension that implements the ExecutionPort contract. No change to TaskState, Evaluation or ADR-0020 and ADR-0050 behavior. ADR-0026 amendment for new capabilities is a separate task.
+    exit_criteria_summary: A capability outside the grant fails closed and is audited; a sandboxed process cannot connect to the public agentd socket and a public client sending client kind extension is refused; a bundle with a different digest is refused before start and a file replaced after install changes nothing; a crash or timeout kills the process tree and fails only the attempt and an oversized or too fast stream closes the channel; the extension protocol has no completion message; the execution-contract conformance harness passes against the extension and per-call IPC cost is measured and recorded.
+    depends_on: []
+    blocked_by: []
+    references: [docs/architecture/adr/ADR-0052-extension-model-out-of-process.md, docs/architecture/adr/ADR-0026-g6-security-authority-and-capability-contracts.md, docs/architecture/adr/ADR-0020-local-ipc-peer-authentication.md, docs/architecture/INVARIANTS.md]

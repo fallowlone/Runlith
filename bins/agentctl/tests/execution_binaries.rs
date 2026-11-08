@@ -729,9 +729,13 @@ mod live_ownership {
                 "{clients}-client race: exactly one owner, got {} accepted: {accepted:?} refused: {refused:?}",
                 accepted.len()
             );
+            // A loser is refused honestly in one of two places: it lost the
+            // owner election (CONFLICT), or it reached the single-prompt user
+            // presence gate while another resume held it (ADR-0050: one
+            // confirmation at a time, so the second is "busy" by design).
             for refusal in &refused {
                 assert!(
-                    refusal.contains("CONFLICT"),
+                    refusal.contains("CONFLICT") || refusal.contains("user_presence_busy"),
                     "loser refused honestly, got {refusal:?}"
                 );
             }
