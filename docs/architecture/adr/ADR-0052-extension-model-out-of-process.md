@@ -1,8 +1,10 @@
 # ADR-0052 - Extensions are out-of-process adapters under policy and sandbox
 
-Status: Proposed. Needs owner ratification before any G17 implementation task
-starts (ADR-0019: this adopts an ACTIVE DECISION only for the first slice; the
-marketplace stays a DEFERRED ARCHITECTURE TARGET).
+Status: Accepted by the owner, 2026-11-08, answering the four open questions
+below (two of them delegated to the author's professional judgment, with the
+reasons recorded). This records the decision, not completion. It is an ACTIVE
+DECISION only for the first slice (ADR-0019); the marketplace stays a DEFERRED
+ARCHITECTURE TARGET.
 Date: 2026-11-08
 
 ## Context
@@ -208,9 +210,16 @@ not the check. It passes when:
 - the conformance harness passes against the extension, and per-call IPC cost
   is measured and recorded.
 
-## Open questions for the owner
+## Decisions on the open questions (owner, 2026-11-08)
 
-1. Ratify new gate G17 "Extensions", or attach this work to an existing gate?
-2. Is a local sideload with owner approval an acceptable first install story?
-3. Is macOS-only hosting acceptable for the first slice?
-4. Should the Procedure Engine ADR be scheduled before or after the first slice?
+1. **New gate G17 "Extensions".** Extensions are a separate capability area
+   with their own acceptance criteria; attaching them to the desktop UI gate
+   (G16) or to a security gate would blur both. Delegated to the author.
+2. **Local sideload approved by the owner is the first install story.**
+   Accepted as proposed.
+3. **macOS-only hosting for the first slice.** Accepted. Other platforms fail
+   closed until their runner enforces the requested capabilities.
+4. **First slice before the Procedure Engine ADR.** The slice measures per-call
+   IPC cost and proves the sandbox, manifest and channel; stage hooks (point c)
+   need exactly that evidence, so scheduling the Procedure Engine ADR after it
+   avoids deciding on guesses (ADR-0019). Delegated to the author.
