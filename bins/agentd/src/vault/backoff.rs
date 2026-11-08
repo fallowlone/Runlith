@@ -12,8 +12,19 @@ pub(super) struct State {
 }
 
 pub(super) struct Guard {
-    _lock: File,
+    lock: File,
     path: PathBuf,
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        // A flock belongs to the open file description, which a concurrent
+        // fork shares with its child until exec closes the copy. Closing our
+        // descriptor alone would leave the lock held for that whole window, so
+        // release it explicitly. Failure is harmless: closing still releases
+        // it once the last copy goes away.
+        let _ = self.lock.unlock();
+    }
 }
 
 impl Guard {
@@ -34,9 +45,10 @@ impl Guard {
             Err(_) => return Err(unavailable()),
         };
         admit_file(&lock).map_err(|_| unavailable())?;
-        // A concurrent owner is refused, but a forking thread can briefly
-        // keep a just-closed descriptor alive until its exec; a short bounded
-        // retry keeps that window from reading as a real concurrent attempt.
+        // A concurrent owner is refused after a short bounded retry, so an
+        // owner that is just finishing does not read as a real concurrent
+        // attempt. (A forked child holding our descriptor is handled by the
+        // explicit unlock in `Drop`, not by this wait.)
         // ponytail: fixed 10 x 10 ms wait, event-driven wakeup if it matters.
         let mut attempts = 0;
         loop {
@@ -51,7 +63,7 @@ impl Guard {
             }
         }
         let guard = Self {
-            _lock: lock,
+            lock,
             path: sidecar(vault, ".unlock-state"),
         };
         match guard.read_state() {
