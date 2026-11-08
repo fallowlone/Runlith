@@ -1097,6 +1097,9 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+mod git_vectors;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

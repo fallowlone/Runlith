@@ -80,3 +80,36 @@ fn unsafe_lock_and_parent_are_refused() {
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
     assert!(Guard::open(&vault).is_err());
 }
+
+/// A flock belongs to the open file description, and `fork` shares it with the
+/// child until `exec` closes the close-on-exec copy. Dropping the guard must
+/// therefore unlock explicitly, or a concurrent spawn keeps the lock alive past
+/// the drop for as long as the child lingers between fork and exec.
+#[test]
+fn dropped_guard_releases_the_lock_while_a_forked_child_still_holds_the_descriptor() {
+    use std::os::unix::process::CommandExt;
+    let dir = private_dir();
+    let vault = dir.path().join("vault");
+    let guard = Guard::open(&vault).unwrap();
+    let spawner = std::thread::spawn(|| {
+        let mut command = std::process::Command::new("true");
+        // SAFETY: the closure only sleeps, which is async-signal-safe.
+        unsafe {
+            command.pre_exec(|| {
+                // Far longer than the bounded retry in `Guard::open`.
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                Ok(())
+            });
+        }
+        command.status().unwrap();
+    });
+    // Let the fork happen; the child now holds the lock descriptor.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    drop(guard);
+    let reopened = Guard::open(&vault);
+    spawner.join().unwrap();
+    assert!(
+        reopened.is_ok(),
+        "lock stayed held by the forked child after the guard was dropped"
+    );
+}

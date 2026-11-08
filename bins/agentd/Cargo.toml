@@ -40,7 +40,7 @@ secrets = { path = "../../crates/secrets" }
 secrets-vault = { path = "../../adapters/secrets-vault" }
 storage-sqlite = { path = "../../adapters/storage-sqlite" }
 task-domain = { path = "../../crates/task" }
-tokio = { version = "~1.51", features = ["macros", "rt", "net", "sync", "time"] }
+tokio = { version = "~1.54", features = ["macros", "rt", "net", "sync", "time"] }
 workspace = { path = "../../crates/workspace" }
 zeroize = "1"
 prost = "0.14.4"
@@ -72,5 +72,5 @@ secrets-vault = { path = "../../adapters/secrets-vault", features = ["test-param
 storage-sqlite = { path = "../../adapters/storage-sqlite" }
 task-domain = { path = "../../crates/task" }
 tempfile = "3"
-tokio = { version = "~1.51", features = ["macros", "rt", "net", "sync", "time"] }
+tokio = { version = "~1.54", features = ["macros", "rt", "net", "sync", "time"] }
 workspace = { path = "../../crates/workspace" }
