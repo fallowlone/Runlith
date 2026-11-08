@@ -22,7 +22,7 @@ ipc-transport = { path = "../../crates/ipc-transport" }
 worker = { path = "../../crates/worker" }
 org = { path = "../../crates/org" }
 prost = "0.14.4"
-tokio = { version = "~1.51", features = ["macros", "rt", "net", "time"] }
+tokio = { version = "~1.54", features = ["macros", "rt", "net", "time"] }
 zeroize = "1"
 
 [target.'cfg(unix)'.dependencies]
@@ -46,4 +46,4 @@ prost = "0.14.4"
 storage-sqlite = { path = "../../adapters/storage-sqlite" }
 task-domain = { path = "../../crates/task" }
 tempfile = "3"
-tokio = { version = "~1.51", features = ["macros", "rt", "net", "time"] }
+tokio = { version = "~1.54", features = ["macros", "rt", "net", "time"] }
