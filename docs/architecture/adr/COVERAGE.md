@@ -27,15 +27,15 @@
 | Adaptive Model Router | DEFERRED ARCHITECTURE TARGET | PRE_RELEVANT_GATE | none yet | dedicated ADR before first adaptive-routing implementation (no gate assigned yet) |
 | DeviceResourceManager | DEFERRED ARCHITECTURE TARGET | PRE_RELEVANT_GATE | none yet | dedicated ADR before first device-resource implementation |
 | ModelResidencyManager | DEFERRED ARCHITECTURE TARGET | PRE_RELEVANT_GATE | none yet | dedicated ADR before first residency implementation |
-| Tools / Skills registry | DEFERRED ARCHITECTURE TARGET | PRE_RELEVANT_GATE | none yet | dedicated ADR before registry implementation (gate unassigned) |
+| Tools / Skills registry | DEFERRED ARCHITECTURE TARGET | PRE_RELEVANT_GATE | ADR-0052 (Proposed) fixes the extension model and manifest; registry and marketplace stay deferred | dedicated ADR before registry or marketplace implementation |
 | Tool contracts JSON Schema decision | DEFERRED ARCHITECTURE TARGET | PRE_RELEVANT_GATE | none yet | dedicated ADR before first tool-contract implementation |
 | Frontend stack + design system | Covered by existing ADR (partial) | PRE_RELEVANT_GATE (UI phase) | ADR-0015 covers primitives-vs-system; Tauri/React/Vite stack has no dedicated ADR | future stack ADR before UI-phase implementation; ADR-0015 must not be cited for facts it does not cover |
 | Security Runner | DEFERRED ARCHITECTURE TARGET | deferred (security gate) | none yet | dedicated ADR before first security-runner implementation |
 | Web Acquisition | DEFERRED ARCHITECTURE TARGET | deferred | none yet | dedicated ADR before first acquisition implementation |
 | Document Worker | DEFERRED ARCHITECTURE TARGET | deferred | none yet | dedicated ADR before first document-worker implementation |
-| Procedure Engine | DEFERRED ARCHITECTURE TARGET | deferred | none yet | dedicated ADR before first procedure-engine implementation |
+| Procedure Engine | DEFERRED ARCHITECTURE TARGET | deferred | none yet | dedicated ADR before first procedure-engine implementation; ADR-0052 extension points b and c wait for it |
 | Living Documentation / Documentation Engine | DEFERRED ARCHITECTURE TARGET | deferred | none yet | dedicated ADR before first doc-engine implementation |
-| Extension-contract architecture | Covered by existing ADR (conditional) | PRE_RELEVANT_GATE if warranted | ADR-0001 + ADR-0009 + INV-069 govern ports/adapters today | none now; dedicated ADR only if the extension surface outgrows current ports |
+| Extension-contract architecture | ACTIVE DECISION (Proposed, awaiting owner ratification) | G17 (planned) | ADR-0052 + ADR-0026 + INV-069/077/082/083 | owner ratifies ADR-0052 and G17 before TASK-0262; ADR-0026 amendment for three new capabilities before they ship |
 | Artifact Store | DEFERRED ARCHITECTURE TARGET | PRE_RELEVANT_GATE | none yet | dedicated ADR before first artifact-store implementation |
 | External Documentation Source | DEFERRED ARCHITECTURE TARGET | PRE_RELEVANT_GATE | none yet | dedicated ADR before first implementation use |
 | Local Inference port | DEFERRED ARCHITECTURE TARGET | PRE_RELEVANT_GATE | none yet (optional adapter by design) | dedicated ADR before first local-inference use |

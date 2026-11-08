@@ -231,6 +231,19 @@ gates:
       Ratified by the owner on 2026-11-01.
     scope_ref: docs/ui/proposals/TASK-PROPOSED-G16-LIVE-WIDGETS.md
 
+  - id: G17
+    name: Extensions
+    status: planned
+    objective: >-
+      Third parties can replace or add parts of Runlith as out-of-process
+      extensions that talk to agentd over its IPC, run under the sandbox
+      runner and act only within a manifest of exact capabilities approved by
+      the owner. Stages are never new task states and extensions never gain
+      completion authority. Marketplace distribution stays deferred. Proposed
+      in ADR-0052; requires owner ratification before any G17 implementation
+      task starts.
+    scope_ref: docs/architecture/adr/ADR-0052-extension-model-out-of-process.md
+
 future_product_engineering_spikes:
   - id: UI-TECHNOLOGY-SPIKE
     status: deferred
