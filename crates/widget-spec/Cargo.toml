@@ -2,6 +2,7 @@
 name = "widget-spec"
 version = "0.1.0"
 edition = "2021"
+publish = false
 description = "Versioned widget and dashboard format: data only, closed validation, no I/O"
 
 [lib]
