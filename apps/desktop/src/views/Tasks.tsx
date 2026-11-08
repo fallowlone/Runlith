@@ -39,14 +39,33 @@ function matchesQuery(task: TaskDto, query: string): boolean {
   return !needle || task.id.toLowerCase().includes(needle) || task.objective.toLowerCase().includes(needle);
 }
 
+/** Dependencies that exist in this list and are not completed. Derived from real state, never from a renamed lifecycle name. */
+function openDependencies(task: TaskDto, byId: Map<string, TaskDto>): string[] {
+  return task.dependsOn.filter((id) => {
+    const dependency = byId.get(id);
+    return dependency !== undefined && dependency.state !== "COMPLETED";
+  });
+}
+
 function inFilter(task: TaskDto, filter: Filter): boolean {
   return filter === "all" || presentState(task.state).group === filter;
+}
+
+function DependsCell({ task, blockedBy }: { task: TaskDto; blockedBy: string[] }) {
+  const waits = blockedBy.length > 0 && !["closed", "active"].includes(presentState(task.state).group);
+  return (
+    <span role="cell" className="mono muted ellip" title={task.dependsOn.join(", ")}>
+      {task.dependsOn.length === 0 ? "—" : task.dependsOn.join(", ")}
+      {waits && <span className="state wait"> · ждёт зависимости</span>}
+    </span>
+  );
 }
 
 export function Tasks({ tasks, reload, navigate, query, onQuery, hasProject }: Props) {
   const [filter, setFilter] = useState<Filter>("all");
   const [activeId, setActiveId] = useState<string | null>(null);
   const all = tasks.status === "ok" ? tasks.data : [];
+  const byId = new Map(all.map((task) => [task.id, task]));
   // Counters follow the search, so each one says what its filter would show right now.
   const found = all.filter((task) => matchesQuery(task, query));
   const visible = found.filter((task) => inFilter(task, filter));
@@ -122,6 +141,7 @@ export function Tasks({ tasks, reload, navigate, query, onQuery, hasProject }: P
                 <span role="columnheader">Состояние</span>
                 <span role="columnheader">ID</span>
                 <span role="columnheader">Цель</span>
+                <span role="columnheader">Зависит от</span>
               </div>
               {visible.map((task) => (
                 <a
@@ -139,6 +159,7 @@ export function Tasks({ tasks, reload, navigate, query, onQuery, hasProject }: P
                   <span role="cell"><StateLabel state={task.state} /></span>
                   <span role="cell" className="mono muted ellip">{task.id}</span>
                   <span role="cell" className="ellip">{task.objective}</span>
+                  <DependsCell task={task} blockedBy={openDependencies(task, byId)} />
                 </a>
               ))}
             </div>

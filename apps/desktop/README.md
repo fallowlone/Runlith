@@ -8,7 +8,7 @@ writes is the overview layout and the cache of live numbers, both in app data.
 
 | Screen | Source |
 | --- | --- |
-| Projects, tasks, task state, dependencies | agentd `task_core` (live) |
+| Projects, tasks, task state, dependencies | agentd `task_core` (live); dependency ids come with `task-list-pages-v1` pages |
 | Attention queue | agentd `human_decision_core` list (live, read only) |
 | Connection | live handshake as client kind `tauri-host`, polled every 5 s |
 | Plan, Changes, Evidence, History, Map, gate charts | demo, labelled in the UI: agentd has no read contract yet |
@@ -45,7 +45,7 @@ the canvas shows and the app does not yet:
 | Screen | Canvas | App | Why |
 | --- | --- | --- | --- |
 | Overview | "Новая задача" button | "Настроить виджеты" | G16 widgets; no task-create RPC |
-| Tasks | Depends-on and Gate columns, state "Ждёт зависимости" | ID, goal and state only | `TaskDto` has no dependencies or gate: TASK-0261 |
+| Tasks | Gate column; state "Ждёт зависимости" | "Зависит от" column from agentd (`TaskDto.dependsOn`); "ждёт зависимости" is derived from dependency state, the lifecycle name stays DRAFT/READY | agentd has no per-task gate (it lives in `planning/tasks/queue.yaml`): open part of TASK-0261 |
 | Attention | Ratify / Defer options, PENDING → RESOLVED → CONSUMED steps | RESUME / REPLAN / ABORT, no steps, "Записать выбор" disabled | no write RPC for decisions |
 | Plan | List / Graph toggle | list only | no plan read contract |
 | History | commit timeline sized by changed lines | journal list only | no event journal query |
@@ -91,7 +91,7 @@ npm run dev             # browser preview with labelled demo data
 npm run tauri dev       # desktop app against the running agentd
 npm run tauri build     # src-tauri/target/release/bundle/macos/Runlith.app
 npx playwright install webkit   # once per machine; the e2e suite runs on WebKit
-npm run test:e2e        # needs `npm run build` first. WebKit, 49 tests: screens x themes x sizes, axe WCAG 2.1 AA, graph geometry, states, keyboard, frames, widgets
+npm run test:e2e        # needs `npm run build` first. WebKit, 50 tests: screens x themes x sizes, axe WCAG 2.1 AA, graph geometry, states, keyboard, frames, widgets
 npm run maps            # regenerate src/lib/map/maps.generated.json (cargo metadata + queue.yaml + ELK layout)
 npm run test:data       # map data equals cargo metadata and queue.yaml; edges keep 12 px from nodes; decision age and expiry text; widget failure text and repo rule
 ```
