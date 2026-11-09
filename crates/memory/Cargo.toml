@@ -10,4 +10,4 @@ path = "src/lib.rs"
 
 [dependencies]
 context-engine = { path = "../context-engine" }
-sha2 = "0.10"
+sha2 = "0.11"

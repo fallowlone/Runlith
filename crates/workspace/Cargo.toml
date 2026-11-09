@@ -12,4 +12,4 @@ path = "src/lib.rs"
 [dependencies]
 task-domain = { path = "../task" }
 agent-runtime = { path = "../agent-runtime" }
-sha2 = "0.10"
+sha2 = "0.11"
