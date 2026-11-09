@@ -194,6 +194,17 @@ impl Sandbox {
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
+        // Tests that kill the daemon on purpose (strand_via_kill) leave its
+        // provider child, a busy loop, running as an orphan. Every run would
+        // add one until the machine is saturated and other tests flake under
+        // that load, so reap whatever still runs from this sandbox's directory
+        // (its path carries this process id and a unique counter).
+        let _ = Command::new("pkill")
+            .args(["-9", "-f"])
+            .arg(&self.root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
