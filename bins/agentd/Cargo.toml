@@ -57,7 +57,7 @@ objc2 = "0.6.5"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
 
 [dev-dependencies]
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 app-services = { path = "../../crates/app-services" }
 agent-runtime = { path = "../../crates/agent-runtime" }
 bytes = "1"
