@@ -199,9 +199,11 @@ impl Drop for Sandbox {
         // add one until the machine is saturated and other tests flake under
         // that load, so reap whatever still runs from this sandbox's directory
         // (its path carries this process id and a unique counter).
+        // The trailing slash anchors the match to this root, so `...-1` never
+        // matches the provider of `...-10`.
         let _ = Command::new("pkill")
             .args(["-9", "-f"])
-            .arg(&self.root)
+            .arg(format!("{}/", self.root.display()))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();

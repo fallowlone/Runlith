@@ -7084,10 +7084,13 @@ items:
       not release it; Drop now unlocks; the keeper test is RED without it and
       50 of 50 runs are green under load. Vanished sqlite journal:
       validate_sidecars looked a sidecar up twice and SQLite deleted the
-      rollback journal in between (also seen as a file with no links left), so
-      a normal deletion read as an unsafe path; it now judges one snapshot; the
-      keeper test is RED without it and the original shutdown test is 30 of 30
-      green under load. execution_binaries had two causes. The loser of a
+      rollback journal in between, so a normal deletion read as an unsafe
+      path; it now judges one snapshot (a file with no links left, seen once
+      on macOS during the reproduction, counts as already deleted). The
+      keeper test is probabilistic by nature, a thread churns the journal
+      while the check runs 20000 times; it failed in 3 of 3 runs before the
+      fix and passes after. The original shutdown test is 30 of 30 green
+      under load. execution_binaries had two causes. The loser of a
       concurrent resume may legitimately be refused by the single-prompt user
       presence gate (ADR-0050), so the test accepts that refusal as well as
       CONFLICT and still requires exactly one owner; 24 of 25 before, 25 of 25
@@ -7107,7 +7110,7 @@ items:
     blocked_by: []
     references: [docs/development/AUDIT_REMEDIATION_2026-11-03.md, audit-reports/05-performance.md]
     outcome: >-
-      Partly done, merged in PR 59 on 2026-11-07. Dependency ids ride the
+      Partly done, merged in PR 59 on 2026-11-08. Dependency ids ride the
       task-list-pages-v1 pages (TaskDto.depends_on, proto field 5, protocol
       number unchanged); storage loads them with one extra query per page; the
       Tasks table has a Depends-on column and a "waits for dependencies"
