@@ -30,7 +30,7 @@ org = { path = "../../crates/org" }
 evaluation = { path = "../../crates/evaluation" }
 policy = { path = "../../crates/policy" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
-sha2 = "0.10"
+sha2 = "0.11"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

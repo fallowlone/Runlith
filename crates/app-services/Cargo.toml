@@ -28,7 +28,7 @@ plan-domain = { path = "../plan" }
 takeover = { path = "../takeover" }
 security-audit = { path = "../security-audit" }
 secrets = { path = "../secrets" }
-sha2 = "0.10"
+sha2 = "0.11"
 repo-finder = { path = "../repo-finder" }
 
 [dev-dependencies]

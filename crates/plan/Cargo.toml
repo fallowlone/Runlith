@@ -10,5 +10,5 @@ name = "plan_domain"
 path = "src/lib.rs"
 
 [dependencies]
-sha2 = "0.10"
+sha2 = "0.11"
 task-domain = { path = "../task" }
