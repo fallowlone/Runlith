@@ -7073,6 +7073,33 @@ items:
     depends_on: []
     blocked_by: []
     references: [docs/architecture/adr/ADR-0051-per-node-acceptance-statements-and-change-intent.md, docs/architecture/adr/ADR-0050-os-user-presence-for-local-control.md]
+    outcome: >-
+      Closed by root cause per case, 2026-11-09 (PRs 62, 66 and this one).
+      candidate fixture did not authenticate: macOS setsockopt returns EINVAL
+      once the peer socket is closed, so a child descheduled between writing
+      the request and setting its read timeout failed; both timeouts are now
+      set before the write; 5 of 40 runs red before, 0 of 25 after under full
+      CPU load. Vault backoff: a flock belongs to the open file description,
+      which a concurrent fork shares until exec, so closing the descriptor did
+      not release it; Drop now unlocks; the keeper test is RED without it and
+      50 of 50 runs are green under load. Vanished sqlite journal:
+      validate_sidecars looked a sidecar up twice and SQLite deleted the
+      rollback journal in between, so a normal deletion read as an unsafe
+      path; it now judges one snapshot (a file with no links left, seen once
+      on macOS during the reproduction, counts as already deleted). The
+      keeper test is probabilistic by nature, a thread churns the journal
+      while the check runs 20000 times; it failed in 3 of 3 runs before the
+      fix and passes after. The original shutdown test is 30 of 30 green
+      under load. execution_binaries had two causes. The loser of a
+      concurrent resume may legitimately be refused by the single-prompt user
+      presence gate (ADR-0050), so the test accepts that refusal as well as
+      CONFLICT and still requires exactly one owner; 24 of 25 before, 25 of 25
+      after. And Sandbox::drop left the killed daemon's provider child, a busy
+      loop, running as an orphan; each run leaked two and a developer machine
+      reached load 150, which made every other test flake; Drop now reaps
+      them and a run leaves none. Not claimed: a 50-run proof of every listed
+      test on the owner machine, and the workspace suite at default
+      parallelism is shown by CI only.
   - id: TASK-0261
     gate: G16
     title: Dependencies and gate in the desktop task list
@@ -7082,6 +7109,17 @@ items:
     depends_on: []
     blocked_by: []
     references: [docs/development/AUDIT_REMEDIATION_2026-11-03.md, audit-reports/05-performance.md]
+    outcome: >-
+      Partly done, merged in PR 59 on 2026-11-08. Dependency ids ride the
+      task-list-pages-v1 pages (TaskDto.depends_on, proto field 5, protocol
+      number unchanged); storage loads them with one extra query per page; the
+      Tasks table has a Depends-on column and a "waits for dependencies"
+      marker derived from dependency state, with the lifecycle names left
+      alone. New agentd paging test and a Playwright test cover it. NOT done
+      and still open, by owner decision on 2026-11-07: the Gate column.
+      agentd has no per-task gate (it exists only in planning/tasks/queue.yaml),
+      so a source must be chosen first (a field in agentd, the host reading
+      the queue file, or dropping the column). No gate value is hard-coded.
   - id: TASK-0262
     gate: G17
     title: First extension slice, ExecutionPort served by an out-of-process sample extension

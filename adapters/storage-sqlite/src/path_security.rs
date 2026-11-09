@@ -177,6 +177,17 @@ fn validate_parent_metadata(path: &Path, metadata: &fs::Metadata) -> StorageResu
 fn validate_private_regular_file(path: &Path, parent_uid: u32) -> StorageResult<fs::Metadata> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| io_path(&format!("inspect sqlite file {}", path.display()), error))?;
+    check_private_regular_file(path, &metadata, parent_uid)?;
+    Ok(metadata)
+}
+
+/// Checks one already-taken snapshot, so a caller that has just looked the
+/// file up never looks it up a second time.
+fn check_private_regular_file(
+    path: &Path,
+    metadata: &fs::Metadata,
+    parent_uid: u32,
+) -> StorageResult<()> {
     let file_type = metadata.file_type();
     if file_type.is_symlink() {
         return Err(unsafe_path(format!(
@@ -208,16 +219,21 @@ fn validate_private_regular_file(path: &Path, parent_uid: u32) -> StorageResult<
             path.display()
         )));
     }
-    Ok(metadata)
+    Ok(())
 }
 
 fn validate_sidecars(path: &Path, parent_uid: u32) -> StorageResult<()> {
     for suffix in SQLITE_SIDECARS {
         let sidecar = sidecar_path(path, suffix);
+        // SQLite creates and deletes `-journal` around every transaction of
+        // another connection, so a sidecar can vanish at any moment. Look it
+        // up once and judge that snapshot; a second lookup would turn a
+        // legitimate deletion into an unsafe-path refusal. A file with no
+        // links left is already deleted (a link count above one is the attack
+        // this check exists for, and still fails below).
         match fs::symlink_metadata(&sidecar) {
-            Ok(_) => {
-                validate_private_regular_file(&sidecar, parent_uid)?;
-            }
+            Ok(metadata) if metadata.nlink() == 0 => {}
+            Ok(metadata) => check_private_regular_file(&sidecar, &metadata, parent_uid)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(io_path(
@@ -243,3 +259,6 @@ fn unsafe_path(detail: String) -> StorageError {
 fn io_path(action: &str, error: io::Error) -> StorageError {
     StorageError::UnsafePath(format!("{action}: {error}"))
 }
+
+#[cfg(test)]
+mod tests;
